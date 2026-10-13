@@ -5,8 +5,6 @@
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
-#include <esp_heap_caps.h>
-
 #include <algorithm>
 #include <cinttypes>
 #include <cstring>
@@ -16,8 +14,56 @@ namespace simple_video_player {
 
 static const char *const TAG = "simple_video_player.controls";
 
+static constexpr float SEEK_STEP_S = 10.0f;
+static constexpr float VOLUME_STEP = 0.05f;
+static constexpr int32_t SEEK_RANGE = 1000;
+static const char *const GLYPHS = "0123456789:";
+static const char *const REPEAT_TEXT[3] = {LV_SYMBOL_LOOP " off", LV_SYMBOL_LOOP " 1", LV_SYMBOL_LOOP " all"};
+
 static bool inside(const lv_area_t &area, int32_t x, int32_t y) {
   return x >= area.x1 && x <= area.x2 && y >= area.y1 && y <= area.y2;
+}
+
+static int32_t area_w(const lv_area_t &area) { return area.x2 - area.x1 + 1; }
+
+static bool clip(lv_area_t &area, const lv_area_t &to) {
+  area.x1 = std::max(area.x1, to.x1);
+  area.y1 = std::max(area.y1, to.y1);
+  area.x2 = std::min(area.x2, to.x2);
+  area.y2 = std::min(area.y2, to.y2);
+  return area.x1 <= area.x2 && area.y1 <= area.y2;
+}
+static int32_t area_h(const lv_area_t &area) { return area.y2 - area.y1 + 1; }
+
+static const char *button_text(uint8_t button) {
+  switch (button) {
+    case SimpleVideoPlayer::CTL_PREVIOUS:
+      return LV_SYMBOL_PREV;
+    case SimpleVideoPlayer::CTL_REWIND:
+      return "-10";
+    case SimpleVideoPlayer::CTL_PLAY_PAUSE:
+      return LV_SYMBOL_PAUSE;
+    case SimpleVideoPlayer::CTL_FORWARD:
+      return "+10";
+    case SimpleVideoPlayer::CTL_NEXT:
+      return LV_SYMBOL_NEXT;
+    case SimpleVideoPlayer::CTL_STOP:
+      return LV_SYMBOL_STOP;
+    case SimpleVideoPlayer::CTL_VOLUME_DOWN:
+      return LV_SYMBOL_MINUS;
+    case SimpleVideoPlayer::CTL_VOLUME_UP:
+      return LV_SYMBOL_PLUS;
+    default:
+      return REPEAT_TEXT[0];
+  }
+}
+
+// "m:ss", or "h:mm:ss" when the file runs an hour or more.
+static size_t format_time(char *out, size_t size, uint32_t seconds, bool hours) {
+  const int n = hours ? snprintf(out, size, "%" PRIu32 ":%02" PRIu32 ":%02" PRIu32, seconds / 3600,
+                                 seconds / 60 % 60, seconds % 60)
+                      : snprintf(out, size, "%" PRIu32 ":%02" PRIu32, seconds / 60, seconds % 60);
+  return n > 0 ? std::min<size_t>(static_cast<size_t>(n), size - 1) : 0;
 }
 
 void ControlsTouchListener::update(const touchscreen::TouchPoints_t &points) {
@@ -28,28 +74,458 @@ void ControlsTouchListener::update(const touchscreen::TouchPoints_t &points) {
 
 void ControlsTouchListener::release() { this->parent_->controls_touch(false, 0, 0); }
 
+//========================================================================
+// Building the bar (setup, LVGL thread)
+//========================================================================
+
+void SimpleVideoPlayer::controls_setup_() {
+  lv_style_init(&this->ctl_bar_style_);
+  lv_style_set_width(&this->ctl_bar_style_, lv_pct(100));
+  lv_style_set_height(&this->ctl_bar_style_, LV_SIZE_CONTENT);
+  lv_style_set_align(&this->ctl_bar_style_, LV_ALIGN_BOTTOM_MID);
+  lv_style_set_bg_color(&this->ctl_bar_style_, lv_color_hex(0x101418));
+  lv_style_set_bg_opa(&this->ctl_bar_style_, LV_OPA_COVER);
+  lv_style_set_pad_hor(&this->ctl_bar_style_, 24);
+  lv_style_set_pad_ver(&this->ctl_bar_style_, 16);
+  lv_style_set_pad_row(&this->ctl_bar_style_, 14);
+  lv_style_set_text_color(&this->ctl_bar_style_, lv_color_hex(0xE6EAF0));
+
+  lv_style_init(&this->ctl_row_style_);
+  lv_style_set_width(&this->ctl_row_style_, lv_pct(100));
+  lv_style_set_height(&this->ctl_row_style_, LV_SIZE_CONTENT);
+  lv_style_set_pad_column(&this->ctl_row_style_, 12);
+
+  lv_style_init(&this->ctl_button_style_);
+  lv_style_set_bg_color(&this->ctl_button_style_, lv_color_hex(0x232C36));
+  lv_style_set_bg_opa(&this->ctl_button_style_, LV_OPA_COVER);
+  lv_style_set_radius(&this->ctl_button_style_, 12);
+  lv_style_set_pad_hor(&this->ctl_button_style_, 26);
+  lv_style_set_pad_ver(&this->ctl_button_style_, 14);
+  lv_style_set_min_width(&this->ctl_button_style_, 88);
+  lv_style_set_text_color(&this->ctl_button_style_, lv_color_hex(0xFFFFFF));
+
+  lv_style_init(&this->ctl_accent_style_);
+  lv_style_set_bg_color(&this->ctl_accent_style_, lv_color_hex(0x2F81F7));
+  lv_style_set_min_width(&this->ctl_accent_style_, 120);
+
+  lv_style_init(&this->ctl_seek_style_);
+  lv_style_set_width(&this->ctl_seek_style_, lv_pct(100));
+  lv_style_set_height(&this->ctl_seek_style_, 10);
+  lv_style_set_radius(&this->ctl_seek_style_, 5);
+  lv_style_set_bg_color(&this->ctl_seek_style_, lv_color_hex(0x2A333D));
+  lv_style_set_bg_opa(&this->ctl_seek_style_, LV_OPA_COVER);
+
+  lv_style_init(&this->ctl_indicator_style_);
+  lv_style_set_radius(&this->ctl_indicator_style_, 5);
+  lv_style_set_bg_color(&this->ctl_indicator_style_, lv_color_hex(0x2F81F7));
+  lv_style_set_bg_opa(&this->ctl_indicator_style_, LV_OPA_COVER);
+
+  if (this->ctl_video_.enabled && this->dsi_ != nullptr && this->build_controls_bar_(this->ctl_video_) &&
+      this->ctl_touchscreen_ != nullptr)
+    this->ctl_touchscreen_->register_listener(&this->ctl_listener_);
+}
+
+static lv_obj_t *plain_row(lv_obj_t *parent, lv_style_t *style) {
+  lv_obj_t *row = lv_obj_create(parent);
+  lv_obj_remove_style_all(row);
+  lv_obj_add_style(row, style, LV_PART_MAIN);
+  lv_obj_set_scrollable(row, false);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  return row;
+}
+
+bool SimpleVideoPlayer::build_controls_bar_(ControlsBar &bar) {
+  lv_obj_t *root = lv_obj_create(lv_layer_top());
+  lv_obj_remove_style_all(root);
+  lv_obj_add_style(root, &this->ctl_bar_style_, LV_PART_MAIN);
+  if (this->ctl_user_bar_style_ != nullptr)
+    lv_obj_add_style(root, this->ctl_user_bar_style_, LV_PART_MAIN);
+  lv_obj_set_scrollable(root, false);
+  lv_obj_set_flex_flow(root, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_hidden(root, true);
+  bar.bar = root;
+
+  if (bar.title || bar.time) {
+    lv_obj_t *row = plain_row(root, &this->ctl_row_style_);
+    lv_obj_set_flex_align(row, bar.title ? LV_FLEX_ALIGN_START : LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    if (bar.title) {
+      bar.title_label = lv_label_create(row);
+      lv_obj_set_flex_grow(bar.title_label, 1);
+      lv_label_set_long_mode(bar.title_label, LV_LABEL_LONG_MODE_DOTS);
+      lv_label_set_text(bar.title_label, "");
+    }
+    if (bar.time) {
+      bar.position_label = lv_label_create(row);
+      lv_obj_set_style_text_align(bar.position_label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+      lv_label_set_text(bar.position_label, "0:00");
+      bar.duration_label = lv_label_create(row);
+      lv_label_set_text(bar.duration_label, "/ 0:00");
+    }
+  }
+  if (bar.seek_bar) {
+    bar.seek = lv_bar_create(root);
+    lv_obj_remove_style_all(bar.seek);
+    lv_obj_add_style(bar.seek, &this->ctl_seek_style_, LV_PART_MAIN);
+    lv_obj_add_style(bar.seek, &this->ctl_indicator_style_, LV_PART_INDICATOR);
+    if (this->ctl_user_seek_style_ != nullptr)
+      lv_obj_add_style(bar.seek, this->ctl_user_seek_style_, LV_PART_MAIN);
+    if (this->ctl_user_indicator_style_ != nullptr)
+      lv_obj_add_style(bar.seek, this->ctl_user_indicator_style_, LV_PART_INDICATOR);
+    lv_bar_set_range(bar.seek, 0, SEEK_RANGE);
+    lv_bar_set_value(bar.seek, 0, LV_ANIM_OFF);
+  }
+  if (!bar.buttons.empty()) {
+    lv_obj_t *row = plain_row(root, &this->ctl_row_style_);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    for (uint8_t id : bar.buttons) {
+      if (id >= CTL_BUTTON_COUNT || bar.button[id] != nullptr)
+        continue;
+      lv_obj_t *button = lv_button_create(row);
+      lv_obj_remove_style_all(button);
+      lv_obj_add_style(button, &this->ctl_button_style_, LV_PART_MAIN);
+      if (this->ctl_user_button_style_ != nullptr)
+        lv_obj_add_style(button, this->ctl_user_button_style_, LV_PART_MAIN);
+      if (id == CTL_PLAY_PAUSE) {
+        lv_obj_add_style(button, &this->ctl_accent_style_, LV_PART_MAIN);
+        if (this->ctl_user_accent_style_ != nullptr)
+          lv_obj_add_style(button, this->ctl_user_accent_style_, LV_PART_MAIN);
+      }
+      lv_obj_t *label = lv_label_create(button);
+      lv_label_set_text(label, button_text(id));
+      lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+      lv_obj_center(label);
+      bar.button[id] = button;
+      bar.button_label[id] = label;
+    }
+  }
+  return true;
+}
+
+size_t SimpleVideoPlayer::controls_bytes_() {
+  if (this->ctl_video_.bar == nullptr)
+    return 0;
+  const lv_color_format_t cf = this->dsi_fb_bpp_ == 3 ? LV_COLOR_FORMAT_RGB888 : LV_COLOR_FORMAT_RGB565;
+  // The size a snapshot of the bar takes (its extra draw area included), measured once.
+  lv_draw_buf_t *probe = lv_snapshot_create_draw_buf(this->ctl_video_.bar, cf);
+  if (probe == nullptr)
+    return 0;
+  this->ctl_snap_bytes_ = (probe->data_size + 127) & ~static_cast<size_t>(127);
+  lv_draw_buf_destroy(probe);
+  // The snapshot, the bar copied out of it, and the pieces (all inside the bar).
+  return 3 * this->ctl_snap_bytes_ + 4096;
+}
+
+//========================================================================
+// Rendering before a direct session (main loop, LVGL still running)
+//========================================================================
+
+uint8_t *SimpleVideoPlayer::ctl_alloc_(size_t bytes) {
+  bytes = (bytes + 15) & ~static_cast<size_t>(15);
+  if (this->ctl_mem_ == nullptr || this->ctl_mem_used_ + bytes > this->controls_reserve_)
+    return nullptr;
+  uint8_t *piece = this->ctl_mem_ + this->ctl_mem_used_;
+  this->ctl_mem_used_ += bytes;
+  return piece;
+}
+
+// Where an area of LVGL's screen lies on the panel; the same mapping as LvglComponent's rotated
+// flush: 90 puts LVGL's (x, y) at the panel's (W - 1 - y, x).
+void SimpleVideoPlayer::ctl_panel_rect_(const lv_area_t &area, int32_t *x, int32_t *y, int32_t *w,
+                                        int32_t *h) const {
+  const int32_t pw = this->dsi_out_w_;
+  const int32_t ph = this->dsi_out_h_;
+  const int32_t cw = area_w(area);
+  const int32_t ch = area_h(area);
+  switch (this->ctl_rotation_) {
+    case display::DISPLAY_ROTATION_90_DEGREES:
+      *x = pw - area.y1 - ch;
+      *y = area.x1;
+      *w = ch;
+      *h = cw;
+      break;
+    case display::DISPLAY_ROTATION_180_DEGREES:
+      *x = pw - area.x1 - cw;
+      *y = ph - area.y1 - ch;
+      *w = cw;
+      *h = ch;
+      break;
+    case display::DISPLAY_ROTATION_270_DEGREES:
+      *x = area.y1;
+      *y = ph - area.x1 - cw;
+      *w = ch;
+      *h = cw;
+      break;
+    default:
+      *x = area.x1;
+      *y = area.y1;
+      *w = cw;
+      *h = ch;
+      break;
+  }
+}
+
+// Copies `part` (LVGL coordinates, clipped to the snapshot and the screen) out of the snapshot,
+// turned to the panel's orientation.
+bool SimpleVideoPlayer::ctl_take_(ControlsSprite &sprite, const lv_draw_buf_t *snapshot, const lv_area_t &snap_area,
+                                  lv_area_t part) {
+  lv_display_t *display = lv_obj_get_display(this->ctl_video_.bar);
+  const lv_area_t screen{0, 0, lv_display_get_horizontal_resolution(display) - 1,
+                         lv_display_get_vertical_resolution(display) - 1};
+  if (!clip(part, snap_area) || !clip(part, screen))
+    return false;
+  int32_t px, py, pw, ph;
+  this->ctl_panel_rect_(part, &px, &py, &pw, &ph);
+  const size_t bpp = this->dsi_fb_bpp_;
+  uint8_t *data = this->ctl_alloc_(static_cast<size_t>(pw) * ph * bpp);
+  if (data == nullptr)
+    return false;
+  const int32_t panel_w = this->dsi_out_w_;
+  const int32_t panel_h = this->dsi_out_h_;
+  const uint32_t stride = snapshot->header.stride;
+  for (int32_t y = part.y1; y <= part.y2; y++) {
+    const uint8_t *src = snapshot->data + static_cast<size_t>(y - snap_area.y1) * stride +
+                         static_cast<size_t>(part.x1 - snap_area.x1) * bpp;
+    // The panel position of (part.x1, y), and how it moves as x grows.
+    int32_t X, Y, step;
+    switch (this->ctl_rotation_) {
+      case display::DISPLAY_ROTATION_90_DEGREES:
+        X = panel_w - 1 - y;
+        Y = part.x1;
+        step = pw;
+        break;
+      case display::DISPLAY_ROTATION_180_DEGREES:
+        X = panel_w - 1 - part.x1;
+        Y = panel_h - 1 - y;
+        step = -1;
+        break;
+      case display::DISPLAY_ROTATION_270_DEGREES:
+        X = y;
+        Y = panel_h - 1 - part.x1;
+        step = -pw;
+        break;
+      default:
+        X = part.x1;
+        Y = y;
+        step = 1;
+        break;
+    }
+    int32_t index = (Y - py) * pw + (X - px);
+    const int32_t count = area_w(part);
+    if (bpp == 2) {
+      const auto *s16 = reinterpret_cast<const uint16_t *>(src);
+      auto *d16 = reinterpret_cast<uint16_t *>(data);
+      for (int32_t i = 0; i < count; i++, index += step)
+        d16[index] = s16[i];
+    } else {
+      for (int32_t i = 0; i < count; i++, index += step) {
+        uint8_t *d = data + static_cast<size_t>(index) * 3;
+        d[0] = src[i * 3];
+        d[1] = src[i * 3 + 1];
+        d[2] = src[i * 3 + 2];
+      }
+    }
+  }
+  sprite.area = part;
+  sprite.pw = pw;
+  sprite.ph = ph;
+  sprite.data = data;
+  return true;
+}
+
+void SimpleVideoPlayer::prerender_controls_() {
+  this->ctl_ready_.store(false, std::memory_order_release);
+  this->ctl_shown_.store(false, std::memory_order_release);
+  ControlsBar &bar = this->ctl_video_;
+  if (bar.bar == nullptr || this->ctl_failed_ || this->ctl_mem_ == nullptr || this->is_network_session())
+    return;
+  this->ctl_mem_used_ = 0;
+  this->ctl_rotation_ = this->lvgl_component_->get_rotation();
+  for (auto &sprite : this->ctl_glyph_)
+    sprite = ControlsSprite{};
+  this->ctl_play_ = this->ctl_pause_ = this->ctl_progress_ = this->ctl_static_ = ControlsSprite{};
+  for (auto &sprite : this->ctl_repeat_sprite_)
+    sprite = ControlsSprite{};
+
+  const lv_color_format_t cf = this->dsi_fb_bpp_ == 3 ? LV_COLOR_FORMAT_RGB888 : LV_COLOR_FORMAT_RGB565;
+  lv_draw_buf_t snapshot;
+  uint8_t *snap_mem = this->ctl_alloc_(this->ctl_snap_bytes_);
+  if (snap_mem == nullptr || lv_draw_buf_init(&snapshot, 1, 1, cf, 0, snap_mem, this->ctl_snap_bytes_) != LV_RESULT_OK)
+    return;
+
+  // What stays the same for the file.
+  const float duration = this->get_duration();
+  const bool hours = duration >= 3600.0f;
+  if (bar.title_label != nullptr) {
+    const size_t slash = this->video_path_.rfind('/');
+    lv_label_set_text(bar.title_label, this->video_path_.c_str() + (slash == std::string::npos ? 0 : slash + 1));
+  }
+  if (bar.duration_label != nullptr) {
+    char text[24] = "/ ";
+    format_time(text + 2, sizeof(text) - 2, static_cast<uint32_t>(duration), hours);
+    lv_label_set_text(bar.duration_label, text);
+  }
+  // Buttons whose text changes keep the width of the widest.
+  for (uint8_t id : {CTL_PLAY_PAUSE, CTL_REPEAT}) {
+    lv_obj_t *label = bar.button_label[id];
+    if (label == nullptr)
+      continue;
+    lv_obj_set_width(label, LV_SIZE_CONTENT);
+    int32_t widest = 0;
+    const char *const *texts = id == CTL_REPEAT ? REPEAT_TEXT : nullptr;
+    const char *play_pause[2] = {LV_SYMBOL_PLAY, LV_SYMBOL_PAUSE};
+    for (int i = 0; i < (id == CTL_REPEAT ? 3 : 2); i++) {
+      lv_label_set_text(label, texts != nullptr ? texts[i] : play_pause[i]);
+      lv_obj_update_layout(label);
+      widest = std::max(widest, lv_obj_get_width(label));
+    }
+    lv_obj_set_width(label, widest);
+  }
+
+  lv_obj_set_hidden(bar.bar, false);
+  auto render = [&](lv_area_t *snap_area) -> bool {
+    lv_obj_update_layout(bar.bar);
+    if (lv_snapshot_take_to_draw_buf(bar.bar, cf, &snapshot) != LV_RESULT_OK)
+      return false;
+    lv_obj_get_coords(bar.bar, snap_area);
+    const int32_t ext = (static_cast<int32_t>(snapshot.header.w) - lv_obj_get_width(bar.bar)) / 2;
+    lv_area_increase(snap_area, ext, ext);
+    return true;
+  };
+  auto coords = [](lv_obj_t *obj) {
+    lv_area_t area;
+    lv_obj_get_coords(obj, &area);
+    return area;
+  };
+  auto set_play = [&](bool playing) {
+    if (bar.button_label[CTL_PLAY_PAUSE] != nullptr)
+      lv_label_set_text(bar.button_label[CTL_PLAY_PAUSE], playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+  };
+  auto set_repeat = [&](int mode) {
+    if (bar.button_label[CTL_REPEAT] != nullptr)
+      lv_label_set_text(bar.button_label[CTL_REPEAT], REPEAT_TEXT[mode]);
+  };
+
+  bool ok = true;
+  lv_area_t snap_area;
+  const lv_font_t *font = nullptr;
+  int32_t letter_space = 0;
+  if (bar.position_label != nullptr) {
+    font = lv_obj_get_style_text_font(bar.position_label, LV_PART_MAIN);
+    letter_space = lv_obj_get_style_text_letter_space(bar.position_label, LV_PART_MAIN);
+  }
+
+  // 1: play, repeat off, the seek bar full, every digit.
+  set_play(false);
+  set_repeat(0);
+  if (bar.seek != nullptr)
+    lv_bar_set_value(bar.seek, SEEK_RANGE, LV_ANIM_OFF);
+  if (bar.position_label != nullptr) {
+    lv_obj_set_width(bar.position_label, LV_SIZE_CONTENT);
+    lv_label_set_text(bar.position_label, GLYPHS);
+  }
+  ok = render(&snap_area);
+  if (ok && bar.button[CTL_PLAY_PAUSE] != nullptr)
+    ok = this->ctl_take_(this->ctl_play_, &snapshot, snap_area, coords(bar.button[CTL_PLAY_PAUSE]));
+  if (ok && bar.button[CTL_REPEAT] != nullptr)
+    ok = this->ctl_take_(this->ctl_repeat_sprite_[0], &snapshot, snap_area, coords(bar.button[CTL_REPEAT]));
+  if (ok && bar.seek != nullptr)
+    ok = this->ctl_take_(this->ctl_progress_, &snapshot, snap_area, coords(bar.seek));
+  int32_t colon_w = 0;
+  if (ok && bar.position_label != nullptr) {
+    lv_area_t text;
+    lv_obj_get_content_coords(bar.position_label, &text);
+    int32_t x = text.x1;
+    this->ctl_cell_w_ = 0;
+    for (size_t i = 0; ok && i < CTL_GLYPHS; i++) {
+      const int32_t w = lv_font_get_glyph_width(font, GLYPHS[i], GLYPHS[i + 1]) + letter_space;
+      const lv_area_t glyph{x, text.y1, x + w - 1, text.y2};
+      ok = w > 0 && this->ctl_take_(this->ctl_glyph_[i], &snapshot, snap_area, glyph);
+      x += w;
+      if (GLYPHS[i] == ':')
+        colon_w = w;
+      else
+        this->ctl_cell_w_ = std::max(this->ctl_cell_w_, w);
+    }
+  }
+  // 2: pause, repeat one.
+  if (ok && (bar.button[CTL_PLAY_PAUSE] != nullptr || bar.button[CTL_REPEAT] != nullptr)) {
+    set_play(true);
+    set_repeat(1);
+    ok = render(&snap_area);
+    if (ok && bar.button[CTL_PLAY_PAUSE] != nullptr)
+      ok = this->ctl_take_(this->ctl_pause_, &snapshot, snap_area, coords(bar.button[CTL_PLAY_PAUSE]));
+    if (ok && bar.button[CTL_REPEAT] != nullptr)
+      ok = this->ctl_take_(this->ctl_repeat_sprite_[1], &snapshot, snap_area, coords(bar.button[CTL_REPEAT]));
+  }
+  // 3: repeat all.
+  if (ok && bar.button[CTL_REPEAT] != nullptr) {
+    set_repeat(2);
+    ok = render(&snap_area) &&
+         this->ctl_take_(this->ctl_repeat_sprite_[2], &snapshot, snap_area, coords(bar.button[CTL_REPEAT]));
+  }
+  // Last: the bar itself, the seek bar empty and no time; the rest is copied over it.
+  if (ok) {
+    set_play(true);
+    set_repeat(0);
+    if (bar.seek != nullptr)
+      lv_bar_set_value(bar.seek, 0, LV_ANIM_OFF);
+    if (bar.position_label != nullptr) {
+      const int digits = hours ? (duration >= 36000.0f ? 6 : 5) : (duration >= 600.0f ? 4 : 3);
+      lv_obj_set_width(bar.position_label, digits * this->ctl_cell_w_ + (hours ? 2 : 1) * colon_w +
+                                               lv_obj_get_style_pad_left(bar.position_label, LV_PART_MAIN) +
+                                               lv_obj_get_style_pad_right(bar.position_label, LV_PART_MAIN));
+      lv_label_set_text(bar.position_label, "");
+    }
+    ok = render(&snap_area) && this->ctl_take_(this->ctl_static_, &snapshot, snap_area, snap_area);
+  }
+  if (ok) {
+    this->ctl_area_ = this->ctl_static_.area;
+    if (bar.seek != nullptr)
+      this->ctl_seek_area_ = coords(bar.seek);
+    if (bar.position_label != nullptr)
+      lv_obj_get_content_coords(bar.position_label, &this->ctl_time_area_);
+    for (int id = 0; id < CTL_BUTTON_COUNT; id++) {
+      if (bar.button[id] != nullptr)
+        this->ctl_button_area_[id] = coords(bar.button[id]);
+    }
+  }
+  lv_obj_set_hidden(bar.bar, true);
+  if (!ok) {
+    ESP_LOGE(TAG, "Could not render the controls (%u bytes of the pool) -- disabled",
+             static_cast<unsigned>(this->controls_reserve_));
+    this->ctl_failed_ = true;
+    return;
+  }
+  this->ctl_ready_.store(true, std::memory_order_release);
+}
+
+//========================================================================
+// Showing, touches (main loop)
+//========================================================================
+
 bool SimpleVideoPlayer::controls_active_() const {
   const PlayerState state = this->state_.load(std::memory_order_acquire);
-  return this->ctl_widget_ != nullptr && !this->ctl_failed_ && this->dsi_ != nullptr && this->dsi_lvgl_paused_ &&
+  return this->ctl_ready_.load(std::memory_order_acquire) && !this->ctl_failed_ && this->dsi_lvgl_paused_ &&
          (state == PlayerState::PLAYING || state == PlayerState::PAUSED) && !this->is_network_session();
 }
 
 void SimpleVideoPlayer::show_controls() {
   if (!this->controls_active_())
     return;
-  this->ctl_visible_ = true;
-  this->ctl_dirty_ = true;
   this->ctl_last_input_ms_ = millis();
+  this->ctl_shown_.store(true, std::memory_order_release);
+  this->ctl_repaint_.store(true, std::memory_order_release);
 }
 
 void SimpleVideoPlayer::hide_controls() {
-  this->ctl_visible_ = false;
-  this->ctl_dragging_ = false;
-  this->ctl_shown_.store(nullptr, std::memory_order_release);
+  this->ctl_dragging_.store(false, std::memory_order_release);
+  if (this->ctl_shown_.exchange(false, std::memory_order_acq_rel))
+    this->ctl_repaint_.store(true, std::memory_order_release);
 }
 
 float SimpleVideoPlayer::controls_fraction_(int32_t x) const {
-  const int32_t width = lv_area_get_width(&this->ctl_seek_area_);
+  const int32_t width = area_w(this->ctl_seek_area_);
   if (width <= 1)
     return 0.0f;
   const float fraction = static_cast<float>(x - this->ctl_seek_area_.x1) / static_cast<float>(width - 1);
@@ -59,36 +535,40 @@ float SimpleVideoPlayer::controls_fraction_(int32_t x) const {
 void SimpleVideoPlayer::controls_touch(bool pressed, int32_t x, int32_t y) {
   if (!this->controls_active_()) {
     this->ctl_pressed_ = false;
-    this->ctl_dragging_ = false;
+    this->ctl_dragging_.store(false, std::memory_order_release);
     return;
   }
   this->ctl_last_input_ms_ = millis();
+  const bool shown = this->ctl_shown_.load(std::memory_order_acquire);
   if (pressed) {
     // Touches come in panel coordinates; the controls are laid out in LVGL's.
     this->lvgl_component_->rotate_coordinates(x, y);
     if (!this->ctl_pressed_) {
       this->ctl_pressed_ = true;
-      this->ctl_dragging_ =
-          this->ctl_visible_ && this->ctl_seek_ != nullptr && this->can_seek() && inside(this->ctl_seek_area_, x, y);
+      this->ctl_dragging_.store(shown && this->ctl_video_.seek != nullptr && this->can_seek() &&
+                                    inside(this->ctl_seek_area_, x, y),
+                                std::memory_order_release);
     }
     this->ctl_x_ = x;
     this->ctl_y_ = y;
-    if (this->ctl_dragging_) {
-      this->ctl_drag_fraction_ = this->controls_fraction_(x);
-      this->ctl_dirty_ = true;
+    if (this->ctl_dragging_.load(std::memory_order_relaxed)) {
+      this->ctl_drag_permille_.store(static_cast<uint16_t>(this->controls_fraction_(x) * SEEK_RANGE),
+                                     std::memory_order_release);
+      this->ctl_repaint_.store(true, std::memory_order_release);
     }
     return;
   }
   if (!this->ctl_pressed_)
     return;
   this->ctl_pressed_ = false;
-  if (this->ctl_dragging_) {
-    this->ctl_dragging_ = false;
-    this->seek(this->ctl_drag_fraction_ * this->get_duration());
-    this->ctl_dirty_ = true;
+  if (this->ctl_dragging_.load(std::memory_order_relaxed)) {
+    const float fraction = this->ctl_drag_permille_.load(std::memory_order_relaxed) / static_cast<float>(SEEK_RANGE);
+    this->seek(fraction * this->get_duration());
+    this->ctl_dragging_.store(false, std::memory_order_release);
+    this->ctl_repaint_.store(true, std::memory_order_release);
     return;
   }
-  if (!this->ctl_visible_) {
+  if (!shown) {
     this->show_controls();
     return;
   }
@@ -98,251 +578,134 @@ void SimpleVideoPlayer::controls_touch(bool pressed, int32_t x, int32_t y) {
       this->hide_controls();
     return;
   }
-  // The widget under the finger, as LVGL's own input would find it; LVGL does not run meanwhile.
-  lv_obj_set_hidden(this->ctl_widget_, false);
-  lv_point_t search{this->ctl_x_, this->ctl_y_};
-  lv_obj_t *target = lv_indev_search_obj(this->ctl_widget_, &search);
-  lv_obj_set_hidden(this->ctl_widget_, true);
-  if (target != nullptr && target != this->ctl_widget_)
-    lv_obj_send_event(target, LV_EVENT_CLICKED, nullptr);
-  this->ctl_dirty_ = true;
-}
-
-void SimpleVideoPlayer::controls_loop_() {
-  if (this->ctl_widget_ == nullptr)
-    return;
-  if (!this->controls_active_()) {
-    if (this->ctl_visible_ || this->ctl_shown_.load(std::memory_order_relaxed) != nullptr)
-      this->hide_controls();
-    this->ctl_pressed_ = false;
-    this->ctl_last_state_ = PlayerState::STOPPED;
-    return;
-  }
-  if (!this->ctl_visible_)
-    return;
-  const uint32_t now = millis();
-  const PlayerState state = this->state_.load(std::memory_order_acquire);
-  if (state == PlayerState::PLAYING && !this->ctl_pressed_ &&
-      now - this->ctl_last_input_ms_ > this->ctl_hide_after_ms_) {
-    this->hide_controls();
-    return;
-  }
-  const uint32_t second = static_cast<uint32_t>(this->get_position());
-  const bool changed = this->ctl_dirty_ || state != this->ctl_last_state_ || second != this->ctl_last_second_ ||
-                       this->repeat_ != this->ctl_last_repeat_;
-  static constexpr uint32_t MIN_RENDER_INTERVAL_MS = 100;
-  if (!changed || now - this->ctl_last_render_ms_ < MIN_RENDER_INTERVAL_MS)
-    return;
-  this->ctl_dirty_ = false;
-  this->ctl_last_state_ = state;
-  this->ctl_last_second_ = second;
-  this->ctl_last_repeat_ = this->repeat_;
-  this->ctl_last_render_ms_ = now;
-  this->render_controls_();
-}
-
-static void format_time(char *out, size_t size, float seconds) {
-  const uint32_t total = seconds > 0.0f ? static_cast<uint32_t>(seconds) : 0;
-  if (total >= 3600) {
-    snprintf(out, size, "%" PRIu32 ":%02" PRIu32 ":%02" PRIu32, total / 3600, total / 60 % 60, total % 60);
-  } else {
-    snprintf(out, size, "%" PRIu32 ":%02" PRIu32, total / 60, total % 60);
-  }
-}
-
-static void set_label(lv_obj_t *obj, const char *text) {
-  if (obj == nullptr)
-    return;
-  if (!lv_obj_check_type(obj, &lv_label_class)) {
-    // A button with a text: its label is the first child.
-    obj = lv_obj_get_child_count(obj) != 0 ? lv_obj_get_child(obj, 0) : nullptr;
-    if (obj == nullptr || !lv_obj_check_type(obj, &lv_label_class))
-      return;
-  }
-  if (strcmp(lv_label_get_text(obj), text) != 0)
-    lv_label_set_text(obj, text);
-}
-
-void SimpleVideoPlayer::render_controls_() {
-  // What the widgets show.
-  const PlayerState state = this->state_.load(std::memory_order_acquire);
-  const float duration = this->get_duration();
-  const float position = this->ctl_dragging_ ? this->ctl_drag_fraction_ * duration : this->get_position();
-  if (this->ctl_title_ != nullptr) {
-    const size_t slash = this->video_path_.rfind('/');
-    set_label(this->ctl_title_, this->video_path_.c_str() + (slash == std::string::npos ? 0 : slash + 1));
-  }
-  set_label(this->ctl_play_pause_, state == PlayerState::PAUSED ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
-  set_label(this->ctl_repeat_, this->repeat_ == RepeatMode::FILE       ? LV_SYMBOL_LOOP " 1"
-                               : this->repeat_ == RepeatMode::PLAYLIST ? LV_SYMBOL_LOOP " all"
-                                                                       : LV_SYMBOL_LOOP " off");
-  if (this->ctl_position_ != nullptr) {
-    char pos[16];
-    char len[16];
-    char text[40];
-    format_time(pos, sizeof(pos), position);
-    format_time(len, sizeof(len), duration);
-    snprintf(text, sizeof(text), "%s / %s", pos, len);
-    set_label(this->ctl_position_, text);
-  }
-#if LV_USE_SLIDER
-  if (this->ctl_seek_ != nullptr && lv_obj_check_type(this->ctl_seek_, &lv_slider_class)) {
-    lv_slider_set_range(this->ctl_seek_, 0, 1000);
-    lv_slider_set_value(this->ctl_seek_, duration > 0.0f ? static_cast<int32_t>(position * 1000.0f / duration) : 0,
-                        LV_ANIM_OFF);
-  }
-#endif
-
-  // Rendered off screen: LVGL is paused, so this is the only drawing it does meanwhile.
-  const uint8_t bpp = this->dsi_fb_bpp_;
-  const lv_color_format_t cf = bpp == 3 ? LV_COLOR_FORMAT_RGB888 : LV_COLOR_FORMAT_RGB565;
-  lv_obj_set_hidden(this->ctl_widget_, false);
-  lv_obj_update_layout(this->ctl_widget_);
-  bool ok = this->ctl_snapshot_ != nullptr &&
-            lv_snapshot_take_to_draw_buf(this->ctl_widget_, cf, this->ctl_snapshot_) == LV_RESULT_OK;
-  if (!ok) {
-    // First time, or the controls grew: a buffer of their size.
-    if (this->ctl_snapshot_ != nullptr)
-      lv_draw_buf_destroy(this->ctl_snapshot_);
-    this->ctl_snapshot_ = lv_snapshot_create_draw_buf(this->ctl_widget_, cf);
-    ok = this->ctl_snapshot_ != nullptr &&
-         lv_snapshot_take_to_draw_buf(this->ctl_widget_, cf, this->ctl_snapshot_) == LV_RESULT_OK;
-  }
-  lv_area_t area;
-  lv_obj_get_coords(this->ctl_widget_, &area);
-  lv_obj_get_coords(this->ctl_widget_, &this->ctl_area_);
-  if (this->ctl_seek_ != nullptr)
-    lv_obj_get_coords(this->ctl_seek_, &this->ctl_seek_area_);
-  lv_obj_set_hidden(this->ctl_widget_, true);
-  if (!ok) {
-    ESP_LOGE(TAG, "Could not render the controls -- disabled");
-    this->ctl_failed_ = true;
-    this->hide_controls();
-    return;
-  }
-  // The snapshot is the widget plus its extra draw size on every side (lv_snapshot_reshape_draw_buf).
-  const int32_t ext = (static_cast<int32_t>(this->ctl_snapshot_->header.w) - lv_obj_get_width(this->ctl_widget_)) / 2;
-  lv_area_increase(&area, ext, ext);
-
-  // The part on the screen, in LVGL coordinates, then where it lies on the panel. Same mapping as
-  // LvglComponent's rotated flush: 90 puts LVGL's (x, y) at the panel's (W - 1 - y, x).
-  const int32_t pw = this->dsi_out_w_;
-  const int32_t ph = this->dsi_out_h_;
-  const display::DisplayRotation rotation = this->lvgl_component_->get_rotation();
-  const bool swapped =
-      rotation == display::DISPLAY_ROTATION_90_DEGREES || rotation == display::DISPLAY_ROTATION_270_DEGREES;
-  const int32_t lw = swapped ? ph : pw;
-  const int32_t lh = swapped ? pw : ph;
-  const int32_t cx0 = std::max<int32_t>(area.x1, 0);
-  const int32_t cy0 = std::max<int32_t>(area.y1, 0);
-  const int32_t cx1 = std::min<int32_t>(area.x1 + static_cast<int32_t>(this->ctl_snapshot_->header.w), lw);
-  const int32_t cy1 = std::min<int32_t>(area.y1 + static_cast<int32_t>(this->ctl_snapshot_->header.h), lh);
-  if (cx1 <= cx0 || cy1 <= cy0) {
-    this->ctl_shown_.store(nullptr, std::memory_order_release);
-    return;
-  }
-  const int32_t cw = cx1 - cx0;
-  const int32_t ch = cy1 - cy0;
-  int32_t nx;
-  int32_t ny;
-  int32_t nw = swapped ? ch : cw;
-  int32_t nh = swapped ? cw : ch;
-  switch (rotation) {
-    case display::DISPLAY_ROTATION_90_DEGREES:
-      nx = pw - cy0 - ch;
-      ny = cx0;
+  for (uint8_t id = 0; id < CTL_BUTTON_COUNT; id++) {
+    if (this->ctl_video_.button[id] != nullptr && inside(this->ctl_button_area_[id], this->ctl_x_, this->ctl_y_)) {
+      this->controls_press_(id);
       break;
-    case display::DISPLAY_ROTATION_180_DEGREES:
-      nx = pw - cx0 - cw;
-      ny = ph - cy0 - ch;
-      break;
-    case display::DISPLAY_ROTATION_270_DEGREES:
-      nx = cy0;
-      ny = ph - cx0 - cw;
-      break;
-    default:
-      nx = cx0;
-      ny = cy0;
-      break;
-  }
-
-  // Into the buffer the playback task is not showing.
-  uint8_t *shown = this->ctl_shown_.load(std::memory_order_acquire);
-  const int slot = shown == this->ctl_bufs_[0] ? 1 : 0;
-  const size_t need = sizeof(ControlsBlock) + static_cast<size_t>(nw) * nh * bpp;
-  auto busy = [this, slot]() {
-    return this->ctl_bufs_[slot] != nullptr &&
-           this->ctl_in_use_.load(std::memory_order_acquire) == this->ctl_bufs_[slot];
-  };
-  for (uint32_t waited = 0; busy() && waited < 20; waited++)
-    delay(1);
-  if (busy()) {
-    this->ctl_dirty_ = true;  // next loop
-    return;
-  }
-  // Both pictures come from the pool with the display's decode buffer, sized for the widget.
-  if (this->ctl_buf_size_[slot] < need) {
-    ESP_LOGE(TAG, "No pool memory for the controls (%zu bytes) -- disabled", need);
-    this->ctl_failed_ = true;
-    this->hide_controls();
-    return;
-  }
-  uint8_t *block = this->ctl_bufs_[slot];
-  const ControlsBlock header{static_cast<uint16_t>(nx), static_cast<uint16_t>(ny), static_cast<uint16_t>(nw),
-                             static_cast<uint16_t>(nh)};
-  memcpy(block, &header, sizeof(header));
-  uint8_t *dst = block + sizeof(ControlsBlock);
-  const uint8_t *src = this->ctl_snapshot_->data;
-  const uint32_t stride = this->ctl_snapshot_->header.stride;
-  const int32_t sx = cx0 - area.x1;
-  const int32_t sy = cy0 - area.y1;
-  for (int32_t r = 0; r < ch; r++) {
-    const uint8_t *row = src + static_cast<size_t>(sy + r) * stride + static_cast<size_t>(sx) * bpp;
-    for (int32_t c = 0; c < cw; c++) {
-      int32_t dx;
-      int32_t dy;
-      switch (rotation) {
-        case display::DISPLAY_ROTATION_90_DEGREES:
-          dx = nw - 1 - r;
-          dy = c;
-          break;
-        case display::DISPLAY_ROTATION_180_DEGREES:
-          dx = nw - 1 - c;
-          dy = nh - 1 - r;
-          break;
-        case display::DISPLAY_ROTATION_270_DEGREES:
-          dx = r;
-          dy = nh - 1 - c;
-          break;
-        default:
-          dx = c;
-          dy = r;
-          break;
-      }
-      memcpy(dst + (static_cast<size_t>(dy) * nw + dx) * bpp, row + static_cast<size_t>(c) * bpp, bpp);
     }
   }
-  this->ctl_shown_.store(block, std::memory_order_release);
   this->ctl_repaint_.store(true, std::memory_order_release);
 }
 
-void SimpleVideoPlayer::composite_controls_() {
-  uint8_t *block = this->ctl_shown_.load(std::memory_order_acquire);
-  if (block == nullptr)
+void SimpleVideoPlayer::controls_press_(uint8_t button) {
+  switch (button) {
+    case CTL_PREVIOUS:
+      this->previous();
+      break;
+    case CTL_REWIND:
+      if (this->can_seek())
+        this->seek_relative(-SEEK_STEP_S);
+      break;
+    case CTL_PLAY_PAUSE:
+      this->toggle_pause();
+      break;
+    case CTL_FORWARD:
+      if (this->can_seek())
+        this->seek_relative(SEEK_STEP_S);
+      break;
+    case CTL_NEXT:
+      this->next();
+      break;
+    case CTL_STOP:
+      this->stop();
+      break;
+    case CTL_REPEAT:
+      this->set_repeat(this->repeat_ == RepeatMode::OFF    ? RepeatMode::FILE
+                       : this->repeat_ == RepeatMode::FILE ? RepeatMode::PLAYLIST
+                                                           : RepeatMode::OFF);
+      break;
+    case CTL_VOLUME_DOWN:
+    case CTL_VOLUME_UP:
+      this->set_volume(std::min(std::max(this->get_volume() + (button == CTL_VOLUME_UP ? VOLUME_STEP : -VOLUME_STEP),
+                                         0.0f),
+                                1.0f));
+      break;
+    default:
+      break;
+  }
+}
+
+void SimpleVideoPlayer::controls_loop_() {
+  if (this->ctl_video_.bar == nullptr)
     return;
-  this->ctl_in_use_.store(block, std::memory_order_release);
-  if (this->ctl_shown_.load(std::memory_order_acquire) == block) {
-    ControlsBlock header;
-    memcpy(&header, block, sizeof(header));
-    const size_t bpp = this->dsi_fb_bpp_;
-    const size_t row_bytes = static_cast<size_t>(header.w) * bpp;
-    const uint8_t *src = block + sizeof(ControlsBlock);
-    for (uint32_t r = 0; r < header.h; r++) {
-      memcpy(this->decode_target_ + (static_cast<size_t>(header.y + r) * this->dsi_out_w_ + header.x) * bpp,
-             src + r * row_bytes, row_bytes);
+  if (!this->controls_active_()) {
+    if (this->ctl_shown_.load(std::memory_order_relaxed))
+      this->hide_controls();
+    this->ctl_pressed_ = false;
+    return;
+  }
+  if (this->ctl_shown_.load(std::memory_order_relaxed) &&
+      this->state_.load(std::memory_order_acquire) == PlayerState::PLAYING && !this->ctl_pressed_ &&
+      millis() - this->ctl_last_input_ms_ > this->ctl_hide_after_ms_)
+    this->hide_controls();
+}
+
+//========================================================================
+// Into the frame (playback task): copies only, no LVGL
+//========================================================================
+
+// The sprite with its top left at LVGL's (x, y); only its first `width` columns when given.
+void SimpleVideoPlayer::ctl_blit_(const ControlsSprite &sprite, int32_t x, int32_t y, int32_t width) {
+  if (sprite.data == nullptr)
+    return;
+  const int32_t sw = area_w(sprite.area);
+  const int32_t sh = area_h(sprite.area);
+  const lv_area_t whole{x, y, x + sw - 1, y + sh - 1};
+  const lv_area_t part{x, y, x + (width < 0 ? sw : std::min(width, sw)) - 1, y + sh - 1};
+  if (part.x2 < part.x1)
+    return;
+  int32_t wx, wy, ww, wh, px, py, pw, ph;
+  this->ctl_panel_rect_(whole, &wx, &wy, &ww, &wh);
+  this->ctl_panel_rect_(part, &px, &py, &pw, &ph);
+  const size_t bpp = this->dsi_fb_bpp_;
+  const size_t row = static_cast<size_t>(pw) * bpp;
+  const uint8_t *src = sprite.data + (static_cast<size_t>(py - wy) * sprite.pw + (px - wx)) * bpp;
+  uint8_t *dst = this->decode_target_ + (static_cast<size_t>(py) * this->dsi_out_w_ + px) * bpp;
+  const size_t dst_stride = static_cast<size_t>(this->dsi_out_w_) * bpp;
+  const size_t src_stride = static_cast<size_t>(sprite.pw) * bpp;
+  for (int32_t r = 0; r < ph; r++, src += src_stride, dst += dst_stride)
+    memcpy(dst, src, row);
+}
+
+void SimpleVideoPlayer::composite_controls_() {
+  if (!this->ctl_ready_.load(std::memory_order_acquire) || !this->ctl_shown_.load(std::memory_order_acquire) ||
+      this->decode_target_ == nullptr)
+    return;
+  this->ctl_blit_(this->ctl_static_, this->ctl_static_.area.x1, this->ctl_static_.area.y1);
+  const ControlsSprite &play_pause =
+      this->state_.load(std::memory_order_relaxed) == PlayerState::PLAYING ? this->ctl_pause_ : this->ctl_play_;
+  this->ctl_blit_(play_pause, play_pause.area.x1, play_pause.area.y1);
+  const ControlsSprite &repeat = this->ctl_repeat_sprite_[static_cast<int>(this->repeat_) % 3];
+  this->ctl_blit_(repeat, repeat.area.x1, repeat.area.y1);
+
+  const float duration = this->get_duration();
+  const bool dragging = this->ctl_dragging_.load(std::memory_order_acquire);
+  float fraction = dragging ? this->ctl_drag_permille_.load(std::memory_order_relaxed) / static_cast<float>(SEEK_RANGE)
+                            : (duration > 0.0f ? this->get_position() / duration : 0.0f);
+  fraction = std::min(std::max(fraction, 0.0f), 1.0f);
+  if (this->ctl_progress_.data != nullptr) {
+    const auto fill = static_cast<int32_t>(fraction * area_w(this->ctl_progress_.area) + 0.5f);
+    this->ctl_blit_(this->ctl_progress_, this->ctl_progress_.area.x1, this->ctl_progress_.area.y1, fill);
+  }
+  if (this->ctl_glyph_[0].data != nullptr) {
+    char text[16];
+    const float seconds = dragging ? fraction * duration : this->get_position();
+    const size_t len = format_time(text, sizeof(text), static_cast<uint32_t>(seconds), duration >= 3600.0f);
+    // Right-aligned; digits in cells as wide as the widest, so the time does not jitter.
+    int32_t x = this->ctl_time_area_.x2 + 1;
+    for (size_t i = len; i-- > 0;) {
+      const size_t g = text[i] == ':' ? 10 : static_cast<size_t>(text[i] - '0');
+      if (g >= CTL_GLYPHS)
+        continue;
+      const ControlsSprite &glyph = this->ctl_glyph_[g];
+      const int32_t gw = area_w(glyph.area);
+      const int32_t cell = text[i] == ':' ? gw : this->ctl_cell_w_;
+      x -= cell;
+      if (x < this->ctl_time_area_.x1)
+        break;
+      this->ctl_blit_(glyph, x + (cell - gw) / 2, glyph.area.y1);
     }
   }
-  this->ctl_in_use_.store(nullptr, std::memory_order_release);
 }
 
 void SimpleVideoPlayer::repaint_paused_() {

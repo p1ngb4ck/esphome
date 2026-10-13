@@ -348,19 +348,41 @@ class SimpleVideoPlayer : public Component
   /// seek() relative to the position shown.
   void seek_relative(float seconds) { this->seek(this->get_position() + seconds); }
 #ifdef SVP_CONTROLS
-  // On-screen controls: an LVGL object (hidden; any widgets, laid out where it shows) drawn over
-  // the video. A tap shows it, a tap on one of its widgets sends that widget LV_EVENT_CLICKED (its
-  // on_click), a tap or drag on the seek bar seeks. It hides after hide_after while playing.
-  void set_controls(lv_obj_t *widget, touchscreen::Touchscreen *touchscreen) {
-    this->ctl_widget_ = widget;
-    this->ctl_touchscreen_ = touchscreen;
-  }
-  void set_controls_seek_bar(lv_obj_t *obj) { this->ctl_seek_ = obj; }
-  void set_controls_position_label(lv_obj_t *obj) { this->ctl_position_ = obj; }
-  void set_controls_title_label(lv_obj_t *obj) { this->ctl_title_ = obj; }
-  void set_controls_play_pause(lv_obj_t *obj) { this->ctl_play_pause_ = obj; }
-  void set_controls_repeat(lv_obj_t *obj) { this->ctl_repeat_ = obj; }
+  // On-screen controls: a bar of LVGL widgets the player builds itself (which ones and their styles
+  // from the configuration). Over a video on the panel it is rendered before playback starts, as
+  // pictures the playback task copies into each frame: no LVGL drawing while the video plays. A tap
+  // shows it, taps on its buttons act, a tap or drag on the seek bar seeks; it hides after
+  // hide_after without a touch while playing.
+  enum ControlButton : uint8_t {
+    CTL_PREVIOUS,
+    CTL_REWIND,
+    CTL_PLAY_PAUSE,
+    CTL_FORWARD,
+    CTL_NEXT,
+    CTL_STOP,
+    CTL_REPEAT,
+    CTL_VOLUME_DOWN,
+    CTL_VOLUME_UP,
+    CTL_BUTTON_COUNT,
+  };
+  void set_controls_touchscreen(touchscreen::Touchscreen *touchscreen) { this->ctl_touchscreen_ = touchscreen; }
   void set_controls_hide_after(uint32_t ms) { this->ctl_hide_after_ms_ = ms; }
+  /// Styles added over the built-in look (any may be null).
+  void set_controls_styles(lv_style_t *bar, lv_style_t *button, lv_style_t *accent_button, lv_style_t *seek_bar,
+                           lv_style_t *seek_indicator) {
+    this->ctl_user_bar_style_ = bar;
+    this->ctl_user_button_style_ = button;
+    this->ctl_user_accent_style_ = accent_button;
+    this->ctl_user_seek_style_ = seek_bar;
+    this->ctl_user_indicator_style_ = seek_indicator;
+  }
+  void set_video_controls(std::vector<uint8_t> buttons, bool title, bool time, bool seek_bar) {
+    this->ctl_video_.buttons = std::move(buttons);
+    this->ctl_video_.title = title;
+    this->ctl_video_.time = time;
+    this->ctl_video_.seek_bar = seek_bar;
+    this->ctl_video_.enabled = true;
+  }
   void show_controls();
   void hide_controls();
   /// Listener: a touch (pressed, display coordinates) or its release.
@@ -874,43 +896,79 @@ class SimpleVideoPlayer : public Component
 
   std::atomic<bool> playback_parked_{false};  // the playback task sits in its pause wait
 #ifdef SVP_CONTROLS
-  struct ControlsBlock {  // header of a controls picture in panel coordinates; the pixels follow
-    uint16_t x, y, w, h;
+  // A piece of the rendered controls, in the panel's orientation; area: where it is in LVGL's.
+  struct ControlsSprite {
+    lv_area_t area{};
+    int32_t pw{0}, ph{0};
+    uint8_t *data{nullptr};
   };
-  lv_obj_t *ctl_widget_{nullptr};
-  lv_obj_t *ctl_seek_{nullptr};
-  lv_obj_t *ctl_position_{nullptr};
-  lv_obj_t *ctl_title_{nullptr};
-  lv_obj_t *ctl_play_pause_{nullptr};
-  lv_obj_t *ctl_repeat_{nullptr};
+  struct ControlsBar {
+    bool enabled{false};
+    std::vector<uint8_t> buttons;
+    bool title{true}, time{true}, seek_bar{true};
+    lv_obj_t *bar{nullptr};
+    lv_obj_t *title_label{nullptr};
+    lv_obj_t *position_label{nullptr};
+    lv_obj_t *duration_label{nullptr};
+    lv_obj_t *seek{nullptr};
+    lv_obj_t *button[CTL_BUTTON_COUNT]{};
+    lv_obj_t *button_label[CTL_BUTTON_COUNT]{};
+  };
+  static constexpr size_t CTL_GLYPHS = 11;  // 0-9 and ':'
+  ControlsBar ctl_video_;
+  lv_style_t *ctl_user_bar_style_{nullptr};
+  lv_style_t *ctl_user_button_style_{nullptr};
+  lv_style_t *ctl_user_accent_style_{nullptr};
+  lv_style_t *ctl_user_seek_style_{nullptr};
+  lv_style_t *ctl_user_indicator_style_{nullptr};
+  lv_style_t ctl_bar_style_{};
+  lv_style_t ctl_row_style_{};
+  lv_style_t ctl_button_style_{};
+  lv_style_t ctl_accent_style_{};
+  lv_style_t ctl_seek_style_{};
+  lv_style_t ctl_indicator_style_{};
   touchscreen::Touchscreen *ctl_touchscreen_{nullptr};
   ControlsTouchListener ctl_listener_{this};
   uint32_t ctl_hide_after_ms_{5000};
-  lv_draw_buf_t *ctl_snapshot_{nullptr};
-  uint8_t *ctl_bufs_[2]{nullptr, nullptr};  // PSRAM, ControlsBlock + pixels
-  size_t ctl_buf_size_[2]{0, 0};
-  std::atomic<uint8_t *> ctl_shown_{nullptr};   // drawn over each frame; nullptr = hidden
-  std::atomic<uint8_t *> ctl_in_use_{nullptr};  // the playback task copies from it right now
-  std::atomic<bool> ctl_repaint_{false};        // paused: present the frame again with the controls
-  std::atomic<bool> ctl_step_{false};           // paused after a seek: show the new frame
-  lv_area_t ctl_area_{};                        // where the controls are (LVGL coordinates)
+  // Pool memory of a direct session (controls_reserve_): the snapshot, then the sprites in it.
+  uint8_t *ctl_mem_{nullptr};
+  size_t ctl_mem_used_{0};
+  size_t ctl_snap_bytes_{0};  // a snapshot of the bar
+  display::DisplayRotation ctl_rotation_{display::DISPLAY_ROTATION_0_DEGREES};
+  ControlsSprite ctl_static_;       // the bar: paused icon, repeat off, empty seek bar and time
+  ControlsSprite ctl_play_, ctl_pause_;
+  ControlsSprite ctl_repeat_sprite_[3];  // RepeatMode
+  ControlsSprite ctl_progress_;          // the seek bar full
+  ControlsSprite ctl_glyph_[CTL_GLYPHS];
+  lv_area_t ctl_area_{};           // the bar (LVGL coordinates)
   lv_area_t ctl_seek_area_{};
-  bool ctl_visible_{false};
-  bool ctl_dirty_{false};
-  bool ctl_pressed_{false};
-  bool ctl_dragging_{false};
+  lv_area_t ctl_time_area_{};      // the position label's text
+  lv_area_t ctl_button_area_[CTL_BUTTON_COUNT]{};
+  int32_t ctl_cell_w_{0};          // a digit, as wide as the widest
+  std::atomic<bool> ctl_ready_{false};  // rendered for this session
+  std::atomic<bool> ctl_shown_{false};  // copied into each frame
+  std::atomic<bool> ctl_dragging_{false};
+  std::atomic<uint16_t> ctl_drag_permille_{0};
+  std::atomic<bool> ctl_repaint_{false};  // paused: present the frame again with the controls
+  std::atomic<bool> ctl_step_{false};     // paused after a seek: show the new frame
   bool ctl_failed_{false};
+  bool ctl_pressed_{false};
   int32_t ctl_x_{0}, ctl_y_{0};
-  float ctl_drag_fraction_{0.0f};
   uint32_t ctl_last_input_ms_{0};
-  uint32_t ctl_last_render_ms_{0};
-  uint32_t ctl_last_second_{UINT32_MAX};
-  PlayerState ctl_last_state_{PlayerState::STOPPED};
-  RepeatMode ctl_last_repeat_{RepeatMode::OFF};
   bool controls_active_() const;
+  void controls_setup_();
+  bool build_controls_bar_(ControlsBar &bar);
+  /// Setup: pool bytes a direct session needs for them (0: none).
+  size_t controls_bytes_();
+  /// Main loop, before a direct session starts: everything the playback task copies.
+  void prerender_controls_();
   void controls_loop_();
-  void render_controls_();
   float controls_fraction_(int32_t x) const;
+  void controls_press_(uint8_t button);
+  uint8_t *ctl_alloc_(size_t bytes);
+  bool ctl_take_(ControlsSprite &sprite, const lv_draw_buf_t *snapshot, const lv_area_t &snap_area, lv_area_t part);
+  void ctl_blit_(const ControlsSprite &sprite, int32_t x, int32_t y, int32_t width = -1);
+  void ctl_panel_rect_(const lv_area_t &area, int32_t *x, int32_t *y, int32_t *w, int32_t *h) const;
   /// Playback task: the controls into decode_target_.
   void composite_controls_();
   /// Playback task, paused: shows decode_target_ (with the controls) again.

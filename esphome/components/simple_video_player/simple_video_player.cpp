@@ -80,6 +80,9 @@ void SimpleVideoPlayer::setup() {
   }
 #endif
 
+#ifdef SVP_CONTROLS
+  this->controls_setup_();  // before plan_pool_(): their share depends on the bar
+#endif
   if (!this->plan_pool_()) {
     this->mark_failed();
     return;
@@ -173,10 +176,6 @@ void SimpleVideoPlayer::setup() {
   if (this->channel_widget_ != nullptr && !this->setup_channel_list_())
     ESP_LOGE(TAG, "Channel list disabled");
 #endif
-#ifdef SVP_CONTROLS
-  if (this->ctl_widget_ != nullptr && this->ctl_touchscreen_ != nullptr)
-    this->ctl_touchscreen_->register_listener(&this->ctl_listener_);
-#endif
 #ifdef SVP_PICTURES
   this->pictures_setup_();
 #endif
@@ -219,6 +218,11 @@ void SimpleVideoPlayer::loop() {
   this->controls_loop_();
 #endif
   if (this->start_req_.load(std::memory_order_acquire) == 1) {
+#ifdef SVP_CONTROLS
+    // Still with LVGL: the controls rendered once, so nothing is drawn while the video plays.
+    if (this->direct_session_())
+      this->prerender_controls_();
+#endif
 #if defined(SVP_DSI_OUTPUT) && defined(SVP_USE_LVGL)
     if (this->direct_session_() && this->lvgl_component_ != nullptr && !this->dsi_lvgl_paused_) {
       this->lvgl_component_->set_paused(true, false);
@@ -258,7 +262,7 @@ void SimpleVideoPlayer::loop() {
     bool paused_ui = this->dsi_lvgl_paused_ && !streaming && state == PlayerState::PAUSED &&
                      !this->is_network_session() && this->playback_parked_.load(std::memory_order_acquire);
 #ifdef SVP_CONTROLS
-    paused_ui = paused_ui && (this->ctl_widget_ == nullptr || this->ctl_failed_);  // else the controls draw over it
+    paused_ui = paused_ui && !this->ctl_ready_.load(std::memory_order_acquire);  // else the controls draw over it
 #endif
     if (paused_ui) {
       this->lvgl_component_->set_paused(false, false);
@@ -1010,11 +1014,11 @@ void SimpleVideoPlayer::playback_loop_() {
         if (this->seek_pending_.load(std::memory_order_acquire)) {
           this->handle_seek_();
 #ifdef SVP_CONTROLS
-          this->ctl_step_.store(direct && this->ctl_widget_ != nullptr, std::memory_order_relaxed);
+          this->ctl_step_.store(direct && this->ctl_ready_.load(std::memory_order_acquire), std::memory_order_relaxed);
 #endif
         }
 #ifdef SVP_CONTROLS
-        if (direct && this->ctl_widget_ != nullptr) {
+        if (direct && this->ctl_ready_.load(std::memory_order_acquire)) {
           // After a seek the new picture shows, with the controls over it.
           FrameSlot *slot = nullptr;
           if (this->ctl_step_.load(std::memory_order_relaxed) &&
@@ -1951,13 +1955,8 @@ bool SimpleVideoPlayer::plan_pool_() {
   this->output_reserve_ = output;
   fixed += output;
 #ifdef SVP_CONTROLS
-  if (this->ctl_widget_ != nullptr && this->dsi_ != nullptr) {
-    lv_obj_update_layout(this->ctl_widget_);
-    const size_t area =
-        static_cast<size_t>(lv_obj_get_width(this->ctl_widget_)) * static_cast<size_t>(lv_obj_get_height(this->ctl_widget_));
-    this->controls_reserve_ = 2 * pool_round(sizeof(ControlsBlock) + area * this->dsi_fb_bpp_);
-    fixed += this->controls_reserve_;
-  }
+  this->controls_reserve_ = pool_round(this->controls_bytes_());
+  fixed += this->controls_reserve_;
 #endif
 #ifdef SVP_STREAM
   if (this->stream_port_ != 0) {
@@ -2066,14 +2065,10 @@ bool SimpleVideoPlayer::ensure_direct_target_() {
   if (target == nullptr)
     return false;
 #ifdef SVP_CONTROLS
-  // The controls drawn over the direct output: both pictures, with the display's decode buffer.
+  // The controls drawn over the direct output, with the display's decode buffer.
   xSemaphoreTake(this->media_lock_, portMAX_DELAY);
-  for (int i = 0; i < 2 && this->controls_reserve_ != 0; i++) {
-    if (this->ctl_bufs_[i] == nullptr) {
-      this->ctl_bufs_[i] = this->pool_.alloc(this->controls_reserve_ / 2);
-      this->ctl_buf_size_[i] = this->ctl_bufs_[i] != nullptr ? this->controls_reserve_ / 2 : 0;
-    }
-  }
+  if (this->ctl_mem_ == nullptr && this->controls_reserve_ != 0)
+    this->ctl_mem_ = this->pool_.alloc(this->controls_reserve_);
   xSemaphoreGive(this->media_lock_);
 #endif
   this->decode_target_len_ = size;
@@ -2140,11 +2135,9 @@ void SimpleVideoPlayer::handle_output_release_() {
       this->decode_target_ = nullptr;
       this->decode_target_len_ = 0;
 #ifdef SVP_CONTROLS
-      for (int i = 0; i < 2; i++) {
-        this->pool_.free(this->ctl_bufs_[i]);
-        this->ctl_bufs_[i] = nullptr;
-        this->ctl_buf_size_[i] = 0;
-      }
+      this->ctl_ready_.store(false, std::memory_order_release);
+      this->pool_.free(this->ctl_mem_);
+      this->ctl_mem_ = nullptr;
 #endif
     }
 #endif
@@ -2197,11 +2190,9 @@ bool SimpleVideoPlayer::release_media_() {
       released = true;
     }
 #ifdef SVP_CONTROLS
-    for (int i = 0; i < 2; i++) {
-      this->pool_.free(this->ctl_bufs_[i]);
-      this->ctl_bufs_[i] = nullptr;
-      this->ctl_buf_size_[i] = 0;
-    }
+    this->ctl_ready_.store(false, std::memory_order_release);
+    this->pool_.free(this->ctl_mem_);
+    this->ctl_mem_ = nullptr;
 #endif
 #endif
     if (this->ring_buf_ != nullptr) {

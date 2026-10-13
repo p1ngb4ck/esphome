@@ -165,11 +165,39 @@ CONF_AUDIO_LATENCY = "audio_latency"
 CONF_RELATIVE = "relative"
 CONF_PLAYLIST = "playlist"
 CONF_CONTROLS = "controls"
-CONF_SEEK_BAR_ID = "seek_bar_id"
-CONF_POSITION_LABEL_ID = "position_label_id"
-CONF_TITLE_LABEL_ID = "title_label_id"
-CONF_PLAY_PAUSE_ID = "play_pause_id"
-CONF_REPEAT_ID = "repeat_id"
+CONF_BUTTONS = "buttons"
+CONF_TITLE = "title"
+CONF_TIME = "time"
+CONF_SEEK_BAR = "seek_bar"
+CONF_VIDEO = "video"
+CONF_BAR_STYLE_ID = "bar_style_id"
+CONF_BUTTON_STYLE_ID = "button_style_id"
+CONF_ACCENT_BUTTON_STYLE_ID = "accent_button_style_id"
+CONF_SEEK_BAR_STYLE_ID = "seek_bar_style_id"
+CONF_SEEK_INDICATOR_STYLE_ID = "seek_indicator_style_id"
+# Buttons of the on-screen controls, as ControlButton in simple_video_player.h.
+CONTROL_BUTTONS = {
+    "previous": 0,
+    "rewind": 1,
+    "play_pause": 2,
+    "forward": 3,
+    "next": 4,
+    "stop": 5,
+    "repeat": 6,
+    "volume_down": 7,
+    "volume_up": 8,
+}
+VIDEO_CONTROL_BUTTONS = [
+    "previous",
+    "rewind",
+    "play_pause",
+    "forward",
+    "next",
+    "stop",
+    "repeat",
+    "volume_down",
+    "volume_up",
+]
 CONF_STEP = "step"
 CONF_HIDE_AFTER = "hide_after"
 CONF_PICTURE_DIRECTORIES = "picture_directories"
@@ -308,8 +336,9 @@ def _validate_controls(config):
             f"'{CONF_CONTROLS}' are drawn over direct display output: they need '{CONF_DISPLAY_ID}' "
             f"and '{CONF_TOUCHSCREEN_ID}'."
         )
-    # The controls are rendered off screen with lv_snapshot while LVGL is paused.
+    # The player builds the controls from these widgets and renders them with lv_snapshot.
     lvgl_defines.add_define("LV_USE_SNAPSHOT", "1")
+    lvgl_defines.add_lv_use("label", "bar", "button")
     return config
 
 
@@ -468,15 +497,25 @@ CONFIG_SCHEMA = cv.All(
                         cv.requires_component("lvgl"),
                         cv.Schema(
                             {
-                                cv.Required(CONF_WIDGET_ID): cv.use_id(lv_obj_base_t),
-                                cv.Optional(CONF_SEEK_BAR_ID): cv.use_id(lv_obj_base_t),
-                                cv.Optional(CONF_POSITION_LABEL_ID): cv.use_id(lv_obj_base_t),
-                                cv.Optional(CONF_TITLE_LABEL_ID): cv.use_id(lv_obj_base_t),
-                                cv.Optional(CONF_PLAY_PAUSE_ID): cv.use_id(lv_obj_base_t),
-                                cv.Optional(CONF_REPEAT_ID): cv.use_id(lv_obj_base_t),
                                 cv.Optional(
                                     CONF_HIDE_AFTER, default="5s"
                                 ): cv.positive_time_period_milliseconds,
+                                # Added over the built-in look, in this order of precedence.
+                                cv.Optional(CONF_BAR_STYLE_ID): cv.use_id(lv_style_t),
+                                cv.Optional(CONF_BUTTON_STYLE_ID): cv.use_id(lv_style_t),
+                                cv.Optional(CONF_ACCENT_BUTTON_STYLE_ID): cv.use_id(lv_style_t),
+                                cv.Optional(CONF_SEEK_BAR_STYLE_ID): cv.use_id(lv_style_t),
+                                cv.Optional(CONF_SEEK_INDICATOR_STYLE_ID): cv.use_id(lv_style_t),
+                                cv.Optional(CONF_VIDEO, default={}): cv.Schema(
+                                    {
+                                        cv.Optional(
+                                            CONF_BUTTONS, default=VIDEO_CONTROL_BUTTONS
+                                        ): cv.ensure_list(cv.one_of(*CONTROL_BUTTONS, lower=True)),
+                                        cv.Optional(CONF_TITLE, default=True): cv.boolean,
+                                        cv.Optional(CONF_TIME, default=True): cv.boolean,
+                                        cv.Optional(CONF_SEEK_BAR, default=True): cv.boolean,
+                                    }
+                                ),
                             }
                         ),
                     )
@@ -812,19 +851,28 @@ async def to_code(config):
 
     if controls := config.get(CONF_CONTROLS):
         cg.add_define("SVP_CONTROLS")
-        widget = await cg.get_variable(controls[CONF_WIDGET_ID])
-        ts = await cg.get_variable(config[CONF_TOUCHSCREEN_ID])
-        cg.add(var.set_controls(widget, ts))
-        for key, setter in (
-            (CONF_SEEK_BAR_ID, "set_controls_seek_bar"),
-            (CONF_POSITION_LABEL_ID, "set_controls_position_label"),
-            (CONF_TITLE_LABEL_ID, "set_controls_title_label"),
-            (CONF_PLAY_PAUSE_ID, "set_controls_play_pause"),
-            (CONF_REPEAT_ID, "set_controls_repeat"),
-        ):
-            if key in controls:
-                cg.add(getattr(var, setter)(await cg.get_variable(controls[key])))
+        cg.add(var.set_controls_touchscreen(await cg.get_variable(config[CONF_TOUCHSCREEN_ID])))
         cg.add(var.set_controls_hide_after(controls[CONF_HIDE_AFTER]))
+        styles = [
+            await cg.get_variable(controls[key]) if key in controls else cg.RawExpression("nullptr")
+            for key in (
+                CONF_BAR_STYLE_ID,
+                CONF_BUTTON_STYLE_ID,
+                CONF_ACCENT_BUTTON_STYLE_ID,
+                CONF_SEEK_BAR_STYLE_ID,
+                CONF_SEEK_INDICATOR_STYLE_ID,
+            )
+        ]
+        cg.add(var.set_controls_styles(*styles))
+        video = controls[CONF_VIDEO]
+        cg.add(
+            var.set_video_controls(
+                [CONTROL_BUTTONS[b] for b in video[CONF_BUTTONS]],
+                video[CONF_TITLE],
+                video[CONF_TIME],
+                video[CONF_SEEK_BAR],
+            )
+        )
 
     if CONF_PICTURE_CANVAS_ID in config:
         await _pictures_to_code(var, config)
