@@ -3,6 +3,7 @@
 #include "esphome/core/application.h"
 #include "esphome/components/storage/storage_worker.h"
 #include <algorithm>
+#include <cctype>
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
@@ -232,6 +233,16 @@ void SimpleVideoPlayer::loop() {
 #ifdef SVP_CHANNEL_LIST
   this->channel_loop_();
 #endif
+  // A file played to its end: the next of the playlist, before LVGL would get the screen back.
+  if (this->advance_req_.load(std::memory_order_acquire) &&
+      this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED) {
+    this->advance_req_.store(false, std::memory_order_relaxed);
+    if (this->playlist_index_ + 1 < this->playlist_.size()) {
+      this->play_index_(this->playlist_index_ + 1);
+    } else if (this->repeat_ == RepeatMode::PLAYLIST && !this->playlist_.empty()) {
+      this->play_index_(0);
+    }
+  }
   if (this->start_req_.load(std::memory_order_acquire) == 1) {
 #if defined(SVP_DSI_OUTPUT) && defined(SVP_USE_LVGL)
     if (this->dsi_ != nullptr && this->lvgl_component_ != nullptr && !this->dsi_lvgl_paused_) {
@@ -257,7 +268,8 @@ void SimpleVideoPlayer::loop() {
       this->dsi_lvgl_paused_ = true;
     }
     const PlayerState state = this->state_.load(std::memory_order_acquire);
-    if (this->dsi_lvgl_paused_ && !streaming && state == PlayerState::STOPPED) {
+    if (this->dsi_lvgl_paused_ && !streaming && state == PlayerState::STOPPED &&
+        !this->advance_req_.load(std::memory_order_acquire)) {
       this->lvgl_component_->set_paused(false, false);
       this->dsi_lvgl_paused_ = false;
     }
@@ -384,11 +396,123 @@ void SimpleVideoPlayer::dump_config() {
 // Playback Control API
 //========================================================================
 
-void SimpleVideoPlayer::play(const std::string &video_path) {
+void SimpleVideoPlayer::play(const std::string &video_path, bool folder_playlist) {
+  this->playlist_.clear();
+  this->playlist_index_ = 0;
+  if (folder_playlist)
+    this->load_folder_playlist_(video_path);
+  if (this->playlist_.empty())
+    this->playlist_.push_back(video_path);
+  this->play_index_(this->playlist_index_);
+}
+
+void SimpleVideoPlayer::play_list(std::vector<std::string> paths, size_t start) {
+  if (paths.empty())
+    return;
+  if (paths.size() > MAX_PLAYLIST)
+    paths.resize(MAX_PLAYLIST);
+  this->playlist_ = std::move(paths);
+  this->play_index_(std::min(start, this->playlist_.size() - 1));
+}
+
+void SimpleVideoPlayer::play_index_(size_t index) {
+  this->playlist_index_ = index;
+  this->advance_req_.store(false, std::memory_order_relaxed);
 #ifdef SVP_STREAM
   this->net_session_ = false;
 #endif
-  this->start_playback_(video_path);
+  this->start_playback_(this->playlist_[index]);
+}
+
+void SimpleVideoPlayer::next() {
+  if (this->playlist_.empty())
+    return;
+  if (this->playlist_index_ + 1 < this->playlist_.size()) {
+    this->play_index_(this->playlist_index_ + 1);
+  } else if (this->repeat_ == RepeatMode::PLAYLIST) {
+    this->play_index_(0);
+  } else {
+    ESP_LOGI(TAG, "End of the playlist");
+  }
+}
+
+void SimpleVideoPlayer::previous() {
+  if (this->playlist_.empty())
+    return;
+  static constexpr float RESTART_AFTER_S = 3.0f;
+  const bool playing = !this->is_stopped();
+  if (playing && this->get_position() > RESTART_AFTER_S) {
+    if (this->can_seek()) {
+      this->seek(0.0f);
+    } else {
+      this->play_index_(this->playlist_index_);
+    }
+  } else if (this->playlist_index_ > 0) {
+    this->play_index_(this->playlist_index_ - 1);
+  } else if (this->repeat_ == RepeatMode::PLAYLIST) {
+    this->play_index_(this->playlist_.size() - 1);
+  } else {
+    this->play_index_(0);
+  }
+}
+
+void SimpleVideoPlayer::load_folder_playlist_(const std::string &path) {
+  const size_t slash = path.rfind('/');
+  if (slash == std::string::npos || slash == 0 || storage::global_storage_registry == nullptr)
+    return;
+  if (this->state_.load(std::memory_order_acquire) != PlayerState::STOPPED) {
+    this->stop();
+    this->wait_for_task_stop_(this->task_handle_, 5000);
+  }
+  const std::string dir = path.substr(0, slash);
+  const char *rel = nullptr;
+  storage::PathStorage *storage = storage::global_storage_registry->resolve_path(dir.c_str(), &rel);
+  if (storage == nullptr || (storage::global_storage_worker != nullptr &&
+                             storage::global_storage_worker->has_active_task_io(storage))) {
+    ESP_LOGW(TAG, "Cannot list %s for the playlist", dir.c_str());
+    return;
+  }
+  std::vector<std::string> names;
+  const storage::StorageError err = storage->list_dir(
+      (rel == nullptr || rel[0] == '\0') ? "/" : rel,
+      [](const storage::FileStat *entry, void *context) -> bool {
+        auto *names = static_cast<std::vector<std::string> *>(context);
+        if (entry->is_dir || entry->name[0] == '.')
+          return true;
+        const char *dot = strrchr(entry->name, '.');
+        if (dot == nullptr)
+          return true;
+        std::string extension(dot);
+        for (char &c : extension)
+          c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        if (extension == ".avi" || extension == ".mjpeg" || extension == ".mjpg")
+          names->emplace_back(entry->name);
+        return names->size() < MAX_PLAYLIST;
+      },
+      &names);
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGW(TAG, "Listing %s failed: %s", dir.c_str(), storage::error_to_string(err));
+    return;
+  }
+  auto lower = [](std::string text) {
+    for (char &c : text)
+      c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return text;
+  };
+  std::sort(names.begin(), names.end(),
+            [&lower](const std::string &a, const std::string &b) { return lower(a) < lower(b); });
+  const std::string file = path.substr(slash + 1);
+  for (size_t i = 0; i < names.size(); i++) {
+    if (names[i] == file)
+      this->playlist_index_ = i;
+    this->playlist_.push_back(dir + "/" + names[i]);
+  }
+  if (this->playlist_index_ >= this->playlist_.size() || this->playlist_[this->playlist_index_] != path) {
+    // The file itself is not among them (another extension, hidden): play it first, then the folder.
+    this->playlist_.insert(this->playlist_.begin(), path);
+    this->playlist_index_ = 0;
+  }
+  ESP_LOGI(TAG, "Playlist: %u videos in %s", static_cast<unsigned>(this->playlist_.size()), dir.c_str());
 }
 
 void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
@@ -484,6 +608,7 @@ void SimpleVideoPlayer::resume() {
 }
 
 void SimpleVideoPlayer::stop() {
+  this->advance_req_.store(false, std::memory_order_relaxed);
   PlayerState prev = this->state_.exchange(PlayerState::STOPPED, std::memory_order_acq_rel);
   if (prev != PlayerState::STOPPED) {
     ESP_LOGI(TAG, "Stopping playback");
@@ -894,6 +1019,10 @@ void SimpleVideoPlayer::playback_loop_() {
         this->stream_played_to_end_.store(true, std::memory_order_release);
 #endif
       ESP_LOGI(TAG, "Playback finished");
+#ifdef SVP_STREAM
+      if (!this->net_session_)
+#endif
+        this->advance_req_.store(true, std::memory_order_release);
       this->on_finished_callbacks_.call();
       break;
     }

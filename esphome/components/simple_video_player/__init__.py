@@ -13,6 +13,7 @@ from esphome.const import (
     CONF_CHANNEL,
     CONF_HEIGHT,
     CONF_ID,
+    CONF_MODE,
     CONF_NUM_CHANNELS,
     CONF_PLATFORM,
     CONF_POSITION,
@@ -85,6 +86,15 @@ StreamSleepAction = simple_video_player_ns.class_("StreamSleepAction", automatio
 StreamWakeAction = simple_video_player_ns.class_("StreamWakeAction", automation.Action)
 SetVolumeAction = simple_video_player_ns.class_("SetVolumeAction", automation.Action)
 SeekAction = simple_video_player_ns.class_("SeekAction", automation.Action)
+NextAction = simple_video_player_ns.class_("NextAction", automation.Action)
+PreviousAction = simple_video_player_ns.class_("PreviousAction", automation.Action)
+RepeatAction = simple_video_player_ns.class_("RepeatAction", automation.Action)
+RepeatMode = simple_video_player_ns.enum("RepeatMode", is_class=True)
+REPEAT_MODES = {
+    "off": RepeatMode.OFF,
+    "file": RepeatMode.FILE,
+    "playlist": RepeatMode.PLAYLIST,
+}
 
 # Configuration keys
 CONF_CANVAS_ID = "canvas_id"
@@ -104,6 +114,7 @@ CONF_WIDGET_ID = "widget_id"
 CONF_AUDIO_CODEC = "audio_codec"
 CONF_AUDIO_LATENCY = "audio_latency"
 CONF_RELATIVE = "relative"
+CONF_PLAYLIST = "playlist"
 CONF_READ_AHEAD_BUFFER_SIZE = "read_ahead_buffer_size"
 # The read-ahead ring holds the picture the sound runs ahead of: 100 ms per MiB (4MB -> 400 ms).
 AUDIO_LATENCY_MS_PER_MIB = 100
@@ -701,6 +712,10 @@ SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA = cv.Schema(
         {
             cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
             cv.Required("path"): cv.templatable(cv.string),
+            # folder: every video of the file's folder (by name), so next/previous go through it.
+            cv.Optional(CONF_PLAYLIST, default="file"): cv.one_of(
+                "file", "folder", lower=True
+            ),
         }
     ),
     # play() copies the path into video_path_ and returns before the decode task starts, so the
@@ -712,6 +727,48 @@ async def simple_video_player_play_to_code(config, action_id, template_arg, args
     var = cg.new_Pvariable(action_id, template_arg, paren)
     template_ = await cg.templatable(config["path"], args, cg.std_string)
     cg.add(var.set_path(template_))
+    cg.add(var.set_folder_playlist(config[CONF_PLAYLIST] == "folder"))
+    return var
+
+
+@automation.register_action(
+    "simple_video_player.next",
+    NextAction,
+    SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+    synchronous=True,
+)
+async def simple_video_player_next_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, paren)
+
+
+# Back to the start of the file once it has played a few seconds, else the previous item.
+@automation.register_action(
+    "simple_video_player.previous",
+    PreviousAction,
+    SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+    synchronous=True,
+)
+async def simple_video_player_previous_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, paren)
+
+
+@automation.register_action(
+    "simple_video_player.repeat",
+    RepeatAction,
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+            cv.Required(CONF_MODE): cv.enum(REPEAT_MODES, lower=True),
+        }
+    ),
+    synchronous=True,
+)
+async def simple_video_player_repeat_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    cg.add(var.set_mode(config[CONF_MODE]))
     return var
 
 

@@ -74,6 +74,13 @@ enum class PlayerState : uint8_t {
 };
 
 /// Playback error codes
+/// What follows the end of a file: nothing, the same file again, or the playlist from the top.
+enum class RepeatMode : uint8_t {
+  OFF = 0,
+  FILE = 1,
+  PLAYLIST = 2,
+};
+
 enum class PlaybackError : uint8_t {
   NONE = 0,
   FILE_NOT_FOUND = 1,
@@ -230,7 +237,17 @@ class SimpleVideoPlayer : public Component
   //========================================================================
 
   /// Start playing a video file (local or network path)
-  void play(const std::string &video_path);
+  void play(const std::string &video_path) { this->play(video_path, false); }
+  /// folder_playlist: the playlist becomes every video of the file's folder (by name), else just this file.
+  void play(const std::string &video_path, bool folder_playlist);
+  /// The playlist (full paths); plays item `start`.
+  void play_list(std::vector<std::string> paths, size_t start = 0);
+  /// Next / previous item of the playlist. previous() restarts the file if it has played for a few
+  /// seconds.
+  void next();
+  void previous();
+  size_t playlist_size() const { return this->playlist_.size(); }
+  size_t playlist_index() const { return this->playlist_index_; }
 
   /// Pause playback (can be resumed)
   void pause();
@@ -242,7 +259,12 @@ class SimpleVideoPlayer : public Component
   void stop();
 
   /// Set loop mode (restart from beginning when finished)
-  void set_loop(bool loop) { this->loop_ = loop; }
+  void set_loop(bool loop) { this->set_repeat(loop ? RepeatMode::FILE : RepeatMode::OFF); }
+  void set_repeat(RepeatMode mode) {
+    this->repeat_ = mode;
+    this->loop_ = mode == RepeatMode::FILE;
+  }
+  RepeatMode get_repeat() const { return this->repeat_; }
 
   /// Jumps to `seconds` into a playing or paused local AVI file (clamped to the file); paused stays
   /// paused. The first jump in a file reads its index.
@@ -320,6 +342,12 @@ class SimpleVideoPlayer : public Component
   bool reader_seek_(uint32_t frame);
   /// Reader task: back to the first frame (loop).
   bool reader_rewind_();
+
+  /// Main loop: the playlist becomes the videos of path's folder (stops what plays: the listing
+  /// must not run beside the reader).
+  void load_folder_playlist_(const std::string &path);
+  /// Main loop: plays playlist item `index`.
+  void play_index_(size_t index);
 
   //========================================================================
   // Frame Processing
@@ -762,6 +790,13 @@ class SimpleVideoPlayer : public Component
   // in-flight storage wait returns promptly at end of playback.
   volatile bool playback_task_stop_{false};
 
+  // Playlist (main loop only). The playback task asks loop() for the next item at the end of a file.
+  std::vector<std::string> playlist_;
+  size_t playlist_index_{0};
+  RepeatMode repeat_{RepeatMode::OFF};
+  std::atomic<bool> advance_req_{false};
+  static constexpr size_t MAX_PLAYLIST = 500;
+
   // Seeking: seek() (main loop) -> playback task (handle_seek_) -> reader task (reader_seek_).
   std::atomic<bool> seek_pending_{false};
   std::atomic<uint32_t> seek_target_{0};       // video frame
@@ -822,14 +857,16 @@ template<typename... Ts> class PlayAction : public Action<Ts...> {
   explicit PlayAction(SimpleVideoPlayer *player) : player_(player) {}
 
   TEMPLATABLE_VALUE(std::string, path)
+  void set_folder_playlist(bool folder) { this->folder_playlist_ = folder; }
 
   void play(const Ts &...x) override {
     auto path = this->path_.value(x...);
-    this->player_->play(path);
+    this->player_->play(path, this->folder_playlist_);
   }
 
  protected:
   SimpleVideoPlayer *player_;
+  bool folder_playlist_{false};
 };
 
 template<typename... Ts> class PauseAction : public Action<Ts...> {
@@ -840,6 +877,35 @@ template<typename... Ts> class PauseAction : public Action<Ts...> {
 
  protected:
   SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class NextAction : public Action<Ts...> {
+ public:
+  explicit NextAction(SimpleVideoPlayer *player) : player_(player) {}
+  void play(const Ts &...x) override { this->player_->next(); }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class PreviousAction : public Action<Ts...> {
+ public:
+  explicit PreviousAction(SimpleVideoPlayer *player) : player_(player) {}
+  void play(const Ts &...x) override { this->player_->previous(); }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class RepeatAction : public Action<Ts...> {
+ public:
+  explicit RepeatAction(SimpleVideoPlayer *player) : player_(player) {}
+  void set_mode(RepeatMode mode) { this->mode_ = mode; }
+  void play(const Ts &...x) override { this->player_->set_repeat(this->mode_); }
+
+ protected:
+  SimpleVideoPlayer *player_;
+  RepeatMode mode_{RepeatMode::OFF};
 };
 
 template<typename... Ts> class SeekAction : public Action<Ts...> {
