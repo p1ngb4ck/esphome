@@ -395,17 +395,26 @@ SimpleVideoPlayer::PicFile *SimpleVideoPlayer::cached_file_(size_t index) {
   return nullptr;
 }
 
-// A file to read into: an empty or stale one, else the least recently used one that is neither
-// shown nor asked for.
+// A file to read into: an empty or stale one, else the one farthest from the shown picture that is
+// neither shown nor asked for.
 SimpleVideoPlayer::PicFile *SimpleVideoPlayer::free_file_() {
+  const int count = static_cast<int>(this->images_.size());
   PicFile *best = nullptr;
+  int best_distance = -1;
   for (PicFile &file : this->pic_files_) {
-    if (file.index < 0 || file.generation != this->pic_generation_ || file.length == 0)
-      return &file;
-    if (file.index == this->current_image_ || file.index == this->pic_wanted_)
-      continue;
-    if (best == nullptr || static_cast<int32_t>(file.used_ms - best->used_ms) < 0)
+    int distance = INT32_MAX;
+    if (file.index >= 0 && file.generation == this->pic_generation_ && file.length != 0) {
+      if (file.index == this->current_image_ || file.index == this->pic_wanted_)
+        continue;
+      if (this->current_image_ >= 0 && count > 0) {
+        const int d = std::abs(file.index - this->current_image_);
+        distance = std::min(d, count - d);
+      }
+    }
+    if (distance > best_distance) {
       best = &file;
+      best_distance = distance;
+    }
   }
   return best;
 }

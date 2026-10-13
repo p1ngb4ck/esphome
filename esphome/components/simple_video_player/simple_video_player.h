@@ -934,7 +934,7 @@ class SimpleVideoPlayer : public Component
     size_t length{0};
     uint32_t used_ms{0};
   };
-  static constexpr size_t PIC_FILE_COUNT = 2;  // the shown picture's, and one to read the next into
+  static constexpr size_t PIC_FILE_COUNT = 3;  // the shown picture's and its neighbours'
   // A picture decoded at the canvas' size, in the pool: the shown one and its neighbours, so a step
   // only switches what the canvas shows; the next one is decoded into one not shown.
   struct PicPage {
