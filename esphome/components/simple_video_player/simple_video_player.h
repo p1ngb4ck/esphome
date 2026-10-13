@@ -869,6 +869,7 @@ class SimpleVideoPlayer : public Component
     size_t limit{0};  // one byte more than the listed size: a file that grew is noticed
     size_t length{0};
     size_t chunk{0};
+    bool decoding{false};  // read, handed to the picture task
   };
 
   bool pic_ready_{false};
@@ -888,6 +889,13 @@ class SimpleVideoPlayer : public Component
   size_t pic_file_cap_{0};
   std::unique_ptr<runtime_image::RuntimeImage> pic_image_;    // the picture, unscaled
   std::unique_ptr<runtime_image::RuntimeImage> thumb_image_;  // a thumbnail, fitted into its slot
+  // Decoding runs on the picture task; pic_file_ and the image are its until pic_decoded_.
+  TaskHandle_t pic_task_{nullptr};
+  runtime_image::RuntimeImage *pic_decode_image_{nullptr};
+  std::string pic_decode_path_;
+  size_t pic_decode_length_{0};
+  bool pic_decode_ok_{false};
+  std::atomic<bool> pic_decoded_{false};
   lv_draw_buf_t *pic_draw_buf_{nullptr};  // the canvas's buffer, RGB565
   uint8_t *pic_own_buf_{nullptr};         // allocated by set_fullscreen()
   bool pic_buf_error_logged_{false};
@@ -955,6 +963,9 @@ class SimpleVideoPlayer : public Component
   void read_next_chunk_();
   void finish_read_();
   void picture_read_done_();
+  void start_decode_(const PictureRead &read, runtime_image::RuntimeImage *image, const std::string &path);
+  void picture_decoded_();
+  static void picture_task_entry_(void *arg);
   bool reserve_file_buffer_(size_t size);
   bool decode_file_(runtime_image::RuntimeImage *image, const std::string &path, size_t length);
   bool adopt_canvas_buffer_();

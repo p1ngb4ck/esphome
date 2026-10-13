@@ -96,6 +96,13 @@ void SimpleVideoPlayer::pictures_setup_() {
         LV_EVENT_SCREEN_UNLOAD_START, this);
   }
 
+  // A large photo takes seconds to decode: on its own task, on Core 1 at the loop task's priority
+  // like the video's decode (DMA2D with LVGL's PPA, esp-idf#18999, see play()).
+  if (xTaskCreatePinnedToCore(picture_task_entry_, "svp_pictures", 8192, this, 1, &this->pic_task_, 1) != pdPASS) {
+    ESP_LOGE(TAG, "Could not create the picture task -- pictures disabled");
+    return;
+  }
+
   if (!this->pic_dirs_.empty()) {
     this->pic_dir_index_ = 0;
     this->pic_dir_ = this->pic_dirs_[0];
@@ -124,8 +131,12 @@ void SimpleVideoPlayer::pictures_loop_() {
     return;
 
   if (this->pic_read_.active) {
-    if (this->pic_read_.done)
+    if (this->pic_read_.decoding) {
+      if (this->pic_decoded_.load(std::memory_order_acquire))
+        this->picture_decoded_();
+    } else if (this->pic_read_.done) {
       this->picture_read_done_();
+    }
     return;
   }
   if (this->pic_list_pending_) {
@@ -464,8 +475,7 @@ void SimpleVideoPlayer::picture_read_done_() {
       ESP_LOGW(TAG, "Not enough PSRAM for a thumbnail");
       return;
     }
-    if (this->decode_file_(this->thumb_image_.get(), entry.path, read.length))
-      this->store_thumbnail_(read.slot);
+    this->start_decode_(read, this->thumb_image_.get(), entry.path);
     return;
   }
 
@@ -478,8 +488,47 @@ void SimpleVideoPlayer::picture_read_done_() {
     ESP_LOGW(TAG, "%s: not enough PSRAM to decode", entry.path.c_str());
     return;
   }
-  if (!this->decode_file_(this->pic_image_.get(), entry.path, read.length))
+  this->start_decode_(read, this->pic_image_.get(), entry.path);
+}
+
+void SimpleVideoPlayer::start_decode_(const PictureRead &read, runtime_image::RuntimeImage *image,
+                                      const std::string &path) {
+  this->pic_read_ = read;
+  this->pic_read_.decoding = true;
+  this->pic_decode_image_ = image;
+  this->pic_decode_path_ = path;
+  this->pic_decode_length_ = read.length;
+  this->pic_decoded_.store(false, std::memory_order_relaxed);
+  xTaskNotifyGive(this->pic_task_);
+}
+
+void SimpleVideoPlayer::picture_task_entry_(void *arg) {
+  auto *self = static_cast<SimpleVideoPlayer *>(arg);
+  while (true) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    self->pic_decode_ok_ = self->decode_file_(self->pic_decode_image_, self->pic_decode_path_, self->pic_decode_length_);
+    self->pic_decoded_.store(true, std::memory_order_release);
+  }
+}
+
+void SimpleVideoPlayer::picture_decoded_() {
+  const PictureRead read = this->pic_read_;
+  this->pic_read_ = PictureRead{};
+  this->pic_decoded_.store(false, std::memory_order_relaxed);
+  const bool current = read.generation == this->pic_generation_ && read.index < this->images_.size();
+  if (read.thumbnail) {
+    if (this->pic_decode_ok_ && current && read.slot < this->thumb_slots_.size() &&
+        this->thumb_slots_[read.slot].image == static_cast<int>(read.index))
+      this->store_thumbnail_(read.slot);
     return;
+  }
+  if (!this->pic_decode_ok_)
+    return;
+  if (!current) {
+    this->pic_image_->release();  // of a folder no longer listed
+    return;
+  }
+  const ImageEntry &entry = this->images_[read.index];
   this->current_image_ = static_cast<int>(read.index);
   this->compose_picture_();
   const size_t slots = this->thumb_slots_.size();
@@ -542,6 +591,8 @@ bool SimpleVideoPlayer::adopt_canvas_buffer_() {
 }
 
 void SimpleVideoPlayer::compose_picture_() {
+  if (this->pic_read_.decoding && !this->pic_read_.thumbnail)
+    return;  // the picture task is writing pic_image_; composed once it is done
   if (this->pic_image_ == nullptr || this->pic_image_->get_data_start() == nullptr || !this->adopt_canvas_buffer_())
     return;
   lv_draw_buf_t *buf = this->pic_draw_buf_;
