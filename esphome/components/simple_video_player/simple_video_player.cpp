@@ -1036,16 +1036,6 @@ void SimpleVideoPlayer::playback_loop_() {
 
   // One state load per iteration. Anything but PLAYING/PAUSED (STOPPED, ERROR) ends the loop.
   while (true) {
-    // Pump the storage worker's completion delivery ourselves. read_chunk() completions
-    // (on_fill_done_ -> arena copy into the ring -> next kick_fill_) only ever fire from
-    // StorageWorker::update() on the main loop; this task never yields Core 1, so without this
-    // the ring would never refill after the precache drains. (update() also runs from loopTask's
-    // scheduler -- concurrent calls are possible; the completion sweep is short and both are on
-    // Core 1.)
-    if (storage::global_storage_worker != nullptr) {
-      storage::global_storage_worker->update();
-    }
-
     const PlayerState st = this->state_.load(std::memory_order_acquire);
     if (st != PlayerState::PLAYING && st != PlayerState::PAUSED) {
       break;
