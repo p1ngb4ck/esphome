@@ -1249,7 +1249,17 @@ void SimpleVideoPlayer::playback_loop_() {
     // decode_frame_() consumes slot->data (compressed) into the decode target. Once it returns, the
     // compressed bytes are no longer needed -- the async PPA rotate reads the decoded buffer, not
     // slot->data -- so the slot is returned to the reader right after.
+#ifdef SVP_STREAM_STATS
+    const int64_t decode_start = esp_timer_get_time();
+#endif
     const bool decoded = this->decode_frame_(slot->data, static_cast<size_t>(payload));
+#ifdef SVP_STREAM_STATS
+    if (decoded) {
+      this->stream_stats_.frames.fetch_add(1, std::memory_order_relaxed);
+      this->stream_stats_.frame_us.fetch_add(static_cast<uint32_t>(esp_timer_get_time() - decode_start),
+                                             std::memory_order_relaxed);
+    }
+#endif
     // decode_frame_() wrote the frame into the back buffer and published it; loop() points the canvas at it.
 
 #ifdef SVP_DSI_OUTPUT
@@ -2651,6 +2661,10 @@ void SimpleVideoPlayer::audio_processing_loop_() {
     if (this->audio_decoded_ring_buffer_ && this->speaker_) {
       const size_t bytes_read = this->audio_decoded_ring_buffer_->read(this->audio_temp_buffer_, AUDIO_TEMP_BUFFER_SIZE,
                                                                        use_decoder ? 0 : AUDIO_WAIT);
+#ifdef SVP_STREAM_STATS
+      if (bytes_read == 0 && !use_decoder)
+        this->stream_stats_.sound_waits.fetch_add(1, std::memory_order_relaxed);
+#endif
       size_t bytes_remaining = bytes_read;
       const uint8_t *write_ptr = this->audio_temp_buffer_;
       // A seek drops what is left from before the jump.

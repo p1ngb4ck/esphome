@@ -1380,6 +1380,7 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> stream_asleep_{false};  // stream_sleep()
   std::atomic<bool> stream_fullscreen_{true};  // set_stream_fullscreen()
   std::atomic<bool> stream_status_pending_{false};
+  std::atomic<uint32_t> stream_echo_{0};  // bit 16 set: echo the low 16 bits back ('R'), udisp 0x22
   std::atomic<bool> stream_depth_pending_{false};
   // The sender streams an AVI (svp_relay) rather than udisp rectangles: it plays through the file
   // playback path, fed from the network task through stream_sink_.
@@ -1397,6 +1398,9 @@ class SimpleVideoPlayer : public Component
     std::atomic<uint32_t> drawn{0};        // rectangles decoded and drawn (draw task)
     std::atomic<uint32_t> draw_us{0};      // decoding and drawing them
     std::atomic<uint32_t> sound_bytes{0};  // PCM received
+    std::atomic<uint32_t> frames{0};       // pictures decoded by the playback task (an AVI, a file)
+    std::atomic<uint32_t> frame_us{0};     // decoding them
+    std::atomic<uint32_t> sound_waits{0};  // the speaker feed found no sound for AUDIO_WAIT
   } stream_stats_;
   std::atomic<bool> stream_stats_log_{false};  // set_stream_statistics()
   bool stream_stats_sender_{false};            // the connected sender asked for 'M' (network task)

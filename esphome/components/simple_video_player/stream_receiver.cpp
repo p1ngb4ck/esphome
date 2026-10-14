@@ -48,6 +48,8 @@ static constexpr uint8_t UDISP_TYPE_STATS = 0x20;  // the sender asks for 'M' (x
 static constexpr uint32_t STREAM_STATS_MS = 1000;
 #endif
 static constexpr uint8_t UDISP_TYPE_INPUT = 0x21;  // the sender asks for 'K', 'X', 'P' (x 1) or no more (x 0)
+static constexpr uint8_t UDISP_TYPE_ECHO = 0x22;   // the sender asks for 'R' with x back at once
+static constexpr uint32_t STREAM_ECHO_PENDING = 1u << 16;
 static constexpr uint32_t STREAM_AUDIO_DEFAULT_RATE = 48000;
 static constexpr size_t UDISP_HEADER_BYTES = 16;
 // Wi-Fi roaming scans and power saving are held off while pictures or sound arrive, and allowed
@@ -285,6 +287,7 @@ void SimpleVideoPlayer::stream_net_loop_() {
         xQueueReset(this->stream_touch_q_);
       this->stream_last_touch_valid_ = false;
 #endif
+      this->stream_echo_.store(0, std::memory_order_relaxed);
 #ifdef SVP_STREAM_INPUT
       this->stream_input_wanted_.store(false, std::memory_order_release);
       if (this->stream_input_q_ != nullptr)
@@ -390,6 +393,14 @@ void SimpleVideoPlayer::stream_net_loop_() {
             vTaskDelay(1);
             continue;
           }
+#ifdef SVP_STREAM_STATS
+          if (std::memcmp(magic, "SVPM", sizeof(magic)) == 0) {
+            // An AVI sender asking for 'M' before its AVI (udisp senders ask with type 0x20).
+            ::recv(client, magic, sizeof(magic), 0);
+            this->stream_stats_sender_ = true;
+            continue;
+          }
+#endif
           kind_known = true;
           if (std::memcmp(magic, "RIFF", sizeof(magic)) == 0) {
             // An AVI (svp_relay): played like a file from SD. Not while something else plays or is
@@ -539,6 +550,10 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
     if (type == UDISP_TYPE_INPUT)
       this->stream_input_wanted_.store(x != 0, std::memory_order_release);
 #endif
+    if (type == UDISP_TYPE_ECHO) {
+      this->stream_echo_.store(STREAM_ECHO_PENDING | x, std::memory_order_release);
+      this->stream_wake_();
+    }
     // Heartbeats/END (and sound without a speaker) are counted out like any payload.
     if (type != UDISP_TYPE_JPG) {
       this->stream_skip_ = total;
@@ -607,6 +622,12 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
 }
 
 void SimpleVideoPlayer::stream_send_pending_(int client) {
+  const uint32_t echo = this->stream_echo_.exchange(0, std::memory_order_acq_rel);
+  if (echo & STREAM_ECHO_PENDING) {
+    // 'R' seq:2 -- the sender measures the round trip.
+    const uint8_t message[3] = {'R', static_cast<uint8_t>(echo & 0xFF), static_cast<uint8_t>((echo >> 8) & 0xFF)};
+    ::send(client, message, sizeof(message), MSG_DONTWAIT);
+  }
   if (this->stream_depth_pending_.exchange(false, std::memory_order_acq_rel)) {
     // 'C': the display's depth (udisp senders). 'V': the picture to send -- width, height, the
     // quarter turns clockwise from the source onto it, and the largest JPEG still a udisp sender
@@ -789,13 +810,14 @@ void SimpleVideoPlayer::stream_stats_step_(int client) {
     this->stream_stats_running_ = wanted;
     this->stream_stats_ms_ = now;
     for (auto *counter : {&stats.bytes, &stats.rects, &stats.skipped, &stats.wait_us, &stats.drawn, &stats.draw_us,
-                          &stats.sound_bytes})
+                          &stats.sound_bytes, &stats.frames, &stats.frame_us, &stats.sound_waits})
       counter->store(0, std::memory_order_relaxed);
     return;
   }
   if (!wanted || now - this->stream_stats_ms_ < STREAM_STATS_MS)
     return;
-  // interval ms, bytes, rectangles, skipped, buffer wait ms, drawn, draw ms, sound bytes
+  // interval ms, bytes, rectangles, skipped, buffer wait ms, drawn, draw ms, sound bytes, pictures
+  // decoded, their decode ms, sound waits
   const uint32_t values[] = {now - this->stream_stats_ms_,
                              stats.bytes.exchange(0, std::memory_order_relaxed),
                              stats.rects.exchange(0, std::memory_order_relaxed),
@@ -803,7 +825,10 @@ void SimpleVideoPlayer::stream_stats_step_(int client) {
                              stats.wait_us.exchange(0, std::memory_order_relaxed) / 1000,
                              stats.drawn.exchange(0, std::memory_order_relaxed),
                              stats.draw_us.exchange(0, std::memory_order_relaxed) / 1000,
-                             stats.sound_bytes.exchange(0, std::memory_order_relaxed)};
+                             stats.sound_bytes.exchange(0, std::memory_order_relaxed),
+                             stats.frames.exchange(0, std::memory_order_relaxed),
+                             stats.frame_us.exchange(0, std::memory_order_relaxed) / 1000,
+                             stats.sound_waits.exchange(0, std::memory_order_relaxed)};
   this->stream_stats_ms_ = now;
   if (this->stream_stats_log_.load(std::memory_order_relaxed)) {
     ESP_LOGI(TAG,
