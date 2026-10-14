@@ -978,13 +978,15 @@ void SimpleVideoPlayer::playback_loop_() {
 
   // Deep pre-buffer: wait (bounded) until the reader has filled the slot queue before presenting
   // the first frame, so decode starts from a full compressed buffer and the storage ring stays
-  // primed throughout -- constant pre-buffering, never a mid-frame empty ring. Not the hot path
-  // (nothing presented yet).
+  // primed throughout -- constant pre-buffering, never a mid-frame empty ring. Pumping the worker
+  // here keeps the fill chain advancing while we wait. Not the hot path (nothing presented yet).
   {
     uint32_t waited_ms = 0;
     while (uxQueueMessagesWaiting(this->filled_queue_) < FRAME_SLOT_COUNT) {
       if (this->state_.load(std::memory_order_acquire) != PlayerState::PLAYING)
         break;
+      if (storage::global_storage_worker != nullptr)
+        storage::global_storage_worker->update();
       vTaskDelay(pdMS_TO_TICKS(5));
       if ((waited_ms += 5) >= 2000)
         break;
@@ -1007,6 +1009,8 @@ void SimpleVideoPlayer::playback_loop_() {
     uint32_t waited_ms = 0;
     while (this->start_req_.load(std::memory_order_acquire) != 2 &&
            this->state_.load(std::memory_order_acquire) == PlayerState::PLAYING && waited_ms < 2000) {
+      if (storage::global_storage_worker != nullptr)
+        storage::global_storage_worker->update();
       vTaskDelay(pdMS_TO_TICKS(1));
       waited_ms++;
     }
@@ -1019,6 +1023,8 @@ void SimpleVideoPlayer::playback_loop_() {
     while (this->audio_cursor_frames_.load(std::memory_order_acquire) <
                this->reader_frames_.load(std::memory_order_acquire) + this->audio_lead_frames_ &&
            this->state_.load(std::memory_order_acquire) == PlayerState::PLAYING && waited_ms < 1000) {
+      if (storage::global_storage_worker != nullptr)
+        storage::global_storage_worker->update();
       vTaskDelay(pdMS_TO_TICKS(1));
       waited_ms++;
     }
@@ -1811,6 +1817,8 @@ void SimpleVideoPlayer::handle_seek_() {
     const PlayerState st = this->state_.load(std::memory_order_acquire);
     if (st != PlayerState::PLAYING && st != PlayerState::PAUSED)
       break;
+    if (storage::global_storage_worker != nullptr)
+      storage::global_storage_worker->update();
     esp_task_wdt_reset();
     vTaskDelay(pdMS_TO_TICKS(1));
   }
@@ -1826,6 +1834,8 @@ void SimpleVideoPlayer::handle_seek_() {
                                     this->reader_frames_.load(std::memory_order_acquire) + this->audio_lead_frames_ &&
                                 waited < 1000;
            waited++) {
+        if (storage::global_storage_worker != nullptr)
+          storage::global_storage_worker->update();
         vTaskDelay(pdMS_TO_TICKS(1));
       }
     }
