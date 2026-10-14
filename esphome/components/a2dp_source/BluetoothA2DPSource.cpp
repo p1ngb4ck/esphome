@@ -705,11 +705,6 @@ void BluetoothA2DPSource::app_a2d_callback(esp_a2d_cb_event_t event,
                        sizeof(esp_a2d_cb_param_t), nullptr);
 }
 
-bool BluetoothA2DPSource::is_media_starting() const {
-  return s_media_state == APP_AV_MEDIA_STATE_STARTING ||
-         (s_media_state == APP_AV_MEDIA_STATE_IDLE && media_wanted.load());
-}
-
 void BluetoothA2DPSource::set_media_active(bool active) {
   if (media_wanted.exchange(active) == active || s_a2d_state != APP_AV_STATE_CONNECTED)
     return;

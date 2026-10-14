@@ -125,8 +125,6 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   /// ESPHome: false suspends the media stream while staying connected (no packets are sent),
   /// true starts it again. Callable from any task.
   void set_media_active(bool active);
-  // ESPHome: a start of the media stream is under way (or about to be asked for)
-  bool is_media_starting() const;
 
   /// activate / deactivate the automatic reconnection to the last address (per
   /// default this is on) If active is true, will retry up to max_retries times
