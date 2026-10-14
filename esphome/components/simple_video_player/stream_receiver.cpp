@@ -45,9 +45,9 @@ static constexpr uint8_t UDISP_TYPE_JPG = 3;
 static constexpr uint8_t UDISP_TYPE_PCM = 0x10;
 #ifdef SVP_STREAM_STATS
 static constexpr uint8_t UDISP_TYPE_STATS = 0x20;  // the sender asks for 'M' (x 1) or no more (x 0)
-static constexpr uint8_t UDISP_TYPE_INPUT = 0x21;  // the sender asks for 'K', 'X', 'P' (x 1) or no more (x 0)
 static constexpr uint32_t STREAM_STATS_MS = 1000;
 #endif
+static constexpr uint8_t UDISP_TYPE_INPUT = 0x21;  // the sender asks for 'K', 'X', 'P' (x 1) or no more (x 0)
 static constexpr uint32_t STREAM_AUDIO_DEFAULT_RATE = 48000;
 static constexpr size_t UDISP_HEADER_BYTES = 16;
 // Wi-Fi roaming scans and power saving are held off while pictures or sound arrive, and allowed
