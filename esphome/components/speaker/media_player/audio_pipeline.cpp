@@ -222,11 +222,11 @@ AudioPipelineState AudioPipeline::process_state() {
       }
     }
     this->is_playing_ = false;
-    if (!this->speaker_->is_running()) {
+    // The file ended once both tasks are freed: what the speaker still holds plays out on its own.
+    if (!this->speaker_->is_running() || (!this->read_task_.is_created() && !this->decode_task_.is_created())) {
       return AudioPipelineState::STOPPED;
-    } else {
-      this->is_finishing_ = true;
     }
+    return AudioPipelineState::PLAYING;
   }
 
   if (this->pause_state_) {

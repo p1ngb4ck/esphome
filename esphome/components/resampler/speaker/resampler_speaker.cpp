@@ -106,7 +106,7 @@ void ResamplerSpeaker::loop() {
       xEventGroupClearBits(this->event_group_, ResamplingEventGroupBits::COMMAND_FINISH);
       // The input ended (the end of a file): over once it is all handed on, not once the output is quiet.
       if (this->task_.is_created()) {
-        this->finishing_ = true;
+        this->finishing_.store(true);
         xEventGroupSetBits(this->event_group_, ResamplingEventGroupBits::TASK_COMMAND_FINISH);
       } else {
         this->output_speaker_->finish();
@@ -172,7 +172,7 @@ void ResamplerSpeaker::loop() {
       if (!this->waiting_for_output_) {
         esp_err_t err = this->start_();
         if (err == ESP_OK) {
-          this->finishing_ = false;
+          this->finishing_.store(false);
           this->callback_remainder_ = 0;  // reset callback remainder
           this->status_clear_error();
           this->waiting_for_output_ = true;
@@ -195,9 +195,10 @@ void ResamplerSpeaker::loop() {
       break;
     }
     case speaker::STATE_RUNNING:
-      if (this->finishing_ && !this->task_.is_created()) {
-        // The task handed on all it had: the output finishes it on its own.
-        this->finishing_ = false;
+      if (this->resampling_ && !this->task_.is_created()) {
+        // The task ended with its input (after finish()): the output finishes what it got on its own.
+        this->resampling_ = false;
+        this->finishing_.store(false);
         this->output_speaker_->finish();
         this->state_ = speaker::STATE_STOPPED;
       } else if (this->output_speaker_->is_stopped()) {
@@ -243,6 +244,9 @@ size_t ResamplerSpeaker::play(const uint8_t *data, size_t length, TickType_t tic
   if (this->is_stopped()) {
     this->start();
   }
+  // More after finish() (the next file right away): the task goes on.
+  if (this->finishing_.exchange(false))
+    xEventGroupClearBits(this->event_group_, ResamplingEventGroupBits::TASK_COMMAND_FINISH);
 
   size_t bytes_written = 0;
   if ((this->output_speaker_->is_running()) && (!this->requires_resampling_())) {
@@ -285,7 +289,8 @@ esp_err_t ResamplerSpeaker::start_() {
   this->output_speaker_->set_audio_stream_info(this->target_stream_info_);
   this->output_speaker_->start();
 
-  if (this->requires_resampling_()) {
+  this->resampling_ = this->requires_resampling_();
+  if (this->resampling_) {
     // Start the resampler task to handle converting sample rates
     if (!this->task_.create(resample_task, "resampler", TASK_STACK_SIZE, (void *) this, RESAMPLER_TASK_PRIORITY,
                             this->task_stack_in_psram_)) {
@@ -299,7 +304,8 @@ esp_err_t ResamplerSpeaker::start_() {
 void ResamplerSpeaker::stop() { this->send_command_(ResamplingEventGroupBits::COMMAND_STOP); }
 
 void ResamplerSpeaker::enter_stopping_state_() {
-  this->finishing_ = false;
+  this->finishing_.store(false);
+  this->resampling_ = false;
   this->state_ = speaker::STATE_STOPPING;
   this->state_start_ms_ = App.get_loop_component_start_time();
   if (this->task_.is_created()) {

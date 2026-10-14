@@ -12,6 +12,8 @@
 
 #include <freertos/event_groups.h>
 
+#include <atomic>
+
 namespace esphome::resampler {
 
 class ResamplerSpeaker final : public Component, public speaker::Speaker {
@@ -104,7 +106,8 @@ class ResamplerSpeaker final : public Component, public speaker::Speaker {
   bool passthrough_bits_per_sample_{false};
   bool task_stack_in_psram_{false};
   bool waiting_for_output_{false};
-  bool finishing_{false};  // finish() while the task still resamples: it ends with its input
+  std::atomic<bool> finishing_{false};  // finish() while the task still resamples: it ends with its input
+  bool resampling_{false};              // started with the resampler task
 };
 
 }  // namespace esphome::resampler
