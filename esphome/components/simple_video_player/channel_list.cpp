@@ -25,7 +25,7 @@ bool SimpleVideoPlayer::setup_channel_list_() {
   this->channel_q_ = xQueueCreate(4, sizeof(ChannelCmd));
   this->channel_lock_ = xSemaphoreCreateMutex();
   if (this->channel_q_ == nullptr || this->channel_lock_ == nullptr ||
-      xTaskCreatePinnedToCore(channel_task_entry_, "svp_channels", 8192, this, 1, nullptr, 0) != pdPASS) {
+      !create_psram_task(channel_task_entry_, "svp_channels", 8192, this, 1, nullptr, 0)) {
     ESP_LOGE(TAG, "Failed to start the channel list task");
     return false;
   }
@@ -92,7 +92,7 @@ void SimpleVideoPlayer::channel_task_loop_() {
       size_t len = 0;
       if (!this->channel_http_("/channels?refresh=1", nullptr, &body, &len))
         continue;
-      std::vector<std::string> names, refs;
+      PsramVector<PsramString> names, refs;
       const bool ok = json::parse_json(reinterpret_cast<const uint8_t *>(body), len, [&](JsonObject root) -> bool {
         JsonArray channels = root["channels"];
         for (JsonObject channel : channels) {
@@ -125,7 +125,7 @@ void SimpleVideoPlayer::channel_task_loop_() {
       std::string ref;
       xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
       if (request.index < this->channel_refs_.size())
-        ref = this->channel_refs_[request.index];
+        ref = this->channel_refs_[request.index].c_str();
       xSemaphoreGive(this->channel_lock_);
       if (ref.empty())
         continue;

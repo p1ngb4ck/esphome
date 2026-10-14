@@ -7,6 +7,7 @@
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
+#include <strings.h>
 
 #include "esp_heap_caps.h"
 #include "esp_cache.h"
@@ -28,7 +29,6 @@ static const uint16_t JPEG_EOI = 0xd9ff;
 
 // Cache alignment for optimal SD/storage performance
 static constexpr size_t CACHE_ALIGNMENT = 1024;
-static constexpr size_t DMA_ALIGNMENT = 128;
 
 //========================================================================
 // Component Lifecycle
@@ -92,10 +92,8 @@ void SimpleVideoPlayer::setup() {
   // Before loop() runs (which serves its storage calls); its ring comes with the session buffers.
   this->file_reader_ = std::make_unique<BufferedFileReader>();
 
-  // Internal RAM, aligned for DMA.
-  this->cache_buffer_.reset(
-      static_cast<uint8_t *>(heap_caps_aligned_alloc(DMA_ALIGNMENT, CACHE_BUFFER_SIZE, MALLOC_CAP_INTERNAL)));
-  if (!this->cache_buffer_) {
+  this->cache_buffer_ = this->pool_.alloc(CACHE_BUFFER_SIZE);
+  if (this->cache_buffer_ == nullptr) {
     ESP_LOGE(TAG, "Failed to allocate cache buffer (%zu bytes)", CACHE_BUFFER_SIZE);
     this->mark_failed();
     return;
@@ -425,7 +423,10 @@ void SimpleVideoPlayer::play_list(std::vector<std::string> paths, size_t start) 
     return;
   if (paths.size() > MAX_PLAYLIST)
     paths.resize(MAX_PLAYLIST);
-  this->playlist_ = std::move(paths);
+  this->playlist_.clear();
+  this->playlist_.reserve(paths.size());
+  for (const auto &path : paths)
+    this->playlist_.emplace_back(path.c_str());
   this->play_index_(std::min(start, this->playlist_.size() - 1));
 }
 
@@ -469,7 +470,7 @@ void SimpleVideoPlayer::run_pending_start_() {
     if (this->start_folder_)
       this->load_folder_playlist_(this->start_path_);
     if (this->playlist_.empty())
-      this->playlist_.push_back(this->start_path_);
+      this->playlist_.emplace_back(this->start_path_.c_str());
     index = this->playlist_index_;
     this->start_path_.clear();
   }
@@ -479,7 +480,7 @@ void SimpleVideoPlayer::run_pending_start_() {
 #ifdef SVP_STREAM
     this->net_session_ = false;
 #endif
-    this->start_playback_(this->playlist_[index]);
+    this->start_playback_(this->playlist_[index].c_str());
   }
   xSemaphoreGive(this->session_lock_);
 }
@@ -528,11 +529,11 @@ void SimpleVideoPlayer::load_folder_playlist_(const std::string &path) {
     ESP_LOGW(TAG, "Cannot list %s for the playlist", dir.c_str());
     return;
   }
-  std::vector<std::string> names;
+  PsramVector<PsramString> names;
   const storage::StorageError err = storage->list_dir(
       (rel == nullptr || rel[0] == '\0') ? "/" : rel,
       [](const storage::FileStat *entry, void *context) -> bool {
-        auto *names = static_cast<std::vector<std::string> *>(context);
+        auto *names = static_cast<PsramVector<PsramString> *>(context);
         if (entry->is_dir || entry->name[0] == '.')
           return true;
         const char *dot = strrchr(entry->name, '.');
@@ -550,22 +551,21 @@ void SimpleVideoPlayer::load_folder_playlist_(const std::string &path) {
     ESP_LOGW(TAG, "Listing %s failed: %s", dir.c_str(), storage::error_to_string(err));
     return;
   }
-  auto lower = [](std::string text) {
-    for (char &c : text)
-      c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-    return text;
-  };
   std::sort(names.begin(), names.end(),
-            [&lower](const std::string &a, const std::string &b) { return lower(a) < lower(b); });
+            [](const PsramString &a, const PsramString &b) { return strcasecmp(a.c_str(), b.c_str()) < 0; });
   const std::string file = path.substr(slash + 1);
+  this->playlist_.reserve(names.size() + 1);
   for (size_t i = 0; i < names.size(); i++) {
-    if (names[i] == file)
+    if (file == names[i].c_str())
       this->playlist_index_ = i;
-    this->playlist_.push_back(dir + "/" + names[i]);
+    PsramString full(dir.c_str());
+    full += '/';
+    full += names[i];
+    this->playlist_.push_back(std::move(full));
   }
-  if (this->playlist_index_ >= this->playlist_.size() || this->playlist_[this->playlist_index_] != path) {
+  if (this->playlist_index_ >= this->playlist_.size() || path != this->playlist_[this->playlist_index_].c_str()) {
     // The file itself is not among them (another extension, hidden): play it first, then the folder.
-    this->playlist_.insert(this->playlist_.begin(), path);
+    this->playlist_.insert(this->playlist_.begin(), PsramString(path.c_str()));
     this->playlist_index_ = 0;
   }
   ESP_LOGI(TAG, "Playlist: %u videos in %s", static_cast<unsigned>(this->playlist_.size()), dir.c_str());
@@ -693,15 +693,14 @@ void SimpleVideoPlayer::seek(float seconds) {
 // loopTask: the tick round-robins the two. The reader (Core 0) never drives DMA2D; the sound (Core 0)
 // neither.
 bool SimpleVideoPlayer::create_tasks_() {
-  if (xTaskCreatePinnedToCore(playback_task_entry_, "video_player", 8192, this, 1, &this->task_handle_, 1) != pdPASS ||
-      xTaskCreatePinnedToCore(reader_task_entry_, "svp_reader", 4096, this, 2, &this->reader_task_handle_, 0) !=
-          pdPASS)
+  if (!create_psram_task(playback_task_entry_, "video_player", 8192, this, 1, &this->task_handle_, 1) ||
+      !create_psram_task(reader_task_entry_, "svp_reader", 4096, this, 2, &this->reader_task_handle_, 0))
     return false;
   this->playback_wait_.task = this->task_handle_;
   this->reader_wait_.task = this->reader_task_handle_;
 #ifdef USE_AUDIO
   if (this->speaker_ != nullptr) {
-    if (xTaskCreatePinnedToCore(audio_task_entry_, "svp_audio", 4096, this, 1, &this->audio_task_handle_, 0) != pdPASS)
+    if (!create_psram_task(audio_task_entry_, "svp_audio", 4096, this, 1, &this->audio_task_handle_, 0))
       return false;
     this->audio_wait_.task = this->audio_task_handle_;
   }
@@ -1473,7 +1472,7 @@ int SimpleVideoPlayer::read_next_frame_(uint8_t *dest_buffer, size_t dest_capaci
       // Read more data into cache if needed
       if (this->cache_buffer_offset_ >= this->cache_buffer_valid_) {
         // Cache is exhausted, read next chunk
-        int bytes_read = this->read_data_(this->cache_buffer_.get(), CACHE_BUFFER_SIZE);
+        int bytes_read = this->read_data_(this->cache_buffer_, CACHE_BUFFER_SIZE);
 
         if (bytes_read <= 0) {
           // EOF or error
@@ -1486,7 +1485,7 @@ int SimpleVideoPlayer::read_next_frame_(uint8_t *dest_buffer, size_t dest_capaci
 
       // Search for EOI marker in cache
       size_t search_len = this->cache_buffer_valid_ - this->cache_buffer_offset_;
-      uint8_t *search_start = this->cache_buffer_.get() + this->cache_buffer_offset_;
+      uint8_t *search_start = this->cache_buffer_ + this->cache_buffer_offset_;
       uint8_t *eoi_ptr = static_cast<uint8_t *>(memmem(search_start, search_len, &JPEG_EOI, 2));
 
       if (eoi_ptr != nullptr) {
@@ -1643,7 +1642,7 @@ bool SimpleVideoPlayer::get_video_dimensions_(uint32_t &width, uint32_t &height)
     return true;
   } else {
     // Raw MJPEG - read first chunk to get JPEG header
-    int bytes_read = this->read_data_(this->cache_buffer_.get(), CACHE_BUFFER_SIZE);
+    int bytes_read = this->read_data_(this->cache_buffer_, CACHE_BUFFER_SIZE);
     if (bytes_read <= 0) {
       return false;
     }
@@ -1652,7 +1651,7 @@ bool SimpleVideoPlayer::get_video_dimensions_(uint32_t &width, uint32_t &height)
     this->cache_buffer_offset_ = 0;
 
     // Parse JPEG header
-    if (!this->parse_header_(this->cache_buffer_.get(), static_cast<size_t>(bytes_read), width, height)) {
+    if (!this->parse_header_(this->cache_buffer_, static_cast<size_t>(bytes_read), width, height)) {
       ESP_LOGE(TAG, "Failed to parse JPEG header");
       return false;
     }
@@ -1761,7 +1760,7 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
 
     ESP_LOGI(TAG, "AVI parser initialized successfully");
     // The index now: seeking, and damage passed over to the next intact frame.
-    this->avi_parser_->load_index(this->cache_buffer_.get(), CACHE_BUFFER_SIZE);
+    this->avi_parser_->load_index(this->cache_buffer_, CACHE_BUFFER_SIZE);
   } else {
     // Raw MJPEG - seek back to start for frame reading
     if (!this->seek_to_(0)) {
@@ -1904,7 +1903,7 @@ bool SimpleVideoPlayer::reader_seek_(uint32_t frame) {
   // Index and seek need blocking reads; the ring then restarts empty and is filled before frames
   // are read again, as at the start of playback.
   reader->set_streaming(false);
-  const bool ok = this->avi_parser_->load_index(this->cache_buffer_.get(), CACHE_BUFFER_SIZE) &&
+  const bool ok = this->avi_parser_->load_index(this->cache_buffer_, CACHE_BUFFER_SIZE) &&
                   this->avi_parser_->seek_to_frame(frame);
   reader->prefill_cache();
   reader->set_streaming(true);
@@ -2047,7 +2046,11 @@ bool SimpleVideoPlayer::plan_pool_() {
 #ifdef SVP_STREAM
   if (this->stream_port_ != 0) {
     this->stream_max_frame_bytes_ = pool_round(this->frame_bytes_ / 4);
-    fixed += STREAM_FRAME_COUNT * static_cast<size_t>(this->stream_max_frame_bytes_);
+    fixed += STREAM_FRAME_COUNT * static_cast<size_t>(this->stream_max_frame_bytes_) + pool_round(STREAM_RECV_BYTES);
+#ifdef USE_AUDIO
+    if (this->speaker_ != nullptr)
+      fixed += pool_round(static_cast<size_t>(AUDIO_SAMPLE_RATE) * STREAM_AUDIO_BLOCK_MS / 1000 * 2 * sizeof(int16_t));
+#endif
   }
 #endif
 #ifdef SVP_PICTURES
@@ -2057,7 +2060,7 @@ bool SimpleVideoPlayer::plan_pool_() {
                         this->thumb_h_ * this->thumb_count_);
 #endif
   this->index_reserve_ = pool_round(std::clamp<size_t>(pool / 32, 128 * 1024, MIB));
-  fixed += this->index_reserve_ + 32 * PsramPool::ALIGN;  // pieces end on whole cache lines
+  fixed += this->index_reserve_ + pool_round(CACHE_BUFFER_SIZE) + 32 * PsramPool::ALIGN;  // pieces end on whole cache lines
 
   const size_t chunk = BufferedFileReader::FILL_CHUNK;
   auto ring_for = [pool, chunk](size_t taken) -> size_t { return taken + 2 * chunk <= pool ? (pool - taken) / chunk * chunk : 0; };
@@ -2599,7 +2602,7 @@ void SimpleVideoPlayer::advance_audio_cursor_() {
   BufferedFileReader *reader = this->file_reader_.get();
   const uint64_t end = this->avi_parser_->data_end();
   // The cache buffer only serves raw MJPEG; AVI playback leaves it free.
-  uint8_t *scratch = this->cache_buffer_.get();
+  uint8_t *scratch = this->cache_buffer_;
   while (this->audio_cursor_frames_.load(std::memory_order_relaxed) <
          this->reader_frames_.load(std::memory_order_relaxed) + this->audio_lead_frames_) {
     const uint64_t at = this->audio_cursor_pos_;

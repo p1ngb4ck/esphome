@@ -42,9 +42,7 @@ static const char *const TAG = "simple_video_player.stream";
 static constexpr uint8_t UDISP_TYPE_JPG = 3;
 static constexpr uint8_t UDISP_TYPE_PCM = 0x10;
 static constexpr uint32_t STREAM_AUDIO_DEFAULT_RATE = 48000;
-static constexpr uint32_t STREAM_AUDIO_BLOCK_MS = 10;
 static constexpr size_t UDISP_HEADER_BYTES = 16;
-static constexpr size_t STREAM_RECV_BYTES = 32768;
 // Wi-Fi roaming scans and power saving are held off while pictures or sound arrive, and allowed
 // again once only heartbeats have arrived for this long. A read no longer than one header is a
 // heartbeat (Portall's network.cpp).
@@ -101,6 +99,11 @@ bool SimpleVideoPlayer::setup_stream_() {
     ESP_LOGE(TAG, "Failed to create stream queues");
     return false;
   }
+  this->stream_recv_buf_ = this->pool_.alloc(STREAM_RECV_BYTES);
+  if (this->stream_recv_buf_ == nullptr) {
+    ESP_LOGE(TAG, "No room in the PSRAM pool for the receive buffer");
+    return false;
+  }
   // The frames stay at the start of the pool (plan_pool_()).
   for (auto &frame : this->stream_frames_) {
     frame.data = this->pool_.alloc(this->stream_max_frame_bytes_);
@@ -117,8 +120,7 @@ bool SimpleVideoPlayer::setup_stream_() {
     this->stream_audio_out_ch_ = this->speaker_channel_mode_ == SpeakerChannelMode::SPEAKER_CHANNEL_STEREO ? 2 : 1;
     this->stream_audio_block_size_ = static_cast<size_t>(AUDIO_SAMPLE_RATE) * STREAM_AUDIO_BLOCK_MS / 1000 *
                                      this->stream_audio_out_ch_ * sizeof(int16_t);
-    this->stream_audio_block_ = static_cast<uint8_t *>(
-        heap_caps_malloc(this->stream_audio_block_size_, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    this->stream_audio_block_ = this->pool_.alloc(this->stream_audio_block_size_);
     if (this->stream_audio_block_ == nullptr)
       ESP_LOGW(TAG, "No memory for the %u-byte audio block: stream plays without sound",
                static_cast<unsigned>(this->stream_audio_block_size_));
@@ -131,13 +133,11 @@ bool SimpleVideoPlayer::setup_stream_() {
       this->stream_touchscreen_->register_listener(&this->stream_touch_listener_);
   }
 #endif
-  if (xTaskCreatePinnedToCore(stream_draw_task_entry_, "svp_stream_draw", 4096, this, 2, &this->stream_draw_task_, 1) !=
-      pdPASS) {
+  if (!create_psram_task(stream_draw_task_entry_, "svp_stream_draw", 4096, this, 2, &this->stream_draw_task_, 1)) {
     ESP_LOGE(TAG, "Failed to create the stream draw task");
     return false;
   }
-  if (xTaskCreatePinnedToCore(stream_net_task_entry_, "svp_stream_net", 4096, this, 4, nullptr, tskNO_AFFINITY) !=
-      pdPASS) {
+  if (!create_psram_task(stream_net_task_entry_, "svp_stream_net", 4096, this, 4, nullptr, tskNO_AFFINITY)) {
     ESP_LOGE(TAG, "Failed to create the stream network task");
     return false;
   }
@@ -176,12 +176,7 @@ void SimpleVideoPlayer::set_stream_fullscreen(bool fullscreen) {
 void SimpleVideoPlayer::stream_net_task_entry_(void *param) { static_cast<SimpleVideoPlayer *>(param)->stream_net_loop_(); }
 
 void SimpleVideoPlayer::stream_net_loop_() {
-  auto *buffer = static_cast<uint8_t *>(heap_caps_malloc(STREAM_RECV_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  if (buffer == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate the %u-byte receive buffer", static_cast<unsigned>(STREAM_RECV_BYTES));
-    vTaskDelete(nullptr);
-    return;
-  }
+  uint8_t *const buffer = this->stream_recv_buf_;
 
   while (true) {
     int listener = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);

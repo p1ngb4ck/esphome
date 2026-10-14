@@ -57,6 +57,7 @@
 #include <functional>
 #include <cstdio>
 #include <atomic>
+#include <cstdlib>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -66,6 +67,15 @@
 #include "esp_heap_caps.h"
 
 namespace esphome::simple_video_player {
+
+/// The player's tasks, stacks in PSRAM (CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM, set by codegen):
+/// none of them works on the flash itself, so no stack is touched while the cache is off. The TCB
+/// stays internal (xTaskCreatePinnedToCoreWithCaps).
+inline bool create_psram_task(TaskFunction_t entry, const char *name, uint32_t stack, void *arg, UBaseType_t priority,
+                              TaskHandle_t *handle, BaseType_t core) {
+  return xTaskCreatePinnedToCoreWithCaps(entry, name, stack, arg, priority, handle, core,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS;
+}
 
 /// Speaker channel modes for audio routing
 enum class SpeakerChannelMode : uint8_t {
@@ -195,9 +205,33 @@ enum class ImageFitMode : uint8_t {
 enum class ThumbnailLayout : uint8_t { HORIZONTAL, VERTICAL, GRID };
 enum class ThumbnailSlideEdge : uint8_t { LEFT, RIGHT, TOP, BOTTOM };
 
+/// Names and paths of the lists (pictures, playlist, channels) in PSRAM: plain new/malloc only takes
+/// internal RAM here (CONFIG_SPIRAM_USE_CAPS_ALLOC). Internal RAM only if PSRAM is out.
+template<class T> struct PsramAllocator {
+  using value_type = T;
+  PsramAllocator() = default;
+  template<class U> constexpr PsramAllocator(const PsramAllocator<U> & /*other*/) noexcept {}
+  T *allocate(size_t n) {
+    auto *p = static_cast<T *>(
+        heap_caps_malloc_prefer(n * sizeof(T), 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_8BIT));
+    if (p == nullptr)
+      abort();
+    return p;
+  }
+  void deallocate(T *p, size_t /*n*/) { heap_caps_free(p); }
+};
+template<class T, class U> bool operator==(const PsramAllocator<T> & /*a*/, const PsramAllocator<U> & /*b*/) {
+  return true;
+}
+template<class T, class U> bool operator!=(const PsramAllocator<T> & /*a*/, const PsramAllocator<U> & /*b*/) {
+  return false;
+}
+using PsramString = std::basic_string<char, std::char_traits<char>, PsramAllocator<char>>;
+template<class T> using PsramVector = std::vector<T, PsramAllocator<T>>;
+
 struct ImageEntry {
-  std::string path;
-  std::string filename;
+  PsramString path;
+  PsramString filename;
   uint64_t size{0};
 };
 
@@ -304,7 +338,7 @@ class SimpleVideoPlayer : public Component
   void channel_play(int index);
   void channel_stop() { this->channel_request_(CHANNEL_CMD_STOP, 0); }
   // Main loop: the names of the channels; the version changes with every new list.
-  const std::vector<std::string> &get_channel_names() const { return this->channel_names_; }
+  const PsramVector<PsramString> &get_channel_names() const { return this->channel_names_; }
   uint32_t get_channel_list_version() const { return this->channel_version_; }
   // The channel played last, -1 for none.
   int get_channel_index() const { return this->channel_index_; }
@@ -900,7 +934,7 @@ class SimpleVideoPlayer : public Component
   uint32_t video_height_{0};
 
   // Buffers -- allocated ONCE in setup(), sized for the max resolution, reused every play().
-  std::unique_ptr<uint8_t[]> cache_buffer_;  // Internal RAM, aligned for DMA
+  uint8_t *cache_buffer_{nullptr};  // pool: raw MJPEG reads, index and sound-cursor scratch
   // Decoded RGB888 double-buffer for the LVGL-canvas path (PSRAM). The P4 HW JPEG decoder
   // DMA2D-writes the next frame into the back buffer while LVGL's PPA reads the front buffer to
   // blit/rotate it, so neither side ever sees a half-written frame -- the former single buffer tore
@@ -1137,7 +1171,7 @@ class SimpleVideoPlayer : public Component
   bool pic_list_pending_{false};
   uint32_t pic_list_retry_ms_{0};
   uint32_t pic_generation_{0};           // bumped with every listing; older reads are dropped
-  std::vector<ImageEntry> images_;
+  PsramVector<ImageEntry> images_;
   int current_image_{-1};
   int pic_wanted_{-1};                   // requested, not read yet
   PictureRead pic_read_;
@@ -1287,6 +1321,9 @@ class SimpleVideoPlayer : public Component
     bool direct{false};  // for the display, else the canvas page
   };
   static constexpr uint8_t STREAM_FRAME_COUNT = 4;
+  static constexpr size_t STREAM_RECV_BYTES = 32768;     // one recv(), into stream_recv_buf_ (pool)
+  static constexpr uint32_t STREAM_AUDIO_BLOCK_MS = 10;  // stream_audio_block_ (pool)
+  uint8_t *stream_recv_buf_{nullptr};
   uint16_t stream_port_{0};
   uint32_t stream_max_frame_bytes_{128 * 1024};
   StreamFrame stream_frames_[STREAM_FRAME_COUNT]{};
@@ -1368,8 +1405,8 @@ class SimpleVideoPlayer : public Component
   QueueHandle_t channel_q_{nullptr};
   SemaphoreHandle_t channel_lock_{nullptr};
   // Shown in the dropdown (LVGL holds pointers into channel_names_) / next list from the task.
-  std::vector<std::string> channel_names_, channel_refs_;
-  std::vector<std::string> channel_new_names_, channel_new_refs_;
+  PsramVector<PsramString> channel_names_, channel_refs_;
+  PsramVector<PsramString> channel_new_names_, channel_new_refs_;
   std::atomic<bool> channel_new_{false};
   bool channel_requested_once_{false};
   uint32_t channel_version_{0};
@@ -1408,7 +1445,7 @@ class SimpleVideoPlayer : public Component
   volatile bool playback_task_stop_{false};
 
   // Playlist (main loop only). The playback task asks loop() for the next item at the end of a file.
-  std::vector<std::string> playlist_;
+  PsramVector<PsramString> playlist_;
   size_t playlist_index_{0};
   RepeatMode repeat_{RepeatMode::OFF};
   std::atomic<bool> advance_req_{false};

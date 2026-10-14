@@ -4,7 +4,11 @@ from esphome import automation
 import esphome.codegen as cg
 from esphome.components import display, media_player, speaker, touchscreen
 from esphome.components.audio import CONF_CODECS, CONF_FLAC, CONF_MP3
-from esphome.components.esp32 import only_on_variant, request_http_client
+from esphome.components.esp32 import (
+    add_idf_sdkconfig_option,
+    only_on_variant,
+    request_http_client,
+)
 from esphome.components.esp32.const import VARIANT_ESP32P4
 from esphome.components.storage import request_storage_worker
 import esphome.config_validation as cv
@@ -825,6 +829,8 @@ async def to_code(config):
     from esphome.components.esp32 import require_hw_jpeg
 
     require_hw_jpeg()
+    # The player's task stacks are in PSRAM (create_psram_task()).
+    add_idf_sdkconfig_option("CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM", True)
 
     # File I/O streams through storage::StorageWorker (see buffered_file_reader.h) rather than a
     # blocking main-loop read; request it directly instead of relying on whichever storage

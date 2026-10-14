@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <strings.h>
 
 namespace esphome::simple_video_player {
 
@@ -101,7 +102,7 @@ void SimpleVideoPlayer::pictures_setup_() {
 
   // Decoding (and scaling a large photo) off the main loop: on Core 1 at the loop task's priority
   // like the video's decode (DMA2D with LVGL's PPA, esp-idf#18999, see play()).
-  if (xTaskCreatePinnedToCore(picture_task_entry_, "svp_pictures", 8192, this, 1, &this->pic_task_, 1) != pdPASS) {
+  if (!create_psram_task(picture_task_entry_, "svp_pictures", 8192, this, 1, &this->pic_task_, 1)) {
     ESP_LOGE(TAG, "Could not create the picture task -- pictures disabled");
     return;
   }
@@ -243,7 +244,7 @@ void SimpleVideoPlayer::refresh_images() {
     return;
   if (this->pic_select_.empty()) {
     if (const ImageEntry *entry = this->get_current_image())
-      this->pic_select_ = entry->path;
+      this->pic_select_ = entry->path.c_str();
   }
   this->pic_list_pending_ = true;
   this->pic_list_retry_ms_ = millis() - LIST_RETRY_MS;
@@ -261,7 +262,7 @@ void SimpleVideoPlayer::list_directory_() {
     return;
 
   struct Context {
-    std::vector<ImageEntry> found;
+    PsramVector<ImageEntry> found;
     const std::string *dir;
   } context{{}, &this->pic_dir_};
   const storage::StorageError err =
@@ -271,7 +272,10 @@ void SimpleVideoPlayer::list_directory_() {
                           runtime_image::ImageFormat format;
                           if (entry->is_dir || entry->name[0] == '.' || !picture_format(entry->name, &format))
                             return true;
-                          context->found.push_back({*context->dir + "/" + entry->name, entry->name, entry->size});
+                          ImageEntry image{PsramString(context->dir->c_str()), PsramString(entry->name), entry->size};
+                          image.path += '/';
+                          image.path += entry->name;
+                          context->found.push_back(std::move(image));
                           return context->found.size() < MAX_IMAGES;
                         },
                         &context);
@@ -281,7 +285,7 @@ void SimpleVideoPlayer::list_directory_() {
     return;
   }
   std::sort(context.found.begin(), context.found.end(),
-            [](const ImageEntry &a, const ImageEntry &b) { return lower(a.filename) < lower(b.filename); });
+            [](const ImageEntry &a, const ImageEntry &b) { return strcasecmp(a.filename.c_str(), b.filename.c_str()) < 0; });
 
   this->pic_generation_++;  // a read in flight belongs to the old list
   this->images_ = std::move(context.found);
@@ -297,7 +301,7 @@ void SimpleVideoPlayer::list_directory_() {
   int show = -1;
   if (!this->pic_select_.empty()) {
     for (size_t i = 0; i < this->images_.size(); i++) {
-      if (this->images_[i].path == this->pic_select_)
+      if (this->pic_select_ == this->images_[i].path.c_str())
         show = static_cast<int>(i);
     }
     this->pic_select_.clear();
@@ -325,7 +329,7 @@ bool SimpleVideoPlayer::show_image(size_t index) {
 
 bool SimpleVideoPlayer::show_image(const std::string &path) {
   for (size_t i = 0; i < this->images_.size(); i++) {
-    if (this->images_[i].path == path || this->images_[i].filename == path)
+    if (path == this->images_[i].path.c_str() || path == this->images_[i].filename.c_str())
       return this->show_image(i);
   }
   const size_t slash = path.rfind('/');
@@ -750,7 +754,7 @@ bool SimpleVideoPlayer::start_decode_(bool thumbnail, size_t index, size_t slot,
   job.thumbnail = thumbnail;
   job.data = file->data;
   job.length = file->length;
-  job.path = this->images_[index].path;
+  job.path = this->images_[index].path.c_str();
   if (thumbnail) {
     job.target = this->thumb_slots_[slot].data;
     job.target_capacity = static_cast<size_t>(this->thumb_stride_) * this->thumb_h_;
@@ -1391,7 +1395,7 @@ void SimpleVideoPlayer::thumbnail_event_(lv_event_t *event) {
 std::string SimpleVideoPlayer::thumbnail_label_(size_t image) const {
   if (image >= this->images_.size())
     return "";
-  const std::string &filename = this->images_[image].filename;
+  const std::string filename = this->images_[image].filename.c_str();
   const size_t dot = filename.rfind('.');
   const std::string name = dot == std::string::npos ? filename : filename.substr(0, dot);
   const std::string number = std::to_string(image + 1);
