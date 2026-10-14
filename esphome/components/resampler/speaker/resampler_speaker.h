@@ -104,6 +104,7 @@ class ResamplerSpeaker final : public Component, public speaker::Speaker {
   bool passthrough_bits_per_sample_{false};
   bool task_stack_in_psram_{false};
   bool waiting_for_output_{false};
+  bool finishing_{false};  // finish() while the task still resamples: it ends with its input
 };
 
 }  // namespace esphome::resampler

@@ -29,6 +29,7 @@ enum ResamplingEventGroupBits : uint32_t {
   COMMAND_START = (1 << 1),      // signals start request
   COMMAND_FINISH = (1 << 2),     // signals finish request (graceful stop)
   TASK_COMMAND_STOP = (1 << 5),  // signals the task to stop
+  TASK_COMMAND_FINISH = (1 << 6),  // signals the task to end once its input is used up
   STATE_STARTING = (1 << 10),
   STATE_RUNNING = (1 << 11),
   STATE_STOPPING = (1 << 12),
@@ -103,7 +104,14 @@ void ResamplerSpeaker::loop() {
   } else if (event_group_bits & ResamplingEventGroupBits::COMMAND_FINISH) {
     if (this->state_ == speaker::STATE_RUNNING) {
       xEventGroupClearBits(this->event_group_, ResamplingEventGroupBits::COMMAND_FINISH);
-      this->output_speaker_->finish();
+      // The input ended (the end of a file): over once it is all handed on, not once the output is quiet.
+      if (this->task_.is_created()) {
+        this->finishing_ = true;
+        xEventGroupSetBits(this->event_group_, ResamplingEventGroupBits::TASK_COMMAND_FINISH);
+      } else {
+        this->output_speaker_->finish();
+        this->state_ = speaker::STATE_STOPPED;
+      }
     } else if (this->state_ == speaker::STATE_STOPPED) {
       // Already stopped, just clear the command bit
       xEventGroupClearBits(this->event_group_, ResamplingEventGroupBits::COMMAND_FINISH);
@@ -164,6 +172,7 @@ void ResamplerSpeaker::loop() {
       if (!this->waiting_for_output_) {
         esp_err_t err = this->start_();
         if (err == ESP_OK) {
+          this->finishing_ = false;
           this->callback_remainder_ = 0;  // reset callback remainder
           this->status_clear_error();
           this->waiting_for_output_ = true;
@@ -186,7 +195,12 @@ void ResamplerSpeaker::loop() {
       break;
     }
     case speaker::STATE_RUNNING:
-      if (this->output_speaker_->is_stopped()) {
+      if (this->finishing_ && !this->task_.is_created()) {
+        // The task handed on all it had: the output finishes it on its own.
+        this->finishing_ = false;
+        this->output_speaker_->finish();
+        this->state_ = speaker::STATE_STOPPED;
+      } else if (this->output_speaker_->is_stopped()) {
         this->enter_stopping_state_();
       }
       break;
@@ -285,6 +299,7 @@ esp_err_t ResamplerSpeaker::start_() {
 void ResamplerSpeaker::stop() { this->send_command_(ResamplingEventGroupBits::COMMAND_STOP); }
 
 void ResamplerSpeaker::enter_stopping_state_() {
+  this->finishing_ = false;
   this->state_ = speaker::STATE_STOPPING;
   this->state_start_ms_ = App.get_loop_component_start_time();
   if (this->task_.is_created()) {
@@ -370,7 +385,8 @@ void ResamplerSpeaker::resample_task(void *params) {
 
       // Stop gracefully if the decoder is done
       int32_t ms_differential = 0;
-      audio::AudioResamplerState resampler_state = resampler->resample(false, &ms_differential);
+      audio::AudioResamplerState resampler_state =
+          resampler->resample((event_bits & ResamplingEventGroupBits::TASK_COMMAND_FINISH) != 0, &ms_differential);
 
       if (resampler_state == audio::AudioResamplerState::FINISHED) {
         break;
