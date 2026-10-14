@@ -14,9 +14,15 @@
 #include <WiFiClient.h>
 #endif
 
+#include <atomic>
 #include <string>
 #include <vector>
 #include <memory>
+
+#ifdef USE_ESP32
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#endif
 
 namespace esphome::nfs_client {
 
@@ -327,6 +333,10 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   // No-RTTI downcast hook -- see PathStorage::as_mountable().
   storage::MountableStorage *as_mountable() override { return this; }
 
+  // Calls come from the main loop, the storage worker's task and consumers' own tasks (the
+  // audio reader): CallLock takes them one at a time over the one socket and reply buffer.
+  uint8_t get_capabilities() const override { return storage::STORAGE_CAP_IO_TASK_SAFE; }
+
   // mount() requests one asynchronous mount attempt; loop() carries it out step by step
   // (never blocking the caller). unmount() tears the mount down synchronously, following
   // the SD-card safe-eject pattern: unregister (drains async worker traffic per the registry
@@ -417,7 +427,7 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   // Set by mount()/connect() or the auto-connect edge below; consumed by loop() to start one
   // mount attempt. No periodic retry exists anymore -- FAILED is terminal until the next
   // request (users schedule retries themselves via interval:/automations + storage.mount).
-  bool mount_requested_{false};
+  std::atomic<bool> mount_requested_{false};
   // Fire one mount attempt on each rising edge of network connectivity (default on). The
   // boot pass counts as an edge when the network is already up by then.
   bool auto_connect_{true};
@@ -438,6 +448,22 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   //========================================================================
 
   RPCClient rpc_;
+
+  // Held for one call (recursive: calls nest, e.g. get_info() -> get_space_info()).
+  class CallLock {
+   public:
+    explicit CallLock(NFSClient *client);
+    ~CallLock();
+    CallLock(const CallLock &) = delete;
+    CallLock &operator=(const CallLock &) = delete;
+
+   private:
+    NFSClient *client_;
+  };
+#ifdef USE_ESP32
+  StaticSemaphore_t lock_storage_;
+  SemaphoreHandle_t lock_{nullptr};
+#endif
   // Every reply is received into this buffer (PSRAM where there is PSRAM) and decoded in place.
   // It holds the largest READ reply: read_max_ bytes of data plus RPC_REPLY_OVERHEAD. After the
   // mount it grows once to the server's rtmax (FSINFO), capped at READ_MAX_CAP.

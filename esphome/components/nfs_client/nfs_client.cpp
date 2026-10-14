@@ -3,6 +3,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
 #include "esphome/components/network/util.h"
+#include "esphome/core/main_task.h"
 
 #include <cerrno>
 #include <cstdlib>
@@ -355,12 +356,27 @@ static uint8_t *alloc_rpc_buffer(size_t size) {
 #endif
 }
 
+NFSClient::CallLock::CallLock(NFSClient *client) : client_(client) {
+#ifdef USE_ESP32
+  xSemaphoreTakeRecursive(client->lock_, portMAX_DELAY);
+#endif
+}
+
+NFSClient::CallLock::~CallLock() {
+#ifdef USE_ESP32
+  xSemaphoreGiveRecursive(this->client_->lock_);
+#endif
+}
+
 NFSClient::~NFSClient() {
   this->unmount_();
   free(this->rpc_buf_);  // NOLINT(cppcoreguidelines-no-malloc)
 }
 
 void NFSClient::setup() {
+#ifdef USE_ESP32
+  this->lock_ = xSemaphoreCreateRecursiveMutexStatic(&this->lock_storage_);
+#endif
   ESP_LOGCONFIG(TAG, "Setting up NFS Client...");
   ESP_LOGCONFIG(TAG, "  Server: %s:%u", this->server_.c_str(), this->port_);
   ESP_LOGCONFIG(TAG, "  Export: %s", this->export_path_.c_str());
@@ -394,6 +410,12 @@ void NFSClient::setup() {
 bool NFSClient::ensure_mounted_() {
   if (this->mounted_)
     return true;
+#ifdef USE_ESP32
+  // Mounting touches main-loop state (the change feed, the watchdog): another task gets
+  // NOT_READY until the main loop has mounted (auto-connect, an action, a listing).
+  if (xTaskGetCurrentTaskHandle() != esphome_main_task_handle)
+    return false;
+#endif
   // Every file-api and browser action is self-contained: none may assume that some earlier
   // action (a listing, a poll) has already brought the share up. So the action itself
   // mounts, inline and synchronously -- the state machine's steps are all synchronous RPCs,
@@ -434,6 +456,15 @@ void NFSClient::loop() {
   }
   this->network_was_connected_ = net_connected;
 
+  // mount_state_ changes on the main loop only (here, ensure_mounted_(), unmount()).
+  const MountState state = this->mount_state_;
+  if (!this->mount_requested_ && (state == MountState::IDLE || state == MountState::FAILED))
+    return;
+  if (state == MountState::MOUNTED) {
+    this->mount_requested_ = false;
+    return;
+  }
+  CallLock lock(this);
   this->drive_mount_state_();
 }
 
@@ -586,6 +617,7 @@ void NFSClient::dump_config() {
 //========================================================================
 
 storage::StorageError NFSClient::get_info(storage::StorageInfo *info) {
+  CallLock lock(this);
   if (info == nullptr) {
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   }
@@ -631,6 +663,7 @@ storage::StorageError NFSClient::unmount() {
   if (storage::global_storage_registry != nullptr)
     storage::global_storage_registry->quiesce_storage(this);
 
+  CallLock lock(this);
   this->unmount_export_(this->export_path_);
   this->close_connection_();
   this->root_fh_.data.clear();
@@ -653,6 +686,7 @@ storage::StorageError NFSClient::disconnect() {
 
 storage::StorageError NFSClient::read_chunk(const char *path, uint8_t *buf, uint64_t offset, size_t len,
                                             size_t *bytes_transferred) {
+  CallLock lock(this);
   if (path == nullptr || buf == nullptr || bytes_transferred == nullptr) {
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   }
@@ -744,6 +778,7 @@ storage::StorageError NFSClient::read_chunk(const char *path, uint8_t *buf, uint
 
 storage::StorageError NFSClient::write_chunk(const char *path, const uint8_t *buf, uint64_t offset, size_t len,
                                              size_t *bytes_transferred) {
+  CallLock lock(this);
   if (path == nullptr || buf == nullptr || bytes_transferred == nullptr) {
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   }
@@ -778,6 +813,7 @@ storage::StorageError NFSClient::write_chunk(const char *path, const uint8_t *bu
 }
 
 storage::StorageError NFSClient::truncate(const char *path, uint64_t size) {
+  CallLock lock(this);
   if (path == nullptr) {
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   }
@@ -813,6 +849,7 @@ storage::StorageError NFSClient::truncate(const char *path, uint64_t size) {
 }
 
 storage::StorageError NFSClient::stat(const char *path, storage::FileStat *stat) {
+  CallLock lock(this);
   if (path == nullptr || stat == nullptr) {
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   }
@@ -842,24 +879,26 @@ storage::StorageError NFSClient::list_dir(const char *path, bool (*callback)(con
   if (path == nullptr || callback == nullptr) {
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   }
-  if (!this->ensure_mounted_()) {
-    return storage::StorageError::STORAGE_ERROR_NOT_READY;
-  }
 
-  const std::string path_str(path);
-  NFSFileHandle fh;
-  NFSFileAttr attr;
-
-  if (!this->resolve_path_(path_str, fh, attr)) {
-    return storage::StorageError::STORAGE_ERROR_NOT_FOUND;
-  }
-  if (attr.type != NF3DIR) {
-    return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
-  }
-
+  // The entries are read under the lock; the callbacks run without it.
   std::vector<NFSDirEntry> entries;
-  if (!this->nfs_readdir_(fh, entries)) {
-    return storage::StorageError::STORAGE_ERROR_READ_ERROR;
+  {
+    CallLock lock(this);
+    if (!this->ensure_mounted_()) {
+      return storage::StorageError::STORAGE_ERROR_NOT_READY;
+    }
+    const std::string path_str(path);
+    NFSFileHandle fh;
+    NFSFileAttr attr;
+    if (!this->resolve_path_(path_str, fh, attr)) {
+      return storage::StorageError::STORAGE_ERROR_NOT_FOUND;
+    }
+    if (attr.type != NF3DIR) {
+      return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
+    }
+    if (!this->nfs_readdir_(fh, entries)) {
+      return storage::StorageError::STORAGE_ERROR_READ_ERROR;
+    }
   }
 
   storage::FileStat entry_stat;
@@ -877,6 +916,7 @@ storage::StorageError NFSClient::list_dir(const char *path, bool (*callback)(con
 }
 
 storage::StorageError NFSClient::mkdir(const char *path) {
+  CallLock lock(this);
   if (path == nullptr) {
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   }
@@ -903,6 +943,7 @@ storage::StorageError NFSClient::mkdir(const char *path) {
 }
 
 storage::StorageError NFSClient::rmdir(const char *path) {
+  CallLock lock(this);
   if (path == nullptr) {
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   }
@@ -942,6 +983,7 @@ storage::StorageError NFSClient::rmdir(const char *path) {
 }
 
 storage::StorageError NFSClient::remove(const char *path) {
+  CallLock lock(this);
   if (path == nullptr) {
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   }
@@ -960,6 +1002,7 @@ storage::StorageError NFSClient::remove(const char *path) {
 }
 
 storage::StorageError NFSClient::rename(const char *old_path, const char *new_path) {
+  CallLock lock(this);
   if (old_path == nullptr || new_path == nullptr) {
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   }
@@ -1021,11 +1064,13 @@ storage::StorageError NFSClient::rename(const char *old_path, const char *new_pa
 //========================================================================
 
 bool NFSClient::get_file_attributes(const std::string &path, NFSFileAttr &attr) {
+  CallLock lock(this);
   NFSFileHandle fh;
   return this->resolve_path_(path, fh, attr);
 }
 
 bool NFSClient::get_space_info(uint64_t &total_bytes, uint64_t &free_bytes) {
+  CallLock lock(this);
   // Deliberately passive (no ensure_mounted_): this feeds the roots listing, which the
   // browser rebuilds on polls -- display metadata must never fire inline mount attempts
   // against a dead server every few seconds. Actions mount; listings show what is.
