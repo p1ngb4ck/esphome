@@ -175,6 +175,7 @@ CONF_BUTTON_STYLE_ID = "button_style_id"
 CONF_ACCENT_BUTTON_STYLE_ID = "accent_button_style_id"
 CONF_SEEK_BAR_STYLE_ID = "seek_bar_style_id"
 CONF_SEEK_INDICATOR_STYLE_ID = "seek_indicator_style_id"
+CONF_FOCUS_STYLE_ID = "focus_style_id"
 # Buttons of the on-screen controls, as ControlButton in simple_video_player.h.
 CONTROL_BUTTONS = {
     "previous": 0,
@@ -512,6 +513,8 @@ CONFIG_SCHEMA = cv.All(
                                 cv.Optional(CONF_ACCENT_BUTTON_STYLE_ID): cv.use_id(lv_style_t),
                                 cv.Optional(CONF_SEEK_BAR_STYLE_ID): cv.use_id(lv_style_t),
                                 cv.Optional(CONF_SEEK_INDICATOR_STYLE_ID): cv.use_id(lv_style_t),
+                                # The button the keys are on.
+                                cv.Optional(CONF_FOCUS_STYLE_ID): cv.use_id(lv_style_t),
                                 cv.Optional(CONF_VIDEO, default={}): cv.Schema(
                                     {
                                         cv.Optional(
@@ -880,6 +883,7 @@ async def to_code(config):
                 CONF_ACCENT_BUTTON_STYLE_ID,
                 CONF_SEEK_BAR_STYLE_ID,
                 CONF_SEEK_INDICATOR_STYLE_ID,
+                CONF_FOCUS_STYLE_ID,
             )
         ]
         cg.add(var.set_controls_styles(*styles))

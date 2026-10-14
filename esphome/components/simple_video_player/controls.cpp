@@ -211,6 +211,8 @@ bool SimpleVideoPlayer::build_controls_bar_(ControlsBar &bar) {
           lv_obj_add_style(button, this->ctl_user_accent_style_, LV_PART_MAIN);
       }
       lv_obj_add_style(button, &this->ctl_focus_style_, LV_STATE_FOCUS_KEY);
+      if (this->ctl_user_focus_style_ != nullptr)
+        lv_obj_add_style(button, this->ctl_user_focus_style_, LV_STATE_FOCUS_KEY);
       lv_obj_t *label = lv_label_create(button);
       lv_label_set_text(label, button_text(id));
       lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);

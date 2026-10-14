@@ -377,12 +377,13 @@ class SimpleVideoPlayer : public Component
   void set_controls_hide_after(uint32_t ms) { this->ctl_hide_after_ms_ = ms; }
   /// Styles added over the built-in look (any may be null).
   void set_controls_styles(lv_style_t *bar, lv_style_t *button, lv_style_t *accent_button, lv_style_t *seek_bar,
-                           lv_style_t *seek_indicator) {
+                           lv_style_t *seek_indicator, lv_style_t *focus) {
     this->ctl_user_bar_style_ = bar;
     this->ctl_user_button_style_ = button;
     this->ctl_user_accent_style_ = accent_button;
     this->ctl_user_seek_style_ = seek_bar;
     this->ctl_user_indicator_style_ = seek_indicator;
+    this->ctl_user_focus_style_ = focus;
   }
   void set_video_controls(std::vector<uint8_t> buttons, bool title, bool time, bool seek_bar) {
     this->ctl_video_.buttons = std::move(buttons);
@@ -982,6 +983,7 @@ class SimpleVideoPlayer : public Component
   lv_style_t *ctl_user_accent_style_{nullptr};
   lv_style_t *ctl_user_seek_style_{nullptr};
   lv_style_t *ctl_user_indicator_style_{nullptr};
+  lv_style_t *ctl_user_focus_style_{nullptr};
   lv_style_t ctl_bar_style_{};
   lv_style_t ctl_row_style_{};
   lv_style_t ctl_button_style_{};
