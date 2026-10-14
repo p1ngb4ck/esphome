@@ -72,12 +72,17 @@ size_t AudioRouter::play(const uint8_t *data, size_t length, TickType_t ticks_to
   this->in_play_.fetch_add(1);
   size_t written = 0;
   if (!this->switching_.load()) {
-    if (this->state_ != speaker::STATE_RUNNING) {
+    // After finish() a player may still hand over what it had buffered (a resampler does): that ends
+    // with it too, the router stays finishing.
+    const bool finishing = this->finishing_.load();
+    if (this->state_ == speaker::STATE_STOPPED) {
       this->start_output_();
-      this->state_ = speaker::STATE_RUNNING;
+      this->state_ = finishing ? speaker::STATE_STOPPING : speaker::STATE_RUNNING;
     }
     written = this->convert_ ? this->play_converted_(data, length, ticks_to_wait)
                              : this->current_()->play(data, length, ticks_to_wait);
+    if (finishing)
+      this->current_()->finish();
   }
   this->in_play_.fetch_sub(1);
   return written;
@@ -87,6 +92,7 @@ void AudioRouter::start() {
   if (this->is_failed())
     return;
   LockGuard guard(this->lock_);
+  this->finishing_.store(false);
   this->start_output_();
   this->state_ = speaker::STATE_RUNNING;
 }
@@ -188,11 +194,13 @@ size_t AudioRouter::play_converted_(const uint8_t *data, size_t length, TickType
 }
 
 void AudioRouter::stop() {
+  this->finishing_.store(false);
   this->current_()->stop();
   this->state_ = speaker::STATE_STOPPED;
 }
 
 void AudioRouter::finish() {
+  this->finishing_.store(true);
   this->current_()->finish();
   if (this->state_ == speaker::STATE_RUNNING)
     this->state_ = speaker::STATE_STOPPING;

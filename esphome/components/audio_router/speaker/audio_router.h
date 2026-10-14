@@ -80,6 +80,7 @@ class AudioRouter : public speaker::Speaker, public Component {
   std::atomic<size_t> active_{0};
   std::atomic<int> in_play_{0};
   std::atomic<bool> switching_{false};
+  std::atomic<bool> finishing_{false};  // finish() since the last start() or stop()
   // Held by play(), start() and an output switch: they change the conversion state below.
   Mutex lock_;
   size_t pending_{0};
