@@ -158,6 +158,10 @@ AudioPipelineState AudioPipeline::process_state() {
     // Init command pending
     if (!(event_bits & EventGroupBits::PIPELINE_COMMAND_STOP)) {
       // Only start if there is no pending stop command
+      if (!this->release_tasks_()) {
+        // A task of the last file is still being freed
+        return AudioPipelineState::PLAYING;
+      }
       if (!this->read_task_.is_created() || !this->decode_task_.is_created()) {
         // At least one task isn't running
         this->start_tasks_();
@@ -199,34 +203,15 @@ AudioPipelineState AudioPipeline::process_state() {
       this->hard_stop_ = true;
     }
 
-    if (!this->is_playing_) {
-      // The tasks have been stopped for two ``process_state`` calls in a row, so delete the tasks
-      if (this->read_task_.is_created() || this->decode_task_.is_created()) {
-        // Both are attempted every time; a task that is still running on the other core is freed by a
-        // subsequent call, and freeing an already freed task succeeds without doing anything
-        bool read_task_freed = this->read_task_.deallocate();
-        bool decode_task_freed = this->decode_task_.deallocate();
-        if (!read_task_freed || !decode_task_freed) {
-          // A task is still running on the other core, so keep the pipeline in its current state and try
-          // again on the next call
-          return AudioPipelineState::PLAYING;
-        }
-        if (this->hard_stop_) {
-          // Stop command was sent, so immediately end the playback
-          this->speaker_->stop();
-          this->hard_stop_ = false;
-        } else {
-          // Decoded all the audio, so let the speaker finish playing before stopping
-          this->speaker_->finish();
-        }
-      }
+    // The end of the file (or a stop): the playback is over, whatever the speaker still holds plays out on its own.
+    if (this->is_playing_) {
+      this->is_playing_ = false;
+      this->release_pending_ = true;
+    } else {
+      // Stopped for two calls in a row
+      this->release_tasks_();
     }
-    this->is_playing_ = false;
-    // The file ended once both tasks are freed: what the speaker still holds plays out on its own.
-    if (!this->speaker_->is_running() || (!this->read_task_.is_created() && !this->decode_task_.is_created())) {
-      return AudioPipelineState::STOPPED;
-    }
-    return AudioPipelineState::PLAYING;
+    return AudioPipelineState::STOPPED;
   }
 
   if (this->pause_state_) {
@@ -249,6 +234,24 @@ AudioPipelineState AudioPipeline::process_state() {
 
   this->is_playing_ = true;
   return AudioPipelineState::PLAYING;
+}
+
+bool AudioPipeline::release_tasks_() {
+  if (!this->release_pending_)
+    return true;
+  // Both are attempted every time; a task still running on the other core is freed by a later call
+  const bool read_task_freed = this->read_task_.deallocate();
+  const bool decode_task_freed = this->decode_task_.deallocate();
+  if (!read_task_freed || !decode_task_freed)
+    return false;
+  this->release_pending_ = false;
+  if (this->hard_stop_) {
+    this->speaker_->stop();
+    this->hard_stop_ = false;
+  } else {
+    this->speaker_->finish();
+  }
+  return true;
 }
 
 esp_err_t AudioPipeline::allocate_communications_() {
