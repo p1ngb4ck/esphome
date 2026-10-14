@@ -272,6 +272,18 @@ class LvglComponent final : public PollingComponent {
 #ifdef USE_LVGL_HID
   // Keypads whose keys still run their actions while the display is paused.
   void add_hid_keypad(LVHIDKeypadListener *keypad) { this->hid_keypads_.push_back(keypad); }
+  /// Takes keys, typed characters and pointer motion while the display is paused, for what shows on
+  /// it instead. Keys and characters come from the main loop, pointer motion from wherever its source
+  /// reports it. Each returns whether it was taken: navigation keys taken run no action here.
+  class PausedInput {
+   public:
+    /// action: the key's KeyBindings action, -1 for none.
+    virtual bool paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action) = 0;
+    virtual bool paused_text(uint32_t codepoint) = 0;
+    virtual bool paused_pointer(int16_t dx, int16_t dy, int16_t wheel, uint8_t buttons) = 0;
+  };
+  void set_paused_input(PausedInput *input) { this->paused_input_ = input; }
+  PausedInput *get_paused_input() const { return this->paused_input_; }
 #endif
   // If the display is paused and we have resume_on_input_ set to true, resume the display.
   void maybe_wakeup() {
@@ -414,6 +426,7 @@ class LvglComponent final : public PollingComponent {
   bool paused_{};
 #ifdef USE_LVGL_HID
   std::vector<LVHIDKeypadListener *> hid_keypads_{};
+  PausedInput *paused_input_{nullptr};
 #endif
   std::vector<LvPageType *> pages_{};
   size_t current_page_{0};
@@ -567,8 +580,8 @@ class LVHIDKeypadListener final : public Parented<LvglComponent> {
   LVHIDKeypadListener(hid::HIDInput *input, KeyBindings *bindings, uint16_t long_press_time,
                       uint16_t long_press_repeat_time);
   lv_indev_t *get_drv() { return this->drv_; }
-  /// While the display is paused (main loop): the keys run their actions' own automations, without
-  /// navigation, and keys let go are let go.
+  /// While the display is paused (main loop): keys and characters go to the paused input, if any; the
+  /// keys run their actions' own automations (navigation only when not taken), and keys let go are let go.
   void run_paused();
 
  protected:

@@ -11,6 +11,10 @@
 #include "esphome/components/lvgl/lvgl_esphome.h"
 #include "lvgl.h"
 #endif
+// Keys, typed characters and the mouse go to a udisp sender that asks for them ('K', 'X', 'P').
+#if defined(SVP_STREAM) && defined(SVP_USE_LVGL) && defined(USE_LVGL_HID)
+#define SVP_STREAM_INPUT
+#endif
 
 #include "driver/jpeg_decode.h"
 #include "driver/jpeg_types.h"
@@ -182,6 +186,20 @@ class ControlsTouchListener : public touchscreen::TouchListener {
 };
 #endif
 
+#ifdef SVP_STREAM_INPUT
+/// What LVGL's keyboards, remotes and mice report while it is paused, for the network stream sender.
+class StreamInputTaker : public lvgl::LvglComponent::PausedInput {
+ public:
+  explicit StreamInputTaker(SimpleVideoPlayer *parent) : parent_(parent) {}
+  bool paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action) override;
+  bool paused_text(uint32_t codepoint) override;
+  bool paused_pointer(int16_t dx, int16_t dy, int16_t wheel, uint8_t buttons) override;
+
+ protected:
+  SimpleVideoPlayer *parent_;
+};
+#endif
+
 #ifdef SVP_STREAM_TOUCH
 /// Forwards the touchscreen to the network stream sender ('T' messages).
 class StreamTouchListener : public touchscreen::TouchListener {
@@ -326,6 +344,10 @@ class SimpleVideoPlayer : public Component
 #ifdef SVP_STREAM_TOUCH
   void set_stream_touchscreen(touchscreen::Touchscreen *ts) { this->stream_touchscreen_ = ts; }
   void stream_on_touch(const touchscreen::TouchPoints_t &points);
+#endif
+#ifdef SVP_STREAM_INPUT
+  /// A message for the sender ('K', 'X', 'P'), when it asked for input and its picture is shown.
+  bool stream_on_input(const uint8_t *message, uint8_t length);
 #endif
 #endif
 
@@ -1400,6 +1422,18 @@ class SimpleVideoPlayer : public Component
   QueueHandle_t stream_touch_q_{nullptr};
   StreamTouch stream_last_touch_{};
   bool stream_last_touch_valid_{false};
+#endif
+#ifdef SVP_STREAM_INPUT
+  static constexpr uint8_t STREAM_INPUT_MAX = 8;
+  static constexpr uint8_t STREAM_INPUT_QUEUE = 32;
+  struct StreamInput {
+    uint8_t length;
+    uint8_t data[STREAM_INPUT_MAX];
+  };
+  StreamInputTaker stream_input_taker_{this};
+  StaticQueue_t stream_input_q_store_{};
+  QueueHandle_t stream_input_q_{nullptr};
+  std::atomic<bool> stream_input_wanted_{false};  // the connected sender asked for input (udisp 0x21)
 #endif
 #ifdef USE_AUDIO
   uint32_t stream_audio_left_{0};  // PCM payload bytes still to come (network task)

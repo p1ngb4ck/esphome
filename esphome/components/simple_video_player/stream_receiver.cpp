@@ -45,6 +45,7 @@ static constexpr uint8_t UDISP_TYPE_JPG = 3;
 static constexpr uint8_t UDISP_TYPE_PCM = 0x10;
 #ifdef SVP_STREAM_STATS
 static constexpr uint8_t UDISP_TYPE_STATS = 0x20;  // the sender asks for 'M' (x 1) or no more (x 0)
+static constexpr uint8_t UDISP_TYPE_INPUT = 0x21;  // the sender asks for 'K', 'X', 'P' (x 1) or no more (x 0)
 static constexpr uint32_t STREAM_STATS_MS = 1000;
 #endif
 static constexpr uint32_t STREAM_AUDIO_DEFAULT_RATE = 48000;
@@ -152,6 +153,19 @@ bool SimpleVideoPlayer::setup_stream_() {
     this->stream_touch_q_ = xQueueCreate(8, sizeof(StreamTouch));
     if (this->stream_touch_q_ != nullptr)
       this->stream_touchscreen_->register_listener(&this->stream_touch_listener_);
+  }
+#endif
+#ifdef SVP_STREAM_INPUT
+  if (this->lvgl_component_ != nullptr) {
+    auto *storage = this->pool_.alloc(STREAM_INPUT_QUEUE * sizeof(StreamInput));
+    if (storage != nullptr)
+      this->stream_input_q_ =
+          xQueueCreateStatic(STREAM_INPUT_QUEUE, sizeof(StreamInput), storage, &this->stream_input_q_store_);
+    if (this->stream_input_q_ != nullptr) {
+      this->lvgl_component_->set_paused_input(&this->stream_input_taker_);
+    } else {
+      ESP_LOGW(TAG, "No memory for the input queue: keys and mouse stay on the panel");
+    }
   }
 #endif
   if (!create_psram_task(stream_draw_task_entry_, "svp_stream_draw", 4096, this, 2, &this->stream_draw_task_, 1)) {
@@ -270,6 +284,11 @@ void SimpleVideoPlayer::stream_net_loop_() {
       if (this->stream_touch_q_ != nullptr)
         xQueueReset(this->stream_touch_q_);
       this->stream_last_touch_valid_ = false;
+#endif
+#ifdef SVP_STREAM_INPUT
+      this->stream_input_wanted_.store(false, std::memory_order_release);
+      if (this->stream_input_q_ != nullptr)
+        xQueueReset(this->stream_input_q_);
 #endif
       this->stream_connected_.store(true, std::memory_order_release);
       // Right away: a sender waits for these before it sends anything, so nothing would wake the
@@ -516,6 +535,10 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
     if (type == UDISP_TYPE_STATS)
       this->stream_stats_sender_ = x != 0;
 #endif
+#ifdef SVP_STREAM_INPUT
+    if (type == UDISP_TYPE_INPUT)
+      this->stream_input_wanted_.store(x != 0, std::memory_order_release);
+#endif
     // Heartbeats/END (and sound without a speaker) are counted out like any payload.
     if (type != UDISP_TYPE_JPG) {
       this->stream_skip_ = total;
@@ -682,7 +705,73 @@ void SimpleVideoPlayer::stream_send_pending_(int client) {
     xQueueReceive(this->stream_touch_q_, &event, 0);
   }
 #endif
+#ifdef SVP_STREAM_INPUT
+  if (this->stream_input_q_ != nullptr) {
+    StreamInput input;
+    while (xQueuePeek(this->stream_input_q_, &input, 0) == pdTRUE) {
+      if (::send(client, input.data, input.length, MSG_DONTWAIT) != static_cast<int>(input.length))
+        return;
+      xQueueReceive(this->stream_input_q_, &input, 0);
+    }
+  }
+#endif
 }
+
+#ifdef SVP_STREAM_INPUT
+bool SimpleVideoPlayer::stream_on_input(const uint8_t *message, uint8_t length) {
+  if (this->stream_input_q_ == nullptr || !this->stream_input_wanted_.load(std::memory_order_acquire) ||
+      !this->stream_connected_.load(std::memory_order_acquire) ||
+      !this->stream_awake_.load(std::memory_order_acquire) || this->stream_asleep_.load(std::memory_order_acquire) ||
+      !this->stream_direct_())
+    return false;
+  StreamInput input{};
+  input.length = std::min<uint8_t>(length, STREAM_INPUT_MAX);
+  std::memcpy(input.data, message, input.length);
+  if (xQueueSend(this->stream_input_q_, &input, 0) != pdTRUE) {
+    // Full: drop the oldest so the newest (often a release) always goes out.
+    StreamInput discarded;
+    xQueueReceive(this->stream_input_q_, &discarded, 0);
+    xQueueSend(this->stream_input_q_, &input, 0);
+  }
+  this->stream_wake_();
+  return true;
+}
+
+// 'K' action page:2 usage:2 mods pressed -- action: the built-in KeyBindings action, 0xFE one of the
+// configuration's own, 0xFF none.
+bool StreamInputTaker::paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action) {
+  const uint8_t kind = action < 0 ? 0xFF : action < lvgl::KeyBindings::BUILTIN_COUNT ? action : 0xFE;
+  const uint8_t message[8] = {'K',
+                              kind,
+                              static_cast<uint8_t>(page & 0xFF),
+                              static_cast<uint8_t>(page >> 8),
+                              static_cast<uint8_t>(usage & 0xFF),
+                              static_cast<uint8_t>(usage >> 8),
+                              mods,
+                              static_cast<uint8_t>(pressed ? 1 : 0)};
+  return this->parent_->stream_on_input(message, sizeof(message));
+}
+
+// 'X' codepoint:4 -- a typed character.
+bool StreamInputTaker::paused_text(uint32_t codepoint) {
+  const uint8_t message[5] = {'X', static_cast<uint8_t>(codepoint & 0xFF), static_cast<uint8_t>(codepoint >> 8),
+                              static_cast<uint8_t>(codepoint >> 16), static_cast<uint8_t>(codepoint >> 24)};
+  return this->parent_->stream_on_input(message, sizeof(message));
+}
+
+// 'P' dx:2 dy:2 wheel buttons -- the mouse's motion (signed), as the display shows it upright.
+bool StreamInputTaker::paused_pointer(int16_t dx, int16_t dy, int16_t wheel, uint8_t buttons) {
+  const auto step = static_cast<int8_t>(std::clamp<int16_t>(wheel, -127, 127));
+  const uint8_t message[7] = {'P',
+                              static_cast<uint8_t>(static_cast<uint16_t>(dx) & 0xFF),
+                              static_cast<uint8_t>(static_cast<uint16_t>(dx) >> 8),
+                              static_cast<uint8_t>(static_cast<uint16_t>(dy) & 0xFF),
+                              static_cast<uint8_t>(static_cast<uint16_t>(dy) >> 8),
+                              static_cast<uint8_t>(step),
+                              buttons};
+  return this->parent_->stream_on_input(message, sizeof(message));
+}
+#endif
 
 #ifdef SVP_STREAM_STATS
 uint32_t SimpleVideoPlayer::stream_stats_due_ms_() const {

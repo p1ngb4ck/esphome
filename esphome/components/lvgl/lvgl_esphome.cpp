@@ -1000,7 +1000,7 @@ void LVHIDKeypadListener::push_(uint32_t code, uint8_t mods, EventKind kind) {
   if (this->parent_->is_paused()) {
     if (kind == KEY_RELEASE)
       this->parent_->maybe_wakeup();
-    if (kind == TEXT)
+    if (kind == TEXT && this->parent_->get_paused_input() == nullptr)
       return;
   }
   const uint8_t tail = this->tail_.load(std::memory_order_relaxed);
@@ -1063,10 +1063,18 @@ void LVHIDKeypadListener::read_(lv_indev_data_t *data) {
 }
 
 void LVHIDKeypadListener::run_paused() {
+  LvglComponent::PausedInput *taker = this->parent_->get_paused_input();
   uint8_t head = this->head_.load(std::memory_order_relaxed);
   while (head != this->tail_.load(std::memory_order_acquire)) {
     const Event event = this->queue_[head % QUEUE_SIZE];
     this->head_.store(++head, std::memory_order_release);
+    if (event.kind == TEXT) {
+      if (taker != nullptr)
+        taker->paused_text(event.code);
+      continue;
+    }
+    const uint16_t page = event.code >> 16;
+    const uint16_t usage = event.code & 0xFFFF;
     if (event.kind == KEY_RELEASE) {
       for (Held &held : this->held_) {
         if (held.code == event.code) {
@@ -1074,15 +1082,19 @@ void LVHIDKeypadListener::run_paused() {
           this->pressed_ = false;
         }
       }
+      if (taker != nullptr)
+        taker->paused_key(page, usage, event.mods, false, this->bindings_->resolve(page, usage, event.mods));
       continue;
     }
     if (event.kind != KEY_PRESS)
       continue;
-    const uint16_t page = event.code >> 16;
-    const uint16_t usage = event.code & 0xFFFF;
     if (this->bindings_->take_learned(page, usage, event.mods))
       continue;
-    this->bindings_->fire(this->bindings_->resolve(page, usage, event.mods));
+    const int action = this->bindings_->resolve(page, usage, event.mods);
+    if (taker != nullptr && taker->paused_key(page, usage, event.mods, true, action) &&
+        action < KeyBindings::BUILTIN_COUNT)
+      continue;
+    this->bindings_->fire(action);
   }
 }
 
@@ -1382,6 +1394,9 @@ void LVHIDPointerListener::set_default_cursor() {
 
 void LVHIDPointerListener::move_(int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
   if (this->parent_->is_paused()) {
+    LvglComponent::PausedInput *taker = this->parent_->get_paused_input();
+    if (taker != nullptr && taker->paused_pointer(dx, dy, wheel, buttons))
+      return;
     if (buttons == 0)
       this->parent_->maybe_wakeup();
     return;
