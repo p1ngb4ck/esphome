@@ -869,6 +869,7 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> audio_use_decoder_{false};
   TaskHandle_t audio_task_handle_{nullptr};       // Audio processing task (runs on Core 0)
   void end_session_audio_();
+  void speaker_pause_(bool paused);
   bool session_audio_{false};  // this session started the audio task and the speaker
   volatile bool audio_task_stop_{false};          // Signal to stop audio task
 #endif

@@ -284,8 +284,12 @@ void SimpleVideoPlayer::loop() {
       this->dsi_lvgl_paused_ = true;
       this->paused_ui_ = false;
       PlayerState expected = PlayerState::PAUSED;
-      if (this->state_.compare_exchange_strong(expected, PlayerState::PLAYING, std::memory_order_acq_rel))
+      if (this->state_.compare_exchange_strong(expected, PlayerState::PLAYING, std::memory_order_acq_rel)) {
         ESP_LOGI(TAG, "Resuming playback");
+#ifdef USE_AUDIO
+        this->speaker_pause_(false);
+#endif
+      }
     }
     const bool lvgl_off = this->lvgl_component_ == nullptr || this->dsi_lvgl_paused_;
 #else
@@ -620,6 +624,9 @@ void SimpleVideoPlayer::pause() {
   PlayerState expected = PlayerState::PLAYING;
   if (this->state_.compare_exchange_strong(expected, PlayerState::PAUSED, std::memory_order_acq_rel)) {
     ESP_LOGI(TAG, "Pausing playback");
+#ifdef USE_AUDIO
+    this->speaker_pause_(true);
+#endif
     this->on_paused_callbacks_.call();
   }
 }
@@ -638,6 +645,9 @@ void SimpleVideoPlayer::resume() {
   PlayerState expected = PlayerState::PAUSED;
   if (this->state_.compare_exchange_strong(expected, PlayerState::PLAYING, std::memory_order_acq_rel)) {
     ESP_LOGI(TAG, "Resuming playback");
+#ifdef USE_AUDIO
+    this->speaker_pause_(false);
+#endif
   }
 }
 
@@ -2689,6 +2699,13 @@ void SimpleVideoPlayer::audio_processing_loop_() {
   vTaskDelete(nullptr);
 }
 
+// While paused the speaker keeps what it holds: the mixer does not drain a paused source, so it
+// neither plays on nor times out and frees its buffers.
+void SimpleVideoPlayer::speaker_pause_(bool paused) {
+  if (this->session_audio_ && this->speaker_ != nullptr)
+    this->speaker_->set_pause_state(paused);
+}
+
 void SimpleVideoPlayer::wait_speaker_running_() {
   // Playback task, right after speaker_->start() before the first frame or after a seek (not the
   // per-frame path).
@@ -2709,8 +2726,10 @@ void SimpleVideoPlayer::end_session_audio_() {
   // audio_decoder_ and the rings are permanent (setup()): init_audio_decoder_() starts them anew.
   const bool had_audio = this->session_audio_ || this->audio_task_handle_ != nullptr;
   this->stop_audio_task_();
-  if (had_audio && this->speaker_ != nullptr)
+  if (had_audio && this->speaker_ != nullptr) {
+    this->speaker_->set_pause_state(false);  // a session stopped while paused
     this->speaker_->stop();
+  }
   this->audio_enabled_ = false;
   this->session_audio_ = false;
   if (had_audio)
