@@ -547,7 +547,12 @@ class SimpleVideoPlayer : public Component
   void refresh_images();
   /// After the canvas widget was resized: a buffer of its new size, the picture fitted again.
   void set_fullscreen(bool fullscreen);
+  /// Before the canvas widget is resized: the picture fitted into width x height first; once it is
+  /// decoded the canvas takes that size together with it (picture callbacks; is_fullscreen_shown()).
+  void set_fullscreen(bool fullscreen, int32_t width, int32_t height);
   bool is_fullscreen() const { return this->fullscreen_; }
+  /// Whether the canvas has the size of full screen yet (set_fullscreen() with a size).
+  bool is_fullscreen_shown() const { return this->pic_shown_fullscreen_; }
   size_t get_thumbnail_count() const { return this->images_.size(); }
   /// RGB565 pixels of a loaded thumbnail (stride: width * 2 rounded as LVGL does), else nullptr.
   const uint8_t *get_thumbnail_data(size_t index, int &width, int &height);
@@ -1234,6 +1239,8 @@ class SimpleVideoPlayer : public Component
   lv_draw_buf_t *pic_lvgl_buf_{nullptr};  // the canvas' own buffer, shown while no page is; none: external_buffer
   bool pic_restore_{false};               // the pages went to a video: the picture decoded again after it
   int8_t pic_fullscreen_pending_{-1};     // set_fullscreen() while a picture is decoded
+  int32_t pic_pending_w_{0}, pic_pending_h_{0};  // its size; 0: the widget's
+  bool pic_shown_fullscreen_{false};      // the canvas has the full screen size
 
   uint32_t slideshow_interval_ms_{5000};
   SlideshowMode slideshow_mode_{SlideshowMode::STOPPED};
@@ -1312,6 +1319,7 @@ class SimpleVideoPlayer : public Component
   PicPage *free_page_();
   void show_page_(PicPage *page);
   void update_picture_size_();
+  void apply_picture_size_();
   static void picture_task_entry_(void *arg);
   void decode_job_(PictureJob &job);
   void render_current_();

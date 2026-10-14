@@ -166,6 +166,11 @@ void SimpleVideoPlayer::pictures_loop_() {
     }
     return;
   }
+  if (this->pic_shown_fullscreen_ != this->fullscreen_ && this->pic_wanted_ < 0) {
+    // The picture of the new size did not come (not read or not decoded): the size on its own.
+    this->apply_picture_size_();
+    this->picture_callbacks_.call();
+  }
   if (this->pic_list_pending_) {
     if (now - this->pic_list_retry_ms_ >= LIST_RETRY_MS)
       this->list_directory_();
@@ -1014,7 +1019,11 @@ void SimpleVideoPlayer::picture_decoded_() {
   if (this->pic_fullscreen_pending_ >= 0) {
     const bool fullscreen = this->pic_fullscreen_pending_ != 0;
     this->pic_fullscreen_pending_ = -1;
-    this->set_fullscreen(fullscreen);
+    if (this->pic_pending_w_ > 0 && this->pic_pending_h_ > 0) {
+      this->set_fullscreen(fullscreen, this->pic_pending_w_, this->pic_pending_h_);
+    } else {
+      this->set_fullscreen(fullscreen);
+    }
   }
 }
 
@@ -1036,8 +1045,19 @@ void SimpleVideoPlayer::update_picture_size_() {
   this->pic_stride_ = lv_draw_buf_width_to_stride(w, LV_COLOR_FORMAT_RGB565);
 }
 
+// Main loop: the canvas takes the size pictures are decoded for (set_fullscreen() with a size).
+void SimpleVideoPlayer::apply_picture_size_() {
+  if (lv_obj_get_style_width(this->pic_canvas_, LV_PART_MAIN) != this->pic_w_ ||
+      lv_obj_get_style_height(this->pic_canvas_, LV_PART_MAIN) != this->pic_h_)
+    lv_obj_set_size(this->pic_canvas_, this->pic_w_, this->pic_h_);
+  this->pic_shown_fullscreen_ = this->fullscreen_;
+}
+
 // Main loop: the canvas shows a decoded page.
 void SimpleVideoPlayer::show_page_(PicPage *page) {
+  // A page of a new size goes in together with that size: no step between.
+  if (this->pic_shown_fullscreen_ != this->fullscreen_ && page->w == this->pic_w_ && page->h == this->pic_h_)
+    this->apply_picture_size_();
   lv_canvas_set_draw_buf(this->pic_canvas_, &page->buf);
   this->pic_shown_ = page;
   this->pic_preload_tries_ = 0;  // the neighbours again: one page may have gone to this one
@@ -1088,11 +1108,42 @@ void SimpleVideoPlayer::set_fullscreen(bool fullscreen) {
     this->pic_fullscreen_pending_ = fullscreen ? 1 : 0;  // for the size being decoded
     return;
   }
+  this->pic_pending_w_ = 0;
+  this->pic_pending_h_ = 0;
   if (this->fullscreen_ == fullscreen)
     return;
   this->fullscreen_ = fullscreen;
+  this->pic_shown_fullscreen_ = fullscreen;
   this->update_picture_size_();
   // Into a page of the new size; the old one shows until then.
+  this->render_current_();
+}
+
+void SimpleVideoPlayer::set_fullscreen(bool fullscreen, int32_t width, int32_t height) {
+  if (this->pic_canvas_ == nullptr || !this->pic_ready_ || width <= 0 || height <= 0)
+    return;
+  if (this->pic_read_.decoding && !this->pic_read_.thumbnail) {
+    this->pic_fullscreen_pending_ = fullscreen ? 1 : 0;  // for the size being decoded
+    this->pic_pending_w_ = width;
+    this->pic_pending_h_ = height;
+    return;
+  }
+  this->pic_pending_w_ = 0;
+  this->pic_pending_h_ = 0;
+  if (this->fullscreen_ == fullscreen && this->pic_shown_fullscreen_ == fullscreen && this->pic_w_ == width &&
+      this->pic_h_ == height)
+    return;
+  this->fullscreen_ = fullscreen;
+  this->pic_w_ = width;
+  this->pic_h_ = height;
+  this->pic_stride_ = lv_draw_buf_width_to_stride(width, LV_COLOR_FORMAT_RGB565);
+  if (this->current_image_ < 0 || this->pictures_held_()) {
+    // Nothing to fit first.
+    this->apply_picture_size_();
+    this->picture_callbacks_.call();
+    return;
+  }
+  // The shown picture stays as it is until it is there in the new size (show_page_()).
   this->render_current_();
 }
 
