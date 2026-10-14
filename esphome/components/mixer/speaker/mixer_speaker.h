@@ -88,7 +88,10 @@ class SourceSpeaker final : public speaker::Speaker, public Component {
   void set_parent(MixerSpeaker *parent) { this->parent_ = parent; }
   void set_timeout(uint32_t ms) { this->timeout_ms_ = ms; }
 
-  std::weak_ptr<audio::RingBufferAudioSource> get_audio_source() { return this->audio_source_; }
+  std::weak_ptr<audio::RingBufferAudioSource> get_audio_source() {
+    LockGuard guard(this->ring_buffer_lock_);
+    return this->audio_source_;
+  }
 
  protected:
   friend class MixerSpeaker;
@@ -100,8 +103,9 @@ class SourceSpeaker final : public speaker::Speaker, public Component {
 
   std::shared_ptr<audio::RingBufferAudioSource> audio_source_;
   std::weak_ptr<ring_buffer::RingBuffer> ring_buffer_;
-  // play() reads ring_buffer_ on the writer's task while start_() replaces it on the main loop.
-  Mutex ring_buffer_lock_;
+  // ring_buffer_ and audio_source_ are replaced on the main loop (start_(), enter_stopping_state_())
+  // while play() (the writer's task), the mixer task and has_buffered_data() read them.
+  mutable Mutex ring_buffer_lock_;
 
   uint32_t buffer_duration_ms_;
   uint32_t last_seen_data_ms_{0};

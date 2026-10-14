@@ -276,6 +276,7 @@ esp_err_t SourceSpeaker::start_() {
     if (source == nullptr) {
       return ESP_ERR_NO_MEM;
     }
+    LockGuard guard(this->ring_buffer_lock_);
     this->audio_source_ = std::move(source);
   }
 
@@ -287,7 +288,12 @@ void SourceSpeaker::stop() { this->send_command_(SOURCE_SPEAKER_COMMAND_STOP); }
 void SourceSpeaker::finish() { this->send_command_(SOURCE_SPEAKER_COMMAND_FINISH); }
 
 bool SourceSpeaker::has_buffered_data() const {
-  return ((this->audio_source_ != nullptr) && this->audio_source_->has_buffered_data());
+  std::shared_ptr<audio::RingBufferAudioSource> source;
+  {
+    LockGuard guard(this->ring_buffer_lock_);
+    source = this->audio_source_;
+  }
+  return source != nullptr && source->has_buffered_data();
 }
 
 void SourceSpeaker::set_mute_state(bool mute_state) {
@@ -331,7 +337,11 @@ void SourceSpeaker::apply_ducking(uint8_t decibel_reduction, uint32_t duration) 
 void SourceSpeaker::enter_stopping_state_() {
   this->state_ = speaker::STATE_STOPPING;
   this->stopping_start_ms_ = millis();
-  this->audio_source_.reset();
+  std::shared_ptr<audio::RingBufferAudioSource> source;
+  {
+    LockGuard guard(this->ring_buffer_lock_);
+    source = std::move(this->audio_source_);
+  }
 }
 
 void MixerSpeaker::dump_config() {
