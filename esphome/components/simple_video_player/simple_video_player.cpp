@@ -1820,11 +1820,8 @@ void SimpleVideoPlayer::handle_seek_() {
 #ifdef USE_AUDIO
   if (audio) {
     if (ok) {
-      // The speaker drops what it still holds from before the jump, then starts again as at the
-      // start of playback, with the sound audio_lead_frames_ ahead of the picture.
-      this->speaker_->stop();
-      for (uint32_t waited = 0; !this->speaker_->is_stopped() && waited < 500; waited++)
-        vTaskDelay(pdMS_TO_TICKS(1));
+      // The speaker keeps running; the sound from the new place goes on audio_lead_frames_ ahead
+      // of the picture, as at the start of playback.
       for (uint32_t waited = 0; this->audio_cursor_frames_.load(std::memory_order_acquire) <
                                     this->reader_frames_.load(std::memory_order_acquire) + this->audio_lead_frames_ &&
                                 waited < 1000;
@@ -1833,8 +1830,6 @@ void SimpleVideoPlayer::handle_seek_() {
           storage::global_storage_worker->update();
         vTaskDelay(pdMS_TO_TICKS(1));
       }
-      this->speaker_->start();
-      this->wait_speaker_running_();
     }
     this->audio_hold_.store(false, std::memory_order_release);
   }
