@@ -272,6 +272,9 @@ void SimpleVideoPlayer::stream_net_loop_() {
       this->stream_last_touch_valid_ = false;
 #endif
       this->stream_connected_.store(true, std::memory_order_release);
+      // Right away: a sender waits for these before it sends anything, so nothing would wake the
+      // wait below before its silence timeout.
+      this->stream_send_pending_(client);
 
       uint32_t last_recv = millis();
       uint32_t last_stream = last_recv;
