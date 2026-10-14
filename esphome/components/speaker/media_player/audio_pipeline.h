@@ -103,10 +103,6 @@ class AudioPipeline final {
   /// @return ESP_OK if successful or an appropriate error if not
   esp_err_t start_tasks_();
 
-  /// @brief Frees the tasks of the file that ended and stops or finishes the speaker.
-  /// @return true once done (or nothing to do), false while a task is still running on the other core
-  bool release_tasks_();
-
   std::string base_name_;
   UBaseType_t priority_;
 
@@ -114,7 +110,6 @@ class AudioPipeline final {
 
   bool hard_stop_{false};
   bool is_playing_{false};
-  bool release_pending_{false};
   bool is_finishing_{false};
   bool pause_state_{false};
   bool task_stack_in_psram_;
