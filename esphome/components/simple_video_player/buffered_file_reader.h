@@ -59,9 +59,12 @@ class BufferedFileReader {
   void push(const uint8_t *data, size_t len);
   /// Network task: the sender is gone; read() reports the end once the ring is drained.
   void end_stream();
-
-  /// Playback reads from here on (counted in the fill stats); before, LOAD-time probes.
-  void set_streaming(bool streaming) { this->streaming_ = streaming; }
+  /// Network task: room() is called once a read frees space in the ring after want_room().
+  void set_room_callback(void (*room)(void *), void *arg) {
+    this->room_cb_ = room;
+    this->room_arg_ = arg;
+  }
+  void want_room() { this->room_wanted_.store(true); }
 
   /// `size` bytes from the ring, waiting for the fill chain as needed. Returns bytes read (fewer only
   /// at the end of the file; 0 = EOF, -1 = error or stopped).
@@ -82,17 +85,6 @@ class BufferedFileReader {
   /// tasks ask for (open, seek, tell, close, the next fill) are made from here.
   void service();
 
-  /// Fill-path counters for the end-of-playback stats (plain counters, reset per open()).
-  struct FillStats {
-    uint32_t underruns{0};      // streaming reads that found the ring short of the request
-    size_t min_avail{0};        // lowest ring fill seen by a streaming read
-    bool min_set{false};
-    uint32_t chunks{0};         // read_chunk completions delivered into the ring
-    uint64_t chunk_us{0};       // sum of submit -> delivered time
-    uint32_t chunk_us_max{0};
-    uint64_t bytes_filled{0};
-  };
-  const FillStats &fill_stats() const { return this->stats_; }
 
  protected:
   // --- the one-shot stream calls (begin_read/seek/tell/end_read): made by service(), waited for --
@@ -146,7 +138,6 @@ class BufferedFileReader {
   bool open_{false};
   bool network_{false};                       // open_stream(): filled by push(), not the storage worker
   SemaphoreHandle_t stream_lock_{nullptr};    // push()/end_stream() vs close() of a network source
-  bool streaming_{false};  // playback reads (fill stats)
   uint64_t current_position_{0};
 
   TaskHandle_t waiting_task_{nullptr};
@@ -190,12 +181,13 @@ class BufferedFileReader {
   };
   LookaheadRing ring_;
   std::atomic<bool> fill_in_flight_{false};
+  void (*room_cb_)(void *){nullptr};
+  void *room_arg_{nullptr};
+  std::atomic<bool> room_wanted_{false};
   std::atomic<bool> draining_{false};   // set during close()/seek(): no new fill may start
   size_t fill_got_{0};                  // bytes the in-flight read_chunk reports
   std::atomic<bool> eof_{false};
   std::atomic<bool> fill_err_{false};
-  uint32_t fill_submit_us_{0};
-  FillStats stats_{};
 };
 
 }  // namespace simple_video_player

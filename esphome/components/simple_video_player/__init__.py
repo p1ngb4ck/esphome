@@ -8,6 +8,7 @@ from esphome.components.esp32 import (
     add_idf_sdkconfig_option,
     only_on_variant,
     request_http_client,
+    require_vfs_select,
 )
 from esphome.components.esp32.const import VARIANT_ESP32P4
 from esphome.components.storage import request_storage_worker
@@ -862,6 +863,8 @@ async def to_code(config):
         cg.add(var.set_stream_port(config[CONF_STREAM_PORT]))
         cg.add(var.init_stream_fullscreen(config[CONF_STREAM_OUTPUT] == STREAM_OUTPUT_FULLSCREEN))
         cg.add_define("SVP_STREAM")
+        # The network task waits on its socket and an eventfd together.
+        require_vfs_select()
         if CONF_TOUCHSCREEN_ID in config:
             ts = await cg.get_variable(config[CONF_TOUCHSCREEN_ID])
             cg.add(var.set_stream_touchscreen(ts))

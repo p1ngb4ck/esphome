@@ -29,6 +29,8 @@
 #endif
 
 #include <lwip/sockets.h>
+#include <unistd.h>
+#include "esp_vfs_eventfd.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -99,6 +101,21 @@ bool SimpleVideoPlayer::setup_stream_() {
     ESP_LOGE(TAG, "Failed to create stream queues");
     return false;
   }
+  {
+    const esp_vfs_eventfd_config_t eventfd_config = ESP_VFS_EVENTD_CONFIG_DEFAULT();
+    const esp_err_t err = esp_vfs_eventfd_register(&eventfd_config);  // once per firmware
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+      ESP_LOGE(TAG, "eventfd: %s", esp_err_to_name(err));
+      return false;
+    }
+    this->stream_wake_fd_ = eventfd(0, 0);
+    if (this->stream_wake_fd_ < 0) {
+      ESP_LOGE(TAG, "No eventfd for the network task");
+      return false;
+    }
+  }
+  if (this->file_reader_)
+    this->file_reader_->set_room_callback(stream_wake_cb_, this);
   this->stream_recv_buf_ = this->pool_.alloc(STREAM_RECV_BYTES);
   if (this->stream_recv_buf_ == nullptr) {
     ESP_LOGE(TAG, "No room in the PSRAM pool for the receive buffer");
@@ -146,16 +163,25 @@ bool SimpleVideoPlayer::setup_stream_() {
   return true;
 }
 
+void SimpleVideoPlayer::stream_wake_() {
+  if (this->stream_wake_fd_ < 0)
+    return;
+  const uint64_t one = 1;
+  ::write(this->stream_wake_fd_, &one, sizeof(one));
+}
+
 void SimpleVideoPlayer::stream_set_awake_(bool awake) {
   if (this->output_lock_ == nullptr)
     return;
   this->stream_awake_.store(awake, std::memory_order_release);
   this->stream_status_pending_.store(true, std::memory_order_release);
+  this->stream_wake_();
 }
 
 void SimpleVideoPlayer::stream_sleep(bool asleep) {
   this->stream_asleep_.store(asleep, std::memory_order_release);
   this->stream_status_pending_.store(true, std::memory_order_release);
+  this->stream_wake_();
 }
 
 void SimpleVideoPlayer::set_stream_fullscreen(bool fullscreen) {
@@ -165,6 +191,7 @@ void SimpleVideoPlayer::set_stream_fullscreen(bool fullscreen) {
   ESP_LOGI(TAG, "Streams are made for the %s", fullscreen ? "display" : "canvas");
   // A connected sender gets the new picture ('V') and restarts its stream for it.
   this->stream_depth_pending_.store(true, std::memory_order_release);
+  this->stream_wake_();
   if (this->stream_draw_task_ != nullptr)
     xTaskNotifyGive(this->stream_draw_task_);
 #else
@@ -226,12 +253,6 @@ void SimpleVideoPlayer::stream_net_loop_() {
         xQueueReset(this->stream_touch_q_);
       this->stream_last_touch_valid_ = false;
 #endif
-      this->stream_stats_since_ms_ = millis();
-      this->stream_drawn_ = 0;
-      this->stream_draw_us_ = 0;
-      this->stream_draw_us_max_ = 0;
-      this->stream_dropped_no_buffer_ = 0;
-      this->stream_dropped_decode_ = 0;
       this->stream_connected_.store(true, std::memory_order_release);
 
       uint32_t last_recv = millis();
@@ -240,6 +261,33 @@ void SimpleVideoPlayer::stream_net_loop_() {
       bool kind_known = false;
       bool sink_seen = false;
       bool sender_done = false;  // the sender's AVI is complete: the connection stays until it has played
+      // Blocks until the sender sends (socket), the player wakes the task (stream_wake_()) or timeout_ms
+      // pass. 1: the socket is readable, 0: not, -1: error.
+      auto wait = [&](bool socket, uint32_t timeout_ms) -> int {
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(this->stream_wake_fd_, &readable);
+        if (socket)
+          FD_SET(client, &readable);
+        struct timeval tv = {.tv_sec = static_cast<time_t>(timeout_ms / 1000),
+                             .tv_usec = static_cast<suseconds_t>((timeout_ms % 1000) * 1000)};
+        const int ready = ::select(std::max(client, this->stream_wake_fd_) + 1, &readable, nullptr, nullptr, &tv);
+        if (ready < 0)
+          return -1;
+        if (ready > 0 && FD_ISSET(this->stream_wake_fd_, &readable)) {
+          uint64_t count;
+          ::read(this->stream_wake_fd_, &count, sizeof(count));
+        }
+        return socket && ready > 0 && FD_ISSET(client, &readable) ? 1 : 0;
+      };
+      // Until the next thing due without the sender: its silence timeout, the end of a Wi-Fi hold.
+      auto next_due_ms = [&]() -> uint32_t {
+        const uint32_t now = millis();
+        uint32_t due = STREAM_RECV_TIMEOUT_MS - std::min<uint32_t>(now - last_recv, STREAM_RECV_TIMEOUT_MS);
+        if (wifi_held)
+          due = std::min<uint32_t>(due, ROAM_QUIET_MS - std::min<uint32_t>(now - last_stream, ROAM_QUIET_MS));
+        return due + 1;
+      };
       while (true) {
         BufferedFileReader *sink = nullptr;
         if (this->stream_avi_.load(std::memory_order_relaxed)) {
@@ -257,21 +305,26 @@ void SimpleVideoPlayer::stream_net_loop_() {
             break;
           }
           if (sender_done) {
-            vTaskDelay(pdMS_TO_TICKS(20));
+            // Woken when the session ends or something is to be sent.
+            this->stream_send_pending_(client);
+            wait(false, STREAM_RECV_TIMEOUT_MS);
             continue;
           }
           if (sink == nullptr || sink->stream_room() < STREAM_RECV_BYTES) {
+            // The ring is full: woken once the player has read from it (or the session ends).
             this->stream_send_pending_(client);
-            vTaskDelay(pdMS_TO_TICKS(5));
+            if (sink != nullptr) {
+              sink->want_room();
+              if (sink->stream_room() < STREAM_RECV_BYTES)
+                wait(false, STREAM_RECV_TIMEOUT_MS);
+            } else {
+              wait(false, STREAM_RECV_TIMEOUT_MS);
+            }
             last_recv = millis();
             continue;
           }
         }
-        fd_set readable;
-        FD_ZERO(&readable);
-        FD_SET(client, &readable);
-        struct timeval slice = {.tv_sec = 0, .tv_usec = 5000};
-        const int ready = ::select(client + 1, &readable, nullptr, nullptr, &slice);
+        const int ready = wait(true, next_due_ms());
         this->stream_send_pending_(client);
         if (wifi_held && millis() - last_stream > ROAM_QUIET_MS)
           hold_wifi_for_stream(wifi_held, false);
@@ -301,8 +354,8 @@ void SimpleVideoPlayer::stream_net_loop_() {
             if (this->state_.load(std::memory_order_acquire) == PlayerState::PLAYING ||
                 this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED)
               break;
-            for (uint32_t waited = 0; this->session_busy_() && waited < SESSION_END_WAIT_MS; waited += 10)
-              vTaskDelay(pdMS_TO_TICKS(10));
+            for (const uint32_t start = millis(); this->session_busy_() && millis() - start < SESSION_END_WAIT_MS;)
+              wait(false, SESSION_END_WAIT_MS);
             if (xSemaphoreTake(this->session_lock_, pdMS_TO_TICKS(SESSION_END_WAIT_MS)) != pdTRUE)
               break;
             const PlayerState st = this->state_.load(std::memory_order_acquire);
@@ -353,18 +406,6 @@ void SimpleVideoPlayer::stream_net_loop_() {
           sink->end_stream();
       }
       hold_wifi_for_stream(wifi_held, false);
-      // The stream is over; only logged when no file plays either.
-      const uint32_t dropped = this->stream_dropped_no_buffer_ + this->stream_dropped_decode_;
-      if ((this->stream_drawn_ > 0 || dropped > 0) &&
-          this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED) {
-        const float secs = (millis() - this->stream_stats_since_ms_) / 1000.0f;
-        ESP_LOGI(TAG,
-                 "stream stats: %" PRIu32 " frames drawn in %.1f s (%.1f fps), draw avg %" PRIu32 " / max %" PRIu32
-                 " us, %" PRIu32 " dropped (%" PRIu32 " no buffer, %" PRIu32 " decode)",
-                 this->stream_drawn_, secs, secs > 0 ? this->stream_drawn_ / secs : 0.0f,
-                 this->stream_drawn_ ? static_cast<uint32_t>(this->stream_draw_us_ / this->stream_drawn_) : 0u,
-                 this->stream_draw_us_max_, dropped, this->stream_dropped_no_buffer_, this->stream_dropped_decode_);
-      }
       if (this->stream_current_ != nullptr) {
         xQueueSend(this->stream_empty_q_, &this->stream_current_, 0);
         this->stream_current_ = nullptr;
@@ -477,7 +518,6 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
     // rectangle is counted out so the next header is found.
     StreamFrame *frame = nullptr;
     if (xQueueReceive(this->stream_empty_q_, &frame, pdMS_TO_TICKS(STREAM_FRAME_WAIT_MS)) != pdTRUE) {
-      this->stream_dropped_no_buffer_++;
       this->stream_skip_ = total;
       continue;
     }
@@ -652,7 +692,6 @@ void SimpleVideoPlayer::stream_draw_loop_() {
           jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame->data, frame->received, target,
                                static_cast<uint32_t>(target_len), &out_size) == ESP_OK &&
           out_size > 0) {
-        const uint32_t start = micros();
 #ifdef SVP_DSI_OUTPUT
         if (frame->direct) {
           // Decoded rows are padded to 16; x_pad skips the padding at the end of each row.
@@ -665,13 +704,6 @@ void SimpleVideoPlayer::stream_draw_loop_() {
         if (!frame->direct)
           this->stream_copy_to_canvas_(frame->x, frame->y, frame->w, frame->h);
 #endif
-        const uint32_t took = micros() - start;
-        this->stream_draw_us_ += took;
-        if (took > this->stream_draw_us_max_)
-          this->stream_draw_us_max_ = took;
-        this->stream_drawn_++;
-      } else {
-        this->stream_dropped_decode_++;
       }
       xSemaphoreGive(this->output_lock_);
     }
@@ -865,6 +897,7 @@ void SimpleVideoPlayer::stream_on_touch(const touchscreen::TouchPoints_t &points
     xQueueReceive(this->stream_touch_q_, &discarded, 0);
     xQueueSend(this->stream_touch_q_, &event, 0);
   }
+  this->stream_wake_();
 }
 #endif
 

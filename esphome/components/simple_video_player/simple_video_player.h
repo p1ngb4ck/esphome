@@ -62,6 +62,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_task_wdt.h"
+#include "esp_timer.h"
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 #include "esp_heap_caps.h"
@@ -680,6 +681,11 @@ class SimpleVideoPlayer : public Component
   void stream_send_pending_(int client);
   /// Tell the sender whether the panel shows its picture (false while a file plays).
   void stream_set_awake_(bool awake);
+  /// The network task blocks in select() on its socket and on stream_wake_fd_ (an eventfd): whatever
+  /// it has to act on wakes it here.
+  void stream_wake_();
+  static void stream_wake_cb_(void *arg) { static_cast<SimpleVideoPlayer *>(arg)->stream_wake_(); }
+  int stream_wake_fd_{-1};
 #ifdef SVP_CHANNEL_LIST
   enum : uint8_t { CHANNEL_CMD_REFRESH, CHANNEL_CMD_PLAY, CHANNEL_CMD_STOP };
   struct ChannelCmd {
@@ -1358,14 +1364,6 @@ class SimpleVideoPlayer : public Component
   bool stream_dirty_{false};
   int32_t stream_dirty_x1_{0}, stream_dirty_y1_{0}, stream_dirty_x2_{0}, stream_dirty_y2_{0};
 #endif
-  // Stream statistics (Portall's): plain counters while a sender is connected, each written by one
-  // task only, logged once by the network task after the sender has gone.
-  uint32_t stream_stats_since_ms_{0};
-  uint32_t stream_drawn_{0};
-  uint64_t stream_draw_us_{0};
-  uint32_t stream_draw_us_max_{0};
-  uint32_t stream_dropped_no_buffer_{0};
-  uint32_t stream_dropped_decode_{0};
 #ifdef SVP_STREAM_TOUCH
   static constexpr uint8_t STREAM_TOUCH_MAX = 5;
   struct StreamTouch {
@@ -1501,6 +1499,9 @@ class SimpleVideoPlayer : public Component
   };
   static constexpr TickType_t WAIT_GUARD = pdMS_TO_TICKS(1000);
   Waiter playback_wait_;
+  // One-shot at a frame's presentation time: wakes the playback task blocked until then.
+  esp_timer_handle_t pace_timer_{nullptr};
+  static void pace_timer_cb_(void *arg) { static_cast<SimpleVideoPlayer *>(arg)->playback_wait_.wake(); }
   bool playback_wdt_on_{false};  // playback task: on the task watchdog
   /// Playback task: blocks until done() holds (see Waiter).
   template<typename F> void playback_wait_for_(F done) {
@@ -1536,26 +1537,12 @@ class SimpleVideoPlayer : public Component
   }
 
   // Frame pacing -- wall clock is the master timeline. Each frame's target instant is
-  // playback_start_time_us_ + paused_accum_us_ + index * frame_duration_us_. The task spins on a
-  // wall-clock comparison until that instant, then presents; it never drops and never sleeps.
+  // playback_start_time_us_ + paused_accum_us_ + index * frame_duration_us_. The task blocks until
+  // that instant (pace_timer_), then presents; it never drops a frame.
   // Audio free-runs on the speaker clock on its own Core 0 task -- no explicit A/V re-sync.
   int64_t playback_start_time_us_{0};  // esp_timer_get_time() at frame 0
   int64_t paused_accum_us_{0};         // total wall time spent PAUSED, excluded from media_us
   float frame_duration_us_{0};         // duration of one frame in microseconds (1000000/fps)
-
-  // Playback-task analysis counters, summarised once after the loop (no logging on the pacing
-  // path; only cheap micros()/adds per frame, so no runtime regression). Reset per play().
-  uint32_t decode_fail_count_{0};
-  uint32_t late_frame_count_{0};   // frames whose achieved present interval blew the frame budget
-  int64_t last_present_us_{0};     // previous paced-release timestamp, to measure the interval
-  uint64_t decode_us_sum_{0};      // time in decode_frame_ (JPEG decode)
-  uint32_t decode_us_max_{0};
-  uint64_t present_us_sum_{0};     // time in the DSI present (draw_pixels_at) -- DSI path only
-  uint32_t present_us_max_{0};
-  uint32_t bad_payload_count_{0};  // frame payloads without JPEG SOI/EOI (fetch-path corruption)
-  static constexpr uint32_t SOLID_FRAME_LOG_MAX = 8;
-  uint32_t solid_frame_count_{0};                      // decoded frames whose 4x4 sample grid is one colour
-  uint32_t solid_frame_idx_[SOLID_FRAME_LOG_MAX]{};    // frame indices of the first of them
 
   // Automation callbacks
   CallbackManager<void()> on_started_callbacks_;

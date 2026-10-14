@@ -698,6 +698,13 @@ bool SimpleVideoPlayer::create_tasks_() {
     return false;
   this->playback_wait_.task = this->task_handle_;
   this->reader_wait_.task = this->reader_task_handle_;
+  esp_timer_create_args_t pace{};
+  pace.callback = pace_timer_cb_;
+  pace.arg = this;
+  pace.dispatch_method = ESP_TIMER_TASK;
+  pace.name = "svp_pace";
+  if (esp_timer_create(&pace, &this->pace_timer_) != ESP_OK)
+    return false;
 #ifdef USE_AUDIO
   if (this->speaker_ != nullptr) {
     if (!create_psram_task(audio_task_entry_, "svp_audio", 4096, this, 1, &this->audio_task_handle_, 0))
@@ -713,6 +720,9 @@ void SimpleVideoPlayer::note_state_() {
   this->playback_wait_.wake();
   this->reader_wait_.wake();
   this->audio_wait_.wake();
+#ifdef SVP_STREAM
+  this->stream_wake_();
+#endif
 }
 
 void SimpleVideoPlayer::return_slot_(FrameSlot *slot) {
@@ -729,6 +739,9 @@ void SimpleVideoPlayer::playback_task_entry_(void *param) {
     player->playback_loop_();
     // Also after an early return. The last thing of a session: from here a new one may start.
     player->playback_busy_.store(false, std::memory_order_release);
+#ifdef SVP_STREAM
+    player->stream_wake_();
+#endif
   }
 }
 
@@ -741,6 +754,9 @@ void SimpleVideoPlayer::reader_task_entry_(void *param) {
     player->reader_loop_();
     player->reader_busy_.store(false, std::memory_order_release);
     player->playback_wait_.wake();
+#ifdef SVP_STREAM
+    player->stream_wake_();
+#endif
   }
 }
 
@@ -898,15 +914,6 @@ void SimpleVideoPlayer::playback_loop_() {
 
   // Fresh pacing state for this session.
   this->paused_accum_us_ = 0;
-  this->decode_fail_count_ = 0;
-  this->late_frame_count_ = 0;
-  this->last_present_us_ = 0;
-  this->decode_us_sum_ = 0;
-  this->decode_us_max_ = 0;
-  this->present_us_sum_ = 0;
-  this->present_us_max_ = 0;
-  this->bad_payload_count_ = 0;
-  this->solid_frame_count_ = 0;
   this->video_frame_index_ = 0;
 
   // No canvas widget resize/reposition here: this is a single, fixed-resolution panel, and the
@@ -1000,14 +1007,10 @@ void SimpleVideoPlayer::playback_loop_() {
   // nothing subscribed).
   this->set_playback_wdt_(true);
 
-  // Load is done (headers, dimensions, audio init all read their bytes with the blocking reader).
-  // Precache: block until the read-ahead ring is full so the first frame reads already have their
-  // bytes. Then switch the reader to non-blocking single-drain -- every read from here is a
-  // hot-path frame read.
-  if (this->file_reader_) {
+  // Load is done (headers, dimensions, audio init all read their bytes). The read-ahead ring is
+  // filled before the first frame read.
+  if (this->file_reader_)
     this->file_reader_->prefill_cache();
-    this->file_reader_->set_streaming(true);
-  }
 
   // Reset the slot queues to a clean start: every slot free in empty_queue_, filled_queue_ empty,
   // regardless of how a prior session ended.
@@ -1219,21 +1222,23 @@ void SimpleVideoPlayer::playback_loop_() {
     }
 #endif
 
-    // Sync to the wall clock by COMPARING it, never sleeping on it. Bare spin -- one storage
-    // update() per frame (top of the loop) is enough (each fetched chunk is pre-decode compressed
-    // video), and the per-frame esp_task_wdt_reset() below covers the <=1-frame spin.
-    while (target_present_time_us - esp_timer_get_time() > 0) {
+    // Blocked until the frame's presentation time (pace_timer_ wakes the task then). A pause, a seek
+    // or a stop wakes it earlier: the frame goes back to the front of the queue, nothing is dropped.
+    const int64_t early_us = target_present_time_us - esp_timer_get_time();
+    if (early_us > 0) {
+      esp_timer_start_once(this->pace_timer_, static_cast<uint64_t>(early_us));
+      this->playback_wait_for_([&]() {
+        return esp_timer_get_time() >= target_present_time_us ||
+               this->state_.load(std::memory_order_acquire) != PlayerState::PLAYING ||
+               this->seek_pending_.load(std::memory_order_acquire);
+      });
+      esp_timer_stop(this->pace_timer_);
+      if (esp_timer_get_time() < target_present_time_us) {
+        xQueueSendToFront(this->filled_queue_, &slot, 0);
+        this->video_frame_index_--;
+        continue;
+      }
     }
-
-    // Late-frame accounting (plain counter, summarised after the loop; no logging here). The
-    // achieved interval between paced releases: when decode kept up, the spin above aligned it to
-    // ~frame_dur, so a longer interval means the previous frame overran the budget. >10% over
-    // filters out sub-ms wall-clock jitter.
-    const int64_t present_now = esp_timer_get_time();
-    if (this->last_present_us_ != 0 && (present_now - this->last_present_us_) > frame_dur + frame_dur / 10) {
-      this->late_frame_count_++;
-    }
-    this->last_present_us_ = present_now;
 
     if (repeat) {
       this->return_slot_(slot);
@@ -1244,74 +1249,20 @@ void SimpleVideoPlayer::playback_loop_() {
     // decode_frame_() consumes slot->data (compressed) into the decode target. Once it returns, the
     // compressed bytes are no longer needed -- the async PPA rotate reads the decoded buffer, not
     // slot->data -- so the slot is returned to the reader right after.
-    {
-      const uint8_t *d = slot->data;
-      bool ok = payload >= 4 && d[0] == 0xFF && d[1] == 0xD8;
-      if (ok) {
-        ok = false;
-        for (int i = payload - 2; i >= 0 && i >= payload - 16; i--) {
-          if (d[i] == 0xFF && d[i + 1] == 0xD9) {
-            ok = true;
-            break;
-          }
-        }
-      }
-      if (!ok)
-        this->bad_payload_count_++;
-    }
-    const uint32_t dec_start = micros();
     const bool decoded = this->decode_frame_(slot->data, static_cast<size_t>(payload));
-    if (decoded) {
-      const uint32_t dec_us = micros() - dec_start;
-      this->decode_us_sum_ += dec_us;
-      if (dec_us > this->decode_us_max_)
-        this->decode_us_max_ = dec_us;
-    } else {
-      // No logging on this pacing path (AGENTS.md) -- plain counter, summarised after the loop.
-      this->decode_fail_count_++;
-    }
     // decode_frame_() wrote the frame into the back buffer and published it; loop() points the canvas at it.
 
 #ifdef SVP_DSI_OUTPUT
     if (decoded && direct) {
       // Portall's plain mode: the frame was decoded into our own buffer in the display's depth; the
       // display copies it in. Panel dims are multiples of 16 (init_dsi_output_), so no x_pad.
-      {
-        // 4x4 sample grid; all 16 identical -> the decoder produced a single-colour frame.
-        const uint8_t bpp = this->dsi_fb_bpp_;
-        const size_t stride = static_cast<size_t>(this->dsi_out_w_) * bpp;
-        const uint8_t *first = nullptr;
-        bool solid = true;
-        for (uint32_t gy = 0; gy < 4 && solid; gy++) {
-          const size_t y = (2 * gy + 1) * this->dsi_out_h_ / 8;
-          for (uint32_t gx = 0; gx < 4; gx++) {
-            const uint8_t *px = this->decode_target_ + y * stride + ((2 * gx + 1) * this->dsi_out_w_ / 8) * bpp;
-            if (first == nullptr) {
-              first = px;
-            } else if (std::memcmp(px, first, bpp) != 0) {
-              solid = false;
-              break;
-            }
-          }
-        }
-        if (solid) {
-          if (this->solid_frame_count_ < SOLID_FRAME_LOG_MAX)
-            this->solid_frame_idx_[this->solid_frame_count_] = frame_index;
-          this->solid_frame_count_++;
-        }
-      }
 #ifdef SVP_CONTROLS
       this->composite_controls_();
 #endif
-      const uint32_t present_start = micros();
       const display::ColorBitness bitness =
           this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
       this->dsi_->draw_pixels_at(0, 0, this->dsi_out_w_, this->dsi_out_h_, this->decode_target_,
                                  display::COLOR_ORDER_RGB, bitness, false, 0, 0, 0);
-      const uint32_t present_us = micros() - present_start;
-      this->present_us_sum_ += present_us;
-      if (present_us > this->present_us_max_)
-        this->present_us_max_ = present_us;
     }
 #endif
 
@@ -1336,42 +1287,6 @@ void SimpleVideoPlayer::playback_loop_() {
     const uint32_t start = millis();
     this->playback_wait_for_(
         [&]() { return !this->reader_busy_.load(std::memory_order_acquire) || millis() - start >= 2000; });
-  }
-
-  // One-line playback analysis summary -- safe here (the loop has exited, not the hot path). All
-  // figures came from plain per-frame counters/micros() on the pacing path, never logging there.
-  const uint32_t stat_frames = this->video_frame_index_;
-  if (stat_frames > 0) {
-    const float late_pct = 100.0f * this->late_frame_count_ / stat_frames;
-    ESP_LOGI(TAG,
-             "playback stats: %" PRIu32 " frames, %" PRIu32 " late (%.1f%%), decode avg %" PRIu32 " / max %" PRIu32
-             " us, present avg %" PRIu32 " / max %" PRIu32 " us, %" PRIu32 " decode failures, %" PRIu32 " bad payloads (no SOI/EOI)",
-             stat_frames, this->late_frame_count_, late_pct,
-             static_cast<uint32_t>(this->decode_us_sum_ / stat_frames), this->decode_us_max_,
-             static_cast<uint32_t>(this->present_us_sum_ / stat_frames), this->present_us_max_,
-             this->decode_fail_count_, this->bad_payload_count_);
-#ifdef SVP_DSI_OUTPUT
-    if (direct) {
-      char idx[SOLID_FRAME_LOG_MAX * 11 + 1] = "";
-      size_t pos = 0;
-      const uint32_t shown = std::min<uint32_t>(this->solid_frame_count_, SOLID_FRAME_LOG_MAX);
-      for (uint32_t i = 0; i < shown && pos < sizeof(idx); i++)
-        pos += snprintf(idx + pos, sizeof(idx) - pos, " %" PRIu32, this->solid_frame_idx_[i]);
-      ESP_LOGI(TAG, "decoded single-colour frames: %" PRIu32 "%s%s", this->solid_frame_count_, shown ? ", first at:" : "",
-               idx);
-    }
-#endif
-  }
-  if (this->file_reader_ != nullptr && stat_frames > 0) {
-    const auto &fs = this->file_reader_->fill_stats();
-    const float play_us = static_cast<float>(stat_frames) * this->frame_duration_us_;
-    ESP_LOGI(TAG,
-             "read stats: %" PRIu32 " underruns, min ring %u KB, %" PRIu32 " chunks, chunk avg %" PRIu32
-             " / max %" PRIu32 " us, fill %.2f MB/s, video needs %.2f MB/s",
-             fs.underruns, static_cast<unsigned>(fs.min_avail / 1024), fs.chunks,
-             fs.chunks ? static_cast<uint32_t>(fs.chunk_us / fs.chunks) : 0u, fs.chunk_us_max,
-             fs.chunk_us ? static_cast<float>(fs.bytes_filled) / static_cast<float>(fs.chunk_us) : 0.0f,
-             play_us > 0 ? static_cast<float>(this->file_reader_->tell()) / play_us : 0.0f);
   }
 
   // Release any in-flight BufferedFileReader wait before close_file_() tears the reader down.
@@ -1783,6 +1698,7 @@ void SimpleVideoPlayer::close_file_() {
 #ifdef SVP_STREAM
   // The network task stops pushing (and drops the connection) once this is gone.
   this->stream_sink_.store(nullptr, std::memory_order_release);
+  this->stream_wake_();
 #endif
   // Close file reader -- NOT reset()/destroyed: kept alive so its PSRAM read-ahead buffers are
   // reused by the next open_file_() instead of being freed and re-malloc'd every play() call.
@@ -1889,7 +1805,6 @@ void SimpleVideoPlayer::handle_seek_() {
 #endif
   if (ok) {
     this->playback_start_time_us_ = 0;  // anchored again on the next frame, like the first one
-    this->last_present_us_ = 0;
     this->position_frame_.store(target, std::memory_order_relaxed);
   } else {
     ESP_LOGW(TAG, "Seek failed");
@@ -1902,11 +1817,9 @@ bool SimpleVideoPlayer::reader_seek_(uint32_t frame) {
   BufferedFileReader *reader = this->file_reader_.get();
   // Index and seek need blocking reads; the ring then restarts empty and is filled before frames
   // are read again, as at the start of playback.
-  reader->set_streaming(false);
   const bool ok = this->avi_parser_->load_index(this->cache_buffer_, CACHE_BUFFER_SIZE) &&
                   this->avi_parser_->seek_to_frame(frame);
   reader->prefill_cache();
-  reader->set_streaming(true);
   if (!ok)
     return false;
 #ifdef USE_AUDIO
@@ -1921,10 +1834,8 @@ bool SimpleVideoPlayer::reader_rewind_() {
   if (!this->file_reader_ || !this->file_reader_->is_open())
     return false;
   BufferedFileReader *reader = this->file_reader_.get();
-  reader->set_streaming(false);
   const bool ok = this->video_format_ == VideoFormat::AVI_MJPEG ? this->avi_parser_->rewind() : reader->seek(0);
   reader->prefill_cache();
-  reader->set_streaming(true);
   return ok;
 }
 
@@ -2662,17 +2573,17 @@ void SimpleVideoPlayer::audio_task_entry_(void *param) {
     player->audio_processing_loop_();
     player->audio_busy_.store(false, std::memory_order_release);
     player->playback_wait_.wake();
+#ifdef SVP_STREAM
+    player->stream_wake_();
+#endif
   }
 }
 
 void SimpleVideoPlayer::audio_processing_loop_() {
   ESP_LOGI(TAG, "Audio processing task started on core %d", xPortGetCoreID());
 
-  // Core 0, prio 1. Never sleeps while playing (only while paused). When there is nothing to
-  // push (ring empty, or speaker DMA full) it simply re-checks. The FreeRTOS tick still lets the
-  // storage worker and system tasks preempt it; the speaker's own I2S task drains its DMA in
-  // parallel. This decouples audio entirely from the Core 1 video decode/pace task -- a multi-ms
-  // jpeg_decoder_process() over there no longer stalls the speaker feed.
+  // Core 0, prio 1, apart from the Core 1 decode task: a multi-ms jpeg_decoder_process() there does
+  // not stall the speaker feed. It blocks on the ring and on the speaker, never spins.
   // Parked until the playback task releases it at the first video frame (or stop_audio_task_()).
   this->audio_wait_.wait(
       [this]() { return this->audio_task_stop_ || this->av_started_.load(std::memory_order_acquire); },

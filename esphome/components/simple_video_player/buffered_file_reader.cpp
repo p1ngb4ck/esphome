@@ -76,7 +76,6 @@ void BufferedFileReader::fill_now_() {
   const size_t at = this->ring_.at(this->ring_.head.load(std::memory_order_relaxed));
   const size_t want = std::min(FILL_CHUNK, this->ring_.size - at);
   this->fill_got_ = 0;
-  this->fill_submit_us_ = micros();
   storage::StorageError submit = storage::global_storage_worker->read_chunk(
       this->handle_, this->ring_.data + at, want, &this->fill_got_,
       [this](storage::StorageError e) { this->on_fill_done_(e); });
@@ -160,12 +159,6 @@ void BufferedFileReader::on_fill_done_(storage::StorageError err) {
   } else {
     // Read into the ring's free part (read() only frees more), now handed to the reader.
     this->ring_.commit(this->fill_got_);
-    const uint32_t dt = micros() - this->fill_submit_us_;
-    this->stats_.chunks++;
-    this->stats_.chunk_us += dt;
-    if (dt > this->stats_.chunk_us_max)
-      this->stats_.chunk_us_max = dt;
-    this->stats_.bytes_filled += this->fill_got_;
   }
   this->fill_in_flight_.store(false, std::memory_order_release);
   if (this->waiting_task_ != nullptr)
@@ -205,7 +198,6 @@ bool BufferedFileReader::open(const char *path) {
   this->fill_err_.store(false);
   this->fill_in_flight_.store(false);
   this->draining_.store(false);
-  this->stats_ = FillStats{};
   this->kick_fill_();  // start streaming
   return true;
 }
@@ -219,7 +211,6 @@ void BufferedFileReader::close() {
     this->network_ = false;
     this->ring_.reset();
     xSemaphoreGive(this->stream_lock_);
-    this->streaming_ = false;
     this->current_position_ = 0;
     this->waiting_task_ = nullptr;
     return;
@@ -233,7 +224,6 @@ void BufferedFileReader::close() {
 
   this->ring_.reset();
   this->open_ = false;
-  this->streaming_ = false;
   this->current_position_ = 0;
   this->waiting_task_ = nullptr;  // no completion is due any more
 }
@@ -258,7 +248,6 @@ bool BufferedFileReader::open_stream() {
   this->fill_err_.store(false);
   this->fill_in_flight_.store(false);
   this->draining_.store(false);
-  this->stats_ = FillStats{};
   this->open_ = true;
   xSemaphoreGive(this->stream_lock_);
   return true;
@@ -279,8 +268,6 @@ void BufferedFileReader::push(const uint8_t *data, size_t len) {
   xSemaphoreTake(this->stream_lock_, portMAX_DELAY);
   if (this->open_ && this->network_) {
     this->ring_.write(data, std::min(len, this->ring_.free()));
-    this->stats_.chunks++;
-    this->stats_.bytes_filled += len;
   }
   xSemaphoreGive(this->stream_lock_);
 }
@@ -319,16 +306,8 @@ bool BufferedFileReader::prefill_cache() {
 int BufferedFileReader::read(uint8_t *buffer, size_t size) {
   if (!this->open_)
     return -1;
-  if (this->streaming_) {
-    const size_t avail = this->ring_.available();
-    if (!this->stats_.min_set || avail < this->stats_.min_avail) {
-      this->stats_.min_avail = avail;
-      this->stats_.min_set = true;
-    }
-  }
   size_t copied = 0;
   uint32_t waited = 0;
-  bool short_counted = false;
   while (copied < size) {
     const size_t n = this->ring_.read(buffer + copied, size - copied);
     if (n > 0) {
@@ -336,6 +315,8 @@ int BufferedFileReader::read(uint8_t *buffer, size_t size) {
       this->current_position_ += n;
       waited = 0;
       this->kick_fill_();  // made room -- keep the stream fed
+      if (this->network_ && this->room_cb_ != nullptr && this->room_wanted_.exchange(false))
+        this->room_cb_(this->room_arg_);
       continue;
     }
     if (this->fill_err_.load(std::memory_order_acquire))
@@ -344,10 +325,6 @@ int BufferedFileReader::read(uint8_t *buffer, size_t size) {
       break;  // stream ended and ring drained
     if (this->abort_flag_ != nullptr && *this->abort_flag_)
       return copied > 0 ? static_cast<int>(copied) : -1;
-    if (this->streaming_ && !short_counted) {
-      this->stats_.underruns++;
-      short_counted = true;
-    }
     this->kick_fill_();
     this->waiting_task_ = xTaskGetCurrentTaskHandle();
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAIT_SLICE_MS));
