@@ -1791,10 +1791,18 @@ void SimpleVideoPlayer::handle_seek_() {
 #ifdef USE_AUDIO
   const bool audio = this->audio_enabled_ && this->audio_task_handle_ != nullptr;
   if (audio) {
+    // The reader restarts the decoder and the rings: only once the audio task has let go of them.
     this->audio_held_.store(false, std::memory_order_release);
     this->audio_hold_.store(true, std::memory_order_release);
-    for (uint32_t waited = 0; !this->audio_held_.load(std::memory_order_acquire) && waited < 500; waited++)
+    while (!this->audio_held_.load(std::memory_order_acquire) && this->audio_task_handle_ != nullptr) {
+      const PlayerState st = this->state_.load(std::memory_order_acquire);
+      if (st != PlayerState::PLAYING && st != PlayerState::PAUSED) {
+        this->audio_hold_.store(false, std::memory_order_release);
+        return;  // playback ends: the seek is dropped
+      }
+      esp_task_wdt_reset();
       vTaskDelay(pdMS_TO_TICKS(1));
+    }
   }
 #endif
   this->reader_seek_frame_.store(target, std::memory_order_relaxed);
@@ -2671,7 +2679,8 @@ void SimpleVideoPlayer::audio_processing_loop_() {
 
         size_t bytes_remaining = bytes_read;
         const uint8_t *write_ptr = this->audio_temp_buffer_;
-        while (bytes_remaining > 0 && !this->audio_task_stop_) {
+        // A seek drops what is left from before the jump.
+        while (bytes_remaining > 0 && !this->audio_task_stop_ && !this->audio_hold_.load(std::memory_order_acquire)) {
           size_t written = this->speaker_->play(write_ptr, bytes_remaining);
           if (written > 0) {
             bytes_remaining -= written;
