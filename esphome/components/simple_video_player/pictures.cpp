@@ -145,6 +145,7 @@ void SimpleVideoPlayer::pictures_loop_() {
     }
     this->release_picture_buffers_();
     this->pool_reclaim_req_.store(false, std::memory_order_release);
+    this->answer_alloc_();
   }
 
   // While a video plays nothing is read or decoded: the JPEG unit and the storage are its.

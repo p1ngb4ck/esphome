@@ -1,6 +1,8 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/core/application.h"
+#include "esphome/core/hal.h"
 #include "esphome/core/automation.h"
 #include "esphome/core/defines.h"
 #include "esphome/core/helpers.h"
@@ -58,6 +60,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_task_wdt.h"
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 #include "esp_heap_caps.h"
@@ -554,11 +557,16 @@ class SimpleVideoPlayer : public Component
   /// FreeRTOS task entry point (decode/playback task, pinned to Core 1)
   static void playback_task_entry_(void *param);
 
-  /// Starts the session's playback task. Only while no session runs (session_busy_()), under
+  /// Hands the session to the playback task. Only while no session runs (session_busy_()), under
   /// session_lock_: from run_pending_start_() and, for the network stream, the network task.
   void start_playback_(const std::string &video_path);
-  /// A task of the last session still runs (playback, reader, audio): nothing new starts before.
+  /// A task of the last session still works (playback, reader, audio): nothing new starts before.
   bool session_busy_() const;
+  /// setup(): the playback, reader and audio tasks, made once; between sessions they block on their
+  /// notification.
+  bool create_tasks_();
+  /// state_ changed: loop() runs the state callbacks, and whichever task waits on it looks again.
+  void note_state_();
   /// Main loop: what play()/next()/... asked for, once the session before has fully ended. The
   /// main loop never waits for that: the ending session's file closes through the storage worker,
   /// whose completions only the main loop delivers.
@@ -574,8 +582,6 @@ class SimpleVideoPlayer : public Component
   static void reader_task_entry_(void *param);
   void reader_loop_();
 
-  /// Playback task: waits (bounded) for one of its helper tasks to have exited.
-  bool wait_for_task_stop_(TaskHandle_t &handle, uint32_t timeout_ms);
 
   /// Playback task: carries out a seek() -- holds the sound, has the reader jump, restarts the sound.
   void handle_seek_();
@@ -877,7 +883,8 @@ class SimpleVideoPlayer : public Component
   // PCM. In a multi-codec build audio_decoder_ exists regardless, so the object pointer can no
   // longer signal the per-file mode -- this flag does. Set in init_audio_decoder_() per play().
   std::atomic<bool> audio_use_decoder_{false};
-  TaskHandle_t audio_task_handle_{nullptr};       // Audio processing task (runs on Core 0)
+  TaskHandle_t audio_task_handle_{nullptr};       // Core 0, made once in setup()
+  std::atomic<bool> audio_busy_{false};           // a session's sound runs on it
   void end_session_audio_();
   void speaker_pause_(bool paused);
   bool session_audio_{false};  // this session started the audio task and the speaker
@@ -1388,7 +1395,10 @@ class SimpleVideoPlayer : public Component
   FrameSlot frame_slots_[FRAME_SLOT_COUNT]{};
   QueueHandle_t empty_queue_{nullptr};   // slots free for the reader to fill
   QueueHandle_t filled_queue_{nullptr};  // slots filled, waiting for decode
-  TaskHandle_t reader_task_handle_{nullptr};
+  /// The playback task gives a frame slot back to the reader.
+  void return_slot_(FrameSlot *slot);
+  TaskHandle_t reader_task_handle_{nullptr};  // Core 0, made once in setup()
+  std::atomic<bool> reader_busy_{false};      // a session's reading runs on it
   volatile bool reader_task_stop_{false};
   // Absolute presentation index of the last frame read (demux order, monotonic across a loop
   // rewind). Playback-task-local.
@@ -1426,7 +1436,67 @@ class SimpleVideoPlayer : public Component
 
   // FreeRTOS task (decode/playback, Core 1 -- alongside the main loop/LVGL, see play()'s
   // xTaskCreatePinnedToCore comment for why decode specifically needs to share that core)
-  TaskHandle_t task_handle_{nullptr};
+  TaskHandle_t task_handle_{nullptr};       // Core 1, made once in setup()
+  std::atomic<bool> playback_busy_{false};  // a session runs on it
+
+  // A task blocks on its notification until done() holds; whoever changes what it waits for calls
+  // wake() afterwards. waiting gates the wake, so the task is not woken where it waits for something
+  // else. guard only bounds a lost wake; feed: the task is on the task watchdog (resetting it
+  // otherwise logs an error).
+  struct Waiter {
+    TaskHandle_t task{nullptr};
+    std::atomic<bool> waiting{false};
+    void wake() {
+      std::atomic_thread_fence(std::memory_order_seq_cst);
+      if (this->waiting.load(std::memory_order_relaxed) && this->task != nullptr)
+        xTaskNotifyGive(this->task);
+    }
+    template<typename F> void wait(F done, TickType_t guard, bool feed = false) {
+      this->waiting.store(true, std::memory_order_relaxed);
+      std::atomic_thread_fence(std::memory_order_seq_cst);
+      while (!done()) {
+        if (feed)
+          esp_task_wdt_reset();
+        ulTaskNotifyTake(pdTRUE, guard);
+      }
+      this->waiting.store(false, std::memory_order_relaxed);
+    }
+  };
+  static constexpr TickType_t WAIT_GUARD = pdMS_TO_TICKS(1000);
+  Waiter playback_wait_;
+  bool playback_wdt_on_{false};  // playback task: on the task watchdog
+  /// Playback task: blocks until done() holds (see Waiter).
+  template<typename F> void playback_wait_for_(F done) {
+    this->playback_wait_.wait(done, WAIT_GUARD, this->playback_wdt_on_);
+  }
+  void set_playback_wdt_(bool on) {
+    if (on == this->playback_wdt_on_)
+      return;
+    this->playback_wdt_on_ = on;
+    if (on) {
+      esp_task_wdt_add(nullptr);
+    } else {
+      esp_task_wdt_delete(nullptr);
+    }
+  }
+  Waiter reader_wait_;
+  Waiter audio_wait_;
+  // A task waiting in media_alloc_()/output_alloc_() for the main loop to free pool memory.
+  std::atomic<TaskHandle_t> alloc_waiter_{nullptr};
+  /// The requesting task blocks until the main loop has answered (done() true), at most 2 s.
+  template<typename F> void wait_alloc_answer_(F done) {
+    this->alloc_waiter_.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
+    App.wake_loop_threadsafe();
+    const uint32_t start = millis();
+    while (!done() && millis() - start < 2000)
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000));
+    this->alloc_waiter_.store(nullptr, std::memory_order_release);
+  }
+  /// Main loop: a pool request answered.
+  void answer_alloc_() {
+    if (TaskHandle_t task = this->alloc_waiter_.load(std::memory_order_acquire))
+      xTaskNotifyGive(task);
+  }
 
   // Frame pacing -- wall clock is the master timeline. Each frame's target instant is
   // playback_start_time_us_ + paused_accum_us_ + index * frame_duration_us_. The task spins on a

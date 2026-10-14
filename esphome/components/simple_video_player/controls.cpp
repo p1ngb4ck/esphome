@@ -620,12 +620,15 @@ void SimpleVideoPlayer::show_controls() {
   this->ctl_last_input_ms_ = millis();
   this->ctl_shown_.store(true, std::memory_order_release);
   this->ctl_repaint_.store(true, std::memory_order_release);
+  this->playback_wait_.wake();
 }
 
 void SimpleVideoPlayer::hide_controls() {
   this->ctl_dragging_.store(false, std::memory_order_release);
-  if (this->ctl_shown_.exchange(false, std::memory_order_acq_rel))
+  if (this->ctl_shown_.exchange(false, std::memory_order_acq_rel)) {
     this->ctl_repaint_.store(true, std::memory_order_release);
+    this->playback_wait_.wake();
+  }
 }
 
 float SimpleVideoPlayer::controls_fraction_(int32_t x) const {
@@ -659,6 +662,7 @@ void SimpleVideoPlayer::controls_touch(bool pressed, int32_t x, int32_t y) {
       this->ctl_drag_permille_.store(static_cast<uint16_t>(this->controls_fraction_(x) * SEEK_RANGE),
                                      std::memory_order_release);
       this->ctl_repaint_.store(true, std::memory_order_release);
+      this->playback_wait_.wake();
     }
     return;
   }
@@ -670,6 +674,7 @@ void SimpleVideoPlayer::controls_touch(bool pressed, int32_t x, int32_t y) {
     this->seek(fraction * this->get_duration());
     this->ctl_dragging_.store(false, std::memory_order_release);
     this->ctl_repaint_.store(true, std::memory_order_release);
+    this->playback_wait_.wake();
     return;
   }
   if (!shown) {
@@ -689,6 +694,7 @@ void SimpleVideoPlayer::controls_touch(bool pressed, int32_t x, int32_t y) {
     }
   }
   this->ctl_repaint_.store(true, std::memory_order_release);
+  this->playback_wait_.wake();
 }
 
 #else
