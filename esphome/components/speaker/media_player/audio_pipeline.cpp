@@ -216,14 +216,6 @@ AudioPipelineState AudioPipeline::process_state() {
     return AudioPipelineState::PAUSED;
   }
 
-  if (this->is_finishing_) {
-    if (!this->speaker_->is_running()) {
-      this->is_finishing_ = false;
-    } else {
-      return AudioPipelineState::PLAYING;
-    }
-  }
-
   if (!this->read_task_.is_created() && !this->decode_task_.is_created()) {
     // No tasks are running, so the pipeline is stopped.
     xEventGroupClearBits(this->event_group_, EventGroupBits::PIPELINE_COMMAND_STOP);

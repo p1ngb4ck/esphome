@@ -110,7 +110,6 @@ class AudioPipeline final {
 
   bool hard_stop_{false};
   bool is_playing_{false};
-  bool is_finishing_{false};
   bool pause_state_{false};
   bool task_stack_in_psram_;
 
