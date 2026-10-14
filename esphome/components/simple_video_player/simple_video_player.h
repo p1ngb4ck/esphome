@@ -533,6 +533,16 @@ class SimpleVideoPlayer : public Component
   void add_on_error_callback(std::function<void(uint8_t)> &&callback) {
     this->on_error_callbacks_.add(std::move(callback));
   }
+  /// Main loop: get_state() or the current file may have changed.
+  void add_on_state_callback(std::function<void()> &&callback) { this->state_callbacks_.add(std::move(callback)); }
+#ifdef SVP_CHANNEL_LIST
+  /// Main loop: get_channel_names() changed.
+  void add_on_channels_callback(std::function<void()> &&callback) { this->channels_callbacks_.add(std::move(callback)); }
+#endif
+#ifdef SVP_PICTURES
+  /// Main loop: the picture shown, the picture list or the slideshow mode changed.
+  void add_on_picture_callback(std::function<void()> &&callback) { this->picture_callbacks_.add(std::move(callback)); }
+#endif
 
  protected:
   //========================================================================
@@ -1448,6 +1458,14 @@ class SimpleVideoPlayer : public Component
   // Set by the playback task, the automations then run from loop(): -1 none, else the PlaybackError.
   std::atomic<bool> finished_pending_{false};
   std::atomic<int16_t> error_pending_{-1};
+  CallbackManager<void()> state_callbacks_;
+  std::atomic<bool> state_changed_{false};  // set wherever state_ changes, state_callbacks_ run from loop()
+#ifdef SVP_CHANNEL_LIST
+  CallbackManager<void()> channels_callbacks_;
+#endif
+#ifdef SVP_PICTURES
+  CallbackManager<void()> picture_callbacks_;
+#endif
   CallbackManager<void()> status_callbacks_;
 #ifdef SVP_MEDIA_PLAYER
   media_player::MediaPlayer *media_player_{nullptr};

@@ -209,6 +209,8 @@ void SimpleVideoPlayer::loop() {
   const int16_t error = this->error_pending_.exchange(-1, std::memory_order_acq_rel);
   if (error >= 0)
     this->on_error_callbacks_.call(static_cast<uint8_t>(error));
+  if (this->state_changed_.exchange(false, std::memory_order_acq_rel))
+    this->state_callbacks_.call();
   this->run_pending_start_();
 #ifdef SVP_CHANNEL_LIST
   this->channel_loop_();
@@ -290,6 +292,7 @@ void SimpleVideoPlayer::loop() {
       this->paused_ui_ = false;
       PlayerState expected = PlayerState::PAUSED;
       if (this->state_.compare_exchange_strong(expected, PlayerState::PLAYING, std::memory_order_acq_rel)) {
+        this->state_changed_.store(true, std::memory_order_release);
         ESP_LOGI(TAG, "Resuming playback");
 #ifdef USE_AUDIO
         this->speaker_pause_(false);
@@ -588,6 +591,7 @@ void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
   this->audio_lead_us_ = std::min<uint32_t>(this->audio_latency_.value(), this->max_audio_latency_ms_) * 1000;
 #endif
   this->state_.store(PlayerState::PLAYING, std::memory_order_release);
+  this->state_changed_.store(true, std::memory_order_release);
 
   // Create the decode/playback task on Core 1, alongside ESPHome's main loop task (which drives
   // App.loop() -> LvglComponent::loop() -> lv_timer_handler(), i.e. the actual LVGL
@@ -628,6 +632,7 @@ void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
 void SimpleVideoPlayer::pause() {
   PlayerState expected = PlayerState::PLAYING;
   if (this->state_.compare_exchange_strong(expected, PlayerState::PAUSED, std::memory_order_acq_rel)) {
+    this->state_changed_.store(true, std::memory_order_release);
     ESP_LOGI(TAG, "Pausing playback");
 #ifdef USE_AUDIO
     this->speaker_pause_(true);
@@ -649,6 +654,7 @@ void SimpleVideoPlayer::resume() {
 #endif
   PlayerState expected = PlayerState::PAUSED;
   if (this->state_.compare_exchange_strong(expected, PlayerState::PLAYING, std::memory_order_acq_rel)) {
+    this->state_changed_.store(true, std::memory_order_release);
     ESP_LOGI(TAG, "Resuming playback");
 #ifdef USE_AUDIO
     this->speaker_pause_(false);
@@ -664,6 +670,8 @@ void SimpleVideoPlayer::stop() {
 void SimpleVideoPlayer::end_session_() {
   this->advance_req_.store(false, std::memory_order_relaxed);
   PlayerState prev = this->state_.exchange(PlayerState::STOPPED, std::memory_order_acq_rel);
+  if (prev != PlayerState::STOPPED)
+    this->state_changed_.store(true, std::memory_order_release);
   if (prev == PlayerState::PLAYING || prev == PlayerState::PAUSED) {
     ESP_LOGI(TAG, "Stopping playback");
   }
@@ -1342,6 +1350,7 @@ void SimpleVideoPlayer::playback_loop_() {
   while (expected != PlayerState::ERROR &&
          !this->state_.compare_exchange_weak(expected, PlayerState::STOPPED, std::memory_order_acq_rel)) {
   }
+  this->state_changed_.store(true, std::memory_order_release);
 
   esp_task_wdt_delete(nullptr);
   ESP_LOGI(TAG, "Playback task finished");
@@ -2769,6 +2778,7 @@ void SimpleVideoPlayer::set_error_(PlaybackError error) {
   // Publish last_error_ before state_ so any reader that sees ERROR also sees the reason.
   this->last_error_.store(error, std::memory_order_relaxed);
   this->state_.store(PlayerState::ERROR, std::memory_order_release);
+  this->state_changed_.store(true, std::memory_order_release);
   // Mostly the playback task: the automations run from loop(), on the main loop.
   this->error_pending_.store(static_cast<int16_t>(error), std::memory_order_release);
 }

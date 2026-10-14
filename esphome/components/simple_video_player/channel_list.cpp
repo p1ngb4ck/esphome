@@ -76,6 +76,7 @@ void SimpleVideoPlayer::channel_loop_() {
   if (static_cast<size_t>(this->channel_index_ + 1) > this->channel_names_.size())
     this->channel_index_ = -1;
   this->channel_version_++;
+  this->channels_callbacks_.call();
 }
 
 void SimpleVideoPlayer::channel_task_entry_(void *param) { static_cast<SimpleVideoPlayer *>(param)->channel_task_loop_(); }

@@ -291,6 +291,7 @@ void SimpleVideoPlayer::list_directory_() {
   this->current_image_ = -1;
   this->pic_wanted_ = -1;
   ESP_LOGI(TAG, "%u pictures in %s", static_cast<unsigned>(this->images_.size()), this->pic_dir_.c_str());
+  this->picture_callbacks_.call();
 
   int show = -1;
   if (!this->pic_select_.empty()) {
@@ -362,6 +363,7 @@ void SimpleVideoPlayer::start_slideshow() {
   if (this->current_image_ < 0 && this->pic_wanted_ < 0)
     this->show_image(static_cast<size_t>(0));
   this->show_overlay_icon_(true);
+  this->picture_callbacks_.call();
 }
 
 void SimpleVideoPlayer::stop_slideshow() {
@@ -369,9 +371,13 @@ void SimpleVideoPlayer::stop_slideshow() {
   this->slideshow_mode_ = SlideshowMode::STOPPED;
   if (was_playing)
     this->show_overlay_icon_(false);
+  this->picture_callbacks_.call();
 }
 
-void SimpleVideoPlayer::pause_slideshow() { this->slideshow_mode_ = SlideshowMode::PAUSED; }
+void SimpleVideoPlayer::pause_slideshow() {
+  this->slideshow_mode_ = SlideshowMode::PAUSED;
+  this->picture_callbacks_.call();
+}
 
 void SimpleVideoPlayer::toggle_slideshow() {
   if (this->slideshow_mode_ == SlideshowMode::PLAYING) {
@@ -1044,6 +1050,7 @@ void SimpleVideoPlayer::show_page_(PicPage *page) {
     }
   }
   this->finish_picture_();
+  this->picture_callbacks_.call();
 }
 
 // The shown picture once more (overlay gone, canvas resized): decoded again from its file.
