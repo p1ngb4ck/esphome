@@ -63,6 +63,8 @@ class KeyBindings : public Component {
   bool remove(const std::string &key);
   bool clear(const std::string &action);
   void reset();
+  /// The action's own default keys again (taken from other actions they were moved to).
+  bool reset(const std::string &action);
   /// The next key pressed (modifiers held with it) is bound to the action.
   void learn(const std::string &action, uint32_t timeout_ms);
   void cancel_learn();

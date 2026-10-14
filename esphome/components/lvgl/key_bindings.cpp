@@ -285,6 +285,21 @@ void KeyBindings::reset() {
   this->changed_();
 }
 
+bool KeyBindings::reset(const std::string &action) {
+  const int index = this->find_action(action);
+  if (index < 0) {
+    ESP_LOGW(TAG, "Unknown action '%s'", action.c_str());
+    return false;
+  }
+  this->bindings_.erase(std::remove_if(this->bindings_.begin(), this->bindings_.end(),
+                                       [index](const Binding &binding) { return binding.action == index; }),
+                        this->bindings_.end());
+  for (const Key &key : this->actions_[index].defaults)
+    this->bind_(key, static_cast<uint8_t>(index));
+  this->changed_();
+  return true;
+}
+
 void KeyBindings::learn(const std::string &action, uint32_t timeout_ms) {
   const int index = this->find_action(action);
   if (index < 0) {
