@@ -55,8 +55,13 @@ void BufferedFileReader::kick_fill_() {
   if (this->draining_.load(std::memory_order_acquire) || this->eof_.load(std::memory_order_acquire) ||
       this->fill_err_.load(std::memory_order_acquire))
     return;
-  if (this->fill_in_flight_.exchange(true, std::memory_order_acq_rel))
+  if (this->fill_in_flight_.exchange(true))
     return;  // one already in flight
+  // quiesce_fill_() may have begun since the check above: it sees this fill or this sees it.
+  if (this->draining_.load()) {
+    this->fill_in_flight_.store(false, std::memory_order_release);
+    return;
+  }
 
   // Only whole chunks: a request occupies the single in-flight slot for a full worker round trip,
   // so topping up a few bytes after every small read() halved the fill rate.
@@ -104,10 +109,10 @@ void BufferedFileReader::on_fill_done_(storage::StorageError err) {
 
 void BufferedFileReader::quiesce_fill_() {
   // No new fill starts from here until draining_ is cleared again (open() / after a seek).
-  this->draining_.store(true, std::memory_order_release);
+  this->draining_.store(true);
   this->waiting_task_ = xTaskGetCurrentTaskHandle();
   uint32_t waited = 0;
-  while (this->fill_in_flight_.load(std::memory_order_acquire)) {
+  while (this->fill_in_flight_.load()) {
     if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAIT_SLICE_MS)) == 0 && (waited += WAIT_SLICE_MS) >= WAIT_CAP_MS)
       break;
   }
