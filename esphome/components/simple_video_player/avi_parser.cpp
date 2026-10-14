@@ -17,6 +17,7 @@ static const char *const TAG = "avi_parser";
 // AVI FOURCC codes
 static constexpr uint32_t FOURCC_RIFF = 0x46464952;  // 'RIFF'
 static constexpr uint32_t FOURCC_AVI = 0x20495641;   // 'AVI '
+static constexpr uint32_t FOURCC_AVIX = 0x58495641;  // 'AVIX': a further RIFF (OpenDML)
 static constexpr uint32_t FOURCC_LIST = 0x5453494C;  // 'LIST'
 static constexpr uint32_t FOURCC_hdrl = 0x6C726468;  // 'hdrl'
 static constexpr uint32_t FOURCC_avih = 0x68697661;  // 'avih'
@@ -25,6 +26,7 @@ static constexpr uint32_t FOURCC_strh = 0x68727473;  // 'strh'
 static constexpr uint32_t FOURCC_strf = 0x66727473;  // 'strf'
 static constexpr uint32_t FOURCC_movi = 0x69766F6D;  // 'movi'
 static constexpr uint32_t FOURCC_idx1 = 0x31786469;  // 'idx1'
+static constexpr uint32_t FOURCC_indx = 0x78646E69;  // 'indx': OpenDML index of the ix## indexes
 static constexpr uint32_t FOURCC_vids = 0x73646976;  // 'vids'
 static constexpr uint32_t FOURCC_auds = 0x73647561;  // 'auds'
 
@@ -54,6 +56,8 @@ bool AVIParser::open(BufferedFileReader *reader) {
   this->current_frame_ = 0;
   this->release_index_();
   this->index_tried_ = false;
+  this->super_index_pos_ = 0;
+  this->super_index_size_ = 0;
   this->recoveries_ = 0;
   this->damage_logged_ = 0;
 
@@ -63,6 +67,9 @@ bool AVIParser::open(BufferedFileReader *reader) {
     this->close();
     return false;
   }
+
+  this->first_movi_offset_ = this->movi_offset_;
+  this->first_movi_size_ = this->movi_size_;
 
   // Seek to start of movi chunk
   if (!this->reader_->seek(this->movi_offset_)) {
@@ -169,7 +176,21 @@ bool AVIParser::parse_headers_() {
               uint64_t strl_start = this->reader_->tell();
 
               // Parse stream header (strh + strf)
+              const bool had_video = this->has_video_;
               this->parse_stream_header_();
+              // The video stream's OpenDML index follows its strf.
+              const uint64_t strl_end = strl_start + sub_size - 4;
+              while (!had_video && this->has_video_ && this->reader_->tell() + 8 <= strl_end) {
+                uint32_t id, size;
+                if (!this->read_fourcc_(id) || !this->read_uint32_(size))
+                  break;
+                if (id == FOURCC_indx) {
+                  this->super_index_pos_ = this->reader_->tell();
+                  this->super_index_size_ = size;
+                }
+                if (this->reader_->tell() + size > strl_end || !this->skip_bytes_(size + (size & 1)))
+                  break;
+              }
 
               // Always skip to end of strl LIST in case there are additional chunks (strn, indx, etc.)
               // sub_size includes the strl_type we already read, so subtract 4
@@ -463,7 +484,7 @@ bool AVIParser::resync_(uint8_t *hdr, size_t max_frame, bool &have_header) {
     uint32_t lo = 0, hi = this->index_count_;
     while (lo < hi) {
       const uint32_t mid = lo + (hi - lo) / 2;
-      if (this->index_base_ + this->index_[mid] < at) {
+      if (this->entry_pos_(mid) < at) {
         lo = mid + 1;
       } else {
         hi = mid;
@@ -506,7 +527,7 @@ int AVIParser::read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_s
     return ++this->recoveries_ <= MAX_RECOVERIES && this->resync_(hdr, buffer_size, have_header);
   };
 
-  while (this->current_offset_ < this->movi_size_) {
+  while (this->current_offset_ < this->movi_size_ || (!have_header && this->next_movi_())) {
     if (!have_header) {
       // Chunk header is fourcc(4) + size(4). One 8-byte read instead of two 4-byte ring ops.
       const int hn = this->reader_->read(hdr, sizeof(hdr));
@@ -611,7 +632,41 @@ int AVIParser::read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_s
   return 0;
 }
 
+bool AVIParser::next_movi_() {
+  if (this->movi_size_ == UINT64_MAX)
+    return false;
+  // ffmpeg: the movi list ends with its ix##, the first RIFF's then idx1; the next RIFF 'AVIX' starts
+  // with its movi list. A few chunks (JUNK, idx1) are passed over.
+  for (int i = 0; i < 8; i++) {
+    uint32_t id, size;
+    if (!this->read_fourcc_(id) || !this->read_uint32_(size))
+      return false;
+    if (id == FOURCC_RIFF || id == FOURCC_LIST) {
+      uint32_t type;
+      if (size < 4 || !this->read_fourcc_(type))
+        return false;
+      if (id == FOURCC_RIFF) {
+        if (type != FOURCC_AVIX)
+          return false;
+        continue;
+      }
+      if (type == FOURCC_movi) {
+        this->movi_offset_ = this->reader_->tell();
+        this->movi_size_ = size - 4;
+        this->current_offset_ = 0;
+        return this->movi_size_ > 0;
+      }
+      size -= 4;
+    }
+    if (!this->skip_bytes_(size + (size & 1)))
+      return false;
+  }
+  return false;
+}
+
 void AVIParser::release_index_() {
+  this->segments_ = nullptr;
+  this->segment_count_ = 0;
   this->index_ = nullptr;
   this->index_count_ = 0;
   this->index_stride_ = 1;
@@ -620,13 +675,13 @@ void AVIParser::release_index_() {
 bool AVIParser::load_index(uint8_t *scratch, size_t scratch_size) {
   if (this->index_ != nullptr)
     return true;
-  if (this->index_tried_ || !this->is_open() || this->movi_size_ == UINT64_MAX || scratch_size < 16)
+  if (this->index_tried_ || !this->is_open() || this->first_movi_size_ == UINT64_MAX || scratch_size < 16)
     return false;
   this->index_tried_ = true;
   const uint64_t resume = this->reader_->tell();
   if (this->read_index_(scratch, scratch_size)) {
-    ESP_LOGI(TAG, "Index: %" PRIu32 " entries, every %" PRIu32 ". video frame", this->index_count_,
-             this->index_stride_);
+    ESP_LOGI(TAG, "Index: %" PRIu32 " entries, every %" PRIu32 ". video frame, %" PRIu32 " RIFF(s)",
+             this->index_count_, this->index_stride_, this->segment_count_);
     return this->reader_->seek(resume);
   }
   this->release_index_();
@@ -638,9 +693,49 @@ bool AVIParser::load_index(uint8_t *scratch, size_t scratch_size) {
   return false;
 }
 
+void AVIParser::add_index_entry_(uint32_t video_frame, uint32_t offset, uint32_t capacity) {
+  if (video_frame % this->index_stride_ != 0)
+    return;
+  if (this->index_count_ == capacity) {
+    for (uint32_t k = 0; k < capacity / 2; k++)
+      this->index_[k] = this->index_[2 * k];
+    this->index_count_ = capacity / 2;
+    this->index_stride_ *= 2;
+    if (video_frame % this->index_stride_ != 0)
+      return;
+  }
+  this->index_[this->index_count_++] = offset;
+}
+
+uint32_t AVIParser::segment_of_(uint32_t k) const {
+  const uint32_t frame = k * this->index_stride_;
+  uint32_t lo = 0, hi = this->segment_count_;
+  while (hi - lo > 1) {
+    const uint32_t mid = lo + (hi - lo) / 2;
+    if (this->segments_[mid].first_frame <= frame) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
+uint64_t AVIParser::entry_pos_(uint32_t k) const {
+  return this->segments_[this->segment_of_(k)].base + this->index_[k];
+}
+
 bool AVIParser::read_index_(uint8_t *scratch, size_t scratch_size) {
-  // idx1 follows the movi list, possibly after other chunks (JUNK).
-  uint64_t pos = this->movi_offset_ + this->movi_size_;
+  if (this->index_memory_ == nullptr)
+    return false;
+  if (this->super_index_pos_ != 0) {
+    if (this->read_odml_index_(scratch, scratch_size))
+      return true;
+    ESP_LOGW(TAG, "OpenDML index not usable: idx1 only (the first RIFF)");
+    this->release_index_();
+  }
+  // idx1 follows the first movi list, possibly after other chunks (JUNK).
+  uint64_t pos = this->first_movi_offset_ + this->first_movi_size_;
   pos += pos & 1;
   uint32_t idx_size = 0;
   for (int i = 0; i < 4 && idx_size == 0; i++) {
@@ -655,17 +750,26 @@ bool AVIParser::read_index_(uint8_t *scratch, size_t scratch_size) {
     }
   }
   const uint32_t entries = idx_size / 16;
-  if (entries == 0 || this->index_memory_ == nullptr)
+  if (entries == 0 || this->index_max_bytes_ < sizeof(Segment) + 2 * sizeof(uint32_t))
     return false;
-  // When the memory has not the room for every frame, every second (fourth, ...) is kept.
-  const auto capacity = static_cast<uint32_t>(std::min<size_t>(entries, this->index_max_bytes_ / sizeof(uint32_t)));
+  // One segment, the first movi list; the entries after it. When the memory has not the room for
+  // every frame, every second (fourth, ...) is kept.
+  this->segments_ = reinterpret_cast<Segment *>(this->index_memory_);
+  this->segment_count_ = 1;
+  Segment &seg = this->segments_[0];
+  seg.base = this->first_movi_offset_ - 4;
+  seg.movi_size = static_cast<uint32_t>(this->first_movi_size_);
+  seg.first_frame = 0;
+  this->index_ = this->index_memory_ + sizeof(Segment) / sizeof(uint32_t);
+  this->index_count_ = 0;
+  this->index_stride_ = 1;
+  const auto capacity = static_cast<uint32_t>(
+                            std::min<size_t>(entries, (this->index_max_bytes_ - sizeof(Segment)) / sizeof(uint32_t))) &
+                        ~1u;
   if (capacity < 2)
     return false;
-  this->index_ = this->index_memory_;
-  this->index_stride_ = 1;
   const size_t per_read = scratch_size / 16;
   uint32_t left = entries;
-  uint32_t count = 0;
   uint32_t video = 0;
   while (left > 0) {
     const size_t n = std::min<size_t>(left, per_read);
@@ -674,44 +778,108 @@ bool AVIParser::read_index_(uint8_t *scratch, size_t scratch_size) {
     for (size_t i = 0; i < n; i++) {
       const uint8_t *entry = scratch + i * 16;
       const uint32_t id = le32(entry);
-      if (id != FOURCC_00dc && id != FOURCC_00db)
-        continue;
-      if (video++ % this->index_stride_ != 0)
-        continue;
-      if (count == capacity) {
-        for (uint32_t k = 0; k < capacity / 2; k++)
-          this->index_[k] = this->index_[2 * k];
-        count = capacity / 2;
-        this->index_stride_ *= 2;
-        if ((video - 1) % this->index_stride_ != 0)
-          continue;
-      }
-      this->index_[count++] = le32(entry + 8);
+      if (id == FOURCC_00dc || id == FOURCC_00db)
+        this->add_index_entry_(video++, le32(entry + 8), capacity);
     }
     left -= n;
   }
-  if (count == 0)
+  if (this->index_count_ == 0)
     return false;
-  this->index_count_ = count;
   // Offsets count from the 'movi' fourcc (AVI spec, ffmpeg); some writers store file offsets.
-  for (const uint64_t base : {this->movi_offset_ - 4, static_cast<uint64_t>(0)}) {
+  for (const uint64_t base : {seg.base, static_cast<uint64_t>(0)}) {
     uint32_t id;
-    if (base + this->index_[0] >= this->movi_offset_ && this->reader_->seek(base + this->index_[0]) &&
+    if (base + this->index_[0] >= this->first_movi_offset_ && this->reader_->seek(base + this->index_[0]) &&
         this->read_fourcc_(id) && (id == FOURCC_00dc || id == FOURCC_00db)) {
-      this->index_base_ = base;
+      if (base == 0) {
+        for (uint32_t k = 0; k < this->index_count_; k++) {
+          if (this->index_[k] < seg.base)
+            return false;
+          this->index_[k] -= static_cast<uint32_t>(seg.base);
+        }
+      }
       return true;
     }
   }
   return false;
 }
 
+// OpenDML (ffmpeg avienc.c avi_write_ix()): the video stream's indx lists one ix## per RIFF
+// (qwOffset, dwSize, dwDuration). An ix## has qwBaseOffset (its movi list's 'movi' fourcc) and per
+// chunk dwOffset (to the chunk's data, from the base) and dwSize (bit 31: not a key frame).
+bool AVIParser::read_odml_index_(uint8_t *scratch, size_t scratch_size) {
+  uint8_t hdr[32];
+  if (!this->reader_->seek(this->super_index_pos_) || this->reader_->read(hdr, 24) != 24)
+    return false;
+  const uint32_t ixes = le32(hdr + 4);
+  // wLongsPerEntry 4, bIndexType 0 (AVI_INDEX_OF_INDEXES)
+  if ((hdr[0] | hdr[1] << 8) != 4 || hdr[3] != 0 || ixes == 0 || ixes > scratch_size / 16 ||
+      24 + static_cast<uint64_t>(ixes) * 16 > this->super_index_size_ ||
+      this->index_max_bytes_ < ixes * sizeof(Segment) + 2 * sizeof(uint32_t))
+    return false;
+  if (this->reader_->read(scratch, ixes * 16) != static_cast<int>(ixes * 16))
+    return false;
+  // The segment table first, the entries after it. base holds the ix##'s position until it is read.
+  this->segments_ = reinterpret_cast<Segment *>(this->index_memory_);
+  this->segment_count_ = ixes;
+  for (uint32_t i = 0; i < ixes; i++)
+    this->segments_[i].base = le32(scratch + i * 16) | static_cast<uint64_t>(le32(scratch + i * 16 + 4)) << 32;
+  this->index_ = this->index_memory_ + ixes * sizeof(Segment) / sizeof(uint32_t);
+  this->index_count_ = 0;
+  this->index_stride_ = 1;
+  const auto capacity =
+      static_cast<uint32_t>((this->index_max_bytes_ - ixes * sizeof(Segment)) / sizeof(uint32_t)) & ~1u;
+  const size_t per_read = scratch_size / 8;
+  uint32_t video = 0;
+  for (uint32_t i = 0; i < ixes; i++) {
+    Segment &seg = this->segments_[i];
+    const uint64_t ix = seg.base;
+    if (!this->reader_->seek(ix) || this->reader_->read(hdr, 32) != 32)
+      return false;
+    const uint32_t count = le32(hdr + 12);
+    const uint32_t chunk = le32(hdr + 16);
+    // ix##, wLongsPerEntry 2, bIndexType 1 (AVI_INDEX_OF_CHUNKS), the video stream's chunks
+    if (hdr[0] != 'i' || hdr[1] != 'x' || (hdr[8] | hdr[9] << 8) != 2 || hdr[11] != 1 ||
+        (chunk != FOURCC_00dc && chunk != FOURCC_00db) || 24 + static_cast<uint64_t>(count) * 8 > le32(hdr + 4))
+      return false;
+    seg.base = le32(hdr + 20) | static_cast<uint64_t>(le32(hdr + 24)) << 32;
+    seg.first_frame = video;
+    // The movi list's size, in its LIST header right before the base.
+    uint8_t list[8];
+    if (seg.base < 4 || !this->reader_->seek(seg.base - 4) || this->reader_->read(list, 8) != 8 ||
+        le32(list + 4) != FOURCC_movi || le32(list) < 4)
+      return false;
+    seg.movi_size = le32(list) - 4;
+    if (!this->reader_->seek(ix + 32))
+      return false;
+    uint32_t left = count;
+    while (left > 0) {
+      const size_t n = std::min<size_t>(left, per_read);
+      if (this->reader_->read(scratch, n * 8) != static_cast<int>(n * 8))
+        return false;
+      for (size_t k = 0; k < n; k++) {
+        const uint32_t offset = le32(scratch + k * 8);
+        if (offset < 8)
+          return false;
+        this->add_index_entry_(video++, offset - 8, capacity);
+      }
+      left -= n;
+    }
+  }
+  uint32_t id;
+  return this->index_count_ > 0 && this->reader_->seek(this->entry_pos_(0)) && this->read_fourcc_(id) &&
+         (id == FOURCC_00dc || id == FOURCC_00db);
+}
+
 bool AVIParser::seek_to_frame(uint32_t frame_number) {
   if (this->index_ == nullptr || !this->is_open())
     return false;
   const uint32_t entry = std::min(frame_number / this->index_stride_, this->index_count_ - 1);
-  const uint64_t pos = this->index_base_ + this->index_[entry];
-  if (pos < this->movi_offset_ || !this->reader_->seek(pos))
+  const Segment &seg = this->segments_[this->segment_of_(entry)];
+  const uint64_t pos = seg.base + this->index_[entry];
+  if (pos < seg.base + 4 || !this->reader_->seek(pos))
     return false;
+  this->movi_offset_ = seg.base + 4;
+  this->movi_size_ = seg.movi_size;
   this->current_offset_ = pos - this->movi_offset_;
   this->current_frame_ = entry * this->index_stride_;
   return true;
@@ -722,10 +890,12 @@ bool AVIParser::rewind() {
     return false;
   }
 
-  if (!this->reader_->seek(this->movi_offset_)) {
+  if (!this->reader_->seek(this->first_movi_offset_)) {
     return false;
   }
 
+  this->movi_offset_ = this->first_movi_offset_;
+  this->movi_size_ = this->first_movi_size_;
   this->current_offset_ = 0;
   this->current_frame_ = 0;
   return true;

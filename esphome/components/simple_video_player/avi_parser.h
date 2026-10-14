@@ -149,8 +149,9 @@ class AVIParser {
     this->index_max_bytes_ = memory != nullptr ? bytes : 0;
   }
 
-  /// Reads the idx1 index (offsets of the video frames) into the index memory. Reads from the end of the
-  /// file and needs a blocking reader; the read position is restored. Tried once per file.
+  /// Reads the index of the video frames into the index memory: the OpenDML one (indx, every RIFF of a
+  /// file over 1 GB), else idx1 (the first RIFF only). Needs a blocking reader; the read position is
+  /// restored. Tried once per file.
   bool load_index(uint8_t *scratch, size_t scratch_size);
   bool has_index() const { return this->index_ != nullptr; }
 
@@ -220,6 +221,15 @@ class AVIParser {
   uint32_t current_frame_{0};   // Current frame number
 
   bool read_index_(uint8_t *scratch, size_t scratch_size);
+  bool read_odml_index_(uint8_t *scratch, size_t scratch_size);
+  /// Keeps a video frame's chunk offset (from its segment's base) if the stride takes it, halving
+  /// the index when full.
+  void add_index_entry_(uint32_t video_frame, uint32_t offset, uint32_t capacity);
+  /// File position of index entry k's chunk header, and the segment it lies in.
+  uint64_t entry_pos_(uint32_t k) const;
+  uint32_t segment_of_(uint32_t k) const;
+  /// OpenDML: past the end of a movi list, the reader into the next one (in the next RIFF 'AVIX').
+  bool next_movi_();
   void release_index_();
   /// Whether these 8 bytes can be the header of a chunk inside the movi list.
   bool plausible_header_(const uint8_t *hdr, size_t max_frame) const;
@@ -228,13 +238,24 @@ class AVIParser {
   bool resync_(uint8_t *hdr, size_t max_frame, bool &have_header);
   uint32_t *index_memory_{nullptr};
   size_t index_max_bytes_{0};
+  // A movi list of the index: the first RIFF's, and one per RIFF 'AVIX' (OpenDML).
+  struct Segment {
+    uint64_t base;        // position of its 'movi' fourcc: what its entries count from
+    uint32_t movi_size;   // its frame data
+    uint32_t first_frame;
+  };
+  Segment *segments_{nullptr};  // at the start of index_memory_
+  uint32_t segment_count_{0};
   uint32_t *index_{nullptr};  // chunk offset of every index_stride_-th video frame (index_memory_)
   uint32_t index_count_{0};
   uint32_t index_stride_{1};
   uint32_t recoveries_{0};  // in a row, without an intact frame between
   uint32_t damage_logged_{0};
-  uint64_t index_base_{0};  // what the offsets count from
   bool index_tried_{false};
+  uint64_t first_movi_offset_{0};  // the first RIFF's movi list
+  uint64_t first_movi_size_{0};
+  uint64_t super_index_pos_{0};  // the video stream's indx (OpenDML), 0 if none
+  uint32_t super_index_size_{0};
 };
 
 }  // namespace simple_video_player
