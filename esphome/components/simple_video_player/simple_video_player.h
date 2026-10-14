@@ -321,6 +321,8 @@ class SimpleVideoPlayer : public Component
   void set_stream_fullscreen(bool fullscreen);
   void init_stream_fullscreen(bool fullscreen) { this->stream_fullscreen_.store(fullscreen); }
   bool is_stream_fullscreen() const { return this->stream_direct_(); }
+  // A line per second while a sender is connected (stream_statistics): what arrived, what was drawn.
+  void set_stream_statistics(bool enable);
 #ifdef SVP_STREAM_TOUCH
   void set_stream_touchscreen(touchscreen::Touchscreen *ts) { this->stream_touchscreen_ = ts; }
   void stream_on_touch(const touchscreen::TouchPoints_t &points);
@@ -679,6 +681,11 @@ class SimpleVideoPlayer : public Component
   void stream_copy_to_canvas_(const uint16_t x, const uint16_t y, const uint16_t w, const uint16_t h);
 #endif
   void stream_send_pending_(int client);
+#ifdef SVP_STREAM_STATS
+  /// Network task: starts, reports and stops the per-second figures; the ms until the next report.
+  void stream_stats_step_(int client);
+  uint32_t stream_stats_due_ms_() const;
+#endif
   /// Tell the sender whether the panel shows its picture (false while a file plays).
   void stream_set_awake_(bool awake);
   /// The network task blocks in select() on its socket and on stream_wake_fd_ (an eventfd): whatever
@@ -1358,6 +1365,22 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> stream_avi_{false};                    // an AVI connection is up
   std::atomic<bool> stream_played_to_end_{false};          // the network AVI's playback reached its end
   std::atomic<BufferedFileReader *> stream_sink_{nullptr};  // open network source, or none
+#ifdef SVP_STREAM_STATS
+  // Each counted by one task; taken and reset by the network task at every report.
+  struct StreamStats {
+    std::atomic<uint32_t> bytes{0};        // received
+    std::atomic<uint32_t> rects{0};        // JPEG rectangles received whole
+    std::atomic<uint32_t> skipped{0};      // rectangles counted out: no free buffer, or not usable
+    std::atomic<uint32_t> wait_us{0};      // waiting for a free buffer
+    std::atomic<uint32_t> drawn{0};        // rectangles decoded and drawn (draw task)
+    std::atomic<uint32_t> draw_us{0};      // decoding and drawing them
+    std::atomic<uint32_t> sound_bytes{0};  // PCM received
+  } stream_stats_;
+  std::atomic<bool> stream_stats_log_{false};  // set_stream_statistics()
+  bool stream_stats_sender_{false};            // the connected sender asked for 'M' (network task)
+  bool stream_stats_running_{false};           // network task
+  uint32_t stream_stats_ms_{0};                // the last report (network task)
+#endif
 #ifdef SVP_CANVAS_OUTPUT
   // Canvas output: the part of the page the udisp rectangles changed since loop() last told LVGL.
   portMUX_TYPE stream_dirty_lock_ = portMUX_INITIALIZER_UNLOCKED;
@@ -1763,6 +1786,16 @@ template<typename... Ts> class StreamOutputAction : public Action<Ts...> {
   explicit StreamOutputAction(SimpleVideoPlayer *player) : player_(player) {}
   TEMPLATABLE_VALUE(bool, fullscreen)
   void play(const Ts &...x) override { this->player_->set_stream_fullscreen(this->fullscreen_.value(x...)); }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class StreamStatisticsAction : public Action<Ts...> {
+ public:
+  explicit StreamStatisticsAction(SimpleVideoPlayer *player) : player_(player) {}
+  TEMPLATABLE_VALUE(bool, enable)
+  void play(const Ts &...x) override { this->player_->set_stream_statistics(this->enable_.value(x...)); }
 
  protected:
   SimpleVideoPlayer *player_;

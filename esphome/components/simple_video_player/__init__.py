@@ -108,6 +108,7 @@ ChannelStopAction = simple_video_player_ns.class_("ChannelStopAction", automatio
 StreamSleepAction = simple_video_player_ns.class_("StreamSleepAction", automation.Action)
 StreamWakeAction = simple_video_player_ns.class_("StreamWakeAction", automation.Action)
 StreamOutputAction = simple_video_player_ns.class_("StreamOutputAction", automation.Action)
+StreamStatisticsAction = simple_video_player_ns.class_("StreamStatisticsAction", automation.Action)
 SetVolumeAction = simple_video_player_ns.class_("SetVolumeAction", automation.Action)
 SeekAction = simple_video_player_ns.class_("SeekAction", automation.Action)
 NextAction = simple_video_player_ns.class_("NextAction", automation.Action)
@@ -159,6 +160,8 @@ CONF_MEDIA_PLAYER_ID = "media_player_id"
 CONF_TARGET_FPS = "target_fps"
 CONF_STREAM_PORT = "stream_port"
 CONF_STREAM_OUTPUT = "stream_output"
+CONF_STREAM_STATISTICS = "stream_statistics"
+CONF_ENABLE = "enable"
 STREAM_OUTPUT_FULLSCREEN = "fullscreen"
 STREAM_OUTPUT_CANVAS = "canvas"
 CONF_TOUCHSCREEN_ID = "touchscreen_id"
@@ -334,6 +337,8 @@ def _validate_output_target(config):
 def _validate_stream(config):
     if CONF_CHANNEL_LIST in config and CONF_STREAM_PORT not in config:
         raise cv.Invalid(f"'{CONF_CHANNEL_LIST}' plays channels through the stream: it needs '{CONF_STREAM_PORT}'.")
+    if CONF_STREAM_STATISTICS in config and CONF_STREAM_PORT not in config:
+        raise cv.Invalid(f"'{CONF_STREAM_STATISTICS}' is about the stream: it needs '{CONF_STREAM_PORT}'.")
     if CONF_TOUCHSCREEN_ID in config and CONF_STREAM_PORT not in config and CONF_CONTROLS not in config:
         raise cv.Invalid(
             f"'{CONF_TOUCHSCREEN_ID}' is for a stream sender ('{CONF_STREAM_PORT}') or '{CONF_CONTROLS}'."
@@ -496,6 +501,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_STREAM_OUTPUT): cv.one_of(
                 STREAM_OUTPUT_FULLSCREEN, STREAM_OUTPUT_CANVAS, lower=True
             ),
+            # Built in: what a sender's stream brings and costs, a line per second while connected
+            # (true: from boot; stream.statistics switches it). A sender may ask for it too ('M').
+            cv.Optional(CONF_STREAM_STATISTICS): cv.boolean,
             # Touches go back to the stream sender, which replays them into its page.
             cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
             # Channel list from the svp_relay Home Assistant integration, shown in an LVGL dropdown;
@@ -865,6 +873,10 @@ async def to_code(config):
         cg.add_define("SVP_STREAM")
         # The network task waits on its socket and an eventfd together.
         require_vfs_select()
+        if CONF_STREAM_STATISTICS in config:
+            cg.add_define("SVP_STREAM_STATS")
+            if config[CONF_STREAM_STATISTICS]:
+                cg.add(var.set_stream_statistics(True))
         if CONF_TOUCHSCREEN_ID in config:
             ts = await cg.get_variable(config[CONF_TOUCHSCREEN_ID])
             cg.add(var.set_stream_touchscreen(ts))
@@ -1250,6 +1262,25 @@ async def simple_video_player_stream_output_to_code(config, action_id, template_
     paren = await cg.get_variable(config[CONF_ID])
     var = cg.new_Pvariable(action_id, template_arg, paren)
     cg.add(var.set_fullscreen(await cg.templatable(config[CONF_FULLSCREEN], args, bool)))
+    return var
+
+
+# The per-second stream figures in the log, on or off (stream_statistics).
+@automation.register_action(
+    "simple_video_player.stream.statistics",
+    StreamStatisticsAction,
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+            cv.Required(CONF_ENABLE): cv.templatable(cv.boolean),
+        }
+    ),
+    synchronous=True,
+)
+async def simple_video_player_stream_statistics_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    cg.add(var.set_enable(await cg.templatable(config[CONF_ENABLE], args, bool)))
     return var
 
 

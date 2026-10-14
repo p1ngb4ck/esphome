@@ -43,6 +43,10 @@ static const char *const TAG = "simple_video_player.stream";
 
 static constexpr uint8_t UDISP_TYPE_JPG = 3;
 static constexpr uint8_t UDISP_TYPE_PCM = 0x10;
+#ifdef SVP_STREAM_STATS
+static constexpr uint8_t UDISP_TYPE_STATS = 0x20;  // the sender asks for 'M' (x 1) or no more (x 0)
+static constexpr uint32_t STREAM_STATS_MS = 1000;
+#endif
 static constexpr uint32_t STREAM_AUDIO_DEFAULT_RATE = 48000;
 static constexpr size_t UDISP_HEADER_BYTES = 16;
 // Wi-Fi roaming scans and power saving are held off while pictures or sound arrive, and allowed
@@ -178,6 +182,16 @@ void SimpleVideoPlayer::stream_set_awake_(bool awake) {
   this->stream_wake_();
 }
 
+void SimpleVideoPlayer::set_stream_statistics(bool enable) {
+#ifdef SVP_STREAM_STATS
+  this->stream_stats_log_.store(enable, std::memory_order_relaxed);
+  this->stream_wake_();
+#else
+  if (enable)
+    ESP_LOGW(TAG, "Stream statistics are not built in (stream_statistics)");
+#endif
+}
+
 void SimpleVideoPlayer::stream_sleep(bool asleep) {
   this->stream_asleep_.store(asleep, std::memory_order_release);
   this->stream_status_pending_.store(true, std::memory_order_release);
@@ -239,6 +253,10 @@ void SimpleVideoPlayer::stream_net_loop_() {
       this->stream_hdr_len_ = 0;
       this->stream_skip_ = 0;
       this->stream_current_ = nullptr;
+#ifdef SVP_STREAM_STATS
+      this->stream_stats_sender_ = false;
+      this->stream_stats_running_ = false;
+#endif
 #ifdef USE_AUDIO
       this->stream_audio_left_ = 0;
       this->stream_audio_carry_len_ = 0;
@@ -264,6 +282,10 @@ void SimpleVideoPlayer::stream_net_loop_() {
       // Blocks until the sender sends (socket), the player wakes the task (stream_wake_()) or timeout_ms
       // pass. 1: the socket is readable, 0: not, -1: error.
       auto wait = [&](bool socket, uint32_t timeout_ms) -> int {
+#ifdef SVP_STREAM_STATS
+        this->stream_stats_step_(client);
+        timeout_ms = std::min(timeout_ms, this->stream_stats_due_ms_());
+#endif
         fd_set readable;
         FD_ZERO(&readable);
         FD_SET(this->stream_wake_fd_, &readable);
@@ -388,6 +410,9 @@ void SimpleVideoPlayer::stream_net_loop_() {
           break;
         }
         last_recv = millis();
+#ifdef SVP_STREAM_STATS
+        this->stream_stats_.bytes.fetch_add(static_cast<uint32_t>(received), std::memory_order_relaxed);
+#endif
         if (received > HEARTBEAT_BYTES) {
           last_stream = last_recv;
           hold_wifi_for_stream(wifi_held, true);
@@ -430,6 +455,9 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
 #ifdef USE_AUDIO
     if (this->stream_audio_left_ > 0) {
       const size_t take = std::min<size_t>(this->stream_audio_left_, len);
+#ifdef SVP_STREAM_STATS
+      this->stream_stats_.sound_bytes.fetch_add(static_cast<uint32_t>(take), std::memory_order_relaxed);
+#endif
       this->stream_on_audio_(data, take);
       this->stream_audio_left_ -= take;
       data += take;
@@ -446,6 +474,9 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
       data += take;
       len -= take;
       if (frame->received == frame->total) {
+#ifdef SVP_STREAM_STATS
+        this->stream_stats_.rects.fetch_add(1, std::memory_order_relaxed);
+#endif
         xQueueSend(this->stream_filled_q_, &frame, portMAX_DELAY);
         this->stream_current_ = nullptr;
       }
@@ -477,6 +508,10 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
       this->stream_audio_left_ = total;
       continue;
     }
+#endif
+#ifdef SVP_STREAM_STATS
+    if (type == UDISP_TYPE_STATS)
+      this->stream_stats_sender_ = x != 0;
 #endif
     // Heartbeats/END (and sound without a speaker) are counted out like any payload.
     if (type != UDISP_TYPE_JPG) {
@@ -510,6 +545,9 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
                  w, h, x, y, total, static_cast<unsigned>(out_w), static_cast<unsigned>(out_h),
                  static_cast<unsigned>(this->stream_max_frame_bytes_));
       }
+#ifdef SVP_STREAM_STATS
+      this->stream_stats_.skipped.fetch_add(1, std::memory_order_relaxed);
+#endif
       this->stream_skip_ = total;
       continue;
     }
@@ -517,7 +555,17 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
     // No free buffer: not reading the socket for a moment is the flow control; after that the
     // rectangle is counted out so the next header is found.
     StreamFrame *frame = nullptr;
-    if (xQueueReceive(this->stream_empty_q_, &frame, pdMS_TO_TICKS(STREAM_FRAME_WAIT_MS)) != pdTRUE) {
+#ifdef SVP_STREAM_STATS
+    const int64_t wait_start = esp_timer_get_time();
+#endif
+    const bool got = xQueueReceive(this->stream_empty_q_, &frame, pdMS_TO_TICKS(STREAM_FRAME_WAIT_MS)) == pdTRUE;
+#ifdef SVP_STREAM_STATS
+    this->stream_stats_.wait_us.fetch_add(static_cast<uint32_t>(esp_timer_get_time() - wait_start),
+                                          std::memory_order_relaxed);
+    if (!got)
+      this->stream_stats_.skipped.fetch_add(1, std::memory_order_relaxed);
+#endif
+    if (!got) {
       this->stream_skip_ = total;
       continue;
     }
@@ -633,6 +681,59 @@ void SimpleVideoPlayer::stream_send_pending_(int client) {
 #endif
 }
 
+#ifdef SVP_STREAM_STATS
+uint32_t SimpleVideoPlayer::stream_stats_due_ms_() const {
+  if (!this->stream_stats_running_)
+    return UINT32_MAX;
+  const uint32_t elapsed = millis() - this->stream_stats_ms_;
+  return elapsed >= STREAM_STATS_MS ? 1 : STREAM_STATS_MS - elapsed;
+}
+
+void SimpleVideoPlayer::stream_stats_step_(int client) {
+  const bool wanted = this->stream_stats_sender_ || this->stream_stats_log_.load(std::memory_order_relaxed);
+  StreamStats &stats = this->stream_stats_;
+  const uint32_t now = millis();
+  if (wanted != this->stream_stats_running_) {
+    this->stream_stats_running_ = wanted;
+    this->stream_stats_ms_ = now;
+    for (auto *counter : {&stats.bytes, &stats.rects, &stats.skipped, &stats.wait_us, &stats.drawn, &stats.draw_us,
+                          &stats.sound_bytes})
+      counter->store(0, std::memory_order_relaxed);
+    return;
+  }
+  if (!wanted || now - this->stream_stats_ms_ < STREAM_STATS_MS)
+    return;
+  // interval ms, bytes, rectangles, skipped, buffer wait ms, drawn, draw ms, sound bytes
+  const uint32_t values[] = {now - this->stream_stats_ms_,
+                             stats.bytes.exchange(0, std::memory_order_relaxed),
+                             stats.rects.exchange(0, std::memory_order_relaxed),
+                             stats.skipped.exchange(0, std::memory_order_relaxed),
+                             stats.wait_us.exchange(0, std::memory_order_relaxed) / 1000,
+                             stats.drawn.exchange(0, std::memory_order_relaxed),
+                             stats.draw_us.exchange(0, std::memory_order_relaxed) / 1000,
+                             stats.sound_bytes.exchange(0, std::memory_order_relaxed)};
+  this->stream_stats_ms_ = now;
+  if (this->stream_stats_log_.load(std::memory_order_relaxed)) {
+    ESP_LOGI(TAG,
+             "Stream %" PRIu32 " ms: %" PRIu32 " KB, %" PRIu32 " rectangles (%" PRIu32 " skipped), %" PRIu32
+             " ms waiting for a buffer, %" PRIu32 " drawn in %" PRIu32 " ms, %" PRIu32 " KB sound",
+             values[0], values[1] / 1024, values[2], values[3], values[4], values[5], values[6], values[7] / 1024);
+  }
+  if (this->stream_stats_sender_) {
+    // 'M', the count of values, then each as 4 bytes little-endian. One lost to a full socket is lost.
+    constexpr size_t COUNT = sizeof(values) / sizeof(values[0]);
+    uint8_t message[2 + COUNT * 4];
+    message[0] = 'M';
+    message[1] = COUNT;
+    for (size_t i = 0; i < COUNT; i++) {
+      for (size_t b = 0; b < 4; b++)
+        message[2 + i * 4 + b] = static_cast<uint8_t>(values[i] >> (8 * b));
+    }
+    ::send(client, message, sizeof(message), MSG_DONTWAIT);
+  }
+}
+#endif
+
 void SimpleVideoPlayer::stream_draw_task_entry_(void *param) {
   static_cast<SimpleVideoPlayer *>(param)->stream_draw_loop_();
 }
@@ -688,6 +789,9 @@ void SimpleVideoPlayer::stream_draw_loop_() {
       }
 #endif
       uint32_t out_size = 0;
+#ifdef SVP_STREAM_STATS
+      const int64_t draw_start = esp_timer_get_time();
+#endif
       if (target != nullptr &&
           jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame->data, frame->received, target,
                                static_cast<uint32_t>(target_len), &out_size) == ESP_OK &&
@@ -703,6 +807,11 @@ void SimpleVideoPlayer::stream_draw_loop_() {
 #ifdef SVP_CANVAS_OUTPUT
         if (!frame->direct)
           this->stream_copy_to_canvas_(frame->x, frame->y, frame->w, frame->h);
+#endif
+#ifdef SVP_STREAM_STATS
+        this->stream_stats_.draw_us.fetch_add(static_cast<uint32_t>(esp_timer_get_time() - draw_start),
+                                              std::memory_order_relaxed);
+        this->stream_stats_.drawn.fetch_add(1, std::memory_order_relaxed);
 #endif
       }
       xSemaphoreGive(this->output_lock_);
