@@ -11,6 +11,7 @@
 #include "esphome/components/storage/storage.h"
 #include "esphome/components/storage/storage_worker.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -40,6 +41,7 @@ class BufferedFileReader {
     this->ring_.data = data;
     this->ring_.size = size;
     this->ring_.reset();
+    this->fill_chunk_ = std::min(FILL_CHUNK, size / 2);
   }
   bool has_ring() const { return this->ring_.data != nullptr; }
   static constexpr size_t FILL_CHUNK = 256 * 1024;  // per read_chunk, straight into the ring
@@ -180,6 +182,7 @@ class BufferedFileReader {
     void copy_out_(uint32_t pos, uint8_t *dst, size_t len) const;
   };
   LookaheadRing ring_;
+  size_t fill_chunk_{FILL_CHUNK};
   std::atomic<bool> fill_in_flight_{false};
   void (*room_cb_)(void *){nullptr};
   void *room_arg_{nullptr};

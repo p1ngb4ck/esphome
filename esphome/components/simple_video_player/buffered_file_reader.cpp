@@ -67,14 +67,14 @@ void BufferedFileReader::fill_now_() {
   // Only whole chunks: a request occupies the single in-flight slot for a full worker round trip,
   // so topping up a few bytes after every small read() halved the fill rate.
   size_t room = this->ring_.free();
-  if (room < FILL_CHUNK) {
+  if (room < this->fill_chunk_) {
     this->fill_in_flight_.store(false, std::memory_order_release);  // read() re-kicks after draining
     return;
   }
   // Straight into the ring, up to its end: chunks start where the last one ended, so with whole
   // chunks (and a ring of whole chunks) one never wraps.
   const size_t at = this->ring_.at(this->ring_.head.load(std::memory_order_relaxed));
-  const size_t want = std::min(FILL_CHUNK, this->ring_.size - at);
+  const size_t want = std::min(this->fill_chunk_, this->ring_.size - at);
   this->fill_got_ = 0;
   storage::StorageError submit = storage::global_storage_worker->read_chunk(
       this->handle_, this->ring_.data + at, want, &this->fill_got_,
@@ -285,7 +285,7 @@ bool BufferedFileReader::prefill_cache() {
   this->waiting_task_ = xTaskGetCurrentTaskHandle();
   this->kick_fill_();
   uint32_t waited = 0;
-  while (this->ring_.free() > FILL_CHUNK) {
+  while (this->ring_.free() > this->fill_chunk_) {
     if (this->fill_err_.load(std::memory_order_acquire))
       return false;
     if (this->eof_.load(std::memory_order_acquire))

@@ -116,6 +116,10 @@ void SimpleVideoPlayer::pictures_setup_() {
 }
 
 bool SimpleVideoPlayer::pictures_held_() const {
+#ifdef SVP_AUDIO_FILES
+  if (this->audio_session_.load(std::memory_order_acquire))
+    return false;  // music plays on with the pictures
+#endif
   const PlayerState state = this->state_.load(std::memory_order_acquire);
   return state == PlayerState::PLAYING || state == PlayerState::PAUSED;
 }

@@ -405,7 +405,11 @@ void SimpleVideoPlayer::stream_net_loop_() {
           if (std::memcmp(magic, "RIFF", sizeof(magic)) == 0) {
             // An AVI (svp_relay): played like a file from SD. Not while something else plays or is
             // about to; a session that still ends is waited for here (this task may wait, the main
-            // loop may not).
+            // loop may not). A track of the audio queue ends for it.
+#ifdef SVP_AUDIO_FILES
+            if (this->audio_session_.load(std::memory_order_acquire))
+              this->end_session_();
+#endif
             if (this->state_.load(std::memory_order_acquire) == PlayerState::PLAYING ||
                 this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED)
               break;
@@ -875,7 +879,7 @@ void SimpleVideoPlayer::stream_draw_loop_() {
     size_t target_len = 0;
     bool output_ok = false;
     // While a file plays, starts or ends its picture wins: nothing is drawn, nor its outputs taken.
-    const bool file_playing = this->session_busy_() || this->start_pending_.load(std::memory_order_acquire);
+    const bool file_playing = this->picture_session_busy_() || this->start_pending_.load(std::memory_order_acquire);
 #ifdef SVP_DSI_OUTPUT
     const display::ColorBitness bitness =
         this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;

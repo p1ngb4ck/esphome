@@ -302,6 +302,40 @@ class SimpleVideoPlayer : public Component
   /// The speaker is this router: sound is wanted in its selected output's rate and channel count.
   void set_audio_router(audio_router::AudioRouter *router) { this->audio_router_ = router; }
 #endif
+#ifdef SVP_AUDIO_FILES
+  // Audio files (audio_file_speaker_id, a resampler in front of the speaker): a queue of their own,
+  // apart from the video playlist, played in the same sessions as a video (one at a time).
+  void set_audio_file_speaker(speaker::Speaker *speaker) { this->file_speaker_ = speaker; }
+  void audio_queue_add(const std::string &path);
+  void audio_queue_clear();
+  /// Plays track `index` of the queue.
+  void audio_play(size_t index);
+  void audio_next();
+  /// The track again after a few seconds of it, else the one before.
+  void audio_previous();
+  /// Resumes a paused track, plays the current one again after a stop; at the end of the queue (or
+  /// before anything played) the queue starts over, shuffled anew.
+  void audio_play_or_resume();
+  void set_audio_shuffle(bool shuffle);
+  bool get_audio_shuffle() const { return this->audio_shuffle_; }
+  void set_audio_repeat(RepeatMode mode) {
+    this->audio_repeat_ = mode;
+    this->audio_changed_.store(true, std::memory_order_release);
+  }
+  RepeatMode get_audio_repeat() const { return this->audio_repeat_; }
+  size_t audio_queue_size() const { return this->audio_queue_.size(); }
+  /// Counts the changes of the queue's tracks (added, cleared).
+  uint32_t audio_queue_generation() const { return this->audio_queue_gen_; }
+  const PsramString &audio_queue_item(size_t index) const { return this->audio_queue_[index]; }
+  /// The queue's track that plays or played last; -1 for none.
+  int audio_queue_index() const {
+    return this->audio_current_ ? static_cast<int>(this->audio_order_[this->audio_pos_]) : -1;
+  }
+  /// The session plays a track of the queue: get_state() and get_current_file() are its.
+  bool is_audio_session() const { return this->audio_session_.load(std::memory_order_acquire); }
+  /// Main loop: the queue, its track or the state of a track changed.
+  void add_on_audio_callback(std::function<void()> &&callback) { this->audio_callbacks_.add(std::move(callback)); }
+#endif
   // The device's one volume, 0..1: this player's speaker and, with media_player_id, the media player's.
   void set_volume(float volume);
   float get_volume();
@@ -626,6 +660,14 @@ class SimpleVideoPlayer : public Component
   void start_playback_(const std::string &video_path);
   /// A task of the last session still works (playback, reader, audio): nothing new starts before.
   bool session_busy_() const;
+  /// session_busy_() of a session with a picture (a video): an audio file's takes no output.
+  bool picture_session_busy_() const {
+#ifdef SVP_AUDIO_FILES
+    if (this->audio_session_.load(std::memory_order_acquire))
+      return false;
+#endif
+    return this->session_busy_();
+  }
   /// setup(): the playback, reader and audio tasks, made once; between sessions they block on their
   /// notification.
   bool create_tasks_();
@@ -964,6 +1006,38 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> audio_busy_{false};           // a session's sound runs on it
   void end_session_audio_();
   void speaker_pause_(bool paused);
+#ifdef SVP_AUDIO_FILES
+  speaker::Speaker *file_speaker_{nullptr};
+  // Its own reader and ring (setup()), apart from the video's whose memory the pictures may take.
+  std::unique_ptr<BufferedFileReader> audio_file_reader_;
+  static constexpr size_t AUDIO_FILE_RING_SIZE = 128 * 1024;
+  // Main loop only. audio_order_ is the queue's order of play (shuffled or as added), audio_pos_
+  // the place in it of the track that plays or played last.
+  PsramVector<PsramString> audio_queue_;
+  PsramVector<uint16_t> audio_order_;
+  size_t audio_pos_{0};
+  uint32_t audio_queue_gen_{0};
+  bool audio_current_{false};  // audio_pos_ names a track: not before the first and after the last
+  bool audio_shuffle_{false};
+  RepeatMode audio_repeat_{RepeatMode::OFF};
+  uint32_t audio_track_started_ms_{0};
+  std::atomic<bool> audio_session_{false};
+  std::atomic<bool> audio_start_pending_{false};
+  std::atomic<bool> audio_advance_req_{false};  // the track played to its end
+  std::atomic<bool> audio_file_eof_{false};     // the reader has handed on the whole file
+  std::atomic<bool> audio_changed_{false};
+  // The file speaker stays open from one track to the next of the same format; audio task while a
+  // session runs, else the main loop.
+  bool file_speaker_open_{false};
+  audio::AudioStreamInfo file_speaker_info_;
+  CallbackManager<void()> audio_callbacks_;
+  void audio_order_build_(size_t first);
+  void audio_start_(size_t pos);
+  void audio_advance_();
+  void start_audio_session_();
+  void audio_file_feed_();  // reader task
+  void audio_file_loop_();  // audio task
+#endif
   bool session_audio_{false};  // this session started the audio task and the speaker
   volatile bool audio_task_stop_{false};          // Signal to stop audio task
 #endif

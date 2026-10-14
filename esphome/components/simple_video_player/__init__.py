@@ -157,6 +157,7 @@ CONF_CANVAS_ID = "canvas_id"
 CONF_DISPLAY_ID = "display_id"
 CONF_SPEAKER_ID = "speaker_id"
 CONF_MEDIA_PLAYER_ID = "media_player_id"
+CONF_AUDIO_FILE_SPEAKER_ID = "audio_file_speaker_id"
 CONF_TARGET_FPS = "target_fps"
 CONF_STREAM_PORT = "stream_port"
 CONF_STREAM_OUTPUT = "stream_output"
@@ -310,6 +311,12 @@ def _validate_audio_codec_required(config):
             "audio format detail that can't be read from the speaker's own config (sample_rate/"
             "channels/bits_per_sample are; see audio_codec's own comment)"
         )
+    return config
+
+
+def _validate_audio_files(config):
+    if CONF_AUDIO_FILE_SPEAKER_ID in config and CONF_SPEAKER_ID not in config:
+        raise cv.Invalid(f"{CONF_AUDIO_FILE_SPEAKER_ID} needs speaker_id: the sound buffers come with it")
     return config
 
 
@@ -571,6 +578,9 @@ CONFIG_SCHEMA = cv.All(
             ),
             **_picture_schema(),
             cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
+            # Audio files (a queue of their own) play through this speaker: a resampler in front of
+            # speaker_id, which takes any file's rate.
+            cv.Optional(CONF_AUDIO_FILE_SPEAKER_ID): cv.use_id(speaker.Speaker),
             # The panel's audio player (mark it `internal: true`): svp_relay plays sound through it with
             # the svp_* actions and shows panel and sound as one media player in Home Assistant.
             cv.Optional(CONF_MEDIA_PLAYER_ID): cv.All(
@@ -634,6 +644,7 @@ CONFIG_SCHEMA = cv.All(
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_audio_codec_required,
+    _validate_audio_files,
     _validate_output_target,
     _validate_stream,
     _validate_controls,
@@ -974,6 +985,10 @@ async def to_code(config):
         # lock: source channel count equals the speaker's, no runtime conversion.
         channel_mode = config[CONF_RESOLVED_SPEAKER_CHANNEL]
         cg.add(var.set_speaker_channel_mode(SPEAKER_CHANNEL_MODES[channel_mode]))
+
+        if CONF_AUDIO_FILE_SPEAKER_ID in config:
+            cg.add(var.set_audio_file_speaker(await cg.get_variable(config[CONF_AUDIO_FILE_SPEAKER_ID])))
+            cg.add_define("SVP_AUDIO_FILES")
 
     if CONF_MEDIA_PLAYER_ID in config:
         cg.add(var.set_media_player(await cg.get_variable(config[CONF_MEDIA_PLAYER_ID])))

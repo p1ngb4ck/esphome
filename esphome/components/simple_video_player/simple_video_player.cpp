@@ -1,6 +1,7 @@
 #include "simple_video_player.h"
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
+#include "esphome/core/helpers.h"
 #include "esphome/components/storage/storage_worker.h"
 #include <algorithm>
 #include <cctype>
@@ -140,7 +141,7 @@ void SimpleVideoPlayer::setup() {
       return;
     }
 
-#if defined(SVP_AUDIO_SUPPORT_MP3) || defined(SVP_AUDIO_SUPPORT_FLAC)
+#if defined(SVP_AUDIO_SUPPORT_MP3) || defined(SVP_AUDIO_SUPPORT_FLAC) || defined(SVP_AUDIO_FILES)
     // audio_decoder_ itself: allocated ONCE here too, same as everything else above. One
     // AudioDecoder instance handles whichever supported compressed codec a given file uses -- its
     // start(AudioFileType) selects the per-file codec path (see init_audio_decoder_), so this is
@@ -153,6 +154,18 @@ void SimpleVideoPlayer::setup() {
     // fresh output_transfer_buffer_ allocation every single play().
     this->audio_decoder_ =
         std::make_unique<audio::AudioDecoder>(AUDIO_DECODER_INPUT_BUFFER_SIZE, AUDIO_DECODER_OUTPUT_BUFFER_SIZE);
+#endif
+#ifdef SVP_AUDIO_FILES
+    if (this->file_speaker_ != nullptr) {
+      uint8_t *ring = this->pool_.alloc(AUDIO_FILE_RING_SIZE);
+      if (ring == nullptr) {
+        ESP_LOGE(TAG, "No room in the PSRAM pool for the audio file ring");
+        this->mark_failed();
+        return;
+      }
+      this->audio_file_reader_ = std::make_unique<BufferedFileReader>();
+      this->audio_file_reader_->set_ring(ring, AUDIO_FILE_RING_SIZE);
+    }
 #endif
 
     ESP_LOGI(TAG, "Audio playback enabled with speaker (fixed format: %" PRIu32 " Hz, %u ch, %u-bit)",
@@ -209,14 +222,28 @@ void SimpleVideoPlayer::setup() {
 void SimpleVideoPlayer::loop() {
   if (this->file_reader_)
     this->file_reader_->service();
+#ifdef SVP_AUDIO_FILES
+  if (this->audio_file_reader_)
+    this->audio_file_reader_->service();
+#endif
   this->handle_output_release_();
   if (this->finished_pending_.exchange(false, std::memory_order_acq_rel))
     this->on_finished_callbacks_.call();
   const int16_t error = this->error_pending_.exchange(-1, std::memory_order_acq_rel);
   if (error >= 0)
     this->on_error_callbacks_.call(static_cast<uint8_t>(error));
-  if (this->state_changed_.exchange(false, std::memory_order_acq_rel))
+  const bool state_changed = this->state_changed_.exchange(false, std::memory_order_acq_rel);
+  if (state_changed)
     this->state_callbacks_.call();
+#ifdef SVP_AUDIO_FILES
+  if (this->audio_changed_.exchange(false, std::memory_order_acq_rel) || state_changed)
+    this->audio_callbacks_.call();
+  if (this->audio_advance_req_.load(std::memory_order_acquire) &&
+      this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED && !this->session_busy_()) {
+    this->audio_advance_req_.store(false, std::memory_order_relaxed);
+    this->audio_advance_();
+  }
+#endif
   this->run_pending_start_();
 #ifdef SVP_CHANNEL_LIST
   this->channel_loop_();
@@ -416,6 +443,9 @@ void SimpleVideoPlayer::play(const std::string &video_path, bool folder_playlist
   this->start_path_ = video_path;
   this->start_folder_ = folder_playlist;
   this->start_pending_.store(true, std::memory_order_release);
+#ifdef SVP_AUDIO_FILES
+  this->audio_start_pending_.store(false, std::memory_order_release);
+#endif
   this->end_session_();
   this->run_pending_start_();
 }
@@ -436,6 +466,9 @@ void SimpleVideoPlayer::play_index_(size_t index) {
   this->start_path_.clear();
   this->start_index_ = index;
   this->start_pending_.store(true, std::memory_order_release);
+#ifdef SVP_AUDIO_FILES
+  this->audio_start_pending_.store(false, std::memory_order_release);
+#endif
   this->end_session_();
   this->run_pending_start_();
 }
@@ -449,7 +482,12 @@ bool SimpleVideoPlayer::session_busy_() const {
 }
 
 void SimpleVideoPlayer::run_pending_start_() {
-  if (!this->start_pending_.load(std::memory_order_acquire))
+#ifdef SVP_AUDIO_FILES
+  const bool audio = this->audio_start_pending_.load(std::memory_order_acquire);
+#else
+  const bool audio = false;
+#endif
+  if (!this->start_pending_.load(std::memory_order_acquire) && !audio)
     return;
   // What started meanwhile (the network stream) ends too: what was asked for last plays.
   const PlayerState now = this->state_.load(std::memory_order_acquire);
@@ -464,6 +502,14 @@ void SimpleVideoPlayer::run_pending_start_() {
     xSemaphoreGive(this->session_lock_);
     return;
   }
+#ifdef SVP_AUDIO_FILES
+  if (audio) {
+    this->audio_start_pending_.store(false, std::memory_order_release);
+    this->start_audio_session_();
+    xSemaphoreGive(this->session_lock_);
+    return;
+  }
+#endif
   this->start_pending_.store(false, std::memory_order_release);
   size_t index = this->start_index_;
   if (!this->start_path_.empty()) {
@@ -588,6 +634,9 @@ void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
   // playback task reads them after taking it.
   this->video_path_ = video_path;
   this->last_error_.store(PlaybackError::NONE, std::memory_order_relaxed);
+#ifdef SVP_AUDIO_FILES
+  this->audio_session_.store(false, std::memory_order_release);
+#endif
   this->playback_task_stop_ = false;
   this->start_req_.store(0, std::memory_order_release);
   this->av_started_.store(false, std::memory_order_release);
@@ -645,6 +694,11 @@ void SimpleVideoPlayer::stop() {
 
 void SimpleVideoPlayer::end_session_() {
   this->advance_req_.store(false, std::memory_order_relaxed);
+#ifdef SVP_AUDIO_FILES
+  this->audio_advance_req_.store(false, std::memory_order_relaxed);
+  if (this->audio_session_.load(std::memory_order_acquire))
+    this->reader_task_stop_ = true;  // a read waiting for the storage returns
+#endif
   PlayerState prev = this->state_.exchange(PlayerState::STOPPED, std::memory_order_acq_rel);
   if (prev != PlayerState::STOPPED)
     this->note_state_();
@@ -753,7 +807,15 @@ void SimpleVideoPlayer::reader_task_entry_(void *param) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     if (!player->reader_busy_.load(std::memory_order_acquire))
       continue;
+#ifdef SVP_AUDIO_FILES
+    if (player->audio_session_.load(std::memory_order_acquire)) {
+      player->audio_file_feed_();
+    } else {
+      player->reader_loop_();
+    }
+#else
     player->reader_loop_();
+#endif
     player->reader_busy_.store(false, std::memory_order_release);
     player->playback_wait_.wake();
 #ifdef SVP_STREAM
@@ -1983,6 +2045,10 @@ bool SimpleVideoPlayer::plan_pool_() {
     fixed += pool_round(static_cast<size_t>(lv_draw_buf_width_to_stride(this->thumb_w_, LV_COLOR_FORMAT_RGB565)) *
                         this->thumb_h_ * this->thumb_count_);
 #endif
+#ifdef SVP_AUDIO_FILES
+  if (this->file_speaker_ != nullptr)
+    fixed += pool_round(AUDIO_FILE_RING_SIZE);
+#endif
   this->index_reserve_ = pool_round(std::clamp<size_t>(pool / 32, 128 * 1024, MIB));
   fixed += this->index_reserve_ + pool_round(CACHE_BUFFER_SIZE) + 32 * PsramPool::ALIGN;  // pieces end on whole cache lines
 
@@ -2144,7 +2210,7 @@ void SimpleVideoPlayer::handle_output_release_() {
   // The stream never takes a file's output, also not while its session starts or ends: it goes
   // without (its alloc fails, the frame is dropped).
   if (this->output_release_stream_.load(std::memory_order_relaxed) &&
-      (this->session_busy_() || this->start_pending_.load(std::memory_order_acquire))) {
+      (this->picture_session_busy_() || this->start_pending_.load(std::memory_order_acquire))) {
     this->output_release_req_.store(0, std::memory_order_release);
     this->answer_alloc_();
     return;
@@ -2190,7 +2256,12 @@ void SimpleVideoPlayer::handle_output_release_() {
 
 bool SimpleVideoPlayer::release_media_() {
   const PlayerState state = this->state_.load(std::memory_order_acquire);
-  if (state == PlayerState::PLAYING || state == PlayerState::PAUSED || this->session_busy_())
+  bool audio_file = false;
+#ifdef SVP_AUDIO_FILES
+  audio_file = this->audio_session_.load(std::memory_order_acquire);
+#endif
+  if ((!audio_file && (state == PlayerState::PLAYING || state == PlayerState::PAUSED)) ||
+      this->picture_session_busy_())
     return false;
 #ifdef SVP_STREAM
   if (this->stream_connected_.load(std::memory_order_acquire) || this->stream_avi_.load(std::memory_order_acquire))
@@ -2583,7 +2654,15 @@ void SimpleVideoPlayer::audio_task_entry_(void *param) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     if (!player->audio_busy_.load(std::memory_order_acquire))
       continue;
+#ifdef SVP_AUDIO_FILES
+    if (player->audio_session_.load(std::memory_order_acquire)) {
+      player->audio_file_loop_();
+    } else {
+      player->audio_processing_loop_();
+    }
+#else
     player->audio_processing_loop_();
+#endif
     player->audio_busy_.store(false, std::memory_order_release);
     player->playback_wait_.wake();
 #ifdef SVP_STREAM
@@ -2686,6 +2765,13 @@ void SimpleVideoPlayer::audio_processing_loop_() {
 // While paused the speaker keeps what it holds: the mixer does not drain a paused source, so it
 // neither plays on nor times out and frees its buffers.
 void SimpleVideoPlayer::speaker_pause_(bool paused) {
+#ifdef SVP_AUDIO_FILES
+  if (this->audio_session_.load(std::memory_order_acquire)) {
+    if (this->file_speaker_open_)
+      this->file_speaker_->set_pause_state(paused);
+    return;
+  }
+#endif
   if (this->session_audio_ && this->speaker_ != nullptr)
     this->speaker_->set_pause_state(paused);
 }
@@ -2733,6 +2819,302 @@ void SimpleVideoPlayer::stop_audio_task_() {
   if (this->audio_busy_.load(std::memory_order_acquire))
     ESP_LOGE(TAG, "Audio task still busy after 3000 ms");
 }
+
+#ifdef SVP_AUDIO_FILES
+//========================================================================
+// Audio files: their own queue, one track per session
+//========================================================================
+
+// The order of play from audio_pos_ 0: `first` leads, shuffled or as added.
+void SimpleVideoPlayer::audio_order_build_(size_t first) {
+  const size_t count = this->audio_queue_.size();
+  this->audio_order_.resize(count);
+  for (size_t i = 0; i < count; i++)
+    this->audio_order_[i] = static_cast<uint16_t>(i);
+  if (!this->audio_shuffle_ || count < 2) {
+    this->audio_pos_ = std::min(first, count != 0 ? count - 1 : 0);
+    return;
+  }
+  for (size_t i = count - 1; i > 0; i--)
+    std::swap(this->audio_order_[i], this->audio_order_[random_uint32() % (i + 1)]);
+  if (first < count) {
+    const auto at = std::find(this->audio_order_.begin(), this->audio_order_.end(), static_cast<uint16_t>(first));
+    std::swap(*at, this->audio_order_[0]);
+  }
+  this->audio_pos_ = 0;
+}
+
+void SimpleVideoPlayer::audio_start_(size_t pos) {
+  if (pos >= this->audio_order_.size())
+    return;
+  this->audio_pos_ = pos;
+  this->audio_current_ = true;
+  this->start_pending_.store(false, std::memory_order_release);
+  this->audio_start_pending_.store(true, std::memory_order_release);
+  this->audio_changed_.store(true, std::memory_order_release);
+  this->end_session_();
+  this->run_pending_start_();
+}
+
+void SimpleVideoPlayer::audio_queue_add(const std::string &path) {
+  if (this->audio_queue_.size() >= MAX_PLAYLIST)
+    return;
+  this->audio_queue_.emplace_back(path.c_str());
+  this->audio_order_.push_back(static_cast<uint16_t>(this->audio_queue_.size() - 1));
+  this->audio_queue_gen_++;
+  this->audio_changed_.store(true, std::memory_order_release);
+}
+
+void SimpleVideoPlayer::audio_queue_clear() {
+  if (this->audio_session_.load(std::memory_order_acquire) ||
+      this->audio_start_pending_.load(std::memory_order_acquire))
+    this->stop();
+  this->audio_start_pending_.store(false, std::memory_order_release);
+  this->audio_queue_.clear();
+  this->audio_order_.clear();
+  this->audio_queue_gen_++;
+  this->audio_pos_ = 0;
+  this->audio_current_ = false;
+  this->audio_changed_.store(true, std::memory_order_release);
+}
+
+void SimpleVideoPlayer::audio_play(size_t index) {
+  if (index >= this->audio_queue_.size())
+    return;
+  this->audio_order_build_(index);
+  this->audio_start_(this->audio_pos_);
+}
+
+void SimpleVideoPlayer::audio_next() {
+  if (this->audio_order_.empty())
+    return;
+  if (!this->audio_current_) {
+    this->audio_play_or_resume();
+  } else if (this->audio_pos_ + 1 < this->audio_order_.size()) {
+    this->audio_start_(this->audio_pos_ + 1);
+  } else if (this->audio_repeat_ == RepeatMode::PLAYLIST) {
+    this->audio_order_build_(this->audio_queue_.size());
+    this->audio_start_(0);
+  } else {
+    if (this->audio_session_.load(std::memory_order_acquire))
+      this->stop();
+    this->audio_current_ = false;
+    this->audio_changed_.store(true, std::memory_order_release);
+  }
+}
+
+void SimpleVideoPlayer::audio_previous() {
+  if (this->audio_order_.empty())
+    return;
+  static constexpr uint32_t RESTART_AFTER_MS = 3000;
+  const bool playing = this->audio_session_.load(std::memory_order_acquire) && !this->is_stopped();
+  if (!this->audio_current_) {
+    this->audio_play_or_resume();
+  } else if (playing && millis() - this->audio_track_started_ms_ > RESTART_AFTER_MS) {
+    this->audio_start_(this->audio_pos_);
+  } else if (this->audio_pos_ > 0) {
+    this->audio_start_(this->audio_pos_ - 1);
+  } else if (this->audio_repeat_ == RepeatMode::PLAYLIST) {
+    this->audio_start_(this->audio_order_.size() - 1);
+  } else {
+    this->audio_start_(0);
+  }
+}
+
+void SimpleVideoPlayer::audio_play_or_resume() {
+  if (this->audio_session_.load(std::memory_order_acquire)) {
+    if (this->is_paused()) {
+      this->resume();
+      return;
+    }
+    if (this->is_playing())
+      return;
+  }
+  if (this->audio_queue_.empty())
+    return;
+  if (this->audio_current_) {
+    this->audio_start_(this->audio_pos_);
+    return;
+  }
+  // Before the first track or after the last: from the start, shuffled anew.
+  this->audio_order_build_(this->audio_shuffle_ ? this->audio_queue_.size() : 0);
+  this->audio_start_(0);
+}
+
+void SimpleVideoPlayer::set_audio_shuffle(bool shuffle) {
+  if (shuffle == this->audio_shuffle_)
+    return;
+  this->audio_shuffle_ = shuffle;
+  // The track playing keeps playing; the rest follows in the new order.
+  const size_t current = this->audio_current_ ? this->audio_order_[this->audio_pos_] : this->audio_queue_.size();
+  this->audio_order_build_(current);
+  this->audio_changed_.store(true, std::memory_order_release);
+}
+
+// Main loop: a track played to its end.
+void SimpleVideoPlayer::audio_advance_() {
+  if (!this->audio_current_)
+    return;
+  if (this->audio_repeat_ == RepeatMode::FILE) {
+    this->audio_start_(this->audio_pos_);
+  } else if (this->audio_pos_ + 1 < this->audio_order_.size()) {
+    this->audio_start_(this->audio_pos_ + 1);
+  } else if (this->audio_repeat_ == RepeatMode::PLAYLIST) {
+    this->audio_order_build_(this->audio_queue_.size());
+    this->audio_start_(0);
+  } else {
+    // The end of the queue: what the speaker still holds plays out.
+    this->audio_current_ = false;
+    if (this->file_speaker_open_) {
+      this->file_speaker_->finish();
+      this->file_speaker_open_ = false;
+    }
+    this->audio_changed_.store(true, std::memory_order_release);
+  }
+}
+
+// Main loop, session_lock_ held, no session runs.
+void SimpleVideoPlayer::start_audio_session_() {
+  if (!this->audio_current_ || this->audio_pos_ >= this->audio_order_.size())
+    return;
+  this->audio_session_.store(true, std::memory_order_release);
+  this->video_path_ = this->audio_queue_[this->audio_order_[this->audio_pos_]].c_str();
+  if (this->is_failed() || this->file_speaker_ == nullptr || !this->audio_decoder_ || !this->audio_file_reader_) {
+    this->set_error_(PlaybackError::DECODER_INIT_FAILED);
+    return;
+  }
+  ESP_LOGI(TAG, "Playing audio: %s", this->video_path_.c_str());
+  this->last_error_.store(PlaybackError::NONE, std::memory_order_relaxed);
+  // A new source first: the old one gives back what it holds of the ring, so the reset drops all.
+  // No sink until the file's format is known (audio_file_loop_()).
+  this->audio_decoder_->discard_output();
+  std::weak_ptr<ring_buffer::RingBuffer> source = this->audio_input_ring_buffer_;
+  bool ok = this->audio_decoder_->add_source(source) == ESP_OK;
+  this->audio_input_ring_buffer_->reset();
+  this->audio_decoder_->add_sink(static_cast<speaker::Speaker *>(nullptr));
+  ok = ok && this->audio_decoder_->start(audio::detect_audio_file_type(nullptr, this->video_path_.c_str())) == ESP_OK;
+  if (!ok) {
+    ESP_LOGE(TAG, "Cannot decode %s", this->video_path_.c_str());
+    this->set_error_(PlaybackError::DECODER_INIT_FAILED);
+    return;
+  }
+  this->duration_frames_.store(0, std::memory_order_relaxed);
+  this->position_frame_.store(0, std::memory_order_relaxed);
+  this->reader_task_stop_ = false;
+  this->audio_task_stop_ = false;
+  this->audio_file_eof_.store(false, std::memory_order_release);
+  this->audio_track_started_ms_ = millis();
+  this->state_.store(PlayerState::PLAYING, std::memory_order_release);
+  this->note_state_();
+  this->reader_busy_.store(true, std::memory_order_release);
+  this->audio_busy_.store(true, std::memory_order_release);
+  xTaskNotifyGive(this->reader_task_handle_);
+  xTaskNotifyGive(this->audio_task_handle_);
+}
+
+// Reader task: the file into the decoder's input ring, blocking while it is full.
+void SimpleVideoPlayer::audio_file_feed_() {
+  static constexpr TickType_t RING_WAIT = pdMS_TO_TICKS(20);
+  BufferedFileReader *reader = this->audio_file_reader_.get();
+  auto running = [this]() {
+    const PlayerState state = this->state_.load(std::memory_order_acquire);
+    return !this->reader_task_stop_ && (state == PlayerState::PLAYING || state == PlayerState::PAUSED);
+  };
+  reader->set_abort_flag(&this->reader_task_stop_);
+  if (!reader->open(this->video_path_.c_str())) {
+    ESP_LOGE(TAG, "Failed to open %s", this->video_path_.c_str());
+    if (running())
+      this->set_error_(PlaybackError::FILE_NOT_FOUND);
+  } else {
+    while (running()) {
+      const int read = reader->read(this->audio_temp_buffer_, AUDIO_TEMP_BUFFER_SIZE);
+      if (read <= 0) {
+        if (read < 0 && running()) {
+          ESP_LOGE(TAG, "Failed to read %s", this->video_path_.c_str());
+          this->set_error_(PlaybackError::FILE_READ_ERROR);
+        }
+        break;
+      }
+      size_t done = 0;
+      while (done < static_cast<size_t>(read) && running())
+        done += this->audio_input_ring_buffer_->write_without_replacement(this->audio_temp_buffer_ + done,
+                                                                          read - done, RING_WAIT);
+    }
+    reader->close();
+  }
+  this->audio_file_eof_.store(true, std::memory_order_release);
+  this->audio_wait_.wake();
+}
+
+// Audio task: decodes the track into the file speaker; its end (all of the file decoded and handed
+// on) ends the session, and the main loop goes on with the queue.
+void SimpleVideoPlayer::audio_file_loop_() {
+  static constexpr uint32_t MAX_CONSECUTIVE_FAILURES = 10;
+  uint32_t failures = 0;
+  bool linked = false;
+  bool finished = false;
+  esp_task_wdt_add(nullptr);
+  while (!this->audio_task_stop_) {
+    esp_task_wdt_reset();
+    const PlayerState state = this->state_.load(std::memory_order_acquire);
+    if (state == PlayerState::PAUSED) {
+      esp_task_wdt_delete(nullptr);
+      this->audio_wait_.wait(
+          [this]() {
+            return this->audio_task_stop_ || this->state_.load(std::memory_order_acquire) != PlayerState::PAUSED;
+          },
+          portMAX_DELAY);
+      esp_task_wdt_add(nullptr);
+      continue;
+    }
+    if (state != PlayerState::PLAYING)
+      break;
+    const audio::AudioDecoderState result =
+        this->audio_decoder_->decode(this->audio_file_eof_.load(std::memory_order_acquire));
+    if (!linked && this->audio_decoder_->get_audio_stream_info().has_value()) {
+      const audio::AudioStreamInfo &info = this->audio_decoder_->get_audio_stream_info().value();
+      if (this->file_speaker_open_ && info != this->file_speaker_info_)
+        this->file_speaker_->stop();  // another format: it starts again in this one
+      this->file_speaker_->set_audio_stream_info(info);
+      this->file_speaker_info_ = info;
+      this->audio_decoder_->add_sink(this->file_speaker_);
+      this->file_speaker_open_ = true;
+      linked = true;
+    }
+    if (result == audio::AudioDecoderState::FINISHED) {
+      finished = true;
+      break;
+    }
+    if (result == audio::AudioDecoderState::FAILED) {
+      if (++failures >= MAX_CONSECUTIVE_FAILURES) {
+        ESP_LOGE(TAG, "Cannot decode %s", this->video_path_.c_str());
+        this->set_error_(PlaybackError::DECODE_ERROR);
+        break;
+      }
+      continue;
+    }
+    failures = 0;
+  }
+  esp_task_wdt_delete(nullptr);
+  if (finished) {
+    // The next track goes on through the open speaker; the main loop finishes it at the end.
+    PlayerState expected = this->state_.load(std::memory_order_acquire);
+    while ((expected == PlayerState::PLAYING || expected == PlayerState::PAUSED) &&
+           !this->state_.compare_exchange_weak(expected, PlayerState::STOPPED, std::memory_order_acq_rel)) {
+    }
+    if (expected == PlayerState::PLAYING || expected == PlayerState::PAUSED) {
+      if (expected == PlayerState::PAUSED)
+        this->file_speaker_->set_pause_state(false);
+      this->audio_advance_req_.store(true, std::memory_order_release);
+      this->note_state_();
+    }
+  } else if (this->file_speaker_open_) {
+    this->file_speaker_->set_pause_state(false);
+    this->file_speaker_->stop();
+    this->file_speaker_open_ = false;
+  }
+}
+#endif
 #endif
 
 //========================================================================
