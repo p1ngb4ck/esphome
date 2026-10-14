@@ -17,7 +17,9 @@ static const char *const TAG = "a2dp_source.speaker";
 void A2DPSpeaker::loop() {
   if (const uint32_t frames = this->parent_->take_played_frames(); frames != 0)
     this->audio_output_callback_.call(frames, esp_timer_get_time());
-  if (this->state_ == speaker::STATE_STOPPING && !this->parent_->has_audio()) {
+  // Played out, or the sink is paused (what waits would never go out): stopped.
+  if (this->state_ == speaker::STATE_STOPPING && (!this->parent_->has_audio() || this->parent_->is_paused())) {
+    this->parent_->clear_audio();
     this->parent_->set_speaker_active(false);
     this->state_ = speaker::STATE_STOPPED;
   }
@@ -47,7 +49,7 @@ void A2DPSpeaker::finish() {
     this->state_ = speaker::STATE_STOPPING;
 }
 
-bool A2DPSpeaker::has_buffered_data() const { return this->parent_->has_audio(); }
+bool A2DPSpeaker::has_buffered_data() const { return this->parent_->has_audio() && !this->parent_->is_paused(); }
 
 void A2DPSpeaker::set_volume(float volume) {
   speaker::Speaker::set_volume(volume);

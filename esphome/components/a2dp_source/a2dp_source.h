@@ -126,6 +126,11 @@ class A2DPSource : public Component
   bool is_connected() const { return this->connected_.load(); }
   /// @brief Whether the sink is taking audio. A connection can stand without it.
   bool is_streaming() const { return this->streaming_.load(); }
+  /// @brief Whether the sink takes no audio and none is on its way: not connected, or its stream
+  ///        suspended (by the sink or after idling) with no start under way.
+  bool is_paused() const {
+    return !this->connected_.load() || (!this->streaming_.load() && !this->source_.is_media_starting());
+  }
   /// @brief Whether a device address is stored, which is what survives a reboot.
   bool has_stored_device() const;
 
