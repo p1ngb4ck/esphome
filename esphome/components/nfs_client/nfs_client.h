@@ -169,7 +169,8 @@ class XDRBuffer {
  public:
   XDRBuffer() = default;
   explicit XDRBuffer(size_t capacity) { this->data_.reserve(capacity); }
-  explicit XDRBuffer(const std::vector<uint8_t> &data) : data_(data), position_(0) {}
+  // A received reply, decoded where it lies (no copy).
+  XDRBuffer(const uint8_t *data, size_t size) : view_(data), view_size_(size) {}
 
   void encode_uint32(uint32_t value);
   void encode_uint64(uint64_t value);
@@ -187,7 +188,7 @@ class XDRBuffer {
   bool decode_bool(bool &value);
 
   const std::vector<uint8_t> &data() const { return this->data_; }
-  size_t size() const { return this->data_.size(); }
+  size_t size() const { return this->view_ != nullptr ? this->view_size_ : this->data_.size(); }
   size_t position() const { return this->position_; }
   void reset() { this->position_ = 0; }
   void skip(size_t bytes) { this->position_ += bytes; }
@@ -198,7 +199,11 @@ class XDRBuffer {
   static size_t align_4(size_t size) { return (size + 3) & ~3; }
 
  protected:
+  const uint8_t *bytes_() const { return this->view_ != nullptr ? this->view_ : this->data_.data(); }
+
   std::vector<uint8_t> data_;
+  const uint8_t *view_{nullptr};
+  size_t view_size_{0};
   size_t position_{0};
 };
 
@@ -433,13 +438,17 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   //========================================================================
 
   RPCClient rpc_;
-  // Fixed RPC response buffer: must hold the largest single RPC reply, which is a READ (its
-  // NFS maxcount is 32 kB) plus RPC/NFS header overhead -- 64 kB covers it with margin. Sized as
-  // one block (not a halving streaming chunk): a short buffer would truncate replies, so this is
-  // deliberately not routed through alloc_dma_capable. Filled by TCP recv(), never DMA, so no
-  // DMA caps are needed -- PSRAM placement (below) is only to spare internal RAM.
+  // Every reply is received into this buffer (PSRAM where there is PSRAM) and decoded in place.
+  // It holds the largest READ reply: read_max_ bytes of data plus RPC_REPLY_OVERHEAD. After the
+  // mount it grows once to the server's rtmax (FSINFO), capped at READ_MAX_CAP.
   static constexpr size_t RPC_RESPONSE_BUFFER_SIZE = 65536;
-  std::unique_ptr<uint8_t[]> rpc_response_buffer_;
+  static constexpr size_t RPC_REPLY_OVERHEAD = 1024;
+  static constexpr size_t READ_MAX_CAP = 1024 * 1024;
+  uint8_t *rpc_buf_{nullptr};
+  size_t rpc_buf_size_{0};
+  size_t read_max_{RPC_RESPONSE_BUFFER_SIZE - RPC_REPLY_OVERHEAD};
+  void finish_mount_();
+  void query_fsinfo_();
 
   //========================================================================
   // File Handle Cache (for chunked reads)

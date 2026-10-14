@@ -5,6 +5,7 @@
 #include "esphome/components/network/util.h"
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 
@@ -54,13 +55,13 @@ void XDRBuffer::encode_opaque(const uint8_t *data, size_t length) {
 }
 
 bool XDRBuffer::decode_uint32(uint32_t &value) {
-  if (this->position_ + 4 > this->data_.size()) {
+  if (this->position_ + 4 > this->size()) {
     return false;
   }
-  value = (static_cast<uint32_t>(this->data_[this->position_]) << 24) |
-          (static_cast<uint32_t>(this->data_[this->position_ + 1]) << 16) |
-          (static_cast<uint32_t>(this->data_[this->position_ + 2]) << 8) |
-          static_cast<uint32_t>(this->data_[this->position_ + 3]);
+  value = (static_cast<uint32_t>(this->bytes_()[this->position_]) << 24) |
+          (static_cast<uint32_t>(this->bytes_()[this->position_ + 1]) << 16) |
+          (static_cast<uint32_t>(this->bytes_()[this->position_ + 2]) << 8) |
+          static_cast<uint32_t>(this->bytes_()[this->position_ + 3]);
   this->position_ += 4;
   return true;
 }
@@ -75,10 +76,10 @@ bool XDRBuffer::decode_uint64(uint64_t &value) {
 }
 
 bool XDRBuffer::decode_bytes(uint8_t *data, size_t length) {
-  if (this->position_ + length > this->data_.size()) {
+  if (this->position_ + length > this->size()) {
     return false;
   }
-  memcpy(data, this->data_.data() + this->position_, length);
+  memcpy(data, this->bytes_() + this->position_, length);
   this->position_ += length;
   return true;
 }
@@ -91,10 +92,10 @@ bool XDRBuffer::decode_string(std::string &str) {
   if (length > NFS_MAXPATHLEN) {
     return false;
   }
-  if (this->position_ + length > this->data_.size()) {
+  if (this->position_ + length > this->size()) {
     return false;
   }
-  str.assign(reinterpret_cast<const char *>(&this->data_[this->position_]), length);
+  str.assign(reinterpret_cast<const char *>(this->bytes_() + this->position_), length);
   this->position_ += align_4(length);
   return true;
 }
@@ -107,10 +108,10 @@ bool XDRBuffer::decode_opaque(std::vector<uint8_t> &data) {
   if (length > 1024 * 1024) {
     return false;
   }
-  if (this->position_ + length > this->data_.size()) {
+  if (this->position_ + length > this->size()) {
     return false;
   }
-  data.assign(this->data_.begin() + this->position_, this->data_.begin() + this->position_ + length);
+  data.assign(this->bytes_() + this->position_, this->bytes_() + this->position_ + length);
   this->position_ += align_4(length);
   return true;
 }
@@ -123,14 +124,14 @@ bool XDRBuffer::decode_opaque_to_buffer(uint8_t *buffer, size_t max_len, size_t 
   if (length > 1024 * 1024) {
     return false;
   }
-  if (this->position_ + length > this->data_.size()) {
+  if (this->position_ + length > this->size()) {
     return false;
   }
   if (length > max_len) {
     ESP_LOGE("XDRBuffer", "Buffer too small: need %" PRIu32 ", have %" PRIu32, (uint32_t) length, (uint32_t) max_len);
     return false;
   }
-  std::memcpy(buffer, this->data_.data() + this->position_, length);
+  std::memcpy(buffer, this->bytes_() + this->position_, length);
   actual_len = length;
   this->position_ += align_4(length);
   return true;
@@ -345,7 +346,19 @@ void RPCClient::encode_auth_null_(XDRBuffer &xdr) {
 // NFSClient Implementation
 //========================================================================
 
-NFSClient::~NFSClient() { this->unmount_(); }
+// In PSRAM where there is PSRAM -- never internal RAM then.
+static uint8_t *alloc_rpc_buffer(size_t size) {
+#if defined(USE_PSRAM) && defined(USE_ESP_IDF)
+  return static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+#else
+  return static_cast<uint8_t *>(malloc(size));  // NOLINT(cppcoreguidelines-no-malloc)
+#endif
+}
+
+NFSClient::~NFSClient() {
+  this->unmount_();
+  free(this->rpc_buf_);  // NOLINT(cppcoreguidelines-no-malloc)
+}
 
 void NFSClient::setup() {
   ESP_LOGCONFIG(TAG, "Setting up NFS Client...");
@@ -354,28 +367,13 @@ void NFSClient::setup() {
   ESP_LOGCONFIG(TAG, "  UID: %" PRIu32 ", GID: %" PRIu32, this->uid_, this->gid_);
   ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_);
 
-#if defined(USE_PSRAM) && defined(USE_ESP_IDF)
-  {
-    auto *psram_buf =
-        static_cast<uint8_t *>(heap_caps_malloc(RPC_RESPONSE_BUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (psram_buf != nullptr) {
-      this->rpc_response_buffer_.reset(psram_buf);
-      ESP_LOGI(TAG, "Allocated %uKB RPC buffer from PSRAM", (unsigned) (RPC_RESPONSE_BUFFER_SIZE / 1024));
-    } else {
-      ESP_LOGW(TAG, "PSRAM allocation failed, using heap for RPC buffer");
-      this->rpc_response_buffer_ = std::make_unique<uint8_t[]>(RPC_RESPONSE_BUFFER_SIZE);
-    }
-  }
-#else
-  this->rpc_response_buffer_ = std::make_unique<uint8_t[]>(RPC_RESPONSE_BUFFER_SIZE);
-  ESP_LOGI(TAG, "Allocated %uKB RPC buffer from heap", (unsigned) (RPC_RESPONSE_BUFFER_SIZE / 1024));
-#endif
-
-  if (this->rpc_response_buffer_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate RPC response buffer!");
+  this->rpc_buf_ = alloc_rpc_buffer(RPC_RESPONSE_BUFFER_SIZE);
+  if (this->rpc_buf_ == nullptr) {
+    ESP_LOGE(TAG, "No memory for the %u KB RPC buffer", (unsigned) (RPC_RESPONSE_BUFFER_SIZE / 1024));
     this->mark_failed();
     return;
   }
+  this->rpc_buf_size_ = RPC_RESPONSE_BUFFER_SIZE;
 
   this->mount_state_ = MountState::IDLE;
 
@@ -505,8 +503,7 @@ void NFSClient::drive_mount_state_() {
           ESP_LOGW(TAG, "Failed to connect to portmapper for NFS query, using configured port %u", this->port_);
           this->nfs_port_ = this->port_;
           this->nfs_port_discovered_ = false;
-          this->set_mounted_(true);
-          this->mount_state_ = MountState::MOUNTED;
+          this->finish_mount_();
           break;
         }
       }
@@ -520,8 +517,7 @@ void NFSClient::drive_mount_state_() {
         this->nfs_port_discovered_ = false;
       }
       this->close_connection_();
-      this->set_mounted_(true);
-      this->mount_state_ = MountState::MOUNTED;
+      this->finish_mount_();
       break;
 
     case MountState::MOUNTED:
@@ -533,6 +529,47 @@ void NFSClient::drive_mount_state_() {
     case MountState::FAILED:
       break;
   }
+}
+
+void NFSClient::finish_mount_() {
+  this->mount_state_ = MountState::MOUNTED;  // from here connect_tcp_() reaches the NFS service
+  this->query_fsinfo_();
+  this->set_mounted_(true);
+}
+
+// The server's largest READ (rtmax, RFC 1813 FSINFO): reads go up to it, the reply buffer grows to
+// hold it. Without an answer, or without the memory, reads stay as large as the buffer allows.
+void NFSClient::query_fsinfo_() {
+  uint32_t xid = RPCClient::generate_xid();
+  XDRBuffer request;
+  this->rpc_.build_call(request, xid, NFS_PROGRAM, NFS_VERSION_3, NFSPROC3_FSINFO, this->uid_, this->gid_);
+  this->root_fh_.encode(request);
+  XDRBuffer response;
+  RPCAcceptStatus rpc_status{};
+  uint32_t nfs_status{0};
+  bool has_attr{false};
+  NFSFileAttr attr;
+  uint32_t rtmax{0};
+  if (!this->send_rpc_(request, response) || !this->rpc_.parse_reply(response, xid, rpc_status) ||
+      !response.decode_uint32(nfs_status) || nfs_status != NFS3_OK || !response.decode_bool(has_attr) ||
+      (has_attr && !attr.decode(response)) || !response.decode_uint32(rtmax) || rtmax == 0) {
+    ESP_LOGW(TAG, "FSINFO failed: reads stay at %u bytes", (unsigned) this->read_max_);
+    return;
+  }
+  const size_t want = std::min<size_t>(rtmax, READ_MAX_CAP);
+  if (want + RPC_REPLY_OVERHEAD > this->rpc_buf_size_) {
+    uint8_t *grown = alloc_rpc_buffer(want + RPC_REPLY_OVERHEAD);
+    if (grown == nullptr) {
+      ESP_LOGW(TAG, "No memory for %u-byte reads: they stay at %u bytes", (unsigned) want,
+               (unsigned) this->read_max_);
+      return;
+    }
+    free(this->rpc_buf_);  // NOLINT(cppcoreguidelines-no-malloc)
+    this->rpc_buf_ = grown;
+    this->rpc_buf_size_ = want + RPC_REPLY_OVERHEAD;
+  }
+  this->read_max_ = want;
+  ESP_LOGD(TAG, "Reads of up to %u bytes (server rtmax %" PRIu32 ")", (unsigned) want, rtmax);
 }
 
 void NFSClient::dump_config() {
@@ -652,7 +689,7 @@ storage::StorageError NFSClient::read_chunk(const char *path, uint8_t *buf, uint
     return storage::StorageError::STORAGE_ERROR_OK;
   }
 
-  size_t to_read = len;
+  size_t to_read = std::min(len, this->read_max_);
   if (offset + to_read > attr.size) {
     to_read = attr.size - offset;
   }
@@ -1287,18 +1324,18 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
       (static_cast<uint32_t>(response_length_buf[2]) << 8) | static_cast<uint32_t>(response_length_buf[3]);
   response_length &= 0x7FFFFFFF;
 
-  if (response_length > RPC_RESPONSE_BUFFER_SIZE) {
-    ESP_LOGVV(TAG, "Response too large: %" PRIu32 " bytes", response_length);
+  if (response_length > this->rpc_buf_size_) {
+    ESP_LOGW(TAG, "Reply of %" PRIu32 " bytes exceeds the %u-byte buffer", response_length,
+             (unsigned) this->rpc_buf_size_);
     close(this->socket_);
     this->socket_ = -1;
     this->connected_ = false;
     return false;
   }
 
-  std::vector<uint8_t> response_data(response_length);
   size_t total_received = 0;
   while (total_received < response_length) {
-    int received = recv(this->socket_, response_data.data() + total_received, response_length - total_received, 0);
+    int received = recv(this->socket_, this->rpc_buf_ + total_received, response_length - total_received, 0);
     if (received <= 0) {
       ESP_LOGVV(TAG,
                 "Failed to receive RPC response data: received=%d, expected=%" PRIu32 ", total_received=%" PRIu32
@@ -1312,7 +1349,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
     total_received += received;
   }
 
-  response = XDRBuffer(response_data);
+  response = XDRBuffer(this->rpc_buf_, response_length);
   return true;
 #else
   uint8_t length_buf[4];
@@ -1341,12 +1378,12 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
       (static_cast<uint32_t>(response_length_buf[2]) << 8) | static_cast<uint32_t>(response_length_buf[3]);
   response_length &= 0x7FFFFFFF;
 
-  if (response_length > RPC_RESPONSE_BUFFER_SIZE) {
-    ESP_LOGVV(TAG, "Response too large: %" PRIu32 " bytes", response_length);
+  if (response_length > this->rpc_buf_size_) {
+    ESP_LOGW(TAG, "Reply of %" PRIu32 " bytes exceeds the %u-byte buffer", response_length,
+             (unsigned) this->rpc_buf_size_);
     return false;
   }
 
-  std::vector<uint8_t> response_data(response_length);
   size_t total_read = 0;
   start = millis();
 
@@ -1354,7 +1391,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
     int available = this->client_->available();
     if (available > 0) {
       size_t to_read = std::min(static_cast<size_t>(available), static_cast<size_t>(response_length - total_read));
-      int bytes_read = this->client_->read(response_data.data() + total_read, to_read);
+      int bytes_read = this->client_->read(this->rpc_buf_ + total_read, to_read);
       if (bytes_read > 0) {
         total_read += bytes_read;
       } else if (bytes_read < 0) {
@@ -1372,7 +1409,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
     return false;
   }
 
-  response = XDRBuffer(response_data);
+  response = XDRBuffer(this->rpc_buf_, response_length);
   return true;
 #endif
 }
