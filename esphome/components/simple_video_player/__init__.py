@@ -666,11 +666,14 @@ def _resolve_speaker_audio_format(config, fconf):
         # The selected output's format, at runtime: the panel reports it and plays what comes in
         # (the router converts channels and width). Buffers are sized for the largest output, at
         # least 48 kHz stereo; sound reaches the router 16-bit (the relay sends no other).
+        from esphome.components.audio import CONF_MAX_SAMPLE_RATE
         from esphome.components.audio_router.speaker import output_formats
 
         formats = output_formats(fconf, speaker_conf)
         this_conf[CONF_AUDIO_SAMPLE_RATE] = max(
-            [48000] + [f[CONF_SAMPLE_RATE] for f in formats]
+            [48000]
+            + [f[CONF_SAMPLE_RATE] for f in formats]
+            + [f[CONF_MAX_SAMPLE_RATE] for f in formats]
         )
         this_conf[CONF_AUDIO_BITS_PER_SAMPLE] = 16
         this_conf[CONF_AUDIO_CHANNELS] = max(

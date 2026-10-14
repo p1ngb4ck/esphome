@@ -28,7 +28,7 @@ class AudioRouter : public speaker::Speaker, public Component {
   float get_setup_priority() const override { return setup_priority::DATA; }
 
   void add_output(speaker::Speaker *output, const char *name, uint8_t bits_per_sample, uint8_t channels,
-                  uint32_t sample_rate);
+                  uint32_t sample_rate, uint32_t min_sample_rate, uint32_t max_sample_rate);
   void set_preference_key(uint32_t key) { this->preference_key_ = key; }
 
   size_t play(const uint8_t *data, size_t length, TickType_t ticks_to_wait) override;
@@ -50,6 +50,9 @@ class AudioRouter : public speaker::Speaker, public Component {
   const char *output_name(size_t index) const { return this->outputs_[index].name; }
   /// The selected output's native format.
   const audio::AudioStreamInfo &active_format() const { return this->outputs_[this->active_.load()].format; }
+  /// The sample rates the selected output takes as they are (its native one among them).
+  uint32_t active_min_sample_rate() const { return this->outputs_[this->active_.load()].min_sample_rate; }
+  uint32_t active_max_sample_rate() const { return this->outputs_[this->active_.load()].max_sample_rate; }
   /// Main loop, with the new index once a switch has happened.
   template<typename F> void add_on_output_callback(F &&callback) {
     this->output_callback_.add(std::forward<F>(callback));
@@ -60,6 +63,8 @@ class AudioRouter : public speaker::Speaker, public Component {
     speaker::Speaker *speaker;
     const char *name;
     audio::AudioStreamInfo format;
+    uint32_t min_sample_rate;
+    uint32_t max_sample_rate;
   };
   speaker::Speaker *current_() const { return this->outputs_[this->active_].speaker; }
   void switch_now_();

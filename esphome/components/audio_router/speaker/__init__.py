@@ -8,6 +8,7 @@ from esphome.const import (
     CONF_NAME,
     CONF_NUM_CHANNELS,
     CONF_OUTPUT_SPEAKER,
+    CONF_PLATFORM,
     CONF_SAMPLE_RATE,
     CONF_SPEAKER,
 )
@@ -74,8 +75,33 @@ def resolve_speaker_format(fconf, speaker_id, known: dict | None = None) -> dict
     return fmt
 
 
+def resolve_rate_range(fconf, speaker_id, native: int) -> tuple[int, int]:
+    """The sample rates a speaker takes as they are: the limits of the first speaker down its
+    output_speaker chain that sets them. A resampler plays its own rate, whatever comes in."""
+    limit_low, limit_high = _LIMIT_KEYS[CONF_SAMPLE_RATE]
+    seen = set()
+    while speaker_id is not None and str(speaker_id) not in seen:
+        seen.add(str(speaker_id))
+        path = fconf.get_path_for_id(speaker_id)[:-1]
+        confs = [fconf.get_config_for_path(path)]
+        if len(path) >= 2 and path[-2] == CONF_SOURCE_SPEAKERS:
+            confs.append(fconf.get_config_for_path(path[:-2]))
+        speaker_id = None
+        for conf in confs:
+            if conf.get(CONF_PLATFORM) == "resampler":
+                return native, native
+            low = _number(conf.get(limit_low))
+            high = _number(conf.get(limit_high))
+            if low is not None and high is not None:
+                return min(low, native), max(high, native)
+            if speaker_id is None:
+                speaker_id = conf.get(CONF_OUTPUT_SPEAKER)
+    return native, native
+
+
 def output_formats(fconf, router_conf) -> list[dict]:
-    """Each output's native format: what is set on the output, else what its speaker plays."""
+    """Each output's native format: what is set on the output, else what its speaker plays; with
+    the range of sample rates it takes (min_sample_rate, max_sample_rate)."""
     formats = []
     for output in router_conf[CONF_OUTPUTS]:
         known = {key: output[key] for key in FORMAT_KEYS if key in output}
@@ -85,6 +111,9 @@ def output_formats(fconf, router_conf) -> list[dict]:
                 f"audio_router output '{output[CONF_NAME]}': its speaker does not fix "
                 f"{', '.join(missing)} -- set {', '.join(missing)} on the output"
             )
+        fmt[audio.CONF_MIN_SAMPLE_RATE], fmt[audio.CONF_MAX_SAMPLE_RATE] = (
+            resolve_rate_range(fconf, output[CONF_SPEAKER], fmt[CONF_SAMPLE_RATE])
+        )
         formats.append(fmt)
     return formats
 
@@ -154,6 +183,8 @@ def _final_validate(config):
                     "is not supported (16, 24 or 32)"
                 )
             output[key] = fmt[key]
+        output[audio.CONF_MIN_SAMPLE_RATE] = fmt[audio.CONF_MIN_SAMPLE_RATE]
+        output[audio.CONF_MAX_SAMPLE_RATE] = fmt[audio.CONF_MAX_SAMPLE_RATE]
 
 
 FINAL_VALIDATE_SCHEMA = _final_validate
@@ -173,5 +204,7 @@ async def to_code(config):
                 output[CONF_BITS_PER_SAMPLE],
                 output[CONF_NUM_CHANNELS],
                 output[CONF_SAMPLE_RATE],
+                output[audio.CONF_MIN_SAMPLE_RATE],
+                output[audio.CONF_MAX_SAMPLE_RATE],
             )
         )

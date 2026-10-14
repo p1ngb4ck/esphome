@@ -141,6 +141,8 @@ void SimpleVideoPlayer::on_audio_output_changed_() {
   // plays on in it.
   const audio::AudioStreamInfo &format = this->audio_router_->active_format();
   this->wanted_audio_rate_.store(format.get_sample_rate(), std::memory_order_release);
+  this->wanted_audio_min_rate_.store(this->audio_router_->active_min_sample_rate(), std::memory_order_release);
+  this->wanted_audio_max_rate_.store(this->audio_router_->active_max_sample_rate(), std::memory_order_release);
   this->wanted_audio_channels_.store(std::min<uint8_t>(format.get_channels(), AUDIO_SOURCE_CHANNELS),
                                      std::memory_order_release);
 #ifdef SVP_STREAM

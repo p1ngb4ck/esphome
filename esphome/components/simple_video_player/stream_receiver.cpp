@@ -672,6 +672,7 @@ void SimpleVideoPlayer::stream_send_pending_(int client) {
   }
 #ifdef USE_AUDIO
   // 'A': the rate this panel's speaker runs at (kHz, then 50 Hz steps), so the sender captures at it.
+  // 'L': the lowest and highest rate it takes as they are (each as in 'A').
   // 'N': the channel count a played AVI's sound must have (the speaker's, see init_audio_decoder_).
   // 'F': the audio codecs a played AVI may carry (audio_codec): 1 PCM, 2 MP3, 4 FLAC.
   if (this->stream_rate_pending_.exchange(false, std::memory_order_acq_rel)) {
@@ -687,13 +688,20 @@ void SimpleVideoPlayer::stream_send_pending_(int client) {
 #endif
     // Sent again whenever an audio router's selection changes them.
     const uint32_t rate = this->wanted_audio_rate_.load(std::memory_order_acquire);
-    const uint8_t message[7] = {'A',
-                                static_cast<uint8_t>(rate / 1000),
-                                static_cast<uint8_t>((rate % 1000) / 50),
-                                'N',
-                                this->wanted_audio_channels_.load(std::memory_order_acquire),
-                                'F',
-                                codecs};
+    const uint32_t min_rate = this->wanted_audio_min_rate_.load(std::memory_order_acquire);
+    const uint32_t max_rate = this->wanted_audio_max_rate_.load(std::memory_order_acquire);
+    const uint8_t message[12] = {'A',
+                                 static_cast<uint8_t>(rate / 1000),
+                                 static_cast<uint8_t>((rate % 1000) / 50),
+                                 'L',
+                                 static_cast<uint8_t>(min_rate / 1000),
+                                 static_cast<uint8_t>((min_rate % 1000) / 50),
+                                 static_cast<uint8_t>(max_rate / 1000),
+                                 static_cast<uint8_t>((max_rate % 1000) / 50),
+                                 'N',
+                                 this->wanted_audio_channels_.load(std::memory_order_acquire),
+                                 'F',
+                                 codecs};
     if (::send(client, message, sizeof(message), MSG_DONTWAIT) != static_cast<int>(sizeof(message)))
       this->stream_rate_pending_.store(true, std::memory_order_release);
   }
@@ -980,20 +988,22 @@ void SimpleVideoPlayer::stream_on_audio_(const uint8_t *data, size_t len) {
     this->stream_audio_carry_len_ = 0;
     return;
   }
-  const uint32_t rate = this->wanted_audio_rate_.load(std::memory_order_acquire);
-  if (AUDIO_BITS_PER_SAMPLE != 16 || this->stream_audio_rate_ != rate || this->stream_audio_src_ch_ > 2) {
+  const uint32_t rate = this->stream_audio_rate_;
+  const uint32_t min_rate = this->wanted_audio_min_rate_.load(std::memory_order_acquire);
+  const uint32_t max_rate = this->wanted_audio_max_rate_.load(std::memory_order_acquire);
+  if (AUDIO_BITS_PER_SAMPLE != 16 || rate < min_rate || rate > max_rate || this->stream_audio_src_ch_ > 2) {
     if (!this->stream_logged_audio_format_) {
       this->stream_logged_audio_format_ = true;
-      ESP_LOGW(TAG, "Sound of %u Hz, %u channel(s) does not fit the speaker (%u Hz, %u bit): not played",
-               static_cast<unsigned>(this->stream_audio_rate_), this->stream_audio_src_ch_,
-               static_cast<unsigned>(rate), static_cast<unsigned>(AUDIO_BITS_PER_SAMPLE));
+      ESP_LOGW(TAG, "Sound of %u Hz, %u channel(s) does not fit the speaker (%u-%u Hz, %u bit): not played",
+               static_cast<unsigned>(rate), this->stream_audio_src_ch_, static_cast<unsigned>(min_rate),
+               static_cast<unsigned>(max_rate), static_cast<unsigned>(AUDIO_BITS_PER_SAMPLE));
     }
     this->stream_audio_carry_len_ = 0;
     return;
   }
   this->stream_logged_audio_format_ = false;
   if (this->speaker_->is_running() && this->stream_speaker_rate_ != rate)
-    this->speaker_->stop();  // the sender follows an audio router's new output: started again in its rate
+    this->speaker_->stop();  // the sender changed its rate: started again in it
   if (!this->speaker_->is_running()) {
     this->speaker_->set_audio_stream_info(
         audio::AudioStreamInfo(AUDIO_BITS_PER_SAMPLE, this->stream_audio_out_ch_, rate));

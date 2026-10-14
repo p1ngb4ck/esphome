@@ -18,9 +18,10 @@ static constexpr size_t SCRATCH_BYTES = 4096;
 static constexpr uint8_t MAX_CHANNELS = 8;
 
 void AudioRouter::add_output(speaker::Speaker *output, const char *name, uint8_t bits_per_sample, uint8_t channels,
-                             uint32_t sample_rate) {
+                             uint32_t sample_rate, uint32_t min_sample_rate, uint32_t max_sample_rate) {
   const size_t index = this->outputs_.size();
-  this->outputs_.push_back({output, name, audio::AudioStreamInfo(bits_per_sample, channels, sample_rate)});
+  this->outputs_.push_back(
+      {output, name, audio::AudioStreamInfo(bits_per_sample, channels, sample_rate), min_sample_rate, max_sample_rate});
   output->add_audio_output_callback([this, index](uint32_t frames, int64_t timestamp) {
     if (this->active_.load() == index)
       this->audio_output_callback_.call(frames, timestamp);
@@ -55,9 +56,10 @@ void AudioRouter::dump_config() {
   ESP_LOGCONFIG(TAG, "Audio router:");
   for (size_t i = 0; i < this->outputs_.size(); i++) {
     const audio::AudioStreamInfo &format = this->outputs_[i].format;
-    ESP_LOGCONFIG(TAG, "  Output %u: %s, %" PRIu32 " Hz, %u bit, %u channel(s)%s", static_cast<unsigned>(i),
-                  this->outputs_[i].name, format.get_sample_rate(), format.get_bits_per_sample(), format.get_channels(),
-                  i == this->active_.load() ? " (selected)" : "");
+    ESP_LOGCONFIG(TAG, "  Output %u: %s, %" PRIu32 " Hz (takes %" PRIu32 "-%" PRIu32 " Hz), %u bit, %u channel(s)%s",
+                  static_cast<unsigned>(i), this->outputs_[i].name, format.get_sample_rate(),
+                  this->outputs_[i].min_sample_rate, this->outputs_[i].max_sample_rate, format.get_bits_per_sample(),
+                  format.get_channels(), i == this->active_.load() ? " (selected)" : "");
   }
 }
 

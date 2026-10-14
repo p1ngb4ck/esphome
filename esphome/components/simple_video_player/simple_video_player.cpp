@@ -44,6 +44,8 @@ void SimpleVideoPlayer::setup() {
 #if defined(USE_AUDIO) && defined(SVP_AUDIO_SAMPLE_RATE)
   this->wanted_audio_rate_.store(AUDIO_SAMPLE_RATE, std::memory_order_release);
   this->wanted_audio_channels_.store(AUDIO_SOURCE_CHANNELS, std::memory_order_release);
+  this->wanted_audio_min_rate_.store(AUDIO_SAMPLE_RATE, std::memory_order_release);
+  this->wanted_audio_max_rate_.store(AUDIO_SAMPLE_RATE, std::memory_order_release);
 #ifdef SVP_AUDIO_ROUTER
   if (this->audio_router_ != nullptr) {
     this->audio_router_->add_on_output_callback([this](size_t) { this->on_audio_output_changed_(); });

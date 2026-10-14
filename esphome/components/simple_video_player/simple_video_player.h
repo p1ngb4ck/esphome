@@ -943,6 +943,9 @@ class SimpleVideoPlayer : public Component
   // audio router its selected output's (they change with the selection).
   std::atomic<uint32_t> wanted_audio_rate_{0};
   std::atomic<uint8_t> wanted_audio_channels_{0};
+  // The rates taken as they are: the speaker's one, or the selected router output's range.
+  std::atomic<uint32_t> wanted_audio_min_rate_{0};
+  std::atomic<uint32_t> wanted_audio_max_rate_{0};
 #ifdef SVP_AUDIO_ROUTER
   audio_router::AudioRouter *audio_router_{nullptr};
   void on_audio_output_changed_();
