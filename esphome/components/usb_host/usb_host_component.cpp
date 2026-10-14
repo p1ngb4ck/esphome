@@ -359,7 +359,10 @@ void USBHost::switch_cb(usb_transfer_t *xfer) {
   // A control switch usually ends with the device dropping off the bus, which is success.
   if (ok && !dev->gone && ++dev->switch_step < steps && host->submit_switch_step_(*dev))
     return;
-  host->finish_mode_switch_(handle);
+  // The transfer still counts as in flight until its callback returns, so releasing the
+  // interface here fails, and closing the device with it: the device is never freed and its
+  // port never sees the device come back in its new mode.
+  host->defer([host, handle]() { host->finish_mode_switch_(handle); });
 }
 
 void USBHost::finish_mode_switch_(usb_device_handle_t handle) {
