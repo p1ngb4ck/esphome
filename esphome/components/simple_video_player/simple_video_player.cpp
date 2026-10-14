@@ -89,9 +89,6 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // Before loop() runs (which serves its storage calls); its ring comes with the session buffers.
-  this->file_reader_ = std::make_unique<BufferedFileReader>();
-
   // Internal RAM, aligned for DMA.
   this->cache_buffer_.reset(
       static_cast<uint8_t *>(heap_caps_aligned_alloc(DMA_ALIGNMENT, CACHE_BUFFER_SIZE, MALLOC_CAP_INTERNAL)));
@@ -201,8 +198,6 @@ void SimpleVideoPlayer::setup() {
 }
 
 void SimpleVideoPlayer::loop() {
-  if (this->file_reader_)
-    this->file_reader_->service();
   this->handle_output_release_();
   if (this->finished_pending_.exchange(false, std::memory_order_acq_rel))
     this->on_finished_callbacks_.call();

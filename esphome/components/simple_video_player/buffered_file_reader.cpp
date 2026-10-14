@@ -4,7 +4,6 @@
  */
 
 #include "buffered_file_reader.h"
-#include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
@@ -50,8 +49,8 @@ bool BufferedFileReader::LookaheadRing::peek(size_t offset, uint8_t *dst, size_t
   return true;
 }
 
-void BufferedFileReader::fill_now_() {
-  if (this->network_ || !this->open_)
+void BufferedFileReader::kick_fill_() {
+  if (this->network_)
     return;  // filled by push()
   if (this->draining_.load(std::memory_order_acquire) || this->eof_.load(std::memory_order_acquire) ||
       this->fill_err_.load(std::memory_order_acquire))
@@ -80,75 +79,10 @@ void BufferedFileReader::fill_now_() {
   storage::StorageError submit = storage::global_storage_worker->read_chunk(
       this->handle_, this->ring_.data + at, want, &this->fill_got_,
       [this](storage::StorageError e) { this->on_fill_done_(e); });
-  if (submit == storage::StorageError::STORAGE_ERROR_NOT_READY) {
-    this->fill_in_flight_.store(false, std::memory_order_release);
-    this->kick_fill_();  // the last step's completion is not delivered yet: on the next pass
-  } else if (submit != storage::StorageError::STORAGE_ERROR_OK) {
-    ESP_LOGE(TAG, "read_chunk submit failed: %s", storage::error_to_string(submit));
-    this->fill_err_.store(true, std::memory_order_release);
-    this->fill_in_flight_.store(false, std::memory_order_release);
+  if (submit != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGW(TAG, "read_chunk submit failed: %s", storage::error_to_string(submit));
+    this->fill_in_flight_.store(false, std::memory_order_release);  // retried by the next kick
   }
-}
-
-void BufferedFileReader::service() {
-  this->loop_task_ = xTaskGetCurrentTaskHandle();
-  Op op = this->op_.load(std::memory_order_acquire);
-  if (op != Op::NONE && this->submit_(op, this->op_seq_.load(std::memory_order_acquire)))
-    this->op_.compare_exchange_strong(op, Op::NONE, std::memory_order_acq_rel);
-  if (this->kick_wanted_.exchange(false, std::memory_order_acq_rel))
-    this->fill_now_();
-}
-
-bool BufferedFileReader::submit_(Op op, uint32_t seq) {
-  auto done = [this, seq](storage::StorageError e) { this->on_sync_done_(seq, e); };
-  storage::StorageWorker *worker = storage::global_storage_worker;
-  storage::StorageError err;
-  switch (op) {
-    case Op::BEGIN_READ: {
-      const char *rel = nullptr;
-      storage::PathStorage *ps = storage::global_storage_registry->resolve_path(this->op_path_.c_str(), &rel);
-      if (ps == nullptr) {
-        ESP_LOGE(TAG, "'%s' does not resolve to a mounted storage", this->op_path_.c_str());
-        this->on_sync_done_(seq, storage::StorageError::STORAGE_ERROR_NOT_FOUND);
-        return true;
-      }
-      err = worker->begin_read(ps, rel, &this->handle_, done);
-      break;
-    }
-    case Op::END_READ:
-      err = worker->end_read(this->handle_, done);
-      break;
-    case Op::SEEK:
-      err = worker->seek(this->handle_, this->op_offset_, this->op_mode_, done);
-      break;
-    case Op::TELL:
-      err = worker->tell(this->handle_, &this->op_tell_, done);
-      break;
-    default:
-      return true;
-  }
-  if (err == storage::StorageError::STORAGE_ERROR_NOT_READY)
-    return false;
-  if (err != storage::StorageError::STORAGE_ERROR_OK)
-    this->on_sync_done_(seq, err);
-  return true;
-}
-
-storage::StorageError BufferedFileReader::call_(Op op) {
-  const uint32_t seq = this->op_seq_.fetch_add(1, std::memory_order_acq_rel) + 1;
-  this->waiting_task_ = xTaskGetCurrentTaskHandle();
-  this->sync_done_.store(false, std::memory_order_release);
-  if (this->waiting_task_ == this->loop_task_) {
-    // On the main loop itself (the destructor): its completion cannot be waited for here.
-    return this->submit_(op, seq) ? storage::StorageError::STORAGE_ERROR_OK
-                                  : storage::StorageError::STORAGE_ERROR_NOT_READY;
-  }
-  this->op_.store(op, std::memory_order_release);
-  App.wake_loop_threadsafe();
-  const storage::StorageError err = this->wait_sync_();
-  Op pending = op;
-  this->op_.compare_exchange_strong(pending, Op::NONE, std::memory_order_acq_rel);  // given up before it was made
-  return err;
 }
 
 void BufferedFileReader::on_fill_done_(storage::StorageError err) {
@@ -170,7 +104,7 @@ void BufferedFileReader::on_fill_done_(storage::StorageError err) {
   this->fill_in_flight_.store(false, std::memory_order_release);
   if (this->waiting_task_ != nullptr)
     xTaskNotifyGive(this->waiting_task_);  // wake a quiesce_fill_() waiter, if any
-  this->fill_now_();  // chain the next read
+  this->kick_fill_();  // chain the next read
 }
 
 void BufferedFileReader::quiesce_fill_() {
@@ -192,8 +126,18 @@ bool BufferedFileReader::open(const char *path) {
     ESP_LOGE(TAG, "storage worker or read-ahead ring not available");
     return false;
   }
-  this->op_path_ = path;
-  if (this->call_(Op::BEGIN_READ) != storage::StorageError::STORAGE_ERROR_OK) {
+  const char *rel = nullptr;
+  storage::PathStorage *ps = storage::global_storage_registry->resolve_path(path, &rel);
+  if (ps == nullptr) {
+    ESP_LOGE(TAG, "'%s' does not resolve to a mounted storage", path);
+    return false;
+  }
+
+  this->arm_wait_();
+  if (storage::global_storage_worker->begin_read(ps, rel, &this->handle_,
+                                                 [this](storage::StorageError e) { this->on_sync_done_(e); }) !=
+          storage::StorageError::STORAGE_ERROR_OK ||
+      this->wait_sync_() != storage::StorageError::STORAGE_ERROR_OK) {
     ESP_LOGE(TAG, "begin_read('%s') failed", path);
     return false;
   }
@@ -229,7 +173,9 @@ void BufferedFileReader::close() {
   // Clear it so this final close runs to completion synchronously while the task is still alive.
   this->abort_flag_ = nullptr;
   this->quiesce_fill_();
-  this->call_(Op::END_READ);
+  this->arm_wait_();
+  storage::global_storage_worker->end_read(this->handle_, [this](storage::StorageError e) { this->on_sync_done_(e); });
+  this->wait_sync_();
 
   this->ring_.reset();
   this->open_ = false;
@@ -381,9 +327,12 @@ bool BufferedFileReader::seek(uint64_t position) {
   this->eof_.store(false);
   this->fill_err_.store(false);
 
-  this->op_offset_ = static_cast<int64_t>(position);
-  this->op_mode_ = storage::SeekMode::SEEK_MODE_SET;
-  if (this->call_(Op::SEEK) != storage::StorageError::STORAGE_ERROR_OK) {
+  this->arm_wait_();
+  if (storage::global_storage_worker->seek(this->handle_, static_cast<int64_t>(position),
+                                           storage::SeekMode::SEEK_MODE_SET,
+                                           [this](storage::StorageError e) { this->on_sync_done_(e); }) !=
+          storage::StorageError::STORAGE_ERROR_OK ||
+      this->wait_sync_() != storage::StorageError::STORAGE_ERROR_OK) {
     ESP_LOGE(TAG, "seek failed");
     return false;
   }
@@ -399,17 +348,23 @@ bool BufferedFileReader::get_size(uint64_t *size) {
   uint64_t saved = this->current_position_;
   this->quiesce_fill_();
 
-  this->op_offset_ = 0;
-  this->op_mode_ = storage::SeekMode::SEEK_MODE_END;
-  if (this->call_(Op::SEEK) != storage::StorageError::STORAGE_ERROR_OK) {
+  this->arm_wait_();
+  if (storage::global_storage_worker->seek(this->handle_, 0, storage::SeekMode::SEEK_MODE_END,
+                                           [this](storage::StorageError e) { this->on_sync_done_(e); }) !=
+          storage::StorageError::STORAGE_ERROR_OK ||
+      this->wait_sync_() != storage::StorageError::STORAGE_ERROR_OK) {
     ESP_LOGE(TAG, "get_size: seek(END) failed");
     return false;
   }
-  if (this->call_(Op::TELL) != storage::StorageError::STORAGE_ERROR_OK) {
+  uint64_t end_pos = 0;
+  this->arm_wait_();
+  if (storage::global_storage_worker->tell(this->handle_, &end_pos,
+                                           [this](storage::StorageError e) { this->on_sync_done_(e); }) !=
+          storage::StorageError::STORAGE_ERROR_OK ||
+      this->wait_sync_() != storage::StorageError::STORAGE_ERROR_OK) {
     ESP_LOGE(TAG, "get_size: tell failed");
     return false;
   }
-  const uint64_t end_pos = this->op_tell_;
   if (!this->seek(saved))  // also re-primes the fill chain from `saved`
     return false;
   *size = end_pos;

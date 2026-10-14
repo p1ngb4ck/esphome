@@ -14,7 +14,6 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
-#include <string>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -78,10 +77,6 @@ class BufferedFileReader {
   /// streaming mode already have their bytes. Uses the existing kick_fill_ -> on_fill_done_ chain.
   bool prefill_cache();
 
-  /// Main loop, every pass: the storage worker's stream calls are main-loop-only, so the calls the
-  /// tasks ask for (open, seek, tell, close, the next fill) are made from here.
-  void service();
-
   /// Fill-path counters for the end-of-playback stats (plain counters, reset per open()).
   struct FillStats {
     uint32_t underruns{0};      // streaming reads that found the ring short of the request
@@ -95,15 +90,12 @@ class BufferedFileReader {
   const FillStats &fill_stats() const { return this->stats_; }
 
  protected:
-  // --- the one-shot stream calls (begin_read/seek/tell/end_read): made by service(), waited for --
-  enum class Op : uint8_t { NONE, BEGIN_READ, END_READ, SEEK, TELL };
-  // A task: has service() make the call and waits for its completion.
-  storage::StorageError call_(Op op);
-  // Main loop: false while the stream is still busy with a step (made again on the next pass).
-  bool submit_(Op op, uint32_t seq);
-  void on_sync_done_(uint32_t seq, storage::StorageError err) {
-    if (seq != this->op_seq_.load(std::memory_order_acquire))
-      return;  // of a call given up meanwhile
+  // --- blocking hand-off for the one-shot stream calls (begin_read/seek/tell/end_read) ----------
+  void arm_wait_() {
+    this->waiting_task_ = xTaskGetCurrentTaskHandle();
+    this->sync_done_.store(false, std::memory_order_release);
+  }
+  void on_sync_done_(storage::StorageError err) {
     this->sync_result_ = err;
     this->sync_done_.store(true, std::memory_order_release);
     if (this->waiting_task_ != nullptr)
@@ -121,11 +113,10 @@ class BufferedFileReader {
   }
 
   // --- async fill chain -------------------------------------------------------------------------
-  // Any task: the next fill is wanted; service() submits it.
-  void kick_fill_() { this->kick_wanted_.store(true, std::memory_order_release); }
-  // Main loop: one non-blocking read_chunk() into the ring's free part if it has room and nothing
-  // is in flight.
-  void fill_now_();
+  // Submit one non-blocking read_chunk() into the ring's free part if it has room and nothing is in
+  // flight. Safe to call from the playback task (after read() drains the ring) and from the
+  // completion callback on the main loop -- the atomic exchange makes it single-entry.
+  void kick_fill_();
   // read_chunk completion (main loop): publish what was read into the ring, then chain the next fill.
   void on_fill_done_(storage::StorageError err);
   // Wait (bounded, abortable) for any in-flight fill to finish, so a one-shot stream call can run.
@@ -135,14 +126,6 @@ class BufferedFileReader {
   static constexpr uint32_t WAIT_CAP_MS = 5000;
 
   storage::StreamHandle handle_{};
-  std::atomic<Op> op_{Op::NONE};
-  std::atomic<uint32_t> op_seq_{0};
-  std::string op_path_;
-  int64_t op_offset_{0};
-  storage::SeekMode op_mode_{storage::SeekMode::SEEK_MODE_SET};
-  uint64_t op_tell_{0};
-  TaskHandle_t loop_task_{nullptr};
-  std::atomic<bool> kick_wanted_{false};
   bool open_{false};
   bool network_{false};                       // open_stream(): filled by push(), not the storage worker
   SemaphoreHandle_t stream_lock_{nullptr};    // push()/end_stream() vs close() of a network source
