@@ -1720,6 +1720,7 @@ bool SimpleVideoPlayer::open_stream_source_() {
     return false;
   }
   this->stream_sink_.store(this->file_reader_.get(), std::memory_order_release);
+  this->stream_wake_();  // the network task waits for the sink before it reads the socket again
   this->file_size_ = 0;
   this->video_format_ = VideoFormat::AVI_MJPEG;
   if (!this->avi_parser_) {
