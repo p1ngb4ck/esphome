@@ -26,6 +26,7 @@ static const char *const TAG = "simple_video_player.channels";
 static constexpr size_t CHANNEL_MAX = 300;
 static constexpr size_t HA_ITEMS_MAX = 500;  // as the relay sends at most
 static constexpr size_t CHANNEL_RESPONSE_MAX = 256 * 1024;
+static constexpr uint32_t RELAY_SLOW_TIMEOUT_MS = 15000;  // /desktop: once the desktop is up; /image: once fitted
 
 bool SimpleVideoPlayer::setup_channel_list_() {
   this->channel_q_ = xQueueCreate(8, sizeof(ChannelCmd));
@@ -404,7 +405,8 @@ void SimpleVideoPlayer::image_task_() {
            static_cast<int>(this->pic_remote_h_), static_cast<unsigned>(read.limit - 1));
   const std::string path = "/image?id=" + url_encoded(id.c_str()) + query;
   size_t len = 0;
-  const bool ok = this->channel_http_(path.c_str(), nullptr, nullptr, &len, read.file->data, read.limit);
+  const bool ok =
+      this->channel_http_(path.c_str(), nullptr, nullptr, &len, read.file->data, read.limit, RELAY_SLOW_TIMEOUT_MS);
   read.length = ok ? len : 0;
   read.failed = !ok || len == 0 || len >= read.limit;
   std::atomic_thread_fence(std::memory_order_release);
@@ -508,7 +510,7 @@ bool SimpleVideoPlayer::desktop_relay_start_(const char *kind, const char *host,
     root["password"] = password;
     root["connection_id"] = connection_id;
   });
-  if (this->channel_http_("/desktop", payload.c_str(), nullptr, nullptr))
+  if (this->channel_http_("/desktop", payload.c_str(), nullptr, nullptr, nullptr, 0, RELAY_SLOW_TIMEOUT_MS))
     return true;
   this->desktop_sender_wanted_.store(false, std::memory_order_release);
   ESP_LOGE(TAG, "svp_relay did not show the desktop (its log says why)");
@@ -525,9 +527,10 @@ void SimpleVideoPlayer::desktop_relay_stop_() {
 #endif
 
 bool SimpleVideoPlayer::channel_http_(const char *path, const char *body, char **response, size_t *response_len,
-                                      uint8_t *into, size_t into_cap) {
+                                      uint8_t *into, size_t into_cap, uint32_t timeout_ms) {
   if (this->channel_http_request_ == nullptr)
     return false;
+  const uint32_t timeout = timeout_ms != 0 ? timeout_ms : this->channel_http_request_->get_timeout();
   const std::string url = this->channel_url_ + path;
   std::vector<http_request::Header> headers;
   if (!this->channel_token_.empty())
@@ -535,7 +538,8 @@ bool SimpleVideoPlayer::channel_http_(const char *path, const char *body, char *
   if (body != nullptr)
     headers.push_back({"Content-Type", "application/json"});
   auto container = this->channel_http_request_->start(url.c_str(), body != nullptr ? "POST" : "GET",
-                                                      body != nullptr ? std::string(body) : std::string(), headers);
+                                                      body != nullptr ? std::string(body) : std::string(), headers,
+                                                      {}, timeout);
   if (container == nullptr) {
     ESP_LOGW(TAG, "%s%s failed", this->channel_url_.c_str(), path);
     return false;
@@ -549,8 +553,7 @@ bool SimpleVideoPlayer::channel_http_(const char *path, const char *body, char *
     uint32_t last = millis();
     while (true) {
       const int n = container->read(dst, room);
-      switch (http_request::http_read_loop_result(n, last, this->channel_http_request_->get_timeout(),
-                                                  container->is_read_complete())) {
+      switch (http_request::http_read_loop_result(n, last, timeout, container->is_read_complete())) {
         case http_request::HttpReadLoopResult::DATA:
           return n;
         case http_request::HttpReadLoopResult::COMPLETE:

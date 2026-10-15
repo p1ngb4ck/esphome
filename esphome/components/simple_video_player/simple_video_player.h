@@ -995,7 +995,7 @@ class SimpleVideoPlayer : public Component
   void channel_task_loop_();
   /// Blocking HTTP to the relay (channel task only). response: PSRAM buffer, caller frees.
   bool channel_http_(const char *path, const char *body, char **response, size_t *response_len,
-                     uint8_t *into = nullptr, size_t into_cap = 0);
+                     uint8_t *into = nullptr, size_t into_cap = 0, uint32_t timeout_ms = 0);
   void ha_browse_task_();
   void ha_play_request_(const std::string &id);
 #if defined(SVP_AUDIO_FILES) && defined(SVP_MEDIA_PLAYER)

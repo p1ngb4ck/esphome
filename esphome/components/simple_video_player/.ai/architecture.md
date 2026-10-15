@@ -36,7 +36,7 @@ Main loop: `loopTask`, prio 1, core 1 (`CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1`, `Ap
 | svp_reader | `reader_task_entry_` S:871 | 0 | 2 | 4096 | video file / audio file read; `reader_wait_`, BFR reads in 20 ms slices |
 | svp_audio | `audio_task_entry_` S:2741 (only with a speaker) | 0 | 1 | 4096 | audio decode/feed; `audio_wait_`, ring reads 20 ms, `speaker->play` 20 ms |
 | svp_pictures | `picture_task_entry_` P:917 | 1 | 1 | 8192 | picture decode and cover decode (cover job first) |
-| svp_channels | `channel_task_entry_` CL:251 | 0 | 1 | 8192 | HTTP to relay through the `http_request` component (its timeout), queue `channel_q_` (8) |
+| svp_channels | `channel_task_entry_` CL:251 | 0 | 1 | 8192 | HTTP to relay through the `http_request` component (its timeout; `/desktop`, `/image` 15 s), queue `channel_q_` (8) |
 | svp_spice | `spice_task_entry_` SP:2585 | any | 4 | 8192 | SPICE/VNC session, select loops, USB service |
 | svp_stream_draw | `stream_draw_task_entry_` R:1010 | 1 | 2 | 4096 | decode/draw udisp stills, desktop cursor |
 | svp_stream_net | `stream_net_task_entry_` R:271 | any | 4 | 4096 | accept/serve one sender at a time, push AVI into ring |
