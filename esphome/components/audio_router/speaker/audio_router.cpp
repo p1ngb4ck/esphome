@@ -5,6 +5,7 @@
 #include "esphome/core/log.h"
 
 #include <esp_heap_caps.h>
+#include <freertos/task.h>
 
 #include <algorithm>
 #include <cinttypes>
@@ -78,6 +79,17 @@ size_t AudioRouter::play(const uint8_t *data, size_t length, TickType_t ticks_to
     if (this->state_ == speaker::STATE_STOPPED) {
       this->start_output_();
       this->state_ = finishing ? speaker::STATE_STOPPING : speaker::STATE_RUNNING;
+    } else if (this->audio_stream_info_ != this->started_info_) {
+      // A player's stream in another format than the output was started in: the output starts again
+      // in it, once it has stopped (nothing is written meanwhile).
+      speaker::Speaker *output = this->current_();
+      if (!output->is_stopped()) {
+        output->stop();
+        this->in_play_.fetch_sub(1);
+        vTaskDelay(ticks_to_wait);
+        return 0;
+      }
+      this->start_output_();
     }
     written = this->convert_ ? this->play_converted_(data, length, ticks_to_wait)
                              : this->current_()->play(data, length, ticks_to_wait);
@@ -104,6 +116,7 @@ audio::AudioStreamInfo AudioRouter::output_stream_info_() const {
 }
 
 void AudioRouter::start_output_() {
+  this->started_info_ = this->audio_stream_info_;
   this->out_info_ = this->output_stream_info_();
   const uint8_t in_bits = this->audio_stream_info_.get_bits_per_sample();
   this->convert_ = this->out_info_.get_channels() != this->audio_stream_info_.get_channels() ||

@@ -88,6 +88,7 @@ class AudioRouter : public speaker::Speaker, public Component {
 
   // Conversion, on the playing task only: the stream as the output takes it.
   audio::AudioStreamInfo out_info_;
+  audio::AudioStreamInfo started_info_;  // the players' stream the output was started for
   bool convert_{false};
   uint8_t *scratch_{nullptr};
   // Converted bytes of a frame the output took only part of; written before anything else.

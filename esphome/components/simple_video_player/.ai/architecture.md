@@ -125,6 +125,7 @@ reports the media player's state instead while `state_` is STOPPED and `audio_re
 | Audio files | reader `audio_file_feed_` (128 KB ring) | audio task `audio_file_loop_` -> `file_speaker_` (resampler); player still calls `stop`/`finish`/pause on it |
 | HA audio | `svp_play_audio` MS:132 | speaker media player (own pipeline) |
 | Router | `add_on_output_callback` S:50 -> `on_audio_output_changed_` MS:170 | new wanted rate/channels, resend 'A/L/N/F' to the sender |
+| Router format | players only `set_audio_stream_info` | `audio_router` starts its output with the first sound, and starts it again (stop, wait until stopped, start) when a player's stream format differs from the one it was started for (audio_router.cpp `play()`); the player never starts/stops |
 
 A/V sync: `audio_latency` (BT delay) clamped to `max_audio_latency_ms_` = ring x 100 / MiB (S:680,
 S:2146); sound released when the cursor leads by `audio_lead_frames_`; picture clock anchored that

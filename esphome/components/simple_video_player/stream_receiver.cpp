@@ -1178,12 +1178,11 @@ void SimpleVideoPlayer::stream_play_audio_(const uint8_t *data, size_t len) {
     return;
   }
   this->stream_logged_audio_format_ = false;
-  // Never started or stopped here: the router starts its output with the first sound.
-  if (!this->speaker_->is_running()) {
-    this->speaker_->set_audio_stream_info(
-        audio::AudioStreamInfo(AUDIO_BITS_PER_SAMPLE, this->stream_audio_out_ch_, rate));
-    this->stream_speaker_rate_ = rate;
-  }
+  // The stream's format, as it is (another player may have set its own): never started or stopped
+  // here, the router starts its output in it.
+  this->speaker_->set_audio_stream_info(
+      audio::AudioStreamInfo(AUDIO_BITS_PER_SAMPLE, this->stream_audio_out_ch_, rate));
+  this->stream_speaker_rate_ = rate;
   this->stream_last_audio_ms_.store(millis(), std::memory_order_release);
   this->stream_audio_on_.store(true, std::memory_order_release);
 
