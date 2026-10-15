@@ -363,18 +363,10 @@ void SimpleVideoPlayer::loop() {
     const bool lvgl_off = true;
 #endif
 #if defined(SVP_STREAM) && defined(USE_AUDIO)
-    // Stream sound stopped arriving: let the speaker go (a playing file manages it itself).
+    // Stream sound stopped arriving (the speaker runs on).
     if (this->stream_audio_on_.load(std::memory_order_acquire) &&
-        millis() - this->stream_last_audio_ms_.load(std::memory_order_acquire) > 500) {
+        millis() - this->stream_last_audio_ms_.load(std::memory_order_acquire) > 500)
       this->stream_audio_on_.store(false, std::memory_order_release);
-      bool speaker_free = this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED;
-#ifdef SVP_SPICE
-      // Audio files playing meanwhile do so on another device (spice_sound_shares_files_).
-      speaker_free = speaker_free || this->spice_on_.load(std::memory_order_acquire);
-#endif
-      if (speaker_free)
-        this->speaker_->stop();
-    }
 #endif
 #ifdef SVP_STREAM
     const bool output_ok = streaming && lvgl_off;
@@ -1215,10 +1207,6 @@ void SimpleVideoPlayer::playback_loop_() {
                      this->reader_frames_.load(std::memory_order_acquire) + this->audio_lead_frames_ ||
                  !playing() || millis() - start >= 1000;
         });
-  }
-  if (this->audio_enabled_) {
-    this->speaker_->start();
-    this->wait_speaker_running_();
   }
 #endif
   this->av_started_.store(true, std::memory_order_release);
@@ -2867,22 +2855,7 @@ void SimpleVideoPlayer::speaker_pause_(bool paused) {
     return;
   }
 #endif
-  if (this->session_audio_ && this->speaker_ != nullptr)
-    this->speaker_->set_pause_state(paused);
-}
-
-void SimpleVideoPlayer::wait_speaker_running_() {
-  // Playback task, right after speaker_->start() before the first frame or after a seek (not the
-  // per-frame path).
-  static constexpr uint32_t SPEAKER_START_TIMEOUT_MS = 1000;
-  const uint32_t wait_start = millis();
-  while (!this->speaker_->is_running() && (millis() - wait_start) < SPEAKER_START_TIMEOUT_MS)
-    vTaskDelay(pdMS_TO_TICKS(1));
-  if (!this->speaker_->is_running()) {
-    ESP_LOGE(TAG, "Speaker failed to start within %" PRIu32 " ms -- playing video-only", SPEAKER_START_TIMEOUT_MS);
-    this->speaker_->stop();
-    this->audio_enabled_ = false;
-  }
+  // A video's sound: the audio task holds itself; the speaker is left as it is.
 }
 
 // Playback task, end of a session: the audio task (also one that turned audio off itself, or that
@@ -2891,10 +2864,6 @@ void SimpleVideoPlayer::end_session_audio_() {
   // audio_decoder_ and the rings are permanent (setup()): init_audio_decoder_() starts them anew.
   const bool had_audio = this->session_audio_ || this->audio_busy_.load(std::memory_order_acquire);
   this->stop_audio_task_();
-  if (had_audio && this->speaker_ != nullptr) {
-    this->speaker_->set_pause_state(false);  // a session stopped while paused
-    this->speaker_->stop();
-  }
   this->audio_enabled_ = false;
   this->session_audio_ = false;
   if (had_audio)

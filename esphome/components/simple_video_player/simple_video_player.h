@@ -1082,8 +1082,6 @@ class SimpleVideoPlayer : public Component
 
   /// Stop audio processing task
   void stop_audio_task_();
-  /// Right before the first frame: make sure the speaker (started at audio init) is running.
-  void wait_speaker_running_();
 #endif
 
   //========================================================================
