@@ -155,8 +155,8 @@ S:2080-2148: everything listed as "fixed" is reserved; the **read-ahead ring get
 | `ring_buf_` | rest of pool (~7-8 MB on the device) | first session, kept | compressed AVI/MJPEG | = rest |
 | `decode_target_` + `ctl_mem_` | panel w·h·bpp (2.05 MB) + 3 × bar snapshot + 4 KiB | first direct output, kept | decoded frame, controls | yes (max of direct/canvas) |
 | `output_buffers_[2]` | 2 × A16(cw)·A16(ch)·3 | first canvas output, kept | decoded RGB888 | yes (max of direct/canvas) |
-| `pic_pages_[3]` | 3 × stride565(max(disp, canvas)) · h | first picture, reclaim | decoded pictures (pre-decoded neighbours) | **no** |
-| `pic_decode_buf_` | page size, grows by 1 MiB steps | first picture, reclaim | full native decode | **no** |
+| `pic_pages_[2]` | 2 × stride565(max(disp, canvas)) · h | first picture, reclaim | the shown picture and the next one (no decode ahead; neighbours only read undecoded) | **no** |
+| `pic_decode_buf_` | the decode's size in 1 MiB steps | only while a picture larger than its target (or a thumbnail) is decoded | full native decode | **no** |
 | `pic_files_[3]` | 1 MiB each, grows | first picture, reclaim | compressed files | **no** |
 | `cover_views_[<=3]` + `cover_file_` | A16 w·h·2 each (device 25 K + 320 K + 1.28 MB) + 512 KiB | cover wanted, reclaim | decoded cover / JPEG | **no** |
 | desktop cursors | ~300 KiB | session start, `release_desktop_` | cursor shapes | no |

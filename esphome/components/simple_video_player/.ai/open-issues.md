@@ -22,7 +22,7 @@ Remove an entry only when Olli confirms the fix on the device.
 | # | Issue | Status |
 |---|---|---|
 | B1 | **The ring takes the whole rest of the pool** (S:2128-2146), and audio latency + audio rings derive from it. Raising the pool only grows the ring; nothing sized by need | CODE |
-| B2 | **Pictures pre-decode**: 3 decoded pages (P:519) + a kept native decode buffer (grows, P:563-577) + 3 compressed files; the same picture compressed and decoded at once | CODE |
+| B2 | (changed in the commit after 775e5ff: 2 pages, neighbours undecoded, decode buffer on demand; awaiting Olli's test) **Pictures pre-decode**: 3 decoded pages (P:519) + a kept native decode buffer (grows, P:563-577) + 3 compressed files; the same picture compressed and decoded at once | CODE |
 | B3 | Pictures and cover are not in the pool plan; they live off whatever the ring leaves or by freeing all media buffers (`release_media_` is all-or-nothing, P:501, C:61). Fragmentation possible when pieces stay inside the free area | CODE / PLAUSIBLE |
 | B4 | Cover: all 3 views are decoded and held while cover art shows, though only the visible one is needed; `cover_file_` (512 KiB) kept after decode | CODE |
 | B5 | DSI direct: decoded frame in `decode_target_` (2.05 MB) is copied into the panel framebuffer every frame (S:1402): a full frame twice. Decoding straight into the framebuffer: unverified whether mipi_dsi allows it | CODE / unverified |

@@ -1538,7 +1538,7 @@ class SimpleVideoPlayer : public Component
     uint32_t stride{0};
     lv_draw_buf_t buf{};  // what the canvas shows of it
   };
-  static constexpr size_t PIC_PAGE_COUNT = 3;
+  static constexpr size_t PIC_PAGE_COUNT = 2;  // the shown picture and the next one decoded (nothing ahead)
   // The file being read through the storage worker (whole, in one request), then decoded on the
   // picture task.
   struct PictureRead {
@@ -1680,6 +1680,7 @@ class SimpleVideoPlayer : public Component
   bool reserve_decode_(size_t size);
   bool acquire_picture_buffers_();
   void release_picture_buffers_();
+  void release_decode_();
   PicFile *cached_file_(size_t index);
   PicFile *free_file_();
   bool reserve_file_(PicFile *file, size_t size);
