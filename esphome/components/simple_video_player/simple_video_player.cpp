@@ -236,8 +236,13 @@ void SimpleVideoPlayer::loop() {
   if (state_changed)
     this->state_callbacks_.call();
 #ifdef SVP_AUDIO_FILES
-  if (this->audio_changed_.exchange(false, std::memory_order_acq_rel) || state_changed)
+  if (this->audio_changed_.exchange(false, std::memory_order_acq_rel) || state_changed) {
     this->audio_callbacks_.call();
+    if (this->audio_playlist_active_() != this->audio_playlist_shown_) {
+      this->audio_playlist_shown_ = this->audio_playlist_active_();
+      this->status_callbacks_.call();
+    }
+  }
   if (this->audio_advance_req_.load(std::memory_order_acquire) &&
       this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED && !this->session_busy_()) {
     this->audio_advance_req_.store(false, std::memory_order_relaxed);
@@ -739,6 +744,12 @@ void SimpleVideoPlayer::resume() {
 }
 
 void SimpleVideoPlayer::stop() {
+#ifdef SVP_AUDIO_FILES
+  if (this->is_audio_session()) {
+    this->audio_halted_ = true;
+    this->audio_changed_.store(true, std::memory_order_release);
+  }
+#endif
 #if defined(SVP_AUDIO_FILES) && defined(SVP_MEDIA_PLAYER) && defined(SVP_CHANNEL_LIST)
   this->audio_remote_command_(media_player::MEDIA_PLAYER_COMMAND_STOP);
 #endif
@@ -2926,6 +2937,7 @@ void SimpleVideoPlayer::audio_start_(size_t pos) {
 #endif
   this->audio_pos_ = pos;
   this->audio_current_ = true;
+  this->audio_halted_ = false;
   this->start_pending_.store(false, std::memory_order_release);
 #ifdef SVP_CHANNEL_LIST
   const PsramString &track = this->audio_queue_[this->audio_order_[pos]];

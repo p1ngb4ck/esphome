@@ -60,11 +60,14 @@ std::string SimpleVideoPlayer::status_json() {
   if (this->media_player_ != nullptr)
     traits = this->media_traits_json_.c_str();
 #endif
-  char json[256];
-  snprintf(json, sizeof(json),
-           "{\"svp\":1,\"port\":%u,\"state\":\"%s\",\"volume\":%.2f,\"muted\":%s,%s}", port, state,
-           this->get_volume(), muted ? "true" : "false", traits);
-  return json;
+  bool playlist = false;
+#ifdef SVP_AUDIO_FILES
+  playlist = this->audio_playlist_active_();
+#endif
+  char json[160];
+  snprintf(json, sizeof(json), "{\"svp\":1,\"port\":%u,\"state\":\"%s\",\"volume\":%.2f,\"muted\":%s,\"playlist\":%s,",
+           port, state, this->get_volume(), muted ? "true" : "false", playlist ? "true" : "false");
+  return std::string(json) + traits + "}";
 }
 
 #ifdef SVP_MEDIA_PLAYER

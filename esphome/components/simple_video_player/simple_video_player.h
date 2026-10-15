@@ -1218,6 +1218,11 @@ class SimpleVideoPlayer : public Component
   // A Home Assistant track of the queue: asked of svp_relay, then its network session plays it.
   static constexpr uint8_t AUDIO_REMOTE_NONE = 0, AUDIO_REMOTE_ASKED = 1, AUDIO_REMOTE_PLAYING = 2;
   std::atomic<uint8_t> audio_remote_{AUDIO_REMOTE_NONE};
+  // The queue plays (a track, or between two): not stopped and not past its end. In the status
+  // (svp_relay: the panel is not idle then); main loop.
+  bool audio_halted_{false};
+  bool audio_playlist_shown_{false};
+  bool audio_playlist_active_() const { return this->audio_current_ && !this->audio_halted_; }
   std::atomic<bool> audio_file_eof_{false};     // the reader has handed on the whole file
   std::atomic<bool> audio_changed_{false};
   // The file speaker stays open from one track to the next of the same format; audio task while a
