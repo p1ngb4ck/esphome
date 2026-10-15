@@ -20,6 +20,7 @@ from esphome.const import (
     CONF_HOST,
     CONF_ID,
     CONF_MODE,
+    CONF_NAME,
     CONF_NUM_CHANNELS,
     CONF_OUTPUT_SPEAKER,
     CONF_PASSWORD,
@@ -116,6 +117,9 @@ StreamOutputAction = simple_video_player_ns.class_("StreamOutputAction", automat
 StreamStatisticsAction = simple_video_player_ns.class_("StreamStatisticsAction", automation.Action)
 SpiceConnectAction = simple_video_player_ns.class_("SpiceConnectAction", automation.Action)
 SpiceDisconnectAction = simple_video_player_ns.class_("SpiceDisconnectAction", automation.Action)
+SpiceConnectSavedAction = simple_video_player_ns.class_("SpiceConnectSavedAction", automation.Action)
+SpiceSaveAction = simple_video_player_ns.class_("SpiceSaveAction", automation.Action)
+SpiceForgetAction = simple_video_player_ns.class_("SpiceForgetAction", automation.Action)
 SetVolumeAction = simple_video_player_ns.class_("SetVolumeAction", automation.Action)
 SeekAction = simple_video_player_ns.class_("SeekAction", automation.Action)
 NextAction = simple_video_player_ns.class_("NextAction", automation.Action)
@@ -170,6 +174,20 @@ CONF_STREAM_PORT = "stream_port"
 CONF_STREAM_OUTPUT = "stream_output"
 CONF_STREAM_STATISTICS = "stream_statistics"
 CONF_SPICE = "spice"
+CONF_CONNECTIONS = "connections"
+CONF_INDEX = "index"
+SPICE_CONNECTIONS_DEFAULT = 8
+
+
+def _spice(value):
+    """spice: true, or spice: {connections: N}: how many connections (name, host, port) are kept."""
+    if isinstance(value, dict):
+        return cv.Schema(
+            {cv.Optional(CONF_CONNECTIONS, default=SPICE_CONNECTIONS_DEFAULT): cv.int_range(min=1, max=16)}
+        )(value)
+    return {CONF_CONNECTIONS: SPICE_CONNECTIONS_DEFAULT} if cv.boolean(value) else False
+
+
 CONF_SPICE_SOUND_SHARES = "spice_sound_shares"  # resolved: (audio files, media player)
 CONF_ENABLE = "enable"
 STREAM_OUTPUT_FULLSCREEN = "fullscreen"
@@ -523,7 +541,7 @@ CONFIG_SCHEMA = cv.All(
             # (true: from boot; stream.statistics switches it). A sender may ask for it too ('M').
             cv.Optional(CONF_STREAM_STATISTICS): cv.boolean,
             # SPICE client: spice.connect shows a SPICE server's desktop on the stream's output.
-            cv.Optional(CONF_SPICE): cv.boolean,
+            cv.Optional(CONF_SPICE): _spice,
             # Touches go back to the stream sender, which replays them into its page.
             cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
             # Channel list from the svp_relay Home Assistant integration, shown in an LVGL dropdown;
@@ -964,6 +982,7 @@ async def to_code(config):
             cg.add_define("SVP_STREAM_TOUCH")
         if config.get(CONF_SPICE):
             cg.add_define("SVP_SPICE")
+            cg.add(var.set_spice_connections(config[CONF_SPICE][CONF_CONNECTIONS]))
             if CONF_SPICE_SOUND_SHARES in config:
                 cg.add(var.set_spice_sound_shares(*config[CONF_SPICE_SOUND_SHARES]))
             # USB redirection's transfer buffers (and every other USB driver's) in PSRAM.
@@ -1409,6 +1428,70 @@ async def simple_video_player_spice_connect_to_code(config, action_id, template_
 async def simple_video_player_spice_disconnect_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, paren)
+
+
+# Saved connections (spice: connections): name, host and port at an index; the password is given at
+# each connect and never kept.
+@automation.register_action(
+    "simple_video_player.spice.connect_saved",
+    SpiceConnectSavedAction,
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+            cv.Required(CONF_INDEX): cv.templatable(cv.uint8_t),
+            cv.Optional(CONF_PASSWORD, default=""): cv.templatable(cv.string),
+        }
+    ),
+    synchronous=True,
+)
+async def simple_video_player_spice_connect_saved_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    cg.add(var.set_index(await cg.templatable(config[CONF_INDEX], args, cg.uint8)))
+    cg.add(var.set_password(await cg.templatable(config[CONF_PASSWORD], args, cg.std_string)))
+    return var
+
+
+@automation.register_action(
+    "simple_video_player.spice.save",
+    SpiceSaveAction,
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+            cv.Required(CONF_INDEX): cv.templatable(cv.uint8_t),
+            cv.Optional(CONF_NAME, default=""): cv.templatable(cv.string),
+            cv.Required(CONF_HOST): cv.templatable(cv.string_strict),
+            cv.Optional(CONF_PORT, default=5900): cv.templatable(cv.port),
+        }
+    ),
+    synchronous=True,
+)
+async def simple_video_player_spice_save_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    cg.add(var.set_index(await cg.templatable(config[CONF_INDEX], args, cg.uint8)))
+    cg.add(var.set_name(await cg.templatable(config[CONF_NAME], args, cg.std_string)))
+    cg.add(var.set_host(await cg.templatable(config[CONF_HOST], args, cg.std_string)))
+    cg.add(var.set_port(await cg.templatable(config[CONF_PORT], args, cg.uint16)))
+    return var
+
+
+@automation.register_action(
+    "simple_video_player.spice.forget",
+    SpiceForgetAction,
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+            cv.Required(CONF_INDEX): cv.templatable(cv.uint8_t),
+        }
+    ),
+    synchronous=True,
+)
+async def simple_video_player_spice_forget_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    cg.add(var.set_index(await cg.templatable(config[CONF_INDEX], args, cg.uint8)))
+    return var
 
 
 # The volume of what this player plays: the speaker's own set_volume() (a template number can drive it).

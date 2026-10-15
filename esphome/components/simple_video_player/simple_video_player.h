@@ -400,6 +400,25 @@ class SimpleVideoPlayer : public Component
     this->spice_sound_shares_files_ = files;
     this->spice_sound_shares_media_player_ = media_player;
   }
+  // Saved connections: name, host and port (the password is given at each connect), spice: connections.
+  void set_spice_connections(uint8_t count) { this->spice_saved_count_ = count; }
+  uint8_t spice_saved_count() const { return this->spice_saved_count_; }
+  /// The connection saved at index; false when there is none.
+  bool spice_saved(uint8_t index, std::string &name, std::string &host, uint16_t &port) const;
+  void spice_save(uint8_t index, const std::string &name, const std::string &host, uint16_t port);
+  void spice_forget(uint8_t index);
+  void spice_connect_saved(uint8_t index, const std::string &password);
+  /// Main loop: a saved connection changed, or a session began or ended.
+  void add_on_spice_callback(std::function<void()> &&callback) { this->spice_callbacks_.add(std::move(callback)); }
+  // Leaving a session on the panel, as the dashboard: the close key held (bit 0 Back, bit 1 Home;
+  // pressed briefly it goes to the desktop), or two fingers held.
+  void set_spice_close_keys(uint8_t keys) { this->spice_close_keys_.store(keys, std::memory_order_release); }
+  void set_spice_close_hold(float seconds) {
+    this->spice_close_hold_ms_.store(static_cast<uint32_t>(seconds * 1000), std::memory_order_release);
+  }
+  void set_spice_touch_hold(float seconds) {
+    this->spice_touch_hold_ms_.store(static_cast<uint32_t>(seconds * 1000), std::memory_order_release);
+  }
 #ifdef SVP_SPICE_USB
   void add_spice_usb_slot(SpiceUsbSlot *slot);
   /// Main loop: a slot picked the device at addr; the others let it go.
@@ -1613,6 +1632,21 @@ class SimpleVideoPlayer : public Component
   uint8_t *spice_cursor_patch_{nullptr};
   bool spice_cursor_drawn_{false};
   int32_t spice_cursor_rx_{0}, spice_cursor_ry_{0}, spice_cursor_rw_{0}, spice_cursor_rh_{0};
+  struct SpiceSaved {
+    char name[32];
+    char host[64];
+    uint16_t port;
+    bool used;
+  };
+  uint8_t spice_saved_count_{8};
+  SpiceSaved *spice_saved_{nullptr};  // PSRAM pool, spice_saved_count_
+  ESPPreferenceObject *spice_saved_prefs_{nullptr};
+  CallbackManager<void()> spice_callbacks_;
+  std::atomic<bool> spice_changed_{false};  // loop(): spice_callbacks_
+  std::atomic<uint8_t> spice_close_keys_{1};
+  std::atomic<uint32_t> spice_close_hold_ms_{1000};
+  std::atomic<uint32_t> spice_touch_hold_ms_{1000};
+  void spice_saved_setup_();
 #ifdef SVP_SPICE_USB
   static constexpr uint8_t SPICE_USB_SLOTS = 4;
   SpiceUsbSlot *spice_usb_[SPICE_USB_SLOTS]{};
@@ -2061,6 +2095,45 @@ template<typename... Ts> class SpiceConnectAction : public Action<Ts...> {
   void play(const Ts &...x) override {
     this->player_->spice_connect(this->host_.value(x...), this->port_.value(x...), this->password_.value(x...));
   }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class SpiceConnectSavedAction : public Action<Ts...> {
+ public:
+  explicit SpiceConnectSavedAction(SimpleVideoPlayer *player) : player_(player) {}
+  TEMPLATABLE_VALUE(uint8_t, index)
+  TEMPLATABLE_VALUE(std::string, password)
+  void play(const Ts &...x) override {
+    this->player_->spice_connect_saved(this->index_.value(x...), this->password_.value(x...));
+  }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class SpiceSaveAction : public Action<Ts...> {
+ public:
+  explicit SpiceSaveAction(SimpleVideoPlayer *player) : player_(player) {}
+  TEMPLATABLE_VALUE(uint8_t, index)
+  TEMPLATABLE_VALUE(std::string, name)
+  TEMPLATABLE_VALUE(std::string, host)
+  TEMPLATABLE_VALUE(uint16_t, port)
+  void play(const Ts &...x) override {
+    this->player_->spice_save(this->index_.value(x...), this->name_.value(x...), this->host_.value(x...),
+                              this->port_.value(x...));
+  }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class SpiceForgetAction : public Action<Ts...> {
+ public:
+  explicit SpiceForgetAction(SimpleVideoPlayer *player) : player_(player) {}
+  TEMPLATABLE_VALUE(uint8_t, index)
+  void play(const Ts &...x) override { this->player_->spice_forget(this->index_.value(x...)); }
 
  protected:
   SimpleVideoPlayer *player_;

@@ -182,13 +182,16 @@ bool SimpleVideoPlayer::setup_stream_() {
       reinterpret_cast<SpiceCursorShape *>(this->pool_.alloc(SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape)));
   this->spice_cursor_under_ = this->pool_.alloc(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3);
   this->spice_cursor_patch_ = this->pool_.alloc(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3);
+  this->spice_saved_ = reinterpret_cast<SpiceSaved *>(this->pool_.alloc(this->spice_saved_count_ * sizeof(SpiceSaved)));
+  this->spice_saved_prefs_ = reinterpret_cast<ESPPreferenceObject *>(
+      this->pool_.alloc(this->spice_saved_count_ * sizeof(ESPPreferenceObject)));
   this->spice_lock_ = xSemaphoreCreateMutex();
   this->spice_cursor_lock_ = xSemaphoreCreateMutex();
   this->spice_wake_fd_ = eventfd(0, 0);
   if (this->spice_ == nullptr || this->spice_scratch_ == nullptr || this->spice_clips_ == nullptr ||
       this->spice_cursor_ == nullptr || this->spice_cursor_cache_ == nullptr || this->spice_cursor_under_ == nullptr ||
-      this->spice_cursor_patch_ == nullptr || this->spice_lock_ == nullptr || this->spice_cursor_lock_ == nullptr ||
-      this->spice_wake_fd_ < 0 ||
+      this->spice_cursor_patch_ == nullptr || this->spice_saved_ == nullptr || this->spice_saved_prefs_ == nullptr ||
+      this->spice_lock_ == nullptr || this->spice_cursor_lock_ == nullptr || this->spice_wake_fd_ < 0 ||
       !create_psram_task(spice_task_entry_, "svp_spice", 8192, this, 4, &this->spice_task_, tskNO_AFFINITY)) {
     ESP_LOGE(TAG, "SPICE client disabled: no room for it");
     this->spice_task_ = nullptr;
@@ -196,6 +199,7 @@ bool SimpleVideoPlayer::setup_stream_() {
     std::memset(this->spice_, 0, sizeof(SpiceState));
     std::memset(this->spice_cursor_, 0, sizeof(SpiceCursor));
     std::memset(this->spice_cursor_cache_, 0, SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape));
+    this->spice_saved_setup_();
     for (size_t i = 0; i < STREAM_FRAME_COUNT; i++)
       this->stream_frames_[i].clips = this->spice_clips_ + i * SPICE_MAX_CLIPS;
   }

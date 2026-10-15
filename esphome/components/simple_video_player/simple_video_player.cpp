@@ -247,6 +247,8 @@ void SimpleVideoPlayer::loop() {
 #ifdef SVP_SPICE
   if (this->spice_sound_claim_.exchange(false, std::memory_order_acq_rel))
     this->spice_sound_take_();
+  if (this->spice_changed_.exchange(false, std::memory_order_acq_rel))
+    this->spice_callbacks_.call();
 #endif
   this->run_pending_start_();
 #ifdef SVP_CHANNEL_LIST
@@ -2053,7 +2055,9 @@ bool SimpleVideoPlayer::plan_pool_() {
 #ifdef SVP_SPICE
     fixed += pool_round(sizeof(SpiceState)) + pool_round(STREAM_FRAME_COUNT * SPICE_MAX_CLIPS * sizeof(StreamRect)) +
              pool_round(sizeof(SpiceCursor)) + pool_round(SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape)) +
-             2 * pool_round(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3);
+             2 * pool_round(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3) +
+             pool_round(this->spice_saved_count_ * sizeof(SpiceSaved)) +
+             pool_round(this->spice_saved_count_ * sizeof(ESPPreferenceObject));
 #endif
 #ifdef USE_AUDIO
     if (this->speaker_ != nullptr)

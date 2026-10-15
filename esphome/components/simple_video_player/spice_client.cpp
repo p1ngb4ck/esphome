@@ -408,8 +408,13 @@ class SpiceSession {
   bool fits_output_(uint32_t w, uint32_t h) const;
   // Inputs.
   bool inputs_pending_();
+#ifdef SVP_STREAM_INPUT
   bool key_(const uint8_t *message);
+  bool send_key_(uint16_t xt, bool pressed);
   bool pointer_(const uint8_t *message);
+#endif
+  /// The ms until the close key or two fingers held end the session (UINT32_MAX: none held); 0: now.
+  uint32_t close_due_() const;
 #ifdef SVP_STREAM_TOUCH
   bool touch_(const StreamTouch &touch);
 #endif
@@ -469,6 +474,12 @@ class SpiceSession {
   bool position_pending_{false};         // client mode: not sent yet
   uint32_t cursor_tick_{0};
   bool sound_ok_{false};  // the playback stream is one the speaker plays
+  // Leaving the session on the panel (as the dashboard): the close key held, two fingers held.
+  bool close_key_held_{false};
+  uint16_t close_page_{0}, close_usage_{0};
+  uint32_t close_key_at_{0};
+  bool two_fingers_{false};
+  uint32_t two_fingers_at_{0};
 };
 
 bool SpiceSession::first_(uint32_t what) {
@@ -1171,6 +1182,8 @@ bool SpiceSession::take_panel_() {
   this->panel_held_ = true;
   SimpleVideoPlayer::hold_wifi_(this->wifi_held_, true);
   ESP_LOGI(TAG, "Connected to %s:%u", inet_ntoa(this->addr_.sin_addr), ntohs(this->addr_.sin_port));
+  p->spice_changed_.store(true, std::memory_order_release);
+  App.wake_loop_threadsafe();
   return true;
 }
 
@@ -1184,9 +1197,10 @@ void SpiceSession::release_panel_() {
     p->stream_connected_.store(false, std::memory_order_release);
     if (p->stream_draw_task_ != nullptr)
       xTaskNotifyGive(p->stream_draw_task_);  // no longer waits for the output
-    App.wake_loop_threadsafe();
   }
   p->spice_on_.store(false, std::memory_order_release);
+  p->spice_changed_.store(true, std::memory_order_release);
+  App.wake_loop_threadsafe();
 }
 
 void SpiceSession::drop_(Channel &ch) {
@@ -1339,8 +1353,10 @@ bool SpiceSession::inputs_pending_() {
   return true;
 }
 
+#ifdef SVP_STREAM_INPUT
 // 'K' action page:2 usage:2 mods pressed.
 bool SpiceSession::key_(const uint8_t *m) {
+  const uint8_t action = m[1];
   const uint16_t page = rd16(m + 2);
   const uint16_t usage = rd16(m + 4);
   const bool pressed = m[7] != 0;
@@ -1353,8 +1369,27 @@ bool SpiceSession::key_(const uint8_t *m) {
         xt = key.xt;
     }
   }
+  // The close key: held long it ends the session (close_due_()), let go before it is the desktop's.
+  const uint8_t keys = this->p_->spice_close_keys_.load(std::memory_order_acquire);
+  const bool close_key =
+      (action == lvgl::KeyBindings::ACT_BACK && (keys & 1)) || (action == lvgl::KeyBindings::ACT_HOME && (keys & 2));
+  if (pressed && close_key && !this->close_key_held_) {
+    this->close_key_held_ = true;
+    this->close_page_ = page;
+    this->close_usage_ = usage;
+    this->close_key_at_ = millis();
+    return true;
+  }
+  if (!pressed && this->close_key_held_ && page == this->close_page_ && usage == this->close_usage_) {
+    this->close_key_held_ = false;
+    return xt == 0 || (this->send_key_(xt, true) && this->send_key_(xt, false));
+  }
   if (xt == 0)
     return true;  // a mouse button (page 9) comes with the pointer
+  return this->send_key_(xt, pressed);
+}
+
+bool SpiceSession::send_key_(uint16_t xt, bool pressed) {
   uint8_t code[4];
   put32(code, key_code(xt, !pressed));
   return this->send_(this->inputs_, pressed ? MSGC_INPUTS_KEY_DOWN : MSGC_INPUTS_KEY_UP, code, sizeof(code));
@@ -1398,9 +1433,24 @@ bool SpiceSession::pointer_(const uint8_t *m) {
   return true;
 }
 
+#endif
+
 #ifdef SVP_STREAM_TOUCH
-// The first finger is the left button where it touches; the others are not passed on.
+// The first finger is the left button where it touches; the others are not passed on. Two fingers
+// are the panel's gesture: held long they end the session (close_due_()).
 bool SpiceSession::touch_(const StreamTouch &touch) {
+  if (touch.count >= 2) {
+    if (!this->two_fingers_) {
+      this->two_fingers_ = true;
+      this->two_fingers_at_ = millis();
+      if (this->touch_down_) {
+        this->touch_down_ = false;
+        return this->buttons_(this->mouse_buttons_);
+      }
+    }
+    return true;
+  }
+  this->two_fingers_ = false;
   int found = -1;
   for (uint8_t i = 0; i < touch.count; i++) {
     if (!this->touch_down_ || touch.id[i] == this->touch_id_) {
@@ -1777,6 +1827,17 @@ bool SpiceSession::usb_read_(Channel &ch, SpiceUsbSlot *slot) {
 }
 #endif
 
+uint32_t SpiceSession::close_due_() const {
+  const uint32_t now = millis();
+  uint32_t due = UINT32_MAX;
+  auto left = [now](uint32_t since, uint32_t hold) { return now - since >= hold ? 0 : hold - (now - since); };
+  if (this->close_key_held_)
+    due = std::min(due, left(this->close_key_at_, this->p_->spice_close_hold_ms_.load(std::memory_order_acquire)));
+  if (this->two_fingers_)
+    due = std::min(due, left(this->two_fingers_at_, this->p_->spice_touch_hold_ms_.load(std::memory_order_acquire)));
+  return due;
+}
+
 void SpiceSession::run(const char *host, uint16_t port, const char *password) {
   SimpleVideoPlayer *p = this->p_;
   this->password_ = password;
@@ -1829,7 +1890,11 @@ void SpiceSession::run(const char *host, uint16_t port, const char *password) {
         add(this->usb_[i]);
     }
 #endif
-    if (::select(top + 1, &readable, nullptr, nullptr, nullptr) < 0)
+    // Woken by the sockets and the wake fd; a held close key or two fingers bring their own deadline.
+    const uint32_t due = this->close_due_();
+    struct timeval wait = {.tv_sec = static_cast<time_t>(due / 1000),
+                           .tv_usec = static_cast<suseconds_t>((due % 1000) * 1000)};
+    if (::select(top + 1, &readable, nullptr, nullptr, due == UINT32_MAX ? nullptr : &wait) < 0)
       break;
     if (FD_ISSET(p->spice_wake_fd_, &readable)) {
       uint64_t count;
@@ -1837,6 +1902,10 @@ void SpiceSession::run(const char *host, uint16_t port, const char *password) {
     }
     if (this->stopping_())
       break;
+    if (this->close_due_() == 0) {
+      ESP_LOGI(TAG, "Ended on the panel");
+      break;
+    }
     if (FD_ISSET(this->main_.fd, &readable) && !this->handle_one_(this->main_))
       break;
     if (this->display_.fd >= 0 && FD_ISSET(this->display_.fd, &readable) && !this->handle_one_(this->display_))
@@ -2143,6 +2212,70 @@ void SimpleVideoPlayer::spice_cursor_update_() {
     this->spice_cursor_show_();
   }
   xSemaphoreGive(this->output_lock_);
+}
+
+//========================================================================
+// Saved connections: name, host, port in preferences (the password never: it is given at each connect)
+//========================================================================
+
+void SimpleVideoPlayer::spice_saved_setup_() {
+  const uint32_t key = fnv1_hash("simple_video_player.spice_saved");
+  for (uint8_t i = 0; i < this->spice_saved_count_; i++) {
+    new (&this->spice_saved_prefs_[i]) ESPPreferenceObject(global_preferences->make_preference<SpiceSaved>(key + i));
+    SpiceSaved &entry = this->spice_saved_[i];
+    if (!this->spice_saved_prefs_[i].load(&entry))
+      entry = SpiceSaved{};
+    entry.name[sizeof(entry.name) - 1] = '\0';
+    entry.host[sizeof(entry.host) - 1] = '\0';
+    entry.used = entry.used && entry.host[0] != '\0';
+  }
+}
+
+bool SimpleVideoPlayer::spice_saved(uint8_t index, std::string &name, std::string &host, uint16_t &port) const {
+  if (this->spice_saved_ == nullptr || index >= this->spice_saved_count_ || !this->spice_saved_[index].used)
+    return false;
+  const SpiceSaved &entry = this->spice_saved_[index];
+  name = entry.name;
+  host = entry.host;
+  port = entry.port;
+  return true;
+}
+
+void SimpleVideoPlayer::spice_save(uint8_t index, const std::string &name, const std::string &host, uint16_t port) {
+  if (this->spice_saved_ == nullptr || index >= this->spice_saved_count_) {
+    ESP_LOGE(TAG, "No saved connection %u (spice: connections)", index);
+    return;
+  }
+  if (host.empty() || host.size() >= sizeof(SpiceSaved::host)) {
+    ESP_LOGE(TAG, "The host must be 1 to %u characters", static_cast<unsigned>(sizeof(SpiceSaved::host) - 1));
+    return;
+  }
+  SpiceSaved &entry = this->spice_saved_[index];
+  entry = SpiceSaved{};
+  std::snprintf(entry.name, sizeof(entry.name), "%s", name.empty() ? host.c_str() : name.c_str());
+  std::snprintf(entry.host, sizeof(entry.host), "%s", host.c_str());
+  entry.port = port;
+  entry.used = true;
+  this->spice_saved_prefs_[index].save(&entry);
+  this->spice_callbacks_.call();
+}
+
+void SimpleVideoPlayer::spice_forget(uint8_t index) {
+  if (this->spice_saved_ == nullptr || index >= this->spice_saved_count_)
+    return;
+  this->spice_saved_[index] = SpiceSaved{};
+  this->spice_saved_prefs_[index].save(&this->spice_saved_[index]);
+  this->spice_callbacks_.call();
+}
+
+void SimpleVideoPlayer::spice_connect_saved(uint8_t index, const std::string &password) {
+  std::string name, host;
+  uint16_t port;
+  if (!this->spice_saved(index, name, host, port)) {
+    ESP_LOGE(TAG, "No saved connection %u", index);
+    return;
+  }
+  this->spice_connect(host, port, password);
 }
 
 void SimpleVideoPlayer::spice_task_entry_(void *param) { static_cast<SimpleVideoPlayer *>(param)->spice_loop_(); }
