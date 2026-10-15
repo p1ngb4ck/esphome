@@ -68,7 +68,7 @@ static inline uint32_t rd32(const uint8_t *p) {
          (static_cast<uint32_t>(p[3]) << 24);
 }
 
-static void hold_wifi_for_stream(bool &held, bool want) {
+void SimpleVideoPlayer::hold_wifi_(bool &held, bool want) {
 #if defined(SVP_HOLDS_ROAMING) || defined(SVP_HOLDS_POWER_SAVE)
   if (held == want || wifi::global_wifi_component == nullptr)
     return;
@@ -170,6 +170,24 @@ bool SimpleVideoPlayer::setup_stream_() {
     }
   }
 #endif
+#ifdef SVP_SPICE
+  this->spice_ = reinterpret_cast<SpiceState *>(this->pool_.alloc(sizeof(SpiceState)));
+  this->spice_scratch_ = this->pool_.alloc(SPICE_SCRATCH_BYTES);
+  this->spice_clips_ =
+      reinterpret_cast<StreamRect *>(this->pool_.alloc(STREAM_FRAME_COUNT * SPICE_MAX_CLIPS * sizeof(StreamRect)));
+  this->spice_lock_ = xSemaphoreCreateMutex();
+  this->spice_wake_fd_ = eventfd(0, 0);
+  if (this->spice_ == nullptr || this->spice_scratch_ == nullptr || this->spice_clips_ == nullptr ||
+      this->spice_lock_ == nullptr || this->spice_wake_fd_ < 0 ||
+      !create_psram_task(spice_task_entry_, "svp_spice", 6144, this, 4, &this->spice_task_, tskNO_AFFINITY)) {
+    ESP_LOGE(TAG, "SPICE client disabled: no room for it");
+    this->spice_task_ = nullptr;
+  } else {
+    std::memset(this->spice_, 0, sizeof(SpiceState));
+    for (size_t i = 0; i < STREAM_FRAME_COUNT; i++)
+      this->stream_frames_[i].clips = this->spice_clips_ + i * SPICE_MAX_CLIPS;
+  }
+#endif
   if (!create_psram_task(stream_draw_task_entry_, "svp_stream_draw", 4096, this, 2, &this->stream_draw_task_, 1)) {
     ESP_LOGE(TAG, "Failed to create the stream draw task");
     return false;
@@ -215,6 +233,10 @@ void SimpleVideoPlayer::stream_sleep(bool asleep) {
 }
 
 void SimpleVideoPlayer::set_stream_fullscreen(bool fullscreen) {
+#ifdef SVP_SPICE
+  if (this->spice_refuses_())
+    return;
+#endif
 #if defined(SVP_DSI_OUTPUT) && defined(SVP_CANVAS_OUTPUT)
   if (this->stream_fullscreen_.exchange(fullscreen, std::memory_order_acq_rel) == fullscreen)
     return;
@@ -264,6 +286,14 @@ void SimpleVideoPlayer::stream_net_loop_() {
       ::setsockopt(client, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
       char peer_text[16] = {};
       ::inet_ntoa_r(peer.sin_addr, peer_text, sizeof(peer_text));
+#ifdef SVP_SPICE
+      if (this->spice_on_.load(std::memory_order_acquire)) {
+        ESP_LOGI(TAG, "Sender from %s refused: a SPICE session holds the panel", peer_text);
+        ::close(client);
+        continue;
+      }
+#endif
+      this->stream_sender_busy_.store(true, std::memory_order_release);
       ESP_LOGI(TAG, "Sender connected from %s", peer_text);
 
       this->stream_hdr_len_ = 0;
@@ -336,6 +366,10 @@ void SimpleVideoPlayer::stream_net_loop_() {
         return due + 1;
       };
       while (true) {
+        if (this->stream_drop_sender_.load(std::memory_order_acquire)) {
+          ESP_LOGI(TAG, "Sender let go: a SPICE session takes the panel");
+          break;
+        }
         BufferedFileReader *sink = nullptr;
         if (this->stream_avi_.load(std::memory_order_relaxed)) {
           // An AVI goes into the file reader's ring; leaving the socket unread while it is full is
@@ -374,7 +408,7 @@ void SimpleVideoPlayer::stream_net_loop_() {
         const int ready = wait(true, next_due_ms());
         this->stream_send_pending_(client);
         if (wifi_held && millis() - last_stream > ROAM_QUIET_MS)
-          hold_wifi_for_stream(wifi_held, false);
+          hold_wifi_(wifi_held, false);
         if (ready == 0) {
           if (millis() - last_recv > STREAM_RECV_TIMEOUT_MS) {
             ESP_LOGW(TAG, "Sender silent for %u s, disconnecting", static_cast<unsigned>(STREAM_RECV_TIMEOUT_MS / 1000));
@@ -438,7 +472,7 @@ void SimpleVideoPlayer::stream_net_loop_() {
           // closing the connection once it has played tells the sender the end was reached.
           sink->end_stream();
           sender_done = true;
-          hold_wifi_for_stream(wifi_held, false);
+          hold_wifi_(wifi_held, false);
           continue;
         }
         if (received <= 0) {
@@ -452,7 +486,7 @@ void SimpleVideoPlayer::stream_net_loop_() {
 #endif
         if (received > HEARTBEAT_BYTES) {
           last_stream = last_recv;
-          hold_wifi_for_stream(wifi_held, true);
+          hold_wifi_(wifi_held, true);
         }
         if (sink != nullptr) {
           sink->push(buffer, static_cast<size_t>(received));
@@ -467,13 +501,14 @@ void SimpleVideoPlayer::stream_net_loop_() {
         if (sink != nullptr)
           sink->end_stream();
       }
-      hold_wifi_for_stream(wifi_held, false);
+      hold_wifi_(wifi_held, false);
       if (this->stream_current_ != nullptr) {
         xQueueSend(this->stream_empty_q_, &this->stream_current_, 0);
         this->stream_current_ = nullptr;
       }
       this->stream_connected_.store(false, std::memory_order_release);
       ::close(client);
+      this->stream_sender_busy_.store(false, std::memory_order_release);
     }
     ::close(listener);
   }
@@ -559,7 +594,7 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
       this->stream_wake_();
     }
     // Heartbeats/END (and sound without a speaker) are counted out like any payload.
-    if (type != UDISP_TYPE_JPG) {
+    if (type != UDISP_TYPE_JPG || this->stream_drop_sender_.load(std::memory_order_relaxed)) {
       this->stream_skip_ = total;
       continue;
     }
@@ -621,6 +656,8 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
     frame->total = total;
     frame->received = 0;
     frame->direct = direct;
+    frame->kind = STREAM_PICTURE_JPEG;
+    frame->clip_count = 0;
     this->stream_current_ = frame;
   }
 }
@@ -917,26 +954,29 @@ void SimpleVideoPlayer::stream_draw_loop_() {
         target_len = this->output_buffer_size_;
       }
 #endif
-      uint32_t out_size = 0;
 #ifdef SVP_STREAM_STATS
       const int64_t draw_start = esp_timer_get_time();
 #endif
-      if (target != nullptr &&
-          jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame->data, frame->received, target,
-                               static_cast<uint32_t>(target_len), &out_size) == ESP_OK &&
-          out_size > 0) {
+      if (target != nullptr && this->stream_render_(frame, &decode_cfg, target, target_len)) {
+        // Rows are padded to 16; one part goes with its offsets into the picture and the rest of its rows.
+        const uint16_t padded_w = (frame->w + 15) & ~15;
+        const StreamRect whole{static_cast<int16_t>(frame->x), static_cast<int16_t>(frame->y),
+                               static_cast<int16_t>(frame->w), static_cast<int16_t>(frame->h)};
+        const uint8_t parts = frame->clip_count == 0 ? 1 : frame->clip_count;
+        for (uint8_t i = 0; i < parts; i++) {
+          const StreamRect &part = frame->clip_count == 0 ? whole : frame->clips[i];
+          const int src_x = part.x - frame->x;
+          const int src_y = part.y - frame->y;
 #ifdef SVP_DSI_OUTPUT
-        if (frame->direct) {
-          // Decoded rows are padded to 16; x_pad skips the padding at the end of each row.
-          const uint16_t padded_w = (frame->w + 15) & ~15;
-          this->dsi_->draw_pixels_at(frame->x, frame->y, frame->w, frame->h, target, display::COLOR_ORDER_RGB,
-                                     bitness, false, 0, 0, padded_w - frame->w);
-        }
+          if (frame->direct)
+            this->dsi_->draw_pixels_at(part.x, part.y, part.w, part.h, target, display::COLOR_ORDER_RGB, bitness, false,
+                                       src_x, src_y, padded_w - src_x - part.w);
 #endif
 #ifdef SVP_CANVAS_OUTPUT
-        if (!frame->direct)
-          this->stream_copy_to_canvas_(frame->x, frame->y, frame->w, frame->h);
+          if (!frame->direct)
+            this->stream_copy_to_canvas_(part.x, part.y, part.w, part.h, src_x, src_y, frame->w);
 #endif
+        }
 #ifdef SVP_STREAM_STATS
         this->stream_stats_.draw_us.fetch_add(static_cast<uint32_t>(esp_timer_get_time() - draw_start),
                                               std::memory_order_relaxed);
@@ -949,18 +989,56 @@ void SimpleVideoPlayer::stream_draw_loop_() {
   }
 }
 
+bool SimpleVideoPlayer::stream_render_(StreamFrame *frame, jpeg_decode_cfg_t *cfg, uint8_t *target, size_t target_len) {
+  if (frame->kind == STREAM_PICTURE_JPEG) {
+    uint32_t out_size = 0;
+    return jpeg_decoder_process(this->hw_jpeg_decoder_, cfg, frame->data, frame->received, target,
+                                static_cast<uint32_t>(target_len), &out_size) == ESP_OK &&
+           out_size > 0;
+  }
+  // A plain bitmap (SPICE): B, G, R, X per pixel, into the decoder's layout (lowest byte blue; RGB565
+  // little-endian), rows padded to 16 as the decoder pads them.
+  const size_t bpp = cfg->output_format == JPEG_DECODE_OUT_FORMAT_RGB565 ? 2 : 3;
+  const size_t row_bytes = static_cast<size_t>((frame->w + 15) & ~15) * bpp;
+  if (row_bytes * frame->h > target_len)
+    return false;
+  for (uint16_t row = 0; row < frame->h; row++) {
+    const uint8_t *src = frame->data + static_cast<size_t>(frame->bottom_up ? frame->h - 1 - row : row) * frame->stride;
+    uint8_t *dst = target + row * row_bytes;
+    if (bpp == 3) {
+      for (uint16_t col = 0; col < frame->w; col++, src += 4, dst += 3) {
+        dst[0] = src[0];
+        dst[1] = src[1];
+        dst[2] = src[2];
+      }
+    } else {
+      for (uint16_t col = 0; col < frame->w; col++, src += 4, dst += 2) {
+        const uint16_t v = static_cast<uint16_t>(((src[2] & 0xF8) << 8) | ((src[1] & 0xFC) << 3) | (src[0] >> 3));
+        dst[0] = static_cast<uint8_t>(v & 0xFF);
+        dst[1] = static_cast<uint8_t>(v >> 8);
+      }
+    }
+  }
+  // Written by the CPU, read by the display's DMA.
+  esp_cache_msync(target, row_bytes * frame->h,
+                  ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+  return true;
+}
+
 #ifdef SVP_CANVAS_OUTPUT
-void SimpleVideoPlayer::stream_copy_to_canvas_(const uint16_t x, const uint16_t y, const uint16_t w, const uint16_t h) {
+void SimpleVideoPlayer::stream_copy_to_canvas_(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t src_x,
+                                               uint16_t src_y, uint16_t src_w) {
   // Rows of the decoded rectangle are padded to 16 pixels; the page's rows are the canvas buffer's
   // (ALIGN_UP(width,16), as loop() hands it to LVGL). Bounds were checked against the canvas size
-  // in stream_feed_().
+  // in stream_feed_() (and spice_client.cpp).
   uint8_t *page = this->output_buffers_[0];
   const uint8_t *rect = this->output_buffers_[1];
   const size_t page_stride = static_cast<size_t>((this->canvas_size_w_ + 15) & ~15) * 3;
-  const size_t rect_stride = static_cast<size_t>((w + 15) & ~15) * 3;
+  const size_t rect_stride = static_cast<size_t>((src_w + 15) & ~15) * 3;
   for (uint16_t row = 0; row < h; row++)
     std::memcpy(page + (static_cast<size_t>(y) + row) * page_stride + static_cast<size_t>(x) * 3,
-                rect + static_cast<size_t>(row) * rect_stride, static_cast<size_t>(w) * 3);
+                rect + (static_cast<size_t>(src_y) + row) * rect_stride + static_cast<size_t>(src_x) * 3,
+                static_cast<size_t>(w) * 3);
   // Written back to PSRAM: the hardware decoder writes this buffer by DMA when a file plays next,
   // and a dirty line evicted after that would put these pixels back over the new picture (Portall's
   // copy_to_canvas_ does the same). esp_cache_msync() flags: esp_mm/include/esp_cache.h.

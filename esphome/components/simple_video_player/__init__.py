@@ -17,10 +17,13 @@ from esphome.const import (
     CONF_BITS_PER_SAMPLE,
     CONF_CHANNEL,
     CONF_HEIGHT,
+    CONF_HOST,
     CONF_ID,
     CONF_MODE,
     CONF_NUM_CHANNELS,
+    CONF_PASSWORD,
     CONF_PLATFORM,
+    CONF_PORT,
     CONF_POSITION,
     CONF_SAMPLE_RATE,
     CONF_TRIGGER_ID,
@@ -109,6 +112,8 @@ StreamSleepAction = simple_video_player_ns.class_("StreamSleepAction", automatio
 StreamWakeAction = simple_video_player_ns.class_("StreamWakeAction", automation.Action)
 StreamOutputAction = simple_video_player_ns.class_("StreamOutputAction", automation.Action)
 StreamStatisticsAction = simple_video_player_ns.class_("StreamStatisticsAction", automation.Action)
+SpiceConnectAction = simple_video_player_ns.class_("SpiceConnectAction", automation.Action)
+SpiceDisconnectAction = simple_video_player_ns.class_("SpiceDisconnectAction", automation.Action)
 SetVolumeAction = simple_video_player_ns.class_("SetVolumeAction", automation.Action)
 SeekAction = simple_video_player_ns.class_("SeekAction", automation.Action)
 NextAction = simple_video_player_ns.class_("NextAction", automation.Action)
@@ -162,6 +167,7 @@ CONF_TARGET_FPS = "target_fps"
 CONF_STREAM_PORT = "stream_port"
 CONF_STREAM_OUTPUT = "stream_output"
 CONF_STREAM_STATISTICS = "stream_statistics"
+CONF_SPICE = "spice"
 CONF_ENABLE = "enable"
 STREAM_OUTPUT_FULLSCREEN = "fullscreen"
 STREAM_OUTPUT_CANVAS = "canvas"
@@ -346,6 +352,8 @@ def _validate_stream(config):
         raise cv.Invalid(f"'{CONF_CHANNEL_LIST}' plays channels through the stream: it needs '{CONF_STREAM_PORT}'.")
     if CONF_STREAM_STATISTICS in config and CONF_STREAM_PORT not in config:
         raise cv.Invalid(f"'{CONF_STREAM_STATISTICS}' is about the stream: it needs '{CONF_STREAM_PORT}'.")
+    if config.get(CONF_SPICE) and CONF_STREAM_PORT not in config:
+        raise cv.Invalid(f"'{CONF_SPICE}' draws through the stream's output: it needs '{CONF_STREAM_PORT}'.")
     if CONF_TOUCHSCREEN_ID in config and CONF_STREAM_PORT not in config and CONF_CONTROLS not in config:
         raise cv.Invalid(
             f"'{CONF_TOUCHSCREEN_ID}' is for a stream sender ('{CONF_STREAM_PORT}') or '{CONF_CONTROLS}'."
@@ -511,6 +519,8 @@ CONFIG_SCHEMA = cv.All(
             # Built in: what a sender's stream brings and costs, a line per second while connected
             # (true: from boot; stream.statistics switches it). A sender may ask for it too ('M').
             cv.Optional(CONF_STREAM_STATISTICS): cv.boolean,
+            # SPICE client: spice.connect shows a SPICE server's desktop on the stream's output.
+            cv.Optional(CONF_SPICE): cv.boolean,
             # Touches go back to the stream sender, which replays them into its page.
             cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
             # Channel list from the svp_relay Home Assistant integration, shown in an LVGL dropdown;
@@ -895,6 +905,8 @@ async def to_code(config):
             ts = await cg.get_variable(config[CONF_TOUCHSCREEN_ID])
             cg.add(var.set_stream_touchscreen(ts))
             cg.add_define("SVP_STREAM_TOUCH")
+        if config.get(CONF_SPICE):
+            cg.add_define("SVP_SPICE")
         if channels := config.get(CONF_CHANNEL_LIST):
             request_http_client()
             cg.add(var.set_channel_url(channels[CONF_URL].rstrip("/")))
@@ -1300,6 +1312,41 @@ async def simple_video_player_stream_statistics_to_code(config, action_id, templ
     var = cg.new_Pvariable(action_id, template_arg, paren)
     cg.add(var.set_enable(await cg.templatable(config[CONF_ENABLE], args, bool)))
     return var
+
+
+# SPICE (spice: true): the server's desktop on the stream's output until spice.disconnect or the
+# server ends it. Refused while a session runs.
+@automation.register_action(
+    "simple_video_player.spice.connect",
+    SpiceConnectAction,
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+            cv.Required(CONF_HOST): cv.templatable(cv.string_strict),
+            cv.Optional(CONF_PORT, default=5900): cv.templatable(cv.port),
+            cv.Optional(CONF_PASSWORD, default=""): cv.templatable(cv.string),
+        }
+    ),
+    synchronous=True,
+)
+async def simple_video_player_spice_connect_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    cg.add(var.set_host(await cg.templatable(config[CONF_HOST], args, cg.std_string)))
+    cg.add(var.set_port(await cg.templatable(config[CONF_PORT], args, cg.uint16)))
+    cg.add(var.set_password(await cg.templatable(config[CONF_PASSWORD], args, cg.std_string)))
+    return var
+
+
+@automation.register_action(
+    "simple_video_player.spice.disconnect",
+    SpiceDisconnectAction,
+    SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+    synchronous=True,
+)
+async def simple_video_player_spice_disconnect_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, paren)
 
 
 # The volume of what this player plays: the speaker's own set_volume() (a template number can drive it).

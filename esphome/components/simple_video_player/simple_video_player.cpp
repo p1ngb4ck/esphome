@@ -440,6 +440,10 @@ void SimpleVideoPlayer::dump_config() {
 //========================================================================
 
 void SimpleVideoPlayer::play(const std::string &video_path, bool folder_playlist) {
+#ifdef SVP_SPICE
+  if (this->spice_refuses_())
+    return;
+#endif
   this->start_path_ = video_path;
   this->start_folder_ = folder_playlist;
   this->start_pending_.store(true, std::memory_order_release);
@@ -463,6 +467,10 @@ void SimpleVideoPlayer::play_list(std::vector<std::string> paths, size_t start) 
 }
 
 void SimpleVideoPlayer::play_index_(size_t index) {
+#ifdef SVP_SPICE
+  if (this->spice_refuses_())
+    return;
+#endif
   this->start_path_.clear();
   this->start_index_ = index;
   this->start_pending_.store(true, std::memory_order_release);
@@ -2033,6 +2041,10 @@ bool SimpleVideoPlayer::plan_pool_() {
   if (this->stream_port_ != 0) {
     this->stream_max_frame_bytes_ = pool_round(this->frame_bytes_ / 4);
     fixed += STREAM_FRAME_COUNT * static_cast<size_t>(this->stream_max_frame_bytes_) + pool_round(STREAM_RECV_BYTES);
+#ifdef SVP_SPICE
+    fixed += pool_round(sizeof(SpiceState)) + pool_round(SPICE_SCRATCH_BYTES) +
+             pool_round(STREAM_FRAME_COUNT * SPICE_MAX_CLIPS * sizeof(StreamRect));
+#endif
 #ifdef USE_AUDIO
     if (this->speaker_ != nullptr)
       fixed += pool_round(static_cast<size_t>(AUDIO_SAMPLE_RATE) * STREAM_AUDIO_BLOCK_MS / 1000 * 2 * sizeof(int16_t));

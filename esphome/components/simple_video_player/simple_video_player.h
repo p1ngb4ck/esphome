@@ -383,6 +383,13 @@ class SimpleVideoPlayer : public Component
   /// A message for the sender ('K', 'X', 'P'), when it asked for input and its picture is shown.
   bool stream_on_input(const uint8_t *message, uint8_t length);
 #endif
+#ifdef SVP_SPICE
+  /// SPICE client (spice_client.cpp): the server's desktop on the stream's output, its pictures
+  /// (JPEG, MJPEG streams, plain bitmaps) drawn like udisp rectangles. The panel is held meanwhile.
+  void spice_connect(const std::string &host, uint16_t port, const std::string &password);
+  void spice_disconnect();
+  bool is_spice_connected() const { return this->spice_on_.load(std::memory_order_acquire); }
+#endif
 #endif
 
 #ifdef SVP_CHANNEL_LIST
@@ -746,10 +753,24 @@ class SimpleVideoPlayer : public Component
 #endif
   }
 #ifdef SVP_CANVAS_OUTPUT
-  /// Canvas output: copy one decoded udisp rectangle into the page buffer the canvas shows.
-  void stream_copy_to_canvas_(const uint16_t x, const uint16_t y, const uint16_t w, const uint16_t h);
+  /// Canvas output: copy the part at src_x, src_y of one decoded rectangle (src_w wide) into the page
+  /// buffer the canvas shows, at x, y.
+  void stream_copy_to_canvas_(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t src_x, uint16_t src_y,
+                              uint16_t src_w);
 #endif
+  struct StreamFrame;
+  /// Draw task: a frame's picture into target as the output takes it (JPEG decoded, bitmap converted).
+  bool stream_render_(StreamFrame *frame, jpeg_decode_cfg_t *cfg, uint8_t *target, size_t target_len);
+  /// Wi-Fi roaming scans and power saving held off (want) or allowed again; counted, each released once.
+  static void hold_wifi_(bool &held, bool want);
   void stream_send_pending_(int client);
+#ifdef SVP_SPICE
+  /// A SPICE session holds the panel: what would take it (a file, another output) is refused.
+  bool spice_refuses_() const;
+  friend class SpiceSession;  // spice_client.cpp: one session, over the stream's frames and outputs
+  static void spice_task_entry_(void *param);
+  void spice_loop_();
+#endif
 #ifdef SVP_STREAM_STATS
   /// Network task: starts, reports and stops the per-second figures; the ms until the next report.
   void stream_stats_step_(int client);
@@ -1432,13 +1453,23 @@ class SimpleVideoPlayer : public Component
 #endif
 
 #ifdef SVP_STREAM
+  struct StreamRect {
+    int16_t x, y, w, h;
+  };
+  enum : uint8_t { STREAM_PICTURE_JPEG = 0, STREAM_PICTURE_BGRX = 1 };
   struct StreamFrame {
     uint8_t *data{nullptr};
     size_t capacity{0};
-    uint16_t x{0}, y{0}, w{0}, h{0};
+    int32_t x{0}, y{0};  // the picture's top left on the output (off it for a clipped SPICE picture)
+    uint16_t w{0}, h{0};
     uint32_t total{0};
     uint32_t received{0};
     bool direct{false};  // for the display, else the canvas page
+    uint8_t kind{STREAM_PICTURE_JPEG};
+    uint32_t stride{0};      // STREAM_PICTURE_BGRX: bytes per row
+    bool bottom_up{false};   // STREAM_PICTURE_BGRX: the last row first
+    uint8_t clip_count{0};   // 0: all of the picture; else only these parts (output coordinates)
+    StreamRect *clips{nullptr};
   };
   static constexpr uint8_t STREAM_FRAME_COUNT = 4;
   static constexpr size_t STREAM_RECV_BYTES = 32768;     // one recv(), into stream_recv_buf_ (pool)
@@ -1459,7 +1490,9 @@ class SimpleVideoPlayer : public Component
   size_t stream_hdr_len_{0};
   uint32_t stream_skip_{0};
   bool stream_logged_bad_header_{false};
-  std::atomic<bool> stream_connected_{false};
+  std::atomic<bool> stream_connected_{false};  // a sender's (or the SPICE session's) picture shows
+  std::atomic<bool> stream_drop_sender_{false};  // the network task lets its sender go (SPICE takes over)
+  std::atomic<bool> stream_sender_busy_{false};  // the network task serves a sender (accepted until closed)
   std::atomic<bool> stream_output_ok_{false};  // loop(): connected and LVGL (if any) paused
   std::atomic<bool> stream_awake_{true};   // false while a file plays
   std::atomic<bool> stream_asleep_{false};  // stream_sleep()
@@ -1491,6 +1524,33 @@ class SimpleVideoPlayer : public Component
   bool stream_stats_sender_{false};            // the connected sender asked for 'M' (network task)
   bool stream_stats_running_{false};           // network task
   uint32_t stream_stats_ms_{0};                // the last report (network task)
+#endif
+#ifdef SVP_SPICE
+  static constexpr uint8_t SPICE_MAX_CLIPS = 16;
+  static constexpr uint8_t SPICE_MAX_STREAMS = 64;  // SPICE_MAX_NUM_STREAMS
+  static constexpr size_t SPICE_SCRATCH_BYTES = 16384;
+  struct SpiceStreamInfo {
+    bool used;
+    bool top_down;
+    int32_t left, top, right, bottom;  // where its pictures go
+    uint32_t width, height;            // its pictures' size
+    uint8_t clip_count;                // 0: all of dest
+    StreamRect clips[SPICE_MAX_CLIPS];
+  };
+  struct SpiceState {
+    char host[64];
+    char password[61];  // SPICE_MAX_PASSWORD_LENGTH + 1
+    uint16_t port;
+    SpiceStreamInfo streams[SPICE_MAX_STREAMS];
+  };
+  SpiceState *spice_{nullptr};          // PSRAM pool
+  uint8_t *spice_scratch_{nullptr};     // PSRAM pool: messages other than pictures
+  StreamRect *spice_clips_{nullptr};    // PSRAM pool: SPICE_MAX_CLIPS per stream frame
+  SemaphoreHandle_t spice_lock_{nullptr};  // spice_->host/password/port
+  TaskHandle_t spice_task_{nullptr};
+  int spice_wake_fd_{-1};
+  std::atomic<uint8_t> spice_request_{0};  // 1 connect, 2 disconnect
+  std::atomic<bool> spice_on_{false};
 #endif
 #ifdef SVP_CANVAS_OUTPUT
   // Canvas output: the part of the page the udisp rectangles changed since loop() last told LVGL.
@@ -1923,6 +1983,31 @@ template<typename... Ts> class StreamStatisticsAction : public Action<Ts...> {
  protected:
   SimpleVideoPlayer *player_;
 };
+
+#ifdef SVP_SPICE
+template<typename... Ts> class SpiceConnectAction : public Action<Ts...> {
+ public:
+  explicit SpiceConnectAction(SimpleVideoPlayer *player) : player_(player) {}
+  TEMPLATABLE_VALUE(std::string, host)
+  TEMPLATABLE_VALUE(uint16_t, port)
+  TEMPLATABLE_VALUE(std::string, password)
+  void play(const Ts &...x) override {
+    this->player_->spice_connect(this->host_.value(x...), this->port_.value(x...), this->password_.value(x...));
+  }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class SpiceDisconnectAction : public Action<Ts...> {
+ public:
+  explicit SpiceDisconnectAction(SimpleVideoPlayer *player) : player_(player) {}
+  void play(const Ts &...x) override { this->player_->spice_disconnect(); }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+#endif
 #endif
 
 template<typename... Ts> class SetVolumeAction : public Action<Ts...> {
