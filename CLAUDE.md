@@ -8,6 +8,10 @@ Also read [`AGENTS.md`](AGENTS.md) (ESPHome's general contributor guide — buil
 conventions, the existing "Verify Before Code Generation" rule about struct fields/method names).
 The rules below are stricter and more specific, and apply on top of it.
 
+**simple_video_player / svp_relay work:** start with `/svp [topic]`, or read
+[`esphome/components/simple_video_player/.ai/README.md`](esphome/components/simple_video_player/.ai/README.md)
+and the files it lists before touching anything of it.
+
 ## 1. Verify BEHAVIOR, not just signatures — every time, no exceptions
 
 AGENTS.md already bans guessing field/method names. This extends that to runtime *behavior* and
