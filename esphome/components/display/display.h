@@ -377,6 +377,9 @@ class Display : public PollingComponent {
   virtual void present_scanout_buffer(void *buffer) {}
   /// True once the buffer presented last is the one scanned out, so the previous one is free.
   virtual bool scanout_flipped() { return true; }
+  /// The frame buffer draw_pixels_at() writes into, native orientation, packed rows of the native
+  /// width, for a caller that reads back what is shown; nullptr when the display has none.
+  virtual uint8_t *get_draw_buffer(ColorBitness *bitness) { return nullptr; }
 
   /// Draw a straight line from the point [x1,y1] to [x2,y2] with the given color.
   void line(int x1, int y1, int x2, int y2, Color color = COLOR_ON);

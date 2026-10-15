@@ -192,6 +192,13 @@ struct RoutedDevice {
   uint16_t switch_mps_in{0};
   uint32_t switched_ms{0};
   bool gone{false};
+  // Given to this driver alone by take_device(): not routed to others until it lets go.
+  USBClient *taken_by{nullptr};
+  // take_device() under way: the holders' endpoints are halted, each is told the device is gone (as
+  // on an unplug) once its transfers are back, and the taker gets it when all have let go.
+  bool taking{false};
+  uint32_t taking_ms{0};
+  std::vector<USBClient *> leaving{};
 };
 
 // USB string descriptors hold at most 126 characters; one more for the terminator
@@ -590,6 +597,17 @@ class USBHost final : public Component {
   void register_client(USBClient *client);
   // A driver let its device go: declined it, lost it, or failed to open it.
   void client_released(USBClient *client, int addr);
+  /// The devices open now (main loop only).
+  const std::vector<RoutedDevice> &get_devices() const { return this->devices_; }
+  /// Main loop: called after a device came or went.
+  template<typename F> void add_on_devices_callback(F &&callback) {
+    this->devices_callback_.add(std::forward<F>(callback));
+  }
+  /// Main loop: the device at addr goes to `taker` alone (a driver that redirects whole devices), away
+  /// from the drivers that hold it, which let go as on an unplug; they get it back once the taker lets
+  /// it go. The taker is bound (bind_) once they have. false: not there, being switched, or taken by
+  /// another.
+  bool take_device(USBClient *taker, uint8_t addr);
 
   // -- Mode switching (mode_switch option) ---------------------------------------
   void add_mode_switch_control(uint16_t vid, uint16_t pid, uint8_t request_type, uint8_t request, uint16_t value,
@@ -612,11 +630,13 @@ class USBHost final : public Component {
   static void switch_cb(usb_transfer_t *xfer);
   void finish_mode_switch_(usb_device_handle_t handle);
   void forget_device_(usb_device_handle_t handle);
+  void continue_take_(RoutedDevice &dev);
 
   std::vector<USBClient *> clients_{};
   std::vector<ModeSwitch> mode_switches_{};
   usb_host_client_handle_t client_handle_{nullptr};
   std::vector<RoutedDevice> devices_{};
+  LazyCallbackManager<void()> devices_callback_;
   bool reroute_{false};
   uint8_t peripheral_map_{0};  // 0: ESP-IDF's default, the high-speed controller
   uint8_t fs_phy_index_{1};

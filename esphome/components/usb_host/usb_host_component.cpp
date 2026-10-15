@@ -134,6 +134,10 @@ void USBHost::loop() {
   if (this->log_low_speed_hub_errors_)
     this->log_low_speed_hub_records_();
 #endif
+  for (auto &dev : this->devices_) {
+    if (dev.taking)
+      this->continue_take_(dev);
+  }
   if (this->reroute_) {
     this->reroute_ = false;
     for (auto &dev : this->devices_)
@@ -183,6 +187,7 @@ void USBHost::device_new_(uint8_t addr) {
   this->devices_.push_back(std::move(dev));
   if (!this->start_mode_switch_(this->devices_.back()))
     this->route_(this->devices_.back());
+  this->devices_callback_.call();
 }
 
 RoutedDevice *USBHost::find_device_(usb_device_handle_t handle) {
@@ -201,6 +206,7 @@ void USBHost::forget_device_(usb_device_handle_t handle) {
       usb_host_interface_release(this->client_handle_, it->handle, it->switch_intf);
     usb_host_device_close(this->client_handle_, it->handle);
     this->devices_.erase(it);
+    this->devices_callback_.call();
     return;
   }
 }
@@ -392,7 +398,15 @@ void USBHost::client_released(USBClient *client, int addr) {
     auto bound = std::find(dev.bound.begin(), dev.bound.end(), client);
     if (bound != dev.bound.end()) {
       dev.bound.erase(bound);
-      dev.declined.push_back(client);
+      // A taker gives the device back to the drivers it was taken from; they did not decline it.
+      if (dev.taken_by == client) {
+        dev.taken_by = nullptr;
+      } else if (dev.taken_by == nullptr) {
+        dev.declined.push_back(client);
+      }
+      auto leaving = std::find(dev.leaving.begin(), dev.leaving.end(), client);
+      if (leaving != dev.leaving.end())
+        dev.leaving.erase(leaving);
     }
     // Recomputed rather than subtracted: interfaces can overlap between drivers' masks.
     dev.assigned = 0;
@@ -404,7 +418,82 @@ void USBHost::client_released(USBClient *client, int addr) {
   this->reroute_ = true;
 }
 
+bool USBHost::take_device(USBClient *taker, uint8_t addr) {
+  RoutedDevice *dev = nullptr;
+  for (auto &d : this->devices_) {
+    if (d.addr == addr && !d.gone)
+      dev = &d;
+  }
+  if (dev == nullptr || dev->mode_switch != nullptr)
+    return false;
+  if (dev->taken_by != nullptr)
+    return dev->taken_by == taker;
+  if (!taker->is_free_())
+    return false;
+  dev->taken_by = taker;
+  dev->taking = true;
+  dev->taking_ms = millis();
+  dev->leaving.clear();
+  // Every transfer of the holders comes back cancelled and a new one is refused (a halted pipe takes
+  // none, hcd_dwc.c _check_port_pipe_state()), as their transfers end on an unplug.
+  int offset = 0;
+  const auto *next = reinterpret_cast<const usb_standard_desc_t *>(dev->config);
+  while ((next = usb_parse_next_descriptor_of_type(next, dev->config->wTotalLength, USB_W_VALUE_DT_ENDPOINT,
+                                                   &offset)) != nullptr) {
+    const uint8_t ep = reinterpret_cast<const usb_ep_desc_t *>(next)->bEndpointAddress;
+    // Not claimed by anyone: refused, nothing to stop there.
+    if (usb_host_endpoint_halt(dev->handle, ep) == ESP_OK)
+      usb_host_endpoint_flush(dev->handle, ep);
+  }
+  this->continue_take_(*dev);
+  return true;
+}
+
+// Main loop: each holder is told the device is gone (its own unplug path) once its transfers are back;
+// the taker gets the device when all have let go.
+void USBHost::continue_take_(RoutedDevice &dev) {
+  static constexpr uint32_t TAKE_WAIT_MS = 500;
+  bool held = false;
+  for (auto *client : dev.bound) {
+    if (client == dev.taken_by)
+      continue;
+    held = true;
+    if (client->state_ == USB_CLIENT_OPEN) {
+      // Bound, not opened yet: nothing to let go of.
+      client->state_ = USB_CLIENT_INIT;
+      client->device_addr_ = -1;
+      client->routed_interfaces_ = 0;
+      this->client_released(client, dev.addr);
+      return;  // bound changed
+    }
+    if (std::find(dev.leaving.begin(), dev.leaving.end(), client) != dev.leaving.end())
+      continue;
+    if (client->trq_in_use_.load(std::memory_order_acquire) != 0 && millis() - dev.taking_ms < TAKE_WAIT_MS)
+      continue;
+    UsbEvent *event = client->event_pool.allocate();
+    if (event == nullptr)
+      continue;
+    event->type = EVENT_DEVICE_GONE;
+    event->data.device_gone.handle = client->device_handle_;
+    client->event_queue.push(event);
+    client->enable_loop_soon_any_context();
+    dev.leaving.push_back(client);
+  }
+  if (held)
+    return;
+  dev.taking = false;
+  dev.leaving.clear();
+  const uint32_t all = 0xFFFFFFFFu;
+  dev.assigned = all;
+  dev.bound.push_back(dev.taken_by);
+  ESP_LOGI(TAG, "%04X:%04X -> %s", dev.desc->idVendor, dev.desc->idProduct,
+           LOG_STR_ARG(dev.taken_by->get_component_log_str()));
+  dev.taken_by->bind_(dev.addr, all);
+}
+
 void USBHost::route_(RoutedDevice &dev) {
+  if (dev.taken_by != nullptr)
+    return;
   if (dev.mode_switch != nullptr || (dev.switched_ms != 0 && millis() - dev.switched_ms < MODE_SWITCH_SETTLE_MS))
     return;
   auto listed = [](const std::vector<USBClient *> &list, USBClient *client) {

@@ -244,6 +244,10 @@ void SimpleVideoPlayer::loop() {
     this->audio_advance_();
   }
 #endif
+#ifdef SVP_SPICE
+  if (this->spice_sound_claim_.exchange(false, std::memory_order_acq_rel))
+    this->spice_sound_take_();
+#endif
   this->run_pending_start_();
 #ifdef SVP_CHANNEL_LIST
   this->channel_loop_();
@@ -343,7 +347,12 @@ void SimpleVideoPlayer::loop() {
     if (this->stream_audio_on_.load(std::memory_order_acquire) &&
         millis() - this->stream_last_audio_ms_.load(std::memory_order_acquire) > 500) {
       this->stream_audio_on_.store(false, std::memory_order_release);
-      if (this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED)
+      bool speaker_free = this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED;
+#ifdef SVP_SPICE
+      // Audio files playing meanwhile do so on another device (spice_sound_shares_files_).
+      speaker_free = speaker_free || this->spice_on_.load(std::memory_order_acquire);
+#endif
+      if (speaker_free)
         this->speaker_->stop();
     }
 #endif
@@ -2042,8 +2051,9 @@ bool SimpleVideoPlayer::plan_pool_() {
     this->stream_max_frame_bytes_ = pool_round(this->frame_bytes_ / 4);
     fixed += STREAM_FRAME_COUNT * static_cast<size_t>(this->stream_max_frame_bytes_) + pool_round(STREAM_RECV_BYTES);
 #ifdef SVP_SPICE
-    fixed += pool_round(sizeof(SpiceState)) + pool_round(SPICE_SCRATCH_BYTES) +
-             pool_round(STREAM_FRAME_COUNT * SPICE_MAX_CLIPS * sizeof(StreamRect));
+    fixed += pool_round(sizeof(SpiceState)) + pool_round(STREAM_FRAME_COUNT * SPICE_MAX_CLIPS * sizeof(StreamRect)) +
+             pool_round(sizeof(SpiceCursor)) + pool_round(SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape)) +
+             2 * pool_round(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3);
 #endif
 #ifdef USE_AUDIO
     if (this->speaker_ != nullptr)
@@ -2859,6 +2869,12 @@ void SimpleVideoPlayer::audio_order_build_(size_t first) {
 void SimpleVideoPlayer::audio_start_(size_t pos) {
   if (pos >= this->audio_order_.size())
     return;
+#ifdef SVP_SPICE
+  if (this->spice_sound_on_.load(std::memory_order_acquire) && this->spice_sound_shares_files_) {
+    ESP_LOGW(TAG, "Refused: the SPICE session's sound plays on this device");
+    return;
+  }
+#endif
   this->audio_pos_ = pos;
   this->audio_current_ = true;
   this->start_pending_.store(false, std::memory_order_release);

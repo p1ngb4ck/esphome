@@ -21,11 +21,13 @@ from esphome.const import (
     CONF_ID,
     CONF_MODE,
     CONF_NUM_CHANNELS,
+    CONF_OUTPUT_SPEAKER,
     CONF_PASSWORD,
     CONF_PLATFORM,
     CONF_PORT,
     CONF_POSITION,
     CONF_SAMPLE_RATE,
+    CONF_SPEAKER,
     CONF_TRIGGER_ID,
     CONF_URL,
     CONF_VOLUME,
@@ -168,6 +170,7 @@ CONF_STREAM_PORT = "stream_port"
 CONF_STREAM_OUTPUT = "stream_output"
 CONF_STREAM_STATISTICS = "stream_statistics"
 CONF_SPICE = "spice"
+CONF_SPICE_SOUND_SHARES = "spice_sound_shares"  # resolved: (audio files, media player)
 CONF_ENABLE = "enable"
 STREAM_OUTPUT_FULLSCREEN = "fullscreen"
 STREAM_OUTPUT_CANVAS = "canvas"
@@ -782,6 +785,58 @@ def _resolve_canvas_size(config, fconf):
     this_conf[CONF_RESOLVED_CANVAS_SIZE] = (width, height)
 
 
+def _speaker_devices(fconf, speaker_id, seen=None) -> set[str]:
+    """The speakers a speaker's sound ends at: down its output_speaker chain (a mixer's source speaker
+    through its mixer), every output of an audio router."""
+    seen = set() if seen is None else seen
+    key = str(speaker_id)
+    if key in seen:
+        return set()
+    seen.add(key)
+    try:
+        path = fconf.get_path_for_id(speaker_id)[:-1]
+    except KeyError:
+        return {key}
+    conf = fconf.get_config_for_path(path)
+    if conf.get(CONF_PLATFORM) == CONF_AUDIO_ROUTER:
+        ends = set()
+        for output in conf.get("outputs") or []:
+            ends |= _speaker_devices(fconf, output[CONF_SPEAKER], seen)
+        return ends or {key}
+    following = conf.get(CONF_OUTPUT_SPEAKER)
+    if following is None and len(path) >= 2 and path[-2] == "source_speakers":
+        following = fconf.get_config_for_path(path[:-2]).get(CONF_OUTPUT_SPEAKER)
+    if following is None:
+        return {key}
+    return _speaker_devices(fconf, following, seen)
+
+
+def _resolve_spice_sound(config, fconf):
+    """Whether the SPICE session's sound (the speaker) reaches the device the audio files and the media
+    player play on: they stop for it there, and go on elsewhere. A media player whose speakers cannot be
+    told counts as sharing."""
+    spice = _speaker_devices(fconf, config[CONF_SPEAKER_ID])
+    files = False
+    if CONF_AUDIO_FILE_SPEAKER_ID in config:
+        files = bool(spice & _speaker_devices(fconf, config[CONF_AUDIO_FILE_SPEAKER_ID]))
+    player = False
+    if CONF_MEDIA_PLAYER_ID in config:
+        player = True
+        try:
+            mp_conf = fconf.get_config_for_path(fconf.get_path_for_id(config[CONF_MEDIA_PLAYER_ID])[:-1])
+        except KeyError:
+            mp_conf = {}
+        pipelines = [
+            mp_conf.get(key)
+            for key in ("announcement_pipeline", "media_pipeline")
+            if isinstance(mp_conf.get(key), dict) and CONF_SPEAKER in mp_conf.get(key)
+        ]
+        if pipelines:
+            player = any(spice & _speaker_devices(fconf, pipeline[CONF_SPEAKER]) for pipeline in pipelines)
+    this_conf = fconf.get_config_for_path(fconf.get_path_for_id(config[CONF_ID])[:-1])
+    this_conf[CONF_SPICE_SOUND_SHARES] = (files, player)
+
+
 def _final_validate(config):
     fconf = fv.full_config.get()
 
@@ -813,6 +868,8 @@ def _final_validate(config):
         return config
 
     _resolve_speaker_audio_format(config, fconf)
+    if config.get(CONF_SPICE):
+        _resolve_spice_sound(config, fconf)
 
     # Codec support (FLAC/MP3) is enabled by the user's own `audio: codecs:` block, never by
     # simple_video_player itself. audio_codec is the list of codecs this player must support, so
@@ -907,6 +964,11 @@ async def to_code(config):
             cg.add_define("SVP_STREAM_TOUCH")
         if config.get(CONF_SPICE):
             cg.add_define("SVP_SPICE")
+            if CONF_SPICE_SOUND_SHARES in config:
+                cg.add(var.set_spice_sound_shares(*config[CONF_SPICE_SOUND_SHARES]))
+            # USB redirection's transfer buffers (and every other USB driver's) in PSRAM.
+            if "usb_host" in CORE.loaded_integrations:
+                add_idf_sdkconfig_option("CONFIG_USB_HOST_DWC_DMA_CAP_MEMORY_IN_PSRAM", True)
         if channels := config.get(CONF_CHANNEL_LIST):
             request_http_client()
             cg.add(var.set_channel_url(channels[CONF_URL].rstrip("/")))

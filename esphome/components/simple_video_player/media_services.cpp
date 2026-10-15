@@ -79,8 +79,15 @@ void SimpleVideoPlayer::setup_media_player_() {
   this->register_service(&SimpleVideoPlayer::set_stream_statistics, "svp_stream_statistics", {"enable"});
 #endif
   this->build_media_traits_();
-  this->media_player_->add_on_state_callback(
-      [this](media_player::MediaPlayerState) { this->status_callbacks_.call(); });
+  this->media_player_->add_on_state_callback([this](media_player::MediaPlayerState state) {
+#ifdef SVP_SPICE
+    // A SPICE session's sound comes first on the device they share.
+    if ((state == media_player::MEDIA_PLAYER_STATE_PLAYING || state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING) &&
+        this->spice_sound_shares_media_player_ && this->spice_sound_on_.load(std::memory_order_acquire))
+      this->spice_sound_claim_.store(true, std::memory_order_release);
+#endif
+    this->status_callbacks_.call();
+  });
   this->status_callbacks_.call();  // whatever published the status before this setup
 }
 

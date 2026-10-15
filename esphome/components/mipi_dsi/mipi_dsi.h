@@ -85,6 +85,7 @@ class MipiDsi final : public display::Display {
   uint8_t get_scanout_buffers(void **out, uint8_t max, display::ColorBitness *bitness) override;
   void present_scanout_buffer(void *buffer) override;
   bool scanout_flipped() override;
+  uint8_t *get_draw_buffer(display::ColorBitness *bitness) override;
 
   void smark_failed(const LogString *message, esp_err_t err);
 
@@ -136,6 +137,9 @@ class MipiDsi final : public display::Display {
 
   esp_lcd_panel_handle_t handle_{};
   void *dsi_fbs_[3]{};  // driver-owned DPI framebuffers, populated in setup() when num_fbs_ >= 2
+  // The one draw_bitmap() copies into: the one presented last (esp_lcd_panel_dpi.c's cur_fb_index,
+  // 0 after init).
+  void *draw_fb_{nullptr};
   esp_lcd_dsi_bus_handle_t bus_handle_{};
   esp_lcd_panel_io_handle_t io_handle_{};
   SemaphoreHandle_t io_lock_{};

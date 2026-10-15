@@ -195,6 +195,9 @@ void MipiDsi::setup() {
       ESP_LOGW(TAG, "esp_lcd_dpi_panel_get_frame_buffer failed: %s", esp_err_to_name(fberr));
       this->dsi_fbs_[0] = this->dsi_fbs_[1] = this->dsi_fbs_[2] = nullptr;
     }
+    this->draw_fb_ = this->dsi_fbs_[0];
+  } else if (esp_lcd_dpi_panel_get_frame_buffer(this->handle_, 1, &this->draw_fb_) != ESP_OK) {
+    this->draw_fb_ = nullptr;
   }
 
   ESP_LOGCONFIG(TAG, "MIPI DSI setup complete");
@@ -207,6 +210,7 @@ void MipiDsi::present_dsi_frame_buffer(void *fb) {
   // non-blocking -- never wait.
   esp_lcd_panel_draw_bitmap(this->handle_, 0, 0, this->width_, this->height_, fb);
   xSemaphoreTake(this->io_lock_, 0);
+  this->draw_fb_ = fb;
 }
 
 uint8_t MipiDsi::get_scanout_buffers(void **out, uint8_t max, display::ColorBitness *bitness) {
@@ -224,9 +228,15 @@ void MipiDsi::present_scanout_buffer(void *buffer) {
   // cache write-back to a single row, the caller has written its rows back already.
   esp_lcd_panel_draw_bitmap(this->handle_, 0, 0, 1, 1, buffer);
   xSemaphoreTake(this->io_lock_, 0);
+  this->draw_fb_ = buffer;
   // A restart counted from here may have picked the buffer before the switch; the one after it
   // cannot have.
   this->flip_frame_ = this->scan_frames_.load(std::memory_order_acquire) + 2;
+}
+
+uint8_t *MipiDsi::get_draw_buffer(display::ColorBitness *bitness) {
+  *bitness = this->color_depth_;
+  return static_cast<uint8_t *>(this->draw_fb_);
 }
 
 bool MipiDsi::scanout_flipped() {

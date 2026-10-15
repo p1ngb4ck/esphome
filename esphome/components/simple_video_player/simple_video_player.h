@@ -125,6 +125,9 @@ enum class VideoFormat : uint8_t {
 
 // Forward declarations for automation
 class SimpleVideoPlayer;
+#ifdef SVP_SPICE_USB
+class SpiceUsbSlot;
+#endif
 
 #ifdef USE_AUDIO
 /// ring_buffer::RingBuffer in the player's pool memory (create() allocates its own).
@@ -389,6 +392,19 @@ class SimpleVideoPlayer : public Component
   void spice_connect(const std::string &host, uint16_t port, const std::string &password);
   void spice_disconnect();
   bool is_spice_connected() const { return this->spice_on_.load(std::memory_order_acquire); }
+  /// Any task: the SPICE task has work (input, USB completions).
+  void spice_wake();
+  /// Whether the speaker's sound reaches the device the audio files / the media player play on
+  /// (codegen, by their speaker chains): SPICE sound stops them then.
+  void set_spice_sound_shares(bool files, bool media_player) {
+    this->spice_sound_shares_files_ = files;
+    this->spice_sound_shares_media_player_ = media_player;
+  }
+#ifdef SVP_SPICE_USB
+  void add_spice_usb_slot(SpiceUsbSlot *slot);
+  /// Main loop: a slot picked the device at addr; the others let it go.
+  void spice_usb_selected(SpiceUsbSlot *slot, uint8_t addr);
+#endif
 #endif
 #endif
 
@@ -770,6 +786,18 @@ class SimpleVideoPlayer : public Component
   friend class SpiceSession;  // spice_client.cpp: one session, over the stream's frames and outputs
   static void spice_task_entry_(void *param);
   void spice_loop_();
+  /// Draw task, output held: the SPICE cursor taken off (what was under it back), or drawn where it is
+  /// now (what is under it kept).
+  void spice_cursor_hide_();
+  void spice_cursor_show_();
+  bool spice_cursor_over_(int32_t x, int32_t y, int32_t w, int32_t h) const;
+  /// Draw task: pixels of the session's output, rows packed w * bpp.
+  void spice_out_read_(int32_t x, int32_t y, int32_t w, int32_t h, uint8_t *dst);
+  void spice_out_write_(int32_t x, int32_t y, int32_t w, int32_t h, const uint8_t *src);
+  /// Draw task: the cursor drawn anew if it changed (holds the output for it).
+  void spice_cursor_update_();
+  /// Main loop: audio files and the media player stop where they share the session's sound device.
+  void spice_sound_take_();
 #endif
 #ifdef SVP_STREAM_STATS
   /// Network task: starts, reports and stops the per-second figures; the ms until the next report.
@@ -801,6 +829,8 @@ class SimpleVideoPlayer : public Component
   /// PCM payload bytes from the sender (network task): converted to the speaker's channel count and
   /// played in 10 ms blocks; dropped while a file plays.
   void stream_on_audio_(const uint8_t *data, size_t len);
+  /// The same, whatever plays: stream_audio_src_ch_ and stream_audio_rate_ say what it is.
+  void stream_play_audio_(const uint8_t *data, size_t len);
   void stream_emit_audio_frames_(const uint8_t *src, size_t frames);
   void stream_flush_audio_block_();
 #endif
@@ -1528,7 +1558,7 @@ class SimpleVideoPlayer : public Component
 #ifdef SVP_SPICE
   static constexpr uint8_t SPICE_MAX_CLIPS = 16;
   static constexpr uint8_t SPICE_MAX_STREAMS = 64;  // SPICE_MAX_NUM_STREAMS
-  static constexpr size_t SPICE_SCRATCH_BYTES = 16384;
+  static constexpr size_t SPICE_SCRATCH_BYTES = 20480;  // internal RAM: a 64x64 cursor's message fits
   struct SpiceStreamInfo {
     bool used;
     bool top_down;
@@ -1551,6 +1581,43 @@ class SimpleVideoPlayer : public Component
   int spice_wake_fd_{-1};
   std::atomic<uint8_t> spice_request_{0};  // 1 connect, 2 disconnect
   std::atomic<bool> spice_on_{false};
+  std::atomic<bool> spice_inputs_on_{false};    // the session's inputs channel takes keys, mouse, touches
+  std::atomic<bool> spice_sound_on_{false};     // the session's playback channel is open
+  std::atomic<bool> spice_sound_claim_{false};  // loop(): what plays on the session's sound device stops
+  std::atomic<bool> spice_direct_out_{true};    // the session draws onto the display, else the canvas
+  bool spice_sound_shares_files_{false};
+  bool spice_sound_shares_media_player_{false};
+  // Cursor: the session sets shape and place (under spice_cursor_lock_), the draw task shows it.
+  // Shapes as straight ARGB; SPICE_CURSOR_INVERT (alpha 0, not black) inverts what is under it.
+  static constexpr uint16_t SPICE_CURSOR_MAX = 64;
+  static constexpr uint8_t SPICE_CURSOR_CACHE = 16;
+  static constexpr uint32_t SPICE_CURSOR_INVERT = 0x00FFFFFF;
+  struct SpiceCursorShape {
+    uint64_t id;
+    uint32_t used;  // last use, for the cache
+    uint16_t w, h, hot_x, hot_y;
+    bool valid;
+    uint32_t px[SPICE_CURSOR_MAX * SPICE_CURSOR_MAX];
+  };
+  struct SpiceCursor {
+    SpiceCursorShape shape;
+    int32_t x, y;  // the hot spot on the output
+    bool visible;
+  };
+  SpiceCursor *spice_cursor_{nullptr};             // PSRAM pool
+  SpiceCursorShape *spice_cursor_cache_{nullptr};  // PSRAM pool, SPICE_CURSOR_CACHE (spice task)
+  SemaphoreHandle_t spice_cursor_lock_{nullptr};
+  std::atomic<bool> spice_cursor_dirty_{false};
+  // Draw task: what is under the drawn cursor, and the cursor composed over it (PSRAM pool).
+  uint8_t *spice_cursor_under_{nullptr};
+  uint8_t *spice_cursor_patch_{nullptr};
+  bool spice_cursor_drawn_{false};
+  int32_t spice_cursor_rx_{0}, spice_cursor_ry_{0}, spice_cursor_rw_{0}, spice_cursor_rh_{0};
+#ifdef SVP_SPICE_USB
+  static constexpr uint8_t SPICE_USB_SLOTS = 4;
+  SpiceUsbSlot *spice_usb_[SPICE_USB_SLOTS]{};
+  uint8_t spice_usb_count_{0};
+#endif
 #endif
 #ifdef SVP_CANVAS_OUTPUT
   // Canvas output: the part of the page the udisp rectangles changed since loop() last told LVGL.

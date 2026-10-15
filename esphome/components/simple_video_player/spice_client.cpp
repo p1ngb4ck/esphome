@@ -1,7 +1,9 @@
 // SPICE client: a SPICE server's desktop (QEMU/libvirt, x11spice, ...) on the stream's output, drawn
-// by the stream draw task like udisp rectangles (stream_receiver.cpp). The wire layouts follow
-// spice-protocol (spice/protocol.h, spice/enums.h) and the demarshallers spice-common's
-// spice_codegen.py generates from spice.proto.
+// by the stream draw task like udisp rectangles (stream_receiver.cpp); its inputs channel fed with the
+// panel's keys, mouse and touches, its cursor drawn over the desktop by the draw task, its sound played
+// on the speaker, and USB devices redirected through its usbredir channels (select/spice_usb.cpp). The
+// wire layouts follow spice-protocol (spice/protocol.h, spice/enums.h) and the demarshallers
+// spice-common's spice_codegen.py generates from spice.proto; the behaviour spice-gtk's channels.
 //
 // Pictures drawn: JPEG and JPEG_ALPHA (its JPEG part) of DRAW_COPY, MJPEG streams, and plain 32-bit
 // bitmaps. The client asks for QUIC compression, which the server turns into JPEG where it may be
@@ -11,6 +13,11 @@
 #include "simple_video_player.h"
 
 #ifdef SVP_SPICE
+
+#ifdef SVP_SPICE_USB
+#include "select/spice_usb.h"
+#endif
+#include "esp_cache.h"
 
 #include "esphome/core/log.h"
 #include "esp_random.h"
@@ -50,6 +57,10 @@ constexpr size_t LINK_MESS_BYTES = 18;
 constexpr size_t LINK_REPLY_FIXED = 4 + PUBKEY_BYTES + 12;
 constexpr uint8_t CHANNEL_MAIN = 1;
 constexpr uint8_t CHANNEL_DISPLAY = 2;
+constexpr uint8_t CHANNEL_INPUTS = 3;
+constexpr uint8_t CHANNEL_CURSOR = 4;
+constexpr uint8_t CHANNEL_PLAYBACK = 5;
+constexpr uint8_t CHANNEL_USBREDIR = 9;
 constexpr uint32_t COMMON_CAP_AUTH_SELECTION = 1u << 0;
 constexpr uint32_t COMMON_CAP_AUTH_SPICE = 1u << 1;
 constexpr uint32_t COMMON_CAP_MINI_HEADER = 1u << 3;
@@ -69,7 +80,44 @@ constexpr uint16_t MSGC_ACK = 2;
 constexpr uint16_t MSGC_PONG = 3;
 constexpr uint16_t MSG_MAIN_INIT = 103;
 constexpr uint16_t MSG_MAIN_CHANNELS_LIST = 104;
+constexpr uint16_t MSG_MAIN_MOUSE_MODE = 105;
 constexpr uint16_t MSGC_MAIN_ATTACH_CHANNELS = 104;
+constexpr uint16_t MSGC_MAIN_MOUSE_MODE_REQUEST = 105;
+constexpr uint16_t MOUSE_MODE_CLIENT = 1u << 1;
+constexpr uint16_t MSGC_INPUTS_KEY_DOWN = 101;
+constexpr uint16_t MSGC_INPUTS_KEY_UP = 102;
+constexpr uint16_t MSGC_INPUTS_MOUSE_MOTION = 111;
+constexpr uint16_t MSGC_INPUTS_MOUSE_POSITION = 112;
+constexpr uint16_t MSGC_INPUTS_MOUSE_PRESS = 113;
+constexpr uint16_t MSGC_INPUTS_MOUSE_RELEASE = 114;
+constexpr uint16_t MSG_INPUTS_MOUSE_MOTION_ACK = 111;
+constexpr uint32_t MOTION_ACK_BUNCH = 4;  // SPICE_INPUT_MOTION_ACK_BUNCH
+constexpr uint16_t MSG_CURSOR_INIT = 101;
+constexpr uint16_t MSG_CURSOR_RESET = 102;
+constexpr uint16_t MSG_CURSOR_SET = 103;
+constexpr uint16_t MSG_CURSOR_MOVE = 104;
+constexpr uint16_t MSG_CURSOR_HIDE = 105;
+constexpr uint16_t MSG_CURSOR_INVAL_ONE = 107;
+constexpr uint16_t MSG_CURSOR_INVAL_ALL = 108;
+constexpr uint8_t CURSOR_TYPE_ALPHA = 0;
+constexpr uint8_t CURSOR_TYPE_MONO = 1;
+constexpr uint8_t CURSOR_TYPE_COLOR4 = 2;
+constexpr uint8_t CURSOR_TYPE_COLOR16 = 4;
+constexpr uint8_t CURSOR_TYPE_COLOR32 = 6;
+constexpr uint16_t CURSOR_FLAGS_NONE = 1u << 0;
+constexpr uint16_t CURSOR_FLAGS_CACHE_ME = 1u << 1;
+constexpr uint16_t CURSOR_FLAGS_FROM_CACHE = 1u << 2;
+constexpr uint16_t MSG_PLAYBACK_DATA = 101;
+constexpr uint16_t MSG_PLAYBACK_MODE = 102;
+constexpr uint16_t MSG_PLAYBACK_START = 103;
+constexpr uint16_t AUDIO_DATA_MODE_RAW = 1;
+constexpr uint16_t AUDIO_FMT_S16 = 1;
+constexpr uint16_t MSG_SPICEVMC_DATA = 101;
+constexpr uint16_t MSGC_SPICEVMC_DATA = 101;
+// SPICE_MOUSE_BUTTON_* and their masks.
+constexpr uint8_t BUTTON_LEFT = 1, BUTTON_MIDDLE = 2, BUTTON_RIGHT = 3, BUTTON_UP = 4, BUTTON_DOWN = 5, BUTTON_SIDE = 6,
+                  BUTTON_EXTRA = 7;
+constexpr uint16_t button_mask(uint8_t button) { return static_cast<uint16_t>(1u << (button - 1)); }
 constexpr uint16_t MSG_DISPLAY_COPY_BITS = 104;
 constexpr uint16_t MSG_DISPLAY_STREAM_CREATE = 122;
 constexpr uint16_t MSG_DISPLAY_STREAM_DATA = 123;
@@ -118,6 +166,10 @@ enum : uint32_t {
   WARN_BOTTOM_UP = 1u << 7,
   WARN_SUB_LIST = 1u << 8,
   WARN_SURFACE = 1u << 9,
+  WARN_CURSOR = 1u << 10,
+  WARN_CURSOR_CACHE = 1u << 11,
+  WARN_SOUND = 1u << 12,
+  WARN_USB = 1u << 13,
 };
 
 inline uint16_t rd16(const uint8_t *p) { return static_cast<uint16_t>(p[0] | (p[1] << 8)); }
@@ -133,6 +185,7 @@ inline void put32(uint8_t *p, uint32_t v) {
   for (int i = 0; i < 4; i++)
     p[i] = static_cast<uint8_t>(v >> (8 * i));
 }
+inline uint64_t rd64(const uint8_t *p) { return rd32(p) | (static_cast<uint64_t>(rd32(p + 4)) << 32); }
 inline void put64(uint8_t *p, uint64_t v) {
   for (int i = 0; i < 8; i++)
     p[i] = static_cast<uint8_t>(v >> (8 * i));
@@ -255,11 +308,53 @@ bool encrypt_ticket(const uint8_t *spki, const char *password, uint8_t *out) {
 
 struct Channel {
   int fd{-1};
+  uint8_t type{0};
+  uint8_t id{0};
   bool mini{false};
   uint64_t serial{0};
   uint32_t ack_window{0};
   uint32_t ack_count{0};
+  uint32_t vmc_left{0};  // usbredir: bytes of the data message being read into its slot
 };
+
+// HID keyboard usages (page 7) to PC XT scancodes, 0x100 for those with the 0xE0 prefix: keycodemapdb's
+// keymaps.csv ("USB Keycodes" to "AT set1 keycode"), as spice-gtk sends them (its xtkbd keymap).
+const uint16_t KEYBOARD_XT[0xE8] = {
+    0x000, 0x000, 0x000, 0x000, 0x01E, 0x030, 0x02E, 0x020, 0x012, 0x021, 0x022, 0x023, 0x017, 0x024, 0x025, 0x026,
+    0x032, 0x031, 0x018, 0x019, 0x010, 0x013, 0x01F, 0x014, 0x016, 0x02F, 0x011, 0x02D, 0x015, 0x02C, 0x002, 0x003,
+    0x004, 0x005, 0x006, 0x007, 0x008, 0x009, 0x00A, 0x00B, 0x01C, 0x001, 0x00E, 0x00F, 0x039, 0x00C, 0x00D, 0x01A,
+    0x01B, 0x02B, 0x02B, 0x027, 0x028, 0x029, 0x033, 0x034, 0x035, 0x03A, 0x03B, 0x03C, 0x03D, 0x03E, 0x03F, 0x040,
+    0x041, 0x042, 0x043, 0x044, 0x057, 0x058, 0x054, 0x046, 0x146, 0x152, 0x147, 0x149, 0x153, 0x14F, 0x151, 0x14D,
+    0x14B, 0x150, 0x148, 0x045, 0x135, 0x037, 0x04A, 0x04E, 0x11C, 0x04F, 0x050, 0x051, 0x04B, 0x04C, 0x04D, 0x047,
+    0x048, 0x049, 0x052, 0x053, 0x056, 0x15D, 0x15E, 0x059, 0x05D, 0x05E, 0x05F, 0x055, 0x103, 0x177, 0x104, 0x05A,
+    0x074, 0x179, 0x06D, 0x06F, 0x064, 0x175, 0x11E, 0x10C, 0x168, 0x105, 0x107, 0x13C, 0x178, 0x065, 0x141, 0x120,
+    0x130, 0x12E, 0x000, 0x000, 0x000, 0x07E, 0x000, 0x073, 0x070, 0x07D, 0x079, 0x07B, 0x05C, 0x000, 0x000, 0x000,
+    0x0F2, 0x0F1, 0x078, 0x077, 0x076, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x176, 0x17B, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x01D, 0x02A, 0x038, 0x15B, 0x11D, 0x036, 0x138, 0x15C,
+};
+
+// HID consumer usages (page 0x0C), the same way (Linux hid-input's mapping, keycodemapdb's codes).
+struct ConsumerKey {
+  uint16_t usage, xt;
+};
+const ConsumerKey CONSUMER_XT[] = {
+    {0x0030, 0x15E}, {0x0032, 0x15F}, {0x0040, 0x11E}, {0x00B5, 0x119}, {0x00B6, 0x110}, {0x00B7, 0x124},
+    {0x00CD, 0x122}, {0x00E2, 0x120}, {0x00E9, 0x130}, {0x00EA, 0x12E}, {0x0183, 0x16D}, {0x018A, 0x16C},
+    {0x0192, 0x121}, {0x0194, 0x16B}, {0x0221, 0x165}, {0x0223, 0x132}, {0x0224, 0x16A}, {0x0225, 0x169},
+    {0x0226, 0x168}, {0x0227, 0x167}, {0x022A, 0x166},
+};
+
+// SpiceMsgcKeyDown/Up code (spice_make_scancode(), spice-gtk): the 0xE0 prefix in the low byte.
+uint32_t key_code(uint16_t xt, bool release) {
+  uint16_t code = static_cast<uint16_t>((xt & 0x37F) | (release ? 0x80 : 0));
+  if (code < 0x100)
+    return code;
+  return 0xE0u | (static_cast<uint32_t>(code & 0xFF) << 8);
+}
 
 }  // namespace
 
@@ -267,22 +362,40 @@ class SpiceSession {
  public:
   using StreamFrame = SimpleVideoPlayer::StreamFrame;
   using StreamRect = SimpleVideoPlayer::StreamRect;
+#ifdef SVP_STREAM_TOUCH
+  using StreamTouch = SimpleVideoPlayer::StreamTouch;
+#endif
   using SpiceStreamInfo = SimpleVideoPlayer::SpiceStreamInfo;
+  using SpiceCursorShape = SimpleVideoPlayer::SpiceCursorShape;
 
   explicit SpiceSession(SimpleVideoPlayer *player) : p_(player) {}
   ~SpiceSession() { this->close_(); }
   void run(const char *host, uint16_t port, const char *password);
 
  protected:
+#ifdef SVP_SPICE_USB
+  /// A slot's bytes into its usbredir channel.
+  struct VmcLink : SpiceVmcLink {
+    SpiceSession *session{nullptr};
+    Channel *channel{nullptr};
+    bool vmc_send(const uint8_t *head, size_t head_len, const uint8_t *data, size_t data_len) override {
+      return this->session->send_parts_(*this->channel, MSGC_SPICEVMC_DATA, head, head_len, data, data_len);
+    }
+  };
+#endif
+  static constexpr uint8_t USB_CHANNELS = 4;
+
   bool resolve_(const char *host, uint16_t port);
   int connect_();
-  bool link_(Channel &ch, uint8_t type, uint32_t channel_caps);
+  bool link_(Channel &ch, uint8_t type, uint8_t id, uint32_t channel_caps);
   bool send_(Channel &ch, uint16_t type, const uint8_t *body, uint32_t len);
+  bool send_parts_(Channel &ch, uint16_t type, const uint8_t *a, size_t a_len, const uint8_t *b, size_t b_len);
   bool skip_(Channel &ch, uint32_t len);
   bool handle_one_(Channel &ch);
   bool handle_message_(Channel &ch, uint16_t type, const uint8_t *body, uint32_t size);
   bool handle_list_(Channel &ch, const uint8_t *body, uint32_t size);
   bool handle_picture_(Channel &ch, uint16_t type, uint32_t size, const uint8_t *body);
+  bool handle_channels_(const uint8_t *body, uint32_t size);
   bool open_display_();
   bool take_panel_();
   void release_panel_();
@@ -293,6 +406,31 @@ class SpiceSession {
   bool parts_(StreamFrame *f, const Rect &area, const uint8_t *wire_rects, uint32_t wire_count,
               const StreamRect *stored, uint8_t stored_count);
   bool fits_output_(uint32_t w, uint32_t h) const;
+  // Inputs.
+  bool inputs_pending_();
+  bool key_(const uint8_t *message);
+  bool pointer_(const uint8_t *message);
+#ifdef SVP_STREAM_TOUCH
+  bool touch_(const StreamTouch &touch);
+#endif
+  /// The pointer to (x, y) and buttons: a position in client mouse mode, else a motion of dx, dy.
+  bool move_(int32_t x, int32_t y, int32_t dx, int32_t dy);
+  bool buttons_(uint16_t now);
+  /// What moved and was not sent yet; force: also beyond the unacknowledged limit (before a button).
+  bool motion_flush_(bool force = false);
+  // Cursor.
+  void cursor_message_(uint16_t type, const uint8_t *body, uint32_t size);
+  /// The SpiceCursor at c (flags, header, data to end): the shape shown, or false (hidden).
+  bool cursor_shape_(const uint8_t *c, const uint8_t *end);
+  bool cursor_convert_(SpiceCursorShape &out, uint8_t type, uint16_t w, uint16_t h, const uint8_t *data, size_t len);
+  void cursor_changed_();
+  // Sound.
+  void playback_message_(uint16_t type, const uint8_t *body, uint32_t size);
+#ifdef SVP_SPICE_USB
+  bool usb_read_(Channel &ch, SpiceUsbSlot *slot);
+#endif
+  /// A channel other than main and display ends; the session goes on without it.
+  void drop_(Channel &ch);
   /// Whether this is the first time this session (for a warning given once).
   bool first_(uint32_t what);
   bool stopping_() const { return this->p_->spice_request_.load(std::memory_order_acquire) != 0; }
@@ -301,6 +439,13 @@ class SpiceSession {
   SimpleVideoPlayer *p_;
   Channel main_;
   Channel display_;
+  Channel inputs_;
+  Channel cursor_;
+  Channel playback_;
+  Channel usb_[USB_CHANNELS];
+#ifdef SVP_SPICE_USB
+  VmcLink usb_link_[USB_CHANNELS];
+#endif
   struct sockaddr_in addr_ {};
   const char *password_{nullptr};
   uint32_t session_id_{0};
@@ -310,6 +455,20 @@ class SpiceSession {
   uint32_t warned_{0};
   bool panel_held_{false};
   bool wifi_held_{false};
+  // Inputs (spice task).
+  bool client_mouse_{false};  // SPICE_MOUSE_MODE_CLIENT: positions, else motions
+  uint16_t mouse_supported_{0};
+  int32_t pointer_x_{0}, pointer_y_{0};  // client mode: where the pointer is
+  uint16_t mouse_buttons_{0};            // SPICE button mask from the mouse
+  bool touch_down_{false};
+  uint8_t touch_id_{0};
+  int32_t touch_x_{0}, touch_y_{0};
+  uint16_t sent_buttons_{0};
+  uint32_t motion_count_{0};             // motions/positions sent, less those acknowledged
+  int32_t motion_dx_{0}, motion_dy_{0};  // server mode: not sent yet
+  bool position_pending_{false};         // client mode: not sent yet
+  uint32_t cursor_tick_{0};
+  bool sound_ok_{false};  // the playback stream is one the speaker plays
 };
 
 bool SpiceSession::first_(uint32_t what) {
@@ -369,7 +528,9 @@ int SpiceSession::connect_() {
 }
 
 // The link (spice_channel_send_link(), spice_channel_recv_link_msg(), spice_channel_recv_auth()).
-bool SpiceSession::link_(Channel &ch, uint8_t type, uint32_t channel_caps) {
+bool SpiceSession::link_(Channel &ch, uint8_t type, uint8_t id, uint32_t channel_caps) {
+  ch.type = type;
+  ch.id = id;
   ch.fd = this->connect_();
   if (ch.fd < 0) {
     ESP_LOGE(TAG, "Could not connect to %s:%u", inet_ntoa(this->addr_.sin_addr), ntohs(this->addr_.sin_port));
@@ -383,7 +544,7 @@ bool SpiceSession::link_(Channel &ch, uint8_t type, uint32_t channel_caps) {
   put32(out + 12, LINK_MESS_BYTES + 4 * (1 + num_channel_caps));
   put32(out + 16, type == CHANNEL_MAIN ? 0 : this->session_id_);
   out[20] = type;
-  out[21] = 0;  // channel id
+  out[21] = id;
   put32(out + 22, 1);
   put32(out + 26, num_channel_caps);
   put32(out + 30, LINK_MESS_BYTES);
@@ -448,7 +609,15 @@ bool SpiceSession::link_(Channel &ch, uint8_t type, uint32_t channel_caps) {
 }
 
 bool SpiceSession::send_(Channel &ch, uint16_t type, const uint8_t *body, uint32_t len) {
-  uint8_t out[18 + 16];
+  return this->send_parts_(ch, type, body, len, nullptr, 0);
+}
+
+// One message of two parts (a header of the body and its data), the small ones sent in one piece.
+bool SpiceSession::send_parts_(Channel &ch, uint16_t type, const uint8_t *a, size_t a_len, const uint8_t *b,
+                               size_t b_len) {
+  static constexpr size_t INLINE = 192;
+  uint8_t out[18 + INLINE];
+  const auto len = static_cast<uint32_t>(a_len + b_len);
   size_t at;
   if (ch.mini) {
     put16(out, type);
@@ -461,11 +630,17 @@ bool SpiceSession::send_(Channel &ch, uint16_t type, const uint8_t *body, uint32
     put32(out + 14, 0);
     at = 18;
   }
-  if (len <= 16) {
-    std::memcpy(out + at, body, len);
-    return send_all(ch.fd, out, at + len);
+  if (a_len <= INLINE) {
+    if (a_len > 0)
+      std::memcpy(out + at, a, a_len);
+    at += a_len;
+    if (b_len > 0 && b_len <= INLINE - a_len) {
+      std::memcpy(out + at, b, b_len);
+      return send_all(ch.fd, out, at + b_len);
+    }
+    return send_all(ch.fd, out, at) && (b_len == 0 || send_all(ch.fd, b, b_len));
   }
-  return send_all(ch.fd, out, at) && send_all(ch.fd, body, len);
+  return send_all(ch.fd, out, at) && send_all(ch.fd, a, a_len) && (b_len == 0 || send_all(ch.fd, b, b_len));
 }
 
 bool SpiceSession::skip_(Channel &ch, uint32_t len) {
@@ -813,21 +988,48 @@ bool SpiceSession::handle_message_(Channel &ch, uint16_t type, const uint8_t *bo
       break;
   }
   if (&ch == &this->main_) {
-    if (type == MSG_MAIN_INIT && size >= 4) {
+    if (type == MSG_MAIN_INIT && size >= 16) {
       this->session_id_ = rd32(body);
-      return this->send_(ch, MSGC_MAIN_ATTACH_CHANNELS, nullptr, 0);
-    }
-    if (type == MSG_MAIN_CHANNELS_LIST && size >= 4 && this->display_.fd < 0) {
-      const uint32_t count = rd32(body);
-      for (uint32_t i = 0; i < count && 4 + 2 * (i + 1) <= size; i++) {
-        if (body[4 + 2 * i] == CHANNEL_DISPLAY && body[5 + 2 * i] == 0)
-          return this->open_display_();
+      this->mouse_supported_ = static_cast<uint16_t>(rd32(body + 8));
+      this->client_mouse_ = (rd32(body + 12) & MOUSE_MODE_CLIENT) != 0;
+      if (!this->send_(ch, MSGC_MAIN_ATTACH_CHANNELS, nullptr, 0))
+        return false;
+      // Touches and the mouse land where they are: client mouse mode, where the server offers it (an
+      // agent or a tablet in the guest).
+      if (!this->client_mouse_ && (this->mouse_supported_ & MOUSE_MODE_CLIENT)) {
+        uint8_t mode[2];
+        put16(mode, MOUSE_MODE_CLIENT);
+        return this->send_(ch, MSGC_MAIN_MOUSE_MODE_REQUEST, mode, sizeof(mode));
       }
-      ESP_LOGE(TAG, "The server has no display");
-      return false;
+      return true;
     }
+    if (type == MSG_MAIN_MOUSE_MODE && size >= 4) {
+      this->mouse_supported_ = rd16(body);
+      this->client_mouse_ = (rd16(body + 2) & MOUSE_MODE_CLIENT) != 0;
+      ESP_LOGD(TAG, "Mouse mode %s", this->client_mouse_ ? "client" : "server");
+      return true;
+    }
+    if (type == MSG_MAIN_CHANNELS_LIST && this->display_.fd < 0)
+      return this->handle_channels_(body, size);
     return true;
   }
+  if (&ch == &this->inputs_) {
+    if (type == MSG_INPUTS_MOUSE_MOTION_ACK) {
+      this->motion_count_ = this->motion_count_ > MOTION_ACK_BUNCH ? this->motion_count_ - MOTION_ACK_BUNCH : 0;
+      return this->motion_flush_();
+    }
+    return true;  // init, key modifiers
+  }
+  if (&ch == &this->cursor_) {
+    this->cursor_message_(type, body, size);
+    return true;
+  }
+  if (&ch == &this->playback_) {
+    this->playback_message_(type, body, size);
+    return true;
+  }
+  if (ch.type == CHANNEL_USBREDIR)
+    return true;  // its data is read by usb_read_()
   switch (type) {
     case MSG_DISPLAY_SURFACE_CREATE:
       // surface_id, width, height, format, flags
@@ -896,6 +1098,15 @@ bool SpiceSession::handle_one_(Channel &ch) {
   if (&ch == &this->display_ &&
       (type == MSG_DISPLAY_DRAW_COPY || type == MSG_DISPLAY_STREAM_DATA || type == MSG_DISPLAY_STREAM_DATA_SIZED)) {
     ok = this->handle_picture_(ch, type, size, nullptr);
+  } else if (ch.type == CHANNEL_USBREDIR && type == MSG_SPICEVMC_DATA) {
+    ch.vmc_left = size;  // read into its slot as it takes it (usb_read_())
+    ok = true;
+  } else if (&ch == &this->cursor_ && size > SimpleVideoPlayer::SPICE_SCRATCH_BYTES) {
+    if (this->first_(WARN_CURSOR))
+      ESP_LOGW(TAG, "A cursor larger than %ux%u is not drawn", SimpleVideoPlayer::SPICE_CURSOR_MAX,
+               SimpleVideoPlayer::SPICE_CURSOR_MAX);
+    this->cursor_message_(MSG_CURSOR_HIDE, nullptr, 0);
+    ok = this->skip_(ch, size);
   } else if (size <= SimpleVideoPlayer::SPICE_SCRATCH_BYTES) {
     ok = recv_all(ch.fd, this->p_->spice_scratch_, size) &&
          this->handle_message_(ch, type, this->p_->spice_scratch_, size);
@@ -906,7 +1117,7 @@ bool SpiceSession::handle_one_(Channel &ch) {
 }
 
 bool SpiceSession::open_display_() {
-  if (!this->link_(this->display_, CHANNEL_DISPLAY, DISPLAY_CAPS))
+  if (!this->link_(this->display_, CHANNEL_DISPLAY, 0, DISPLAY_CAPS))
     return false;
   // No image cache and no GLZ window: nothing comes from a cache (dcc_handle_init()).
   uint8_t init[14] = {};
@@ -921,7 +1132,8 @@ bool SpiceSession::open_display_() {
 
 // The panel to this session, before everything else: a playing video ends, a stream sender is let
 // go, and both are refused from then on (spice_refuses_(), the network task); LVGL pauses for it
-// (loop()) as for a sender. Music of the audio queue goes on.
+// (loop()) as for a sender. What plays sound stops only on the device the session's sound takes
+// (spice_sound_take_()).
 bool SpiceSession::take_panel_() {
   SimpleVideoPlayer *p = this->p_;
   p->spice_on_.store(true, std::memory_order_release);
@@ -943,6 +1155,18 @@ bool SpiceSession::take_panel_() {
   p->stream_drop_sender_.store(false, std::memory_order_release);
   for (auto &stream : p->spice_->streams)
     stream.used = false;
+  // No cursor yet; the draw task holds nothing of one (it draws nothing of this session yet).
+  xSemaphoreTake(p->spice_cursor_lock_, portMAX_DELAY);
+  p->spice_cursor_->visible = false;
+  p->spice_cursor_->shape.valid = false;
+  xSemaphoreGive(p->spice_cursor_lock_);
+  for (uint8_t i = 0; i < SimpleVideoPlayer::SPICE_CURSOR_CACHE; i++)
+    p->spice_cursor_cache_[i].valid = false;
+  p->spice_cursor_drawn_ = false;
+  p->spice_cursor_dirty_.store(false, std::memory_order_release);
+  p->spice_direct_out_.store(this->direct_, std::memory_order_release);
+  this->pointer_x_ = static_cast<int32_t>(this->out_w_ / 2);
+  this->pointer_y_ = static_cast<int32_t>(this->out_h_ / 2);
   p->stream_connected_.store(true, std::memory_order_release);
   this->panel_held_ = true;
   SimpleVideoPlayer::hold_wifi_(this->wifi_held_, true);
@@ -952,6 +1176,8 @@ bool SpiceSession::take_panel_() {
 
 void SpiceSession::release_panel_() {
   SimpleVideoPlayer *p = this->p_;
+  p->spice_inputs_on_.store(false, std::memory_order_release);
+  p->spice_sound_on_.store(false, std::memory_order_release);
   SimpleVideoPlayer::hold_wifi_(this->wifi_held_, false);
   if (this->panel_held_) {
     this->panel_held_ = false;
@@ -963,14 +1189,593 @@ void SpiceSession::release_panel_() {
   p->spice_on_.store(false, std::memory_order_release);
 }
 
+void SpiceSession::drop_(Channel &ch) {
+  if (ch.fd < 0)
+    return;
+  ESP_LOGW(TAG, "Channel %u:%u ended", ch.type, ch.id);
+  ::close(ch.fd);
+  ch.fd = -1;
+  ch.vmc_left = 0;
+  if (&ch == &this->inputs_)
+    this->p_->spice_inputs_on_.store(false, std::memory_order_release);
+  if (&ch == &this->playback_)
+    this->p_->spice_sound_on_.store(false, std::memory_order_release);
+  if (&ch == &this->cursor_)
+    this->cursor_message_(MSG_CURSOR_HIDE, nullptr, 0);
+#ifdef SVP_SPICE_USB
+  for (uint8_t i = 0; i < USB_CHANNELS; i++) {
+    if (&ch == &this->usb_[i] && i < this->p_->spice_usb_count_)
+      this->p_->spice_usb_[i]->link_close();
+  }
+#endif
+}
+
 void SpiceSession::close_() {
-  for (Channel *ch : {&this->main_, &this->display_}) {
+#ifdef SVP_SPICE_USB
+  for (uint8_t i = 0; i < USB_CHANNELS && i < this->p_->spice_usb_count_; i++) {
+    if (this->usb_[i].fd >= 0)
+      this->p_->spice_usb_[i]->link_close();
+  }
+#endif
+  for (Channel *ch : {&this->main_, &this->display_, &this->inputs_, &this->cursor_, &this->playback_, &this->usb_[0],
+                      &this->usb_[1], &this->usb_[2], &this->usb_[3]}) {
     if (ch->fd >= 0) {
       ::close(ch->fd);
       ch->fd = -1;
     }
   }
 }
+
+// CHANNELS_LIST: the display first (the panel is taken with it), then what the panel has a use for.
+bool SpiceSession::handle_channels_(const uint8_t *body, uint32_t size) {
+  if (size < 4)
+    return false;
+  const uint32_t count = rd32(body);
+  auto listed = [body, size, count](uint8_t type, uint8_t id) {
+    for (uint32_t i = 0; i < count && 4 + 2 * (i + 1) <= size; i++) {
+      if (body[4 + 2 * i] == type && body[5 + 2 * i] == id)
+        return true;
+    }
+    return false;
+  };
+  if (!listed(CHANNEL_DISPLAY, 0)) {
+    ESP_LOGE(TAG, "The server has no display");
+    return false;
+  }
+  if (!this->open_display_())
+    return false;
+  SimpleVideoPlayer *p = this->p_;
+#if defined(SVP_STREAM_INPUT) || defined(SVP_STREAM_TOUCH)
+  bool inputs = false;
+#ifdef SVP_STREAM_INPUT
+  inputs = inputs || p->stream_input_q_ != nullptr;
+#endif
+#ifdef SVP_STREAM_TOUCH
+  inputs = inputs || p->stream_touch_q_ != nullptr;
+#endif
+  if (inputs && listed(CHANNEL_INPUTS, 0)) {
+    if (this->link_(this->inputs_, CHANNEL_INPUTS, 0, 0)) {
+      // What came before the session is not its.
+#ifdef SVP_STREAM_INPUT
+      if (p->stream_input_q_ != nullptr)
+        xQueueReset(p->stream_input_q_);
+#endif
+#ifdef SVP_STREAM_TOUCH
+      if (p->stream_touch_q_ != nullptr)
+        xQueueReset(p->stream_touch_q_);
+#endif
+      p->spice_inputs_on_.store(true, std::memory_order_release);
+    } else {
+      this->drop_(this->inputs_);
+    }
+  }
+#endif
+  if (listed(CHANNEL_CURSOR, 0) && !this->link_(this->cursor_, CHANNEL_CURSOR, 0, 0))
+    this->drop_(this->cursor_);
+#ifdef USE_AUDIO
+  if (p->speaker_ != nullptr && p->stream_audio_block_ != nullptr && listed(CHANNEL_PLAYBACK, 0)) {
+    // No codec offered: the server sends raw S16 (snd_desired_audio_mode()).
+    if (this->link_(this->playback_, CHANNEL_PLAYBACK, 0, 0)) {
+      p->spice_sound_on_.store(true, std::memory_order_release);
+      p->spice_sound_claim_.store(true, std::memory_order_release);
+      App.wake_loop_threadsafe();
+    } else {
+      this->drop_(this->playback_);
+    }
+  }
+#endif
+#ifdef SVP_SPICE_USB
+  for (uint8_t i = 0; i < p->spice_usb_count_ && i < USB_CHANNELS; i++) {
+    if (!listed(CHANNEL_USBREDIR, i)) {
+      if (this->first_(WARN_USB))
+        ESP_LOGW(TAG, "The server has fewer usbredir channels than the panel has USB redirection slots");
+      continue;
+    }
+    if (!this->link_(this->usb_[i], CHANNEL_USBREDIR, i, 0)) {
+      this->drop_(this->usb_[i]);
+      continue;
+    }
+    this->usb_link_[i].session = this;
+    this->usb_link_[i].channel = &this->usb_[i];
+    p->spice_usb_[i]->link_open(&this->usb_link_[i]);
+  }
+#endif
+  return true;
+}
+
+//========================================================================
+// Inputs: keys, mouse and touches into the inputs channel (spice-gtk's channel-inputs.c)
+//========================================================================
+
+bool SpiceSession::inputs_pending_() {
+  if (this->inputs_.fd < 0)
+    return true;
+  SimpleVideoPlayer *p = this->p_;
+#ifdef SVP_STREAM_INPUT
+  if (p->stream_input_q_ != nullptr) {
+    SimpleVideoPlayer::StreamInput input;
+    while (xQueueReceive(p->stream_input_q_, &input, 0) == pdTRUE) {
+      bool ok = true;
+      if (input.data[0] == 'K' && input.length >= 8) {
+        ok = this->key_(input.data);
+      } else if (input.data[0] == 'P' && input.length >= 7) {
+        ok = this->pointer_(input.data);
+      }  // 'X': typed characters come as their keys too
+      if (!ok)
+        return false;
+    }
+  }
+#endif
+#ifdef SVP_STREAM_TOUCH
+  if (p->stream_touch_q_ != nullptr) {
+    StreamTouch touch;
+    while (xQueueReceive(p->stream_touch_q_, &touch, 0) == pdTRUE) {
+      if (!this->touch_(touch))
+        return false;
+    }
+  }
+#endif
+  (void) p;
+  return true;
+}
+
+// 'K' action page:2 usage:2 mods pressed.
+bool SpiceSession::key_(const uint8_t *m) {
+  const uint16_t page = rd16(m + 2);
+  const uint16_t usage = rd16(m + 4);
+  const bool pressed = m[7] != 0;
+  uint16_t xt = 0;
+  if (page == 0x07 && usage < sizeof(KEYBOARD_XT) / sizeof(KEYBOARD_XT[0])) {
+    xt = KEYBOARD_XT[usage];
+  } else if (page == 0x0C) {
+    for (const auto &key : CONSUMER_XT) {
+      if (key.usage == usage)
+        xt = key.xt;
+    }
+  }
+  if (xt == 0)
+    return true;  // a mouse button (page 9) comes with the pointer
+  uint8_t code[4];
+  put32(code, key_code(xt, !pressed));
+  return this->send_(this->inputs_, pressed ? MSGC_INPUTS_KEY_DOWN : MSGC_INPUTS_KEY_UP, code, sizeof(code));
+}
+
+// 'P' dx:2 dy:2 wheel buttons: HID buttons 1 (primary), 2 (secondary), 3 (middle), 4, 5.
+bool SpiceSession::pointer_(const uint8_t *m) {
+  const auto dx = static_cast<int16_t>(rd16(m + 1));
+  const auto dy = static_cast<int16_t>(rd16(m + 3));
+  const auto wheel = static_cast<int8_t>(m[5]);
+  const uint8_t hid = m[6];
+  uint16_t mask = 0;
+  if (hid & 0x01)
+    mask |= button_mask(BUTTON_LEFT);
+  if (hid & 0x02)
+    mask |= button_mask(BUTTON_RIGHT);
+  if (hid & 0x04)
+    mask |= button_mask(BUTTON_MIDDLE);
+  if (hid & 0x08)
+    mask |= button_mask(BUTTON_SIDE);
+  if (hid & 0x10)
+    mask |= button_mask(BUTTON_EXTRA);
+  this->mouse_buttons_ = mask;
+  if ((dx != 0 || dy != 0) && !this->move_(this->pointer_x_ + dx, this->pointer_y_ + dy, dx, dy))
+    return false;
+  const uint16_t now = static_cast<uint16_t>(mask | (this->touch_down_ ? button_mask(BUTTON_LEFT) : 0));
+  if (!this->buttons_(now))
+    return false;
+  // A wheel step is a press and release of UP or DOWN (spice-gtk's scroll events).
+  const uint8_t button = wheel > 0 ? BUTTON_UP : BUTTON_DOWN;
+  for (int step = 0; step < (wheel > 0 ? wheel : -wheel); step++) {
+    uint8_t msg[3];
+    msg[0] = button;
+    put16(msg + 1, static_cast<uint16_t>(this->sent_buttons_ | button_mask(button)));
+    if (!this->send_(this->inputs_, MSGC_INPUTS_MOUSE_PRESS, msg, sizeof(msg)))
+      return false;
+    put16(msg + 1, this->sent_buttons_);
+    if (!this->send_(this->inputs_, MSGC_INPUTS_MOUSE_RELEASE, msg, sizeof(msg)))
+      return false;
+  }
+  return true;
+}
+
+#ifdef SVP_STREAM_TOUCH
+// The first finger is the left button where it touches; the others are not passed on.
+bool SpiceSession::touch_(const StreamTouch &touch) {
+  int found = -1;
+  for (uint8_t i = 0; i < touch.count; i++) {
+    if (!this->touch_down_ || touch.id[i] == this->touch_id_) {
+      found = i;
+      break;
+    }
+  }
+  if (found < 0) {
+    if (!this->touch_down_)
+      return true;
+    this->touch_down_ = false;
+    return this->buttons_(this->mouse_buttons_);
+  }
+  const int32_t x = std::min<int32_t>(touch.x[found], static_cast<int32_t>(this->out_w_) - 1);
+  const int32_t y = std::min<int32_t>(touch.y[found], static_cast<int32_t>(this->out_h_) - 1);
+  const bool first = !this->touch_down_;
+  // Server mouse mode moves relatively: from where the finger was, not from where it lands.
+  const int32_t dx = first ? 0 : x - this->touch_x_;
+  const int32_t dy = first ? 0 : y - this->touch_y_;
+  this->touch_x_ = x;
+  this->touch_y_ = y;
+  if ((this->client_mouse_ || dx != 0 || dy != 0) && !this->move_(x, y, dx, dy))
+    return false;
+  if (first) {
+    this->touch_down_ = true;
+    this->touch_id_ = touch.id[found];
+    return this->buttons_(static_cast<uint16_t>(this->mouse_buttons_ | button_mask(BUTTON_LEFT)));
+  }
+  return true;
+}
+#endif
+
+bool SpiceSession::move_(int32_t x, int32_t y, int32_t dx, int32_t dy) {
+  if (this->client_mouse_) {
+    this->pointer_x_ = std::clamp<int32_t>(x, 0, static_cast<int32_t>(this->out_w_) - 1);
+    this->pointer_y_ = std::clamp<int32_t>(y, 0, static_cast<int32_t>(this->out_h_) - 1);
+    this->position_pending_ = true;
+    // The server does not move the cursor in client mode: it is drawn where the pointer is.
+    SimpleVideoPlayer *p = this->p_;
+    xSemaphoreTake(p->spice_cursor_lock_, portMAX_DELAY);
+    p->spice_cursor_->x = this->pointer_x_;
+    p->spice_cursor_->y = this->pointer_y_;
+    xSemaphoreGive(p->spice_cursor_lock_);
+    this->cursor_changed_();
+  } else {
+    this->motion_dx_ += dx;
+    this->motion_dy_ += dy;
+  }
+  return this->motion_flush_();
+}
+
+// Motions and positions wait while more than two bunches are unacknowledged (spice-gtk).
+bool SpiceSession::motion_flush_(bool force) {
+  if (!force && this->motion_count_ >= MOTION_ACK_BUNCH * 2)
+    return true;
+  if (this->client_mouse_ && this->position_pending_) {
+    uint8_t msg[11];
+    put32(msg, static_cast<uint32_t>(this->pointer_x_));
+    put32(msg + 4, static_cast<uint32_t>(this->pointer_y_));
+    put16(msg + 8, this->sent_buttons_);
+    msg[10] = 0;  // display id
+    this->position_pending_ = false;
+    this->motion_count_++;
+    return this->send_(this->inputs_, MSGC_INPUTS_MOUSE_POSITION, msg, sizeof(msg));
+  }
+  if (!this->client_mouse_ && (this->motion_dx_ != 0 || this->motion_dy_ != 0)) {
+    uint8_t msg[10];
+    put32(msg, static_cast<uint32_t>(this->motion_dx_));
+    put32(msg + 4, static_cast<uint32_t>(this->motion_dy_));
+    put16(msg + 8, this->sent_buttons_);
+    this->motion_dx_ = this->motion_dy_ = 0;
+    this->motion_count_++;
+    return this->send_(this->inputs_, MSGC_INPUTS_MOUSE_MOTION, msg, sizeof(msg));
+  }
+  return true;
+}
+
+bool SpiceSession::buttons_(uint16_t now) {
+  if (now == this->sent_buttons_)
+    return true;
+  // The pointer is where it is before a button changes (spice-gtk sends motion and position first).
+  if (!this->motion_flush_(true))
+    return false;
+  for (uint8_t button : {BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT, BUTTON_SIDE, BUTTON_EXTRA}) {
+    const uint16_t bit = button_mask(button);
+    if ((now & bit) == (this->sent_buttons_ & bit))
+      continue;
+    this->sent_buttons_ = static_cast<uint16_t>((this->sent_buttons_ & ~bit) | (now & bit));
+    uint8_t msg[3];
+    msg[0] = button;
+    put16(msg + 1, this->sent_buttons_);
+    if (!this->send_(this->inputs_, (now & bit) ? MSGC_INPUTS_MOUSE_PRESS : MSGC_INPUTS_MOUSE_RELEASE, msg,
+                     sizeof(msg)))
+      return false;
+  }
+  return true;
+}
+
+//========================================================================
+// Cursor channel: the shape and where it is (spice-gtk's channel-cursor.c), drawn by the draw task
+//========================================================================
+
+void SpiceSession::cursor_changed_() {
+  this->p_->spice_cursor_dirty_.store(true, std::memory_order_release);
+  // The draw task takes a null frame for a cursor change; a full queue brings it with the next frame.
+  StreamFrame *none = nullptr;
+  xQueueSend(this->p_->stream_filled_q_, &none, 0);
+}
+
+void SpiceSession::cursor_message_(uint16_t type, const uint8_t *body, uint32_t size) {
+  SimpleVideoPlayer *p = this->p_;
+  SimpleVideoPlayer::SpiceCursor *c = p->spice_cursor_;
+  const uint8_t *end = body + size;
+  switch (type) {
+    case MSG_CURSOR_INIT:   // position, trail_length, trail_frequency, visible, cursor
+    case MSG_CURSOR_SET: {  // position, visible, cursor
+      const uint32_t at = type == MSG_CURSOR_INIT ? 9 : 5;
+      if (size < at)
+        return;
+      xSemaphoreTake(p->spice_cursor_lock_, portMAX_DELAY);
+      if (!this->client_mouse_) {
+        c->x = static_cast<int16_t>(rd16(body));
+        c->y = static_cast<int16_t>(rd16(body + 2));
+      }
+      const bool shape = this->cursor_shape_(body + at, end);
+      c->visible = body[at - 1] != 0 && shape;
+      xSemaphoreGive(p->spice_cursor_lock_);
+      break;
+    }
+    case MSG_CURSOR_MOVE:
+      if (size < 4 || this->client_mouse_)
+        return;
+      xSemaphoreTake(p->spice_cursor_lock_, portMAX_DELAY);
+      c->x = static_cast<int16_t>(rd16(body));
+      c->y = static_cast<int16_t>(rd16(body + 2));
+      xSemaphoreGive(p->spice_cursor_lock_);
+      break;
+    case MSG_CURSOR_HIDE:
+      xSemaphoreTake(p->spice_cursor_lock_, portMAX_DELAY);
+      c->visible = false;
+      xSemaphoreGive(p->spice_cursor_lock_);
+      break;
+    case MSG_CURSOR_RESET:
+      for (uint8_t i = 0; i < SimpleVideoPlayer::SPICE_CURSOR_CACHE; i++)
+        p->spice_cursor_cache_[i].valid = false;
+      xSemaphoreTake(p->spice_cursor_lock_, portMAX_DELAY);
+      c->visible = false;
+      c->shape.valid = false;
+      xSemaphoreGive(p->spice_cursor_lock_);
+      break;
+    case MSG_CURSOR_INVAL_ONE:
+      if (size >= 8) {
+        const uint64_t id = rd64(body);
+        for (uint8_t i = 0; i < SimpleVideoPlayer::SPICE_CURSOR_CACHE; i++) {
+          if (p->spice_cursor_cache_[i].valid && p->spice_cursor_cache_[i].id == id)
+            p->spice_cursor_cache_[i].valid = false;
+        }
+      }
+      return;
+    case MSG_CURSOR_INVAL_ALL:
+      for (uint8_t i = 0; i < SimpleVideoPlayer::SPICE_CURSOR_CACHE; i++)
+        p->spice_cursor_cache_[i].valid = false;
+      return;
+    default:
+      return;  // trail
+  }
+  this->cursor_changed_();
+}
+
+// SpiceCursor: flags:2, [unique:8 type:1 width:2 height:2 hot_spot_x:2 hot_spot_y:2], data to the
+// end. Into spice_cursor_->shape (lock held).
+bool SpiceSession::cursor_shape_(const uint8_t *cp, const uint8_t *end) {
+  SimpleVideoPlayer *p = this->p_;
+  SpiceCursorShape &shape = p->spice_cursor_->shape;
+  if (end - cp < 2)
+    return false;
+  const uint16_t flags = rd16(cp);
+  if (flags & CURSOR_FLAGS_NONE)
+    return false;
+  if (end - cp < 19)
+    return false;
+  const uint64_t id = rd64(cp + 2);
+  if (flags & CURSOR_FLAGS_FROM_CACHE) {
+    for (uint8_t i = 0; i < SimpleVideoPlayer::SPICE_CURSOR_CACHE; i++) {
+      SpiceCursorShape &cached = p->spice_cursor_cache_[i];
+      if (cached.valid && cached.id == id) {
+        cached.used = ++this->cursor_tick_;
+        std::memcpy(&shape, &cached, sizeof(shape));
+        return true;
+      }
+    }
+    // Fewer kept here than the server's 256: shown again once it sends it anew.
+    if (this->first_(WARN_CURSOR_CACHE))
+      ESP_LOGW(TAG, "A cursor no longer kept here is not drawn");
+    return false;
+  }
+  const uint8_t type = cp[10];
+  const uint16_t w = rd16(cp + 11), h = rd16(cp + 13);
+  shape.valid = false;
+  if (w == 0 || h == 0 || !this->cursor_convert_(shape, type, w, h, cp + 19, static_cast<size_t>(end - (cp + 19))))
+    return false;
+  shape.id = id;
+  shape.hot_x = std::min<uint16_t>(rd16(cp + 15), shape.w);
+  shape.hot_y = std::min<uint16_t>(rd16(cp + 17), shape.h);
+  shape.valid = true;
+  if (flags & CURSOR_FLAGS_CACHE_ME) {
+    SpiceCursorShape *slot = &p->spice_cursor_cache_[0];
+    for (uint8_t i = 0; i < SimpleVideoPlayer::SPICE_CURSOR_CACHE; i++) {
+      SpiceCursorShape &cached = p->spice_cursor_cache_[i];
+      if (!cached.valid) {
+        slot = &cached;
+        break;
+      }
+      if (cached.used < slot->used)
+        slot = &cached;
+    }
+    std::memcpy(slot, &shape, sizeof(shape));
+    slot->used = ++this->cursor_tick_;
+  }
+  return true;
+}
+
+// The cursor types spice-gtk draws (set_cursor()), as straight ARGB. A mask bit over white inverts
+// what is under it (spice-gtk draws a pattern there instead); larger than SPICE_CURSOR_MAX: its top left.
+bool SpiceSession::cursor_convert_(SpiceCursorShape &out, uint8_t type, uint16_t w, uint16_t h, const uint8_t *data,
+                                   size_t len) {
+  constexpr uint32_t INVERT = SimpleVideoPlayer::SPICE_CURSOR_INVERT;
+  const uint16_t ow = std::min<uint16_t>(w, SimpleVideoPlayer::SPICE_CURSOR_MAX);
+  const uint16_t oh = std::min<uint16_t>(h, SimpleVideoPlayer::SPICE_CURSOR_MAX);
+  if ((ow != w || oh != h) && this->first_(WARN_CURSOR))
+    ESP_LOGW(TAG, "A cursor larger than %ux%u is cut", SimpleVideoPlayer::SPICE_CURSOR_MAX,
+             SimpleVideoPlayer::SPICE_CURSOR_MAX);
+  const size_t bpl = (static_cast<size_t>(w) + 7) / 8;  // a mask row
+  const size_t pixels = static_cast<size_t>(w) * h;
+  auto bit = [](const uint8_t *mask, size_t row_bytes, uint16_t x, uint16_t y) {
+    return (mask[y * row_bytes + x / 8] & (0x80 >> (x % 8))) != 0;
+  };
+  out.w = ow;
+  out.h = oh;
+  uint32_t *px = out.px;
+  switch (type) {
+    case CURSOR_TYPE_ALPHA:
+      if (len < pixels * 4)
+        return false;
+      for (uint16_t y = 0; y < oh; y++) {
+        for (uint16_t x = 0; x < ow; x++) {
+          const uint32_t v = rd32(data + (static_cast<size_t>(y) * w + x) * 4);
+          px[y * ow + x] = (v >> 24) == 0 ? 0 : v;
+        }
+      }
+      return true;
+    case CURSOR_TYPE_MONO: {
+      // AND mask, then XOR mask: transparent, black, white, or inverted.
+      if (len < 2 * bpl * h)
+        return false;
+      const uint8_t *xor_mask = data + bpl * h;
+      for (uint16_t y = 0; y < oh; y++) {
+        for (uint16_t x = 0; x < ow; x++) {
+          const bool a = bit(data, bpl, x, y), o = bit(xor_mask, bpl, x, y);
+          px[y * ow + x] = a ? (o ? INVERT : 0) : (o ? 0xFFFFFFFF : 0xFF000000);
+        }
+      }
+      return true;
+    }
+    case CURSOR_TYPE_COLOR32:
+    case CURSOR_TYPE_COLOR16:
+    case CURSOR_TYPE_COLOR4: {
+      // Colours, (COLOR4: a 16-entry palette,) then the AND mask.
+      size_t colors;
+      size_t row = 0;
+      if (type == CURSOR_TYPE_COLOR32) {
+        colors = pixels * 4;
+      } else if (type == CURSOR_TYPE_COLOR16) {
+        colors = pixels * 2;
+      } else {
+        row = (static_cast<size_t>(w) + 1) / 2;
+        colors = row * h + 16 * 4;
+      }
+      if (len < colors + bpl * h)
+        return false;
+      const uint8_t *mask = data + colors;
+      for (uint16_t y = 0; y < oh; y++) {
+        for (uint16_t x = 0; x < ow; x++) {
+          const size_t i = static_cast<size_t>(y) * w + x;
+          uint32_t c;
+          bool white;
+          if (type == CURSOR_TYPE_COLOR32) {
+            c = rd32(data + i * 4) & 0xFFFFFF;
+            white = c == 0xFFFFFF;
+          } else if (type == CURSOR_TYPE_COLOR16) {
+            const uint16_t v = rd16(data + i * 2);
+            c = ((v & 0x1F) << 3) | ((v & 0x3E0) << 6) | ((v & 0x7C00) << 9);
+            white = v == 0x7FFF;
+          } else {
+            const uint8_t b = data[y * row + x / 2];
+            const uint8_t idx = (x & 1) ? (b & 0x0F) : (b >> 4);
+            c = rd32(data + row * h + idx * 4) & 0xFFFFFF;
+            white = c == 0xFFFFFF;
+          }
+          const bool m = bit(mask, bpl, x, y);
+          px[y * ow + x] = m ? (white ? INVERT : 0) : (0xFF000000 | c);
+        }
+      }
+      return true;
+    }
+    default:
+      if (this->first_(WARN_CURSOR))
+        ESP_LOGW(TAG, "Cursors of type %u are not drawn", type);
+      return false;
+  }
+}
+
+//========================================================================
+// Playback channel: raw S16 into the speaker, as a sender's sound
+//========================================================================
+
+void SpiceSession::playback_message_(uint16_t type, const uint8_t *body, uint32_t size) {
+#ifdef USE_AUDIO
+  SimpleVideoPlayer *p = this->p_;
+  switch (type) {
+    case MSG_PLAYBACK_START: {  // channels:4 format:2 frequency:4 time:4
+      if (size < 10)
+        return;
+      const uint32_t channels = rd32(body);
+      this->sound_ok_ = rd16(body + 4) == AUDIO_FMT_S16 && channels >= 1 && channels <= 2;
+      if (!this->sound_ok_) {
+        if (this->first_(WARN_SOUND))
+          ESP_LOGW(TAG, "Sound of %" PRIu32 " channels in format %u is not played", channels, rd16(body + 4));
+        return;
+      }
+      p->stream_audio_src_ch_ = static_cast<uint8_t>(channels);
+      p->stream_audio_rate_ = rd32(body + 6);
+      p->stream_audio_carry_len_ = 0;
+      return;
+    }
+    case MSG_PLAYBACK_MODE:  // time:4 mode:2
+      if (size >= 6 && rd16(body + 4) != AUDIO_DATA_MODE_RAW) {
+        this->sound_ok_ = false;
+        if (this->first_(WARN_SOUND))
+          ESP_LOGW(TAG, "Compressed sound is not played");
+      }
+      return;
+    case MSG_PLAYBACK_DATA:  // time:4, samples
+      if (this->sound_ok_ && size > 4)
+        p->stream_play_audio_(body + 4, size - 4);
+      return;
+    default:
+      return;  // stop (the speaker is let go once sound stops coming), volume, mute, latency
+  }
+#else
+  (void) type;
+  (void) body;
+  (void) size;
+#endif
+}
+
+//========================================================================
+// usbredir channels: the bytes of their data messages straight into the slots
+//========================================================================
+
+#ifdef SVP_SPICE_USB
+bool SpiceSession::usb_read_(Channel &ch, SpiceUsbSlot *slot) {
+  if (ch.vmc_left == 0)
+    return this->handle_one_(ch);
+  size_t room = 0;
+  uint8_t *at = slot->rx_space(room);
+  if (room == 0)
+    return true;
+  const int got = ::recv(ch.fd, at, std::min<size_t>(room, ch.vmc_left), 0);
+  if (got <= 0)
+    return false;
+  ch.vmc_left -= static_cast<uint32_t>(got);
+  return slot->rx_done(static_cast<size_t>(got));
+}
+#endif
 
 void SpiceSession::run(const char *host, uint16_t port, const char *password) {
   SimpleVideoPlayer *p = this->p_;
@@ -995,20 +1800,35 @@ void SpiceSession::run(const char *host, uint16_t port, const char *password) {
   }
 #endif
   ESP_LOGI(TAG, "Connecting to %s:%u", host, port);
-  if (!this->resolve_(host, port) || !this->link_(this->main_, CHANNEL_MAIN, 0)) {
+  if (!this->resolve_(host, port) || !this->link_(this->main_, CHANNEL_MAIN, 0, 0)) {
     this->close_();
     return;
   }
+  Channel *const others[] = {&this->inputs_, &this->cursor_, &this->playback_};
   while (true) {
     fd_set readable;
     FD_ZERO(&readable);
-    FD_SET(p->spice_wake_fd_, &readable);
-    FD_SET(this->main_.fd, &readable);
-    int top = std::max(p->spice_wake_fd_, this->main_.fd);
-    if (this->display_.fd >= 0) {
-      FD_SET(this->display_.fd, &readable);
-      top = std::max(top, this->display_.fd);
+    int top = p->spice_wake_fd_;
+    FD_SET(top, &readable);
+    auto add = [&readable, &top](const Channel &ch) {
+      if (ch.fd >= 0) {
+        FD_SET(ch.fd, &readable);
+        top = std::max(top, ch.fd);
+      }
+    };
+    add(this->main_);
+    add(this->display_);
+    for (Channel *ch : others)
+      add(*ch);
+#ifdef SVP_SPICE_USB
+    for (uint8_t i = 0; i < p->spice_usb_count_ && i < USB_CHANNELS; i++) {
+      size_t room = 1;
+      if (this->usb_[i].vmc_left > 0)
+        p->spice_usb_[i]->rx_space(room);
+      if (room > 0)  // else it waits for a free transfer: read no further
+        add(this->usb_[i]);
     }
+#endif
     if (::select(top + 1, &readable, nullptr, nullptr, nullptr) < 0)
       break;
     if (FD_ISSET(p->spice_wake_fd_, &readable)) {
@@ -1021,6 +1841,21 @@ void SpiceSession::run(const char *host, uint16_t port, const char *password) {
       break;
     if (this->display_.fd >= 0 && FD_ISSET(this->display_.fd, &readable) && !this->handle_one_(this->display_))
       break;
+    for (Channel *ch : others) {
+      if (ch->fd >= 0 && FD_ISSET(ch->fd, &readable) && !this->handle_one_(*ch))
+        this->drop_(*ch);
+    }
+    if (!this->inputs_pending_())
+      this->drop_(this->inputs_);
+#ifdef SVP_SPICE_USB
+    for (uint8_t i = 0; i < p->spice_usb_count_ && i < USB_CHANNELS; i++) {
+      Channel &ch = this->usb_[i];
+      if (ch.fd < 0)
+        continue;
+      if ((FD_ISSET(ch.fd, &readable) && !this->usb_read_(ch, p->spice_usb_[i])) || !p->spice_usb_[i]->service())
+        this->drop_(ch);
+    }
+#endif
   }
   ESP_LOGI(TAG, "Disconnected");
   this->close_();
@@ -1054,8 +1889,7 @@ void SimpleVideoPlayer::spice_connect(const std::string &host, uint16_t port, co
   xSemaphoreGive(this->spice_lock_);
   // A connection still being made ends first; the task then connects anew.
   this->spice_request_.store(1, std::memory_order_release);
-  const uint64_t one = 1;
-  ::write(this->spice_wake_fd_, &one, sizeof(one));
+  this->spice_wake();
   xTaskNotifyGive(this->spice_task_);
 }
 
@@ -1063,9 +1897,252 @@ void SimpleVideoPlayer::spice_disconnect() {
   if (this->spice_task_ == nullptr)
     return;
   this->spice_request_.store(2, std::memory_order_release);
+  this->spice_wake();
+  xTaskNotifyGive(this->spice_task_);
+}
+
+void SimpleVideoPlayer::spice_wake() {
+  if (this->spice_wake_fd_ < 0)
+    return;
   const uint64_t one = 1;
   ::write(this->spice_wake_fd_, &one, sizeof(one));
-  xTaskNotifyGive(this->spice_task_);
+}
+
+#ifdef SVP_SPICE_USB
+void SimpleVideoPlayer::add_spice_usb_slot(SpiceUsbSlot *slot) {
+  if (this->spice_usb_count_ < SPICE_USB_SLOTS)
+    this->spice_usb_[this->spice_usb_count_++] = slot;
+}
+
+void SimpleVideoPlayer::spice_usb_selected(SpiceUsbSlot *slot, uint8_t addr) {
+  for (uint8_t i = 0; i < this->spice_usb_count_; i++) {
+    if (this->spice_usb_[i] != slot)
+      this->spice_usb_[i]->forget_selection(addr);
+  }
+}
+#endif
+
+void SimpleVideoPlayer::spice_sound_take_() {
+  if (!this->spice_sound_on_.load(std::memory_order_acquire))
+    return;
+#ifdef SVP_AUDIO_FILES
+  if (this->spice_sound_shares_files_ && this->audio_session_.load(std::memory_order_acquire)) {
+    ESP_LOGI(TAG, "Audio file stopped: the SPICE session's sound plays on its device");
+    this->end_session_();
+  }
+#endif
+#ifdef SVP_MEDIA_PLAYER
+  if (this->spice_sound_shares_media_player_ && this->media_player_ != nullptr &&
+      (this->media_player_->state == media_player::MEDIA_PLAYER_STATE_PLAYING ||
+       this->media_player_->state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING)) {
+    ESP_LOGI(TAG, "Media player stopped: the SPICE session's sound plays on its device");
+    this->media_player_->make_call().set_command(media_player::MEDIA_PLAYER_COMMAND_STOP).perform();
+  }
+#endif
+}
+
+//========================================================================
+// SPICE cursor on the output (draw task)
+//========================================================================
+
+bool SimpleVideoPlayer::spice_cursor_over_(int32_t x, int32_t y, int32_t w, int32_t h) const {
+  return this->spice_cursor_drawn_ && x < this->spice_cursor_rx_ + this->spice_cursor_rw_ &&
+         this->spice_cursor_rx_ < x + w && y < this->spice_cursor_ry_ + this->spice_cursor_rh_ &&
+         this->spice_cursor_ry_ < y + h;
+}
+
+void SimpleVideoPlayer::spice_out_read_(int32_t x, int32_t y, int32_t w, int32_t h, uint8_t *dst) {
+#ifdef SVP_DSI_OUTPUT
+  if (this->spice_direct_out_.load(std::memory_order_acquire)) {
+    display::ColorBitness bitness;
+    const uint8_t *fb = this->dsi_->get_draw_buffer(&bitness);
+    const size_t bpp = this->dsi_fb_bpp_;
+    const size_t stride = static_cast<size_t>(this->dsi_out_w_) * bpp;
+    // The display's DMA wrote these rows: what the cache holds of them is dropped first (the CPU
+    // wrote none of them back unsynced: LVGL is paused, draw_bitmap() writes its copies back).
+    static constexpr uintptr_t LINE = CONFIG_CACHE_L2_CACHE_LINE_SIZE;
+    const uintptr_t fb_start = reinterpret_cast<uintptr_t>(fb);
+    const uintptr_t fb_end = (fb_start + stride * this->dsi_out_h_) & ~(LINE - 1);
+    const uintptr_t from = (fb_start + static_cast<size_t>(y) * stride) & ~(LINE - 1);
+    uintptr_t to = (fb_start + static_cast<size_t>(y + h) * stride + LINE - 1) & ~(LINE - 1);
+    to = std::min(to, fb_end);
+    if (to > from)
+      esp_cache_msync(reinterpret_cast<void *>(from), to - from,
+                      ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+    for (int32_t row = 0; row < h; row++)
+      std::memcpy(dst + static_cast<size_t>(row) * w * bpp, fb + (static_cast<size_t>(y) + row) * stride + x * bpp,
+                  static_cast<size_t>(w) * bpp);
+    return;
+  }
+#endif
+#ifdef SVP_CANVAS_OUTPUT
+  const uint8_t *page = this->output_buffers_[0];
+  const size_t page_stride = static_cast<size_t>((this->canvas_size_w_ + 15) & ~15) * 3;
+  for (int32_t row = 0; row < h; row++)
+    std::memcpy(dst + static_cast<size_t>(row) * w * 3, page + (static_cast<size_t>(y) + row) * page_stride + x * 3,
+                static_cast<size_t>(w) * 3);
+#endif
+}
+
+void SimpleVideoPlayer::spice_out_write_(int32_t x, int32_t y, int32_t w, int32_t h, const uint8_t *src) {
+#ifdef SVP_DSI_OUTPUT
+  if (this->spice_direct_out_.load(std::memory_order_acquire)) {
+    const display::ColorBitness bitness =
+        this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
+    this->dsi_->draw_pixels_at(x, y, w, h, src, display::COLOR_ORDER_RGB, bitness, false, 0, 0, 0);
+    return;
+  }
+#endif
+#ifdef SVP_CANVAS_OUTPUT
+  uint8_t *page = this->output_buffers_[0];
+  const size_t page_stride = static_cast<size_t>((this->canvas_size_w_ + 15) & ~15) * 3;
+  for (int32_t row = 0; row < h; row++)
+    std::memcpy(page + (static_cast<size_t>(y) + row) * page_stride + x * 3, src + static_cast<size_t>(row) * w * 3,
+                static_cast<size_t>(w) * 3);
+  // As stream_copy_to_canvas_(): written back, and the part LVGL shows anew.
+  uint8_t *first = page + static_cast<size_t>(y) * page_stride + static_cast<size_t>(x) * 3;
+  uint8_t *last = page + (static_cast<size_t>(y) + h - 1) * page_stride + (static_cast<size_t>(x) + w) * 3;
+  esp_cache_msync(first, last - first,
+                  ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+  portENTER_CRITICAL(&this->stream_dirty_lock_);
+  if (this->stream_dirty_) {
+    this->stream_dirty_x1_ = std::min<int32_t>(this->stream_dirty_x1_, x);
+    this->stream_dirty_y1_ = std::min<int32_t>(this->stream_dirty_y1_, y);
+    this->stream_dirty_x2_ = std::max<int32_t>(this->stream_dirty_x2_, x + w - 1);
+    this->stream_dirty_y2_ = std::max<int32_t>(this->stream_dirty_y2_, y + h - 1);
+  } else {
+    this->stream_dirty_x1_ = x;
+    this->stream_dirty_y1_ = y;
+    this->stream_dirty_x2_ = x + w - 1;
+    this->stream_dirty_y2_ = y + h - 1;
+    this->stream_dirty_ = true;
+  }
+  portEXIT_CRITICAL(&this->stream_dirty_lock_);
+#endif
+}
+
+void SimpleVideoPlayer::spice_cursor_hide_() {
+  if (!this->spice_cursor_drawn_)
+    return;
+  this->spice_cursor_drawn_ = false;
+  this->spice_out_write_(this->spice_cursor_rx_, this->spice_cursor_ry_, this->spice_cursor_rw_, this->spice_cursor_rh_,
+                         this->spice_cursor_under_);
+}
+
+void SimpleVideoPlayer::spice_cursor_show_() {
+  if (this->spice_cursor_drawn_)
+    return;
+  int32_t out_w = 0, out_h = 0;
+  size_t bpp = 3;
+  const bool direct = this->spice_direct_out_.load(std::memory_order_acquire);
+#ifdef SVP_DSI_OUTPUT
+  if (direct) {
+    display::ColorBitness bitness;
+    if (this->dsi_->get_draw_buffer(&bitness) == nullptr)
+      return;  // nothing to read what is under it back from
+    out_w = this->dsi_out_w_;
+    out_h = this->dsi_out_h_;
+    bpp = this->dsi_fb_bpp_;
+  }
+#endif
+#ifdef SVP_CANVAS_OUTPUT
+  if (!direct) {
+    out_w = this->canvas_size_w_;
+    out_h = this->canvas_size_h_;
+  }
+#endif
+  xSemaphoreTake(this->spice_cursor_lock_, portMAX_DELAY);
+  const SpiceCursor &c = *this->spice_cursor_;
+  const SpiceCursorShape &s = c.shape;
+  if (!c.visible || !s.valid) {
+    xSemaphoreGive(this->spice_cursor_lock_);
+    return;
+  }
+  const int32_t left = c.x - s.hot_x, top = c.y - s.hot_y;
+  const int32_t x0 = std::max<int32_t>(left, 0), y0 = std::max<int32_t>(top, 0);
+  const int32_t x1 = std::min<int32_t>(left + s.w, out_w), y1 = std::min<int32_t>(top + s.h, out_h);
+  if (x1 <= x0 || y1 <= y0) {
+    xSemaphoreGive(this->spice_cursor_lock_);
+    return;
+  }
+  const int32_t w = x1 - x0, h = y1 - y0;
+  this->spice_out_read_(x0, y0, w, h, this->spice_cursor_under_);
+  // The shape over what is under it, in the output's layout: B, G, R, or RGB565 little-endian.
+  for (int32_t row = 0; row < h; row++) {
+    const uint32_t *src = s.px + static_cast<size_t>(y0 - top + row) * s.w + (x0 - left);
+    const uint8_t *under = this->spice_cursor_under_ + static_cast<size_t>(row) * w * bpp;
+    uint8_t *out = this->spice_cursor_patch_ + static_cast<size_t>(row) * w * bpp;
+    for (int32_t col = 0; col < w; col++, under += bpp, out += bpp) {
+      const uint32_t v = src[col];
+      const uint32_t a = v >> 24;
+      uint32_t b, g, r;
+      if (bpp == 3) {
+        b = under[0];
+        g = under[1];
+        r = under[2];
+      } else {
+        const uint16_t u = static_cast<uint16_t>(under[0] | (under[1] << 8));
+        r = ((u >> 11) & 0x1F) << 3;
+        g = ((u >> 5) & 0x3F) << 2;
+        b = (u & 0x1F) << 3;
+      }
+      if (v == SPICE_CURSOR_INVERT) {
+        b = 255 - b;
+        g = 255 - g;
+        r = 255 - r;
+      } else if (a == 255) {
+        b = v & 0xFF;
+        g = (v >> 8) & 0xFF;
+        r = (v >> 16) & 0xFF;
+      } else if (a != 0) {
+        b = (((v & 0xFF) * a) + b * (255 - a)) / 255;
+        g = ((((v >> 8) & 0xFF) * a) + g * (255 - a)) / 255;
+        r = ((((v >> 16) & 0xFF) * a) + r * (255 - a)) / 255;
+      } else if (bpp == 2) {
+        out[0] = under[0];  // as it was, not through 8 bits a channel
+        out[1] = under[1];
+        continue;
+      }
+      if (bpp == 3) {
+        out[0] = static_cast<uint8_t>(b);
+        out[1] = static_cast<uint8_t>(g);
+        out[2] = static_cast<uint8_t>(r);
+      } else {
+        const uint16_t o = static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+        out[0] = static_cast<uint8_t>(o & 0xFF);
+        out[1] = static_cast<uint8_t>(o >> 8);
+      }
+    }
+  }
+  xSemaphoreGive(this->spice_cursor_lock_);
+  this->spice_out_write_(x0, y0, w, h, this->spice_cursor_patch_);
+  this->spice_cursor_rx_ = x0;
+  this->spice_cursor_ry_ = y0;
+  this->spice_cursor_rw_ = w;
+  this->spice_cursor_rh_ = h;
+  this->spice_cursor_drawn_ = true;
+}
+
+void SimpleVideoPlayer::spice_cursor_update_() {
+  if (!this->spice_on_.load(std::memory_order_acquire) || !this->spice_cursor_dirty_.load(std::memory_order_acquire))
+    return;
+  bool ok = false;
+#ifdef SVP_DSI_OUTPUT
+  if (this->spice_direct_out_.load(std::memory_order_acquire))
+    ok = this->stream_output_ok_.load(std::memory_order_acquire);
+#endif
+#ifdef SVP_CANVAS_OUTPUT
+  if (!this->spice_direct_out_.load(std::memory_order_acquire))
+    ok = this->stream_connected_.load(std::memory_order_acquire) && this->ensure_canvas_outputs_();
+#endif
+  // Not drawable now: the next picture brings it.
+  if (!ok || this->picture_session_busy_() || xSemaphoreTake(this->output_lock_, 0) != pdTRUE)
+    return;
+  if (this->spice_cursor_dirty_.exchange(false, std::memory_order_acq_rel)) {
+    this->spice_cursor_hide_();
+    this->spice_cursor_show_();
+  }
+  xSemaphoreGive(this->output_lock_);
 }
 
 void SimpleVideoPlayer::spice_task_entry_(void *param) { static_cast<SimpleVideoPlayer *>(param)->spice_loop_(); }

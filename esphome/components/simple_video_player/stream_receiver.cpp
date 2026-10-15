@@ -172,18 +172,30 @@ bool SimpleVideoPlayer::setup_stream_() {
 #endif
 #ifdef SVP_SPICE
   this->spice_ = reinterpret_cast<SpiceState *>(this->pool_.alloc(sizeof(SpiceState)));
-  this->spice_scratch_ = this->pool_.alloc(SPICE_SCRATCH_BYTES);
+  // Internal RAM: every message but a picture is read into it.
+  this->spice_scratch_ =
+      static_cast<uint8_t *>(heap_caps_malloc(SPICE_SCRATCH_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   this->spice_clips_ =
       reinterpret_cast<StreamRect *>(this->pool_.alloc(STREAM_FRAME_COUNT * SPICE_MAX_CLIPS * sizeof(StreamRect)));
+  this->spice_cursor_ = reinterpret_cast<SpiceCursor *>(this->pool_.alloc(sizeof(SpiceCursor)));
+  this->spice_cursor_cache_ =
+      reinterpret_cast<SpiceCursorShape *>(this->pool_.alloc(SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape)));
+  this->spice_cursor_under_ = this->pool_.alloc(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3);
+  this->spice_cursor_patch_ = this->pool_.alloc(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3);
   this->spice_lock_ = xSemaphoreCreateMutex();
+  this->spice_cursor_lock_ = xSemaphoreCreateMutex();
   this->spice_wake_fd_ = eventfd(0, 0);
   if (this->spice_ == nullptr || this->spice_scratch_ == nullptr || this->spice_clips_ == nullptr ||
-      this->spice_lock_ == nullptr || this->spice_wake_fd_ < 0 ||
-      !create_psram_task(spice_task_entry_, "svp_spice", 6144, this, 4, &this->spice_task_, tskNO_AFFINITY)) {
+      this->spice_cursor_ == nullptr || this->spice_cursor_cache_ == nullptr || this->spice_cursor_under_ == nullptr ||
+      this->spice_cursor_patch_ == nullptr || this->spice_lock_ == nullptr || this->spice_cursor_lock_ == nullptr ||
+      this->spice_wake_fd_ < 0 ||
+      !create_psram_task(spice_task_entry_, "svp_spice", 8192, this, 4, &this->spice_task_, tskNO_AFFINITY)) {
     ESP_LOGE(TAG, "SPICE client disabled: no room for it");
     this->spice_task_ = nullptr;
   } else {
     std::memset(this->spice_, 0, sizeof(SpiceState));
+    std::memset(this->spice_cursor_, 0, sizeof(SpiceCursor));
+    std::memset(this->spice_cursor_cache_, 0, SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape));
     for (size_t i = 0; i < STREAM_FRAME_COUNT; i++)
       this->stream_frames_[i].clips = this->spice_clips_ + i * SPICE_MAX_CLIPS;
   }
@@ -789,8 +801,14 @@ void SimpleVideoPlayer::stream_send_pending_(int client) {
 
 #ifdef SVP_STREAM_INPUT
 bool SimpleVideoPlayer::stream_on_input(const uint8_t *message, uint8_t length) {
-  if (this->stream_input_q_ == nullptr || !this->stream_input_wanted_.load(std::memory_order_acquire) ||
-      !this->stream_connected_.load(std::memory_order_acquire) ||
+  bool wanted = this->stream_input_wanted_.load(std::memory_order_acquire);
+#ifdef SVP_SPICE
+  // A SPICE session takes them for its inputs channel.
+  const bool spice = this->spice_on_.load(std::memory_order_acquire);
+  if (spice)
+    wanted = this->spice_inputs_on_.load(std::memory_order_acquire);
+#endif
+  if (this->stream_input_q_ == nullptr || !wanted || !this->stream_connected_.load(std::memory_order_acquire) ||
       !this->stream_awake_.load(std::memory_order_acquire) || this->stream_asleep_.load(std::memory_order_acquire) ||
       !this->stream_direct_())
     return false;
@@ -803,6 +821,12 @@ bool SimpleVideoPlayer::stream_on_input(const uint8_t *message, uint8_t length) 
     xQueueReceive(this->stream_input_q_, &discarded, 0);
     xQueueSend(this->stream_input_q_, &input, 0);
   }
+#ifdef SVP_SPICE
+  if (spice) {
+    this->spice_wake();
+    return true;
+  }
+#endif
   this->stream_wake_();
   return true;
 }
@@ -912,6 +936,13 @@ void SimpleVideoPlayer::stream_draw_loop_() {
     StreamFrame *frame = nullptr;
     if (xQueueReceive(this->stream_filled_q_, &frame, portMAX_DELAY) != pdTRUE)
       continue;
+#ifdef SVP_SPICE
+    // A null frame: the SPICE cursor changed.
+    if (frame == nullptr) {
+      this->spice_cursor_update_();
+      continue;
+    }
+#endif
     uint8_t *target = nullptr;
     size_t target_len = 0;
     bool output_ok = false;
@@ -963,6 +994,17 @@ void SimpleVideoPlayer::stream_draw_loop_() {
         const StreamRect whole{static_cast<int16_t>(frame->x), static_cast<int16_t>(frame->y),
                                static_cast<int16_t>(frame->w), static_cast<int16_t>(frame->h)};
         const uint8_t parts = frame->clip_count == 0 ? 1 : frame->clip_count;
+#ifdef SVP_SPICE
+        // The SPICE cursor off what is drawn over it first, and on again after.
+        const bool spice = this->spice_on_.load(std::memory_order_acquire);
+        bool cursor_off = false;
+        for (uint8_t i = 0; spice && !cursor_off && i < parts; i++) {
+          const StreamRect &part = frame->clip_count == 0 ? whole : frame->clips[i];
+          cursor_off = this->spice_cursor_over_(part.x, part.y, part.w, part.h);
+        }
+        if (cursor_off)
+          this->spice_cursor_hide_();
+#endif
         for (uint8_t i = 0; i < parts; i++) {
           const StreamRect &part = frame->clip_count == 0 ? whole : frame->clips[i];
           const int src_x = part.x - frame->x;
@@ -977,6 +1019,12 @@ void SimpleVideoPlayer::stream_draw_loop_() {
             this->stream_copy_to_canvas_(part.x, part.y, part.w, part.h, src_x, src_y, frame->w);
 #endif
         }
+#ifdef SVP_SPICE
+        if (spice && (this->spice_cursor_dirty_.exchange(false, std::memory_order_acq_rel) || cursor_off)) {
+          this->spice_cursor_hide_();
+          this->spice_cursor_show_();
+        }
+#endif
 #ifdef SVP_STREAM_STATS
         this->stream_stats_.draw_us.fetch_add(static_cast<uint32_t>(esp_timer_get_time() - draw_start),
                                               std::memory_order_relaxed);
@@ -1070,6 +1118,10 @@ void SimpleVideoPlayer::stream_on_audio_(const uint8_t *data, size_t len) {
     this->stream_audio_carry_len_ = 0;
     return;
   }
+  this->stream_play_audio_(data, len);
+}
+
+void SimpleVideoPlayer::stream_play_audio_(const uint8_t *data, size_t len) {
   const uint32_t rate = this->stream_audio_rate_;
   const uint32_t min_rate = this->wanted_audio_min_rate_.load(std::memory_order_acquire);
   const uint32_t max_rate = this->wanted_audio_max_rate_.load(std::memory_order_acquire);
@@ -1169,6 +1221,10 @@ void StreamTouchListener::release() {
 void SimpleVideoPlayer::stream_on_touch(const touchscreen::TouchPoints_t &points) {
   if (this->stream_touch_q_ == nullptr)
     return;
+#ifdef SVP_SPICE
+  if (this->spice_on_.load(std::memory_order_acquire) && !this->spice_inputs_on_.load(std::memory_order_acquire))
+    return;
+#endif
   // Touches go to a udisp sender whose picture is shown, and to an AVI sender while it plays.
   const bool udisp_shown =
       this->stream_connected_.load(std::memory_order_acquire) && this->stream_awake_.load(std::memory_order_acquire);
@@ -1215,6 +1271,13 @@ void SimpleVideoPlayer::stream_on_touch(const touchscreen::TouchPoints_t &points
     xQueueReceive(this->stream_touch_q_, &discarded, 0);
     xQueueSend(this->stream_touch_q_, &event, 0);
   }
+#ifdef SVP_SPICE
+  // A SPICE session takes them for its inputs channel.
+  if (this->spice_on_.load(std::memory_order_acquire)) {
+    this->spice_wake();
+    return;
+  }
+#endif
   this->stream_wake_();
 }
 #endif
