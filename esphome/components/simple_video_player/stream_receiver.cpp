@@ -320,6 +320,7 @@ void SimpleVideoPlayer::stream_net_loop_() {
         continue;
       }
       this->desktop_cursor_left_ = 0;
+      this->stream_desktop_sender_ = desktop_sender;
 #endif
       this->stream_sender_busy_.store(true, std::memory_order_release);
       ESP_LOGI(TAG, "Sender connected from %s", peer_text);
@@ -534,6 +535,11 @@ void SimpleVideoPlayer::stream_net_loop_() {
         xQueueSend(this->stream_empty_q_, &this->stream_current_, 0);
         this->stream_current_ = nullptr;
       }
+#ifdef SVP_SPICE
+      this->stream_desktop_sender_ = false;
+      while (this->stream_held_count_ > 0)
+        xQueueSend(this->stream_empty_q_, &this->stream_held_[--this->stream_held_count_], 0);
+#endif
       this->stream_connected_.store(false, std::memory_order_release);
       ::close(client);
       this->stream_sender_busy_.store(false, std::memory_order_release);
@@ -716,6 +722,15 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
     // No free buffer: not reading the socket for a moment is the flow control; after that the
     // rectangle is counted out so the next header is found.
     StreamFrame *frame = nullptr;
+#ifdef SVP_SPICE
+    // The desktop's: the frames beyond its own are taken out as they come free.
+    if (this->stream_desktop_sender_) {
+      while (this->stream_held_count_ < STREAM_FRAME_COUNT - DESKTOP_FRAMES &&
+             xQueueReceive(this->stream_empty_q_, &frame, 0) == pdTRUE)
+        this->stream_held_[this->stream_held_count_++] = frame;
+      frame = nullptr;
+    }
+#endif
 #ifdef SVP_STREAM_STATS
     const int64_t wait_start = esp_timer_get_time();
 #endif

@@ -1744,6 +1744,12 @@ class SimpleVideoPlayer : public Component
   uint32_t desktop_cursor_left_{0};
   size_t desktop_cursor_at_{0};
   bool desktop_cursor_ok_{false};
+  // Network task: the desktop's sender gets only DESKTOP_FRAMES of the stream frames (one received, one
+  // drawn), the others are held here meanwhile -- no picture of the past waits on the panel.
+  static constexpr uint8_t DESKTOP_FRAMES = 2;
+  bool stream_desktop_sender_{false};
+  StreamFrame *stream_held_[STREAM_FRAME_COUNT]{};
+  uint8_t stream_held_count_{0};
   void spice_saved_setup_();
   // The connections file (spice_file_path_): one line per connection, read and written whole through
   // the storage worker (main loop); its text in spice_file_buf_ (PSRAM pool).
