@@ -407,6 +407,8 @@ class SimpleVideoPlayer : public Component
   bool spice_saved(uint8_t index, std::string &name, std::string &host, uint16_t &port) const;
   void spice_save(uint8_t index, const std::string &name, const std::string &host, uint16_t port);
   void spice_forget(uint8_t index);
+  /// Saved at the first free index (the Desktop screen's "save"); -1: all are taken.
+  int spice_save_new(const std::string &name, const std::string &host, uint16_t port);
   void spice_connect_saved(uint8_t index, const std::string &password);
   /// Main loop: a saved connection changed, or a session began or ended.
   void add_on_spice_callback(std::function<void()> &&callback) { this->spice_callbacks_.add(std::move(callback)); }

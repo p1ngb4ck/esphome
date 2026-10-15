@@ -2260,6 +2260,17 @@ void SimpleVideoPlayer::spice_save(uint8_t index, const std::string &name, const
   this->spice_callbacks_.call();
 }
 
+int SimpleVideoPlayer::spice_save_new(const std::string &name, const std::string &host, uint16_t port) {
+  for (uint8_t i = 0; this->spice_saved_ != nullptr && i < this->spice_saved_count_; i++) {
+    if (!this->spice_saved_[i].used) {
+      this->spice_save(i, name, host, port);
+      return this->spice_saved_[i].used ? i : -1;
+    }
+  }
+  ESP_LOGW(TAG, "All %u saved connections are taken (spice: connections)", this->spice_saved_count_);
+  return -1;
+}
+
 void SimpleVideoPlayer::spice_forget(uint8_t index) {
   if (this->spice_saved_ == nullptr || index >= this->spice_saved_count_)
     return;
