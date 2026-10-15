@@ -238,6 +238,10 @@ CONTROL_BUTTONS = {
     "exit": 9,
 }
 CONF_PICTURE = "picture"
+CONF_AUDIO_CONTROLS = "audio"
+# Over the cover art in full screen: the audio queue's tracks (exit: on_exit).
+AUDIO_CONTROL_BUTTONS = ["previous", "play_pause", "stop", "next", "volume_down", "volume_up", "exit"]
+CONF_AUDIO_COVER = "audio_cover"
 CONF_COUNTER = "counter"
 CONF_ON_EXIT = "on_exit"
 PICTURE_CONTROL_BUTTONS = ["previous", "play_pause", "next", "exit"]
@@ -401,6 +405,8 @@ def _validate_stream(config):
 def _validate_controls(config):
     if CONF_CONTROLS not in config:
         return config
+    if CONF_AUDIO_CONTROLS in config[CONF_CONTROLS] and CONF_AUDIO_FILE_SPEAKER_ID not in config:
+        raise cv.Invalid(f"'{CONF_CONTROLS}: {CONF_AUDIO_CONTROLS}' is for the audio queue: it needs '{CONF_AUDIO_FILE_SPEAKER_ID}'.")
     if CONF_DISPLAY_ID in config and CONF_TOUCHSCREEN_ID not in config:
         raise cv.Invalid(
             f"'{CONF_CONTROLS}' over a full-screen video take its touches directly: they need '{CONF_TOUCHSCREEN_ID}'."
@@ -408,6 +414,17 @@ def _validate_controls(config):
     # The player builds the controls from these widgets and renders them with lv_snapshot.
     lvgl_defines.add_define("LV_USE_SNAPSHOT", "1")
     lvgl_defines.add_lv_use("label", "bar", "button")
+    return config
+
+
+def _validate_audio_cover(config):
+    if CONF_AUDIO_COVER not in config:
+        return config
+    for key in (CONF_PICTURE_CANVAS_ID, CONF_CHANNEL_LIST, CONF_MEDIA_PLAYER_ID, CONF_AUDIO_FILE_SPEAKER_ID):
+        if key not in config:
+            raise cv.Invalid(
+                f"'{CONF_AUDIO_COVER}' (svp_relay's cover art of the audio queue) needs '{key}'.", [CONF_AUDIO_COVER]
+            )
     return config
 
 
@@ -428,6 +445,9 @@ def _picture_schema():
         # play/pause overlay, swipes (left/right: picture, up/down: folder, long press: slideshow)
         # and an optional thumbnail strip in thumbnail_container_id.
         cv.Optional(CONF_PICTURE_CANVAS_ID): cv.use_id(lv_canvas_t),
+        # The cover art of the sound svp_relay plays (the audio queue's Home Assistant tracks) in these
+        # canvases (external_buffer: true), each fitted into its size; PSRAM of their size, kept.
+        cv.Optional(CONF_AUDIO_COVER): cv.All(cv.ensure_list(cv.use_id(lv_canvas_t)), cv.Length(min=1, max=3)),
         cv.Optional(CONF_PICTURE_DIRECTORIES): cv.ensure_list(cv.string),
         cv.Optional(CONF_SLIDESHOW_INTERVAL, default="5s"): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_FIT_MODE, default="SCALE_TO_FIT"): cv.enum(IMAGE_FIT_MODES, upper=True),
@@ -592,6 +612,18 @@ CONFIG_SCHEMA = cv.All(
                                         cv.Optional(CONF_SEEK_BAR, default=True): cv.boolean,
                                     }
                                 ),
+                                cv.Optional(CONF_AUDIO_CONTROLS): cv.Schema(
+                                    {
+                                        cv.Optional(
+                                            CONF_BUTTONS, default=AUDIO_CONTROL_BUTTONS
+                                        ): cv.ensure_list(cv.one_of(*AUDIO_CONTROL_BUTTONS, lower=True)),
+                                        cv.Optional(CONF_TITLE, default=True): cv.boolean,
+                                        # Only while the track's length is known.
+                                        cv.Optional(CONF_TIME, default=True): cv.boolean,
+                                        # The exit button: leave full screen (the layout is yours).
+                                        cv.Optional(CONF_ON_EXIT): automation.validate_automation(single=True),
+                                    }
+                                ),
                                 cv.Optional(CONF_PICTURE, default={}): cv.Schema(
                                     {
                                         cv.Optional(
@@ -696,6 +728,7 @@ CONFIG_SCHEMA = cv.All(
     _validate_stream,
     _validate_controls,
     _validate_pictures,
+    _validate_audio_cover,
     _request_fast_network,
     only_on_variant(supported=[VARIANT_ESP32P4], msg_prefix="simple_video_player"),
 )
@@ -1054,9 +1087,24 @@ async def to_code(config):
             )
             if on_exit := picture.get(CONF_ON_EXIT):
                 await automation.build_automation(var.get_picture_exit_trigger(), [], on_exit)
+        if (audio := controls.get(CONF_AUDIO_CONTROLS)) is not None:
+            cg.add_define("SVP_AUDIO_CONTROLS")
+            cg.add(
+                var.set_audio_controls(
+                    [CONTROL_BUTTONS[b] for b in audio[CONF_BUTTONS]],
+                    audio[CONF_TITLE],
+                    audio[CONF_TIME],
+                )
+            )
+            if on_exit := audio.get(CONF_ON_EXIT):
+                await automation.build_automation(var.get_audio_exit_trigger(), [], on_exit)
 
     if CONF_PICTURE_CANVAS_ID in config:
         await _pictures_to_code(var, config)
+    if CONF_AUDIO_COVER in config:
+        cg.add_define("SVP_AUDIO_COVER")
+        for canvas in config[CONF_AUDIO_COVER]:
+            cg.add(var.add_audio_cover_canvas(await cg.get_variable(canvas)))
 
     # Set speaker (optional - for audio playback)
     if CONF_SPEAKER_ID in config:

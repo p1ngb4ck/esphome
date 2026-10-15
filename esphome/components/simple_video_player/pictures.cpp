@@ -142,6 +142,11 @@ void SimpleVideoPlayer::pictures_loop_() {
       now - this->thumb_touched_ms_ >= this->thumb_auto_hide_ms_)
     this->slide_thumbnails_(false);
 
+#ifdef SVP_AUDIO_COVER
+  // The picture task decodes cover art: no picture meanwhile, and the video waits for it.
+  if (this->cover_step_ == CoverStep::DECODING)
+    return;
+#endif
   // A starting video needs the pool: what is in flight finishes, then the pictures' buffers go.
   if (this->pool_reclaim_req_.load(std::memory_order_acquire)) {
     if (this->pic_read_.active) {
@@ -907,6 +912,13 @@ void SimpleVideoPlayer::picture_task_entry_(void *arg) {
   auto *self = static_cast<SimpleVideoPlayer *>(arg);
   while (true) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+#ifdef SVP_AUDIO_COVER
+    if (self->cover_job_.exchange(false, std::memory_order_acq_rel)) {
+      self->cover_decode_();
+      self->cover_decoded_.store(true, std::memory_order_release);
+      continue;
+    }
+#endif
     self->decode_job_(self->pic_job_);
     self->pic_decoded_.store(true, std::memory_order_release);
   }

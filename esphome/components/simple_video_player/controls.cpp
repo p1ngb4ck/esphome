@@ -36,15 +36,15 @@ static bool clip(lv_area_t &area, const lv_area_t &to) {
   return area.x1 <= area.x2 && area.y1 <= area.y2;
 }
 static int32_t area_h(const lv_area_t &area) { return area.y2 - area.y1 + 1; }
+#endif
 
 // "m:ss", or "h:mm:ss" when the file runs an hour or more.
-static size_t format_time(char *out, size_t size, uint32_t seconds, bool hours) {
+[[maybe_unused]] static size_t format_time(char *out, size_t size, uint32_t seconds, bool hours) {
   const int n = hours ? snprintf(out, size, "%" PRIu32 ":%02" PRIu32 ":%02" PRIu32, seconds / 3600,
                                  seconds / 60 % 60, seconds % 60)
                       : snprintf(out, size, "%" PRIu32 ":%02" PRIu32, seconds / 60, seconds % 60);
   return n > 0 ? std::min<size_t>(static_cast<size_t>(n), size - 1) : 0;
 }
-#endif
 
 static const char *button_text(uint8_t button) {
   switch (button) {
@@ -140,6 +140,10 @@ void SimpleVideoPlayer::controls_setup_() {
   if (this->ctl_picture_.enabled && this->pic_canvas_ != nullptr)
     this->build_controls_bar_(this->ctl_picture_);
 #endif
+#ifdef SVP_AUDIO_CONTROLS
+  if (this->ctl_audio_.enabled)
+    this->build_controls_bar_(this->ctl_audio_);
+#endif
 }
 
 static lv_obj_t *plain_row(lv_obj_t *parent, lv_style_t *style) {
@@ -193,6 +197,14 @@ bool SimpleVideoPlayer::build_controls_bar_(ControlsBar &bar) {
       lv_obj_add_style(bar.seek, this->ctl_user_indicator_style_, LV_PART_INDICATOR);
     lv_bar_set_range(bar.seek, 0, SEEK_RANGE);
     lv_bar_set_value(bar.seek, 0, LV_ANIM_OFF);
+#ifdef SVP_AUDIO_CONTROLS
+    if (bar.audio) {
+      // A tap or drag on it seeks (on release).
+      bar.seek_target = ControlsTarget{this, &bar, CTL_BUTTON_COUNT};
+      lv_obj_add_flag(bar.seek, LV_OBJ_FLAG_CLICKABLE);
+      lv_obj_add_event_cb(bar.seek, &SimpleVideoPlayer::audio_seek_event_, LV_EVENT_ALL, &bar.seek_target);
+    }
+#endif
   }
   if (!bar.buttons.empty()) {
     lv_obj_t *row = plain_row(root, &this->ctl_row_style_);
@@ -221,35 +233,65 @@ bool SimpleVideoPlayer::build_controls_bar_(ControlsBar &bar) {
       bar.button_label[id] = label;
       // Over a picture LVGL runs: the buttons act through their events.
       bar.target[id] = ControlsTarget{this, &bar, id};
-      if (bar.picture) {
+      if (bar.picture || bar.audio) {
         lv_obj_add_event_cb(button, &SimpleVideoPlayer::controls_button_event_, LV_EVENT_CLICKED, &bar.target[id]);
-#ifdef SVP_PICTURES
         // Moving between the buttons with keys keeps the bar shown.
         lv_obj_add_event_cb(
             button,
-            [](lv_event_t *event) {
-              static_cast<SimpleVideoPlayer *>(lv_event_get_user_data(event))->picture_controls_touched_();
-            },
-            LV_EVENT_FOCUSED, this);
-#endif
+            [](lv_event_t *event) { static_cast<ControlsBar *>(lv_event_get_user_data(event))->shown_ms = millis(); },
+            LV_EVENT_FOCUSED, &bar);
       }
     }
   }
-#ifdef SVP_PICTURES
-  if (bar.picture) {
+  if (bar.picture || bar.audio) {
     lv_obj_add_event_cb(
         root,
-        [](lv_event_t *event) {
-          static_cast<SimpleVideoPlayer *>(lv_event_get_user_data(event))->picture_controls_touched_();
-        },
-        LV_EVENT_PRESSED, this);
+        [](lv_event_t *event) { static_cast<ControlsBar *>(lv_event_get_user_data(event))->shown_ms = millis(); },
+        LV_EVENT_PRESSED, &bar);
   }
-#endif
   return true;
 }
 
 void SimpleVideoPlayer::controls_button_event_(lv_event_t *event) {
   const auto *target = static_cast<ControlsTarget *>(lv_event_get_user_data(event));
+#ifdef SVP_AUDIO_CONTROLS
+  if (target->bar->audio) {
+    SimpleVideoPlayer *self = target->player;
+    target->bar->shown_ms = millis();
+    switch (target->button) {
+      case CTL_PREVIOUS:
+        self->audio_previous();
+        break;
+      case CTL_NEXT:
+        self->audio_next();
+        break;
+      case CTL_PLAY_PAUSE:
+        // As the Media page's play button: pause while a track plays, else play.
+        if (self->is_audio_session() && self->is_playing()) {
+          self->pause();
+        } else {
+          self->audio_play_or_resume();
+        }
+        break;
+      case CTL_STOP:
+        if (self->is_audio_session())
+          self->stop();
+        break;
+      case CTL_EXIT:
+        self->hide_audio_controls_();
+        target->bar->exit_trigger.trigger();
+        return;
+      case CTL_VOLUME_DOWN:
+      case CTL_VOLUME_UP:
+        self->controls_press_(target->button);
+        break;
+      default:
+        break;
+    }
+    self->update_audio_controls_(false);
+    return;
+  }
+#endif
 #ifdef SVP_PICTURES
   if (target->bar->picture) {
     SimpleVideoPlayer *self = target->player;
@@ -594,6 +636,10 @@ void SimpleVideoPlayer::prerender_controls_() {}
 //========================================================================
 
 bool SimpleVideoPlayer::controls_shown() const {
+#ifdef SVP_AUDIO_CONTROLS
+  if (this->ctl_audio_.visible && this->lvgl_component_ != nullptr && !this->lvgl_component_->is_paused())
+    return true;
+#endif
 #ifdef SVP_PICTURES
   if (this->ctl_picture_.bar != nullptr && !lv_obj_is_hidden(this->ctl_picture_.bar))
     return true;
@@ -609,6 +655,13 @@ bool SimpleVideoPlayer::controls_active_() const {
 }
 
 void SimpleVideoPlayer::show_controls() {
+#ifdef SVP_AUDIO_CONTROLS
+  // Over the cover art while LVGL shows it; a video over everything has its own.
+  if (this->audio_fullscreen_ && this->lvgl_component_ != nullptr && !this->lvgl_component_->is_paused()) {
+    this->show_audio_controls_();
+    return;
+  }
+#endif
 #ifdef SVP_PICTURES
   if (this->fullscreen_) {
     this->show_picture_controls_();
@@ -624,6 +677,9 @@ void SimpleVideoPlayer::show_controls() {
 }
 
 void SimpleVideoPlayer::hide_controls() {
+#ifdef SVP_AUDIO_CONTROLS
+  this->hide_audio_controls_();
+#endif
   this->ctl_dragging_.store(false, std::memory_order_release);
   if (this->ctl_shown_.exchange(false, std::memory_order_acq_rel)) {
     this->ctl_repaint_.store(true, std::memory_order_release);
@@ -700,12 +756,23 @@ void SimpleVideoPlayer::controls_touch(bool pressed, int32_t x, int32_t y) {
 #else
 bool SimpleVideoPlayer::controls_active_() const { return false; }
 void SimpleVideoPlayer::show_controls() {
+#ifdef SVP_AUDIO_CONTROLS
+  // Over the cover art while LVGL shows it; a video over everything has its own.
+  if (this->audio_fullscreen_ && this->lvgl_component_ != nullptr && !this->lvgl_component_->is_paused()) {
+    this->show_audio_controls_();
+    return;
+  }
+#endif
 #ifdef SVP_PICTURES
   if (this->fullscreen_)
     this->show_picture_controls_();
 #endif
 }
-void SimpleVideoPlayer::hide_controls() {}
+void SimpleVideoPlayer::hide_controls() {
+#ifdef SVP_AUDIO_CONTROLS
+  this->hide_audio_controls_();
+#endif
+}
 void SimpleVideoPlayer::controls_touch(bool pressed, int32_t x, int32_t y) {}
 #endif
 
@@ -751,6 +818,9 @@ void SimpleVideoPlayer::controls_press_(uint8_t button) {
 void SimpleVideoPlayer::controls_loop_() {
 #ifdef SVP_PICTURES
   this->picture_controls_loop_();
+#endif
+#ifdef SVP_AUDIO_CONTROLS
+  this->audio_controls_loop_();
 #endif
   if (this->ctl_video_.bar == nullptr)
     return;
@@ -838,6 +908,146 @@ void SimpleVideoPlayer::picture_controls_loop_() {
     return;
   }
   this->update_picture_controls_(false);
+}
+#endif
+
+#ifdef SVP_AUDIO_CONTROLS
+//========================================================================
+// Over the audio queue's cover art in full screen (main loop, LVGL shows them)
+//========================================================================
+
+static bool lvgl_paused(lvgl::LvglComponent *lvgl) { return lvgl == nullptr || lvgl->is_paused(); }
+
+void SimpleVideoPlayer::set_audio_fullscreen(bool fullscreen) {
+  this->audio_fullscreen_ = fullscreen;
+  if (!fullscreen)
+    this->hide_audio_controls_();
+}
+
+void SimpleVideoPlayer::show_audio_controls_() {
+  ControlsBar &bar = this->ctl_audio_;
+  if (bar.bar == nullptr || !this->audio_fullscreen_ || lvgl_paused(this->lvgl_component_))
+    return;
+  this->update_audio_controls_(true);
+  lv_obj_move_to_index(bar.bar, -1);
+  lv_obj_set_hidden(bar.bar, false);
+  bar.visible = true;
+  bar.shown_ms = millis();
+  // Keys go to the bar: its play/pause button, else its first one.
+  lv_obj_t *focus = bar.button[CTL_PLAY_PAUSE];
+  for (uint8_t id = 0; focus == nullptr && id < CTL_BUTTON_COUNT; id++)
+    focus = bar.button[id];
+  if (focus != nullptr)
+    lv_group_focus_obj(focus);
+}
+
+void SimpleVideoPlayer::hide_audio_controls_() {
+  ControlsBar &bar = this->ctl_audio_;
+  if (!bar.visible || lvgl_paused(this->lvgl_component_))
+    return;  // paused: hidden once LVGL runs again (audio_controls_loop_())
+  lv_obj_set_hidden(bar.bar, true);
+  bar.visible = false;
+  bar.dragging = false;
+}
+
+// The texts only when they changed: what LVGL redraws.
+void SimpleVideoPlayer::update_audio_controls_(bool force) {
+  ControlsBar &bar = this->ctl_audio_;
+  const int track = this->audio_queue_index();
+  if (force || track != bar.shown_image || this->audio_queue_gen_ != bar.shown_gen) {
+    if (bar.title_label != nullptr)
+      lv_label_set_text(bar.title_label, track >= 0 ? this->audio_queue_title(track).c_str() : "");
+    bar.shown_image = track;
+    bar.shown_gen = this->audio_queue_gen_;
+  }
+  const bool session = this->is_audio_session();
+  const int playing = session && this->is_playing() ? 1 : 0;
+  if ((force || playing != bar.shown_playing) && bar.button_label[CTL_PLAY_PAUSE] != nullptr) {
+    lv_label_set_text(bar.button_label[CTL_PLAY_PAUSE], playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+    bar.shown_playing = playing;
+  }
+  // Time and seek bar only while the track's length is known.
+  const float duration = session ? this->get_duration() : 0.0f;
+  const int total = static_cast<int>(duration);
+  if (force || total != bar.shown_count) {
+    const bool known = total > 0;
+    for (lv_obj_t *part : {bar.position_label, bar.duration_label, bar.seek}) {
+      if (part != nullptr && lv_obj_is_hidden(part) == known)
+        lv_obj_set_hidden(part, !known);
+    }
+    if (known && bar.duration_label != nullptr) {
+      char text[24] = "/ ";
+      format_time(text + 2, sizeof(text) - 2, static_cast<uint32_t>(total), total >= 3600);
+      lv_label_set_text(bar.duration_label, text);
+    }
+    bar.shown_count = total;
+    bar.shown_position = -1;
+  }
+  if (total <= 0)
+    return;
+  const float fraction = bar.dragging ? bar.drag_permille / static_cast<float>(SEEK_RANGE)
+                                      : std::min(std::max(this->get_position() / duration, 0.0f), 1.0f);
+  const int position = static_cast<int>(fraction * duration);
+  if (force || position != bar.shown_position) {
+    if (bar.position_label != nullptr) {
+      char text[16];
+      format_time(text, sizeof(text), static_cast<uint32_t>(position), total >= 3600);
+      lv_label_set_text(bar.position_label, text);
+    }
+    if (bar.seek != nullptr)
+      lv_bar_set_value(bar.seek, static_cast<int32_t>(fraction * SEEK_RANGE), LV_ANIM_OFF);
+    bar.shown_position = position;
+  }
+}
+
+void SimpleVideoPlayer::audio_controls_loop_() {
+  ControlsBar &bar = this->ctl_audio_;
+  if (!bar.visible || lvgl_paused(this->lvgl_component_))
+    return;
+  // As over a video: hidden after hide_after while it plays, kept while paused or stopped.
+  const bool playing = this->is_audio_session() && this->is_playing();
+  if (!this->audio_fullscreen_ || (playing && !bar.dragging && millis() - bar.shown_ms > this->ctl_hide_after_ms_)) {
+    this->hide_audio_controls_();
+    return;
+  }
+  this->update_audio_controls_(false);
+}
+
+// The seek bar: where it is pressed, shown while dragged, sought on release.
+void SimpleVideoPlayer::audio_seek_event_(lv_event_t *event) {
+  const auto *target = static_cast<ControlsTarget *>(lv_event_get_user_data(event));
+  SimpleVideoPlayer *self = target->player;
+  ControlsBar &bar = *target->bar;
+  const lv_event_code_t code = lv_event_get_code(event);
+  if (code != LV_EVENT_PRESSED && code != LV_EVENT_PRESSING && code != LV_EVENT_RELEASED &&
+      code != LV_EVENT_PRESS_LOST)
+    return;
+  bar.shown_ms = millis();
+  const float duration = self->get_duration();
+  if (!self->can_seek() || duration <= 0.0f) {
+    bar.dragging = false;
+    return;
+  }
+  if (code == LV_EVENT_PRESS_LOST) {
+    bar.dragging = false;
+    return;
+  }
+  lv_indev_t *indev = lv_indev_active();
+  if (indev == nullptr || lv_indev_get_type(indev) != LV_INDEV_TYPE_POINTER)
+    return;
+  lv_point_t point;
+  lv_indev_get_point(indev, &point);
+  lv_area_t area;
+  lv_obj_get_coords(bar.seek, &area);
+  const int32_t width = area.x2 - area.x1;
+  const float fraction =
+      width > 0 ? std::min(std::max(static_cast<float>(point.x - area.x1) / static_cast<float>(width), 0.0f), 1.0f)
+                : 0.0f;
+  bar.drag_permille = static_cast<uint16_t>(fraction * SEEK_RANGE);
+  bar.dragging = code != LV_EVENT_RELEASED;
+  if (code == LV_EVENT_RELEASED)
+    self->seek(fraction * duration);
+  self->update_audio_controls_(false);
 }
 #endif
 

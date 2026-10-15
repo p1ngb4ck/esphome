@@ -358,6 +358,18 @@ class SimpleVideoPlayer : public Component
   void on_svp_audio_command(std::string command);
   void on_svp_set_volume(float volume);
 #endif
+#ifdef SVP_AUDIO_COVER
+  /// The playing sound's cover art (svp_relay) shows in these canvases (external_buffer), each fitted
+  /// into its own size; at most COVER_VIEWS.
+  void add_audio_cover_canvas(lv_obj_t *canvas) {
+    if (this->cover_view_count_ < COVER_VIEWS)
+      this->cover_views_[this->cover_view_count_++].canvas = canvas;
+  }
+  /// svp_relay: the playing sound's cover art changed: fetched again, or cleared when there is none.
+  void on_svp_cover();
+  /// Main loop: the cover art shows.
+  bool has_audio_cover() const { return this->cover_shown_; }
+#endif
 
   // What svp_relay reads from the status text sensor: a short JSON (Home Assistant states are at most
   // 255 characters). Status callbacks run whenever it may have changed.
@@ -600,6 +612,23 @@ class SimpleVideoPlayer : public Component
   }
   /// The exit button over a picture: leaving full screen is the configuration's (its layout).
   Trigger<> *get_picture_exit_trigger() { return &this->ctl_picture_.exit_trigger; }
+#endif
+#ifdef SVP_AUDIO_CONTROLS
+  /// Over the audio queue's cover art in full screen (LVGL shows them, as over a picture): time and
+  /// seek bar while the track's length is known.
+  void set_audio_controls(std::vector<uint8_t> buttons, bool title, bool time) {
+    this->ctl_audio_.buttons = std::move(buttons);
+    this->ctl_audio_.title = title;
+    this->ctl_audio_.time = time;
+    this->ctl_audio_.seek_bar = time;
+    this->ctl_audio_.audio = true;
+    this->ctl_audio_.enabled = true;
+  }
+  /// The exit button over the cover art: leaving full screen is the configuration's (its layout).
+  Trigger<> *get_audio_exit_trigger() { return &this->ctl_audio_.exit_trigger; }
+  /// The configuration shows the cover art in full screen: show_controls() means this bar then.
+  void set_audio_fullscreen(bool fullscreen);
+  bool is_audio_fullscreen() const { return this->audio_fullscreen_; }
 #endif
   /// Over a full-screen video, or a picture in full screen.
   void show_controls();
@@ -937,6 +966,7 @@ class SimpleVideoPlayer : public Component
     CHANNEL_CMD_IMAGE,
     CHANNEL_CMD_OPTIONS_GET,
     CHANNEL_CMD_OPTIONS_SET,
+    CHANNEL_CMD_COVER,
   };
   struct ChannelCmd {
     uint8_t cmd;
@@ -963,6 +993,48 @@ class SimpleVideoPlayer : public Component
   void options_get_task_();
   void options_set_task_();
   static bool remote_image_(const ImageEntry &entry);
+#endif
+#ifdef SVP_AUDIO_COVER
+  // The cover art in each canvas, one after the other: the relay fits a JPEG into the canvas' size,
+  // the picture task's hardware decoder writes it into the view's buffer (own PSRAM, kept), LVGL shows
+  // it at its own size (centred). A canvas lets go of its buffer before it is written, and LVGL is
+  // touched only while it runs.
+  struct CoverView {
+    lv_obj_t *canvas{nullptr};
+    int32_t w{0}, h{0};  // the canvas' size
+    uint8_t *data{nullptr};
+    size_t capacity{0};
+    lv_draw_buf_t buf{};
+    int32_t shown_w{0}, shown_h{0};
+    uint32_t stride{0};
+  };
+  static constexpr size_t COVER_VIEWS = 3;
+  static constexpr size_t COVER_FILE_MAX = 512 * 1024;
+  enum class CoverStep : uint8_t { IDLE, FETCHING, DECODING };
+  CoverView cover_views_[COVER_VIEWS];
+  size_t cover_view_count_{0};
+  CoverStep cover_step_{CoverStep::IDLE};
+  size_t cover_view_{0};       // the view being fetched or decoded
+  bool cover_wanted_{false};   // svp_cover: all views again
+  bool cover_clear_{false};    // a local track: no cover art
+  bool cover_shown_{false};
+  bool cover_failed_{false};   // no PSRAM for its buffers
+  uint8_t *cover_file_{nullptr};
+  // The channel task fetches into cover_file_ (cover_fetch_w_ x cover_fetch_h_), the picture task
+  // decodes it; each hands over with its flag (release / acquire).
+  int32_t cover_fetch_w_{0}, cover_fetch_h_{0};
+  size_t cover_len_{0};
+  bool cover_fetch_ok_{false};
+  std::atomic<bool> cover_fetched_{false};
+  std::atomic<bool> cover_job_{false};
+  std::atomic<bool> cover_decoded_{false};
+  bool cover_decode_ok_{false};
+  bool cover_buffers_();
+  void cover_loop_();
+  void cover_task_();     // channel task
+  void cover_decode_();   // picture task
+  void cover_detach_(CoverView &view);
+  void cover_clear_views_();
 #endif
 #ifdef USE_AUDIO
   /// PCM payload bytes from the sender (network task): converted to the speaker's channel count and
@@ -1319,6 +1391,7 @@ class SimpleVideoPlayer : public Component
   struct ControlsBar {
     bool enabled{false};
     bool picture{false};
+    bool audio{false};
     std::vector<uint8_t> buttons;
     bool title{true}, time{true}, seek_bar{true};
     Trigger<> exit_trigger;
@@ -1327,6 +1400,12 @@ class SimpleVideoPlayer : public Component
     int shown_image{-2};
     int shown_count{-1};
     int shown_playing{-1};
+    int shown_position{-1};
+    uint32_t shown_gen{UINT32_MAX};
+    bool visible{false};  // LVGL shows it (main loop's own note: nothing read of LVGL while paused)
+    bool dragging{false};  // its seek bar (an LVGL bar's)
+    uint16_t drag_permille{0};
+    ControlsTarget seek_target{};
     lv_obj_t *bar{nullptr};
     lv_obj_t *title_label{nullptr};
     lv_obj_t *position_label{nullptr};
@@ -1337,6 +1416,15 @@ class SimpleVideoPlayer : public Component
   };
   static constexpr size_t CTL_GLYPHS = 11;  // 0-9 and ':'
   ControlsBar ctl_video_;
+#ifdef SVP_AUDIO_CONTROLS
+  ControlsBar ctl_audio_;
+  bool audio_fullscreen_{false};
+  void audio_controls_loop_();
+  void show_audio_controls_();
+  void hide_audio_controls_();
+  void update_audio_controls_(bool force);
+  static void audio_seek_event_(lv_event_t *event);
+#endif
 #ifdef SVP_PICTURES
   ControlsBar ctl_picture_;
   void picture_controls_loop_();

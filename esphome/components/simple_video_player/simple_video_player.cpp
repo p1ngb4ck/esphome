@@ -264,6 +264,9 @@ void SimpleVideoPlayer::loop() {
 #ifdef SVP_PICTURES
   this->pictures_loop_();
 #endif
+#ifdef SVP_AUDIO_COVER
+  this->cover_loop_();
+#endif
   // A file played to its end: the next of the playlist, before LVGL would get the screen back.
   if (this->advance_req_.load(std::memory_order_acquire) &&
       this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED) {
@@ -2956,6 +2959,11 @@ void SimpleVideoPlayer::audio_start_(size_t pos) {
   }
 #endif
   this->audio_remote_.store(AUDIO_REMOTE_NONE, std::memory_order_release);
+#ifdef SVP_AUDIO_COVER
+  // A file's own cover art is not svp_relay's.
+  this->cover_clear_ = true;
+  this->cover_wanted_ = false;
+#endif
   this->audio_start_pending_.store(true, std::memory_order_release);
   this->audio_changed_.store(true, std::memory_order_release);
   this->end_session_();

@@ -78,6 +78,9 @@ void SimpleVideoPlayer::setup_media_player_() {
   this->register_service(&SimpleVideoPlayer::on_svp_play_audio, "svp_play_audio", {"url", "announce"});
   this->register_service(&SimpleVideoPlayer::on_svp_audio_command, "svp_audio_command", {"command"});
   this->register_service(&SimpleVideoPlayer::on_svp_set_volume, "svp_set_volume", {"volume"});
+#ifdef SVP_AUDIO_COVER
+  this->register_service(&SimpleVideoPlayer::on_svp_cover, "svp_cover");
+#endif
 #ifdef SVP_STREAM_STATS
   this->register_service(&SimpleVideoPlayer::set_stream_statistics, "svp_stream_statistics", {"enable"});
 #endif

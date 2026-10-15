@@ -328,6 +328,10 @@ void SimpleVideoPlayer::channel_task_loop_() {
       this->options_get_task_();
     } else if (request.cmd == CHANNEL_CMD_OPTIONS_SET) {
       this->options_set_task_();
+#ifdef SVP_AUDIO_COVER
+    } else if (request.cmd == CHANNEL_CMD_COVER) {
+      this->cover_task_();
+#endif
     }
   }
 }
