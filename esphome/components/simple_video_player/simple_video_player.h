@@ -45,6 +45,9 @@
 #include "esphome/components/audio_router/speaker/audio_router.h"
 #endif
 
+#ifdef SVP_CHANNEL_LIST
+#include "esphome/components/http_request/http_request.h"
+#endif
 #ifdef SVP_MEDIA_PLAYER
 #include "esphome/components/api/custom_api_device.h"
 #include "esphome/components/media_player/media_player.h"
@@ -467,6 +470,7 @@ class SimpleVideoPlayer : public Component
   // Channel list from the svp_relay Home Assistant integration, optionally shown in an LVGL dropdown;
   // channel_play() asks the relay to stream a channel to stream_port.
   void set_channel_url(const std::string &url) { this->channel_url_ = url; }
+  void set_channel_http_request(http_request::HttpRequestComponent *http) { this->channel_http_request_ = http; }
   void set_channel_token(const std::string &token) { this->channel_token_ = token; }
   void set_channel_widget(lvgl::LvDropdownType *widget) { this->channel_widget_ = widget; }
   void channel_list_refresh() { this->channel_request_(CHANNEL_CMD_REFRESH, 0); }
@@ -1967,6 +1971,7 @@ class SimpleVideoPlayer : public Component
 #ifdef SVP_CHANNEL_LIST
   std::string channel_url_;
   std::string channel_token_;
+  http_request::HttpRequestComponent *channel_http_request_{nullptr};
   lvgl::LvDropdownType *channel_widget_{nullptr};
   QueueHandle_t channel_q_{nullptr};
   SemaphoreHandle_t channel_lock_{nullptr};

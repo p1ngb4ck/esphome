@@ -7,7 +7,6 @@ from esphome.components.audio import CONF_CODECS, CONF_FLAC, CONF_MP3
 from esphome.components.esp32 import (
     add_idf_sdkconfig_option,
     only_on_variant,
-    request_http_client,
     require_vfs_select,
 )
 from esphome.components.esp32.const import VARIANT_ESP32P4
@@ -77,6 +76,8 @@ simple_video_player_ns = cg.esphome_ns.namespace("simple_video_player")
 
 # Classes
 SimpleVideoPlayer = simple_video_player_ns.class_("SimpleVideoPlayer", cg.Component)
+http_request_ns = cg.esphome_ns.namespace("http_request")
+HttpRequestComponent = http_request_ns.class_("HttpRequestComponent", cg.Component)
 
 # Enums for speaker channel configuration -- is_class=True: the C++ side is a scoped `enum class`,
 # so codegen must emit `SpeakerChannelMode::SPEAKER_CHANNEL_*`, not a bare `SPEAKER_CHANNEL_*`.
@@ -207,6 +208,7 @@ STREAM_OUTPUT_CANVAS = "canvas"
 CONF_TOUCHSCREEN_ID = "touchscreen_id"
 CONF_CHANNEL_LIST = "channel_list"
 CONF_TOKEN = "token"
+CONF_HTTP_REQUEST_ID = "http_request_id"
 CONF_WIDGET_ID = "widget_id"
 CONF_AUDIO_CODEC = "audio_codec"
 CONF_AUDIO_LATENCY = "audio_latency"
@@ -646,6 +648,7 @@ CONFIG_SCHEMA = cv.All(
                 {
                     cv.Optional(CONF_CHANNEL_LIST): cv.Schema(
                         {
+                            cv.GenerateID(CONF_HTTP_REQUEST_ID): cv.use_id(HttpRequestComponent),
                             cv.Required(CONF_URL): cv.url,
                             cv.Optional(CONF_TOKEN): cv.string,
                             cv.Optional(CONF_WIDGET_ID): cv.use_id(lv_dropdown_t),
@@ -1040,7 +1043,8 @@ async def to_code(config):
             if "usb_host" in CORE.loaded_integrations:
                 add_idf_sdkconfig_option("CONFIG_USB_HOST_DWC_DMA_CAP_MEMORY_IN_PSRAM", True)
         if channels := config.get(CONF_CHANNEL_LIST):
-            request_http_client()
+            http = await cg.get_variable(channels[CONF_HTTP_REQUEST_ID])
+            cg.add(var.set_channel_http_request(http))
             cg.add(var.set_channel_url(channels[CONF_URL].rstrip("/")))
             if CONF_TOKEN in channels:
                 cg.add(var.set_channel_token(channels[CONF_TOKEN]))

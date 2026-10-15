@@ -9,7 +9,6 @@
 #include "esphome/components/network/util.h"
 #include "esphome/core/log.h"
 #include "esp_heap_caps.h"
-#include "esp_http_client.h"
 
 #ifdef SVP_SPICE
 #include <lwip/netdb.h>
@@ -27,7 +26,6 @@ static const char *const TAG = "simple_video_player.channels";
 static constexpr size_t CHANNEL_MAX = 300;
 static constexpr size_t HA_ITEMS_MAX = 500;  // as the relay sends at most
 static constexpr size_t CHANNEL_RESPONSE_MAX = 256 * 1024;
-static constexpr int CHANNEL_HTTP_TIMEOUT_MS = 15000;
 
 bool SimpleVideoPlayer::setup_channel_list_() {
   this->channel_q_ = xQueueCreate(8, sizeof(ChannelCmd));
@@ -528,81 +526,86 @@ void SimpleVideoPlayer::desktop_relay_stop_() {
 
 bool SimpleVideoPlayer::channel_http_(const char *path, const char *body, char **response, size_t *response_len,
                                       uint8_t *into, size_t into_cap) {
+  if (this->channel_http_request_ == nullptr)
+    return false;
   const std::string url = this->channel_url_ + path;
-  esp_http_client_config_t config = {};
-  config.url = url.c_str();
-  config.method = body != nullptr ? HTTP_METHOD_POST : HTTP_METHOD_GET;
-  config.timeout_ms = CHANNEL_HTTP_TIMEOUT_MS;
-  esp_http_client_handle_t client = esp_http_client_init(&config);
-  if (client == nullptr) {
-    ESP_LOGW(TAG, "HTTP client init failed");
+  std::vector<http_request::Header> headers;
+  if (!this->channel_token_.empty())
+    headers.push_back({"Authorization", "Bearer " + this->channel_token_});
+  if (body != nullptr)
+    headers.push_back({"Content-Type", "application/json"});
+  auto container = this->channel_http_request_->start(url.c_str(), body != nullptr ? "POST" : "GET",
+                                                      body != nullptr ? std::string(body) : std::string(), headers);
+  if (container == nullptr) {
+    ESP_LOGW(TAG, "%s%s failed", this->channel_url_.c_str(), path);
     return false;
   }
-  std::string auth;
-  if (!this->channel_token_.empty()) {
-    auth = "Bearer " + this->channel_token_;
-    esp_http_client_set_header(client, "Authorization", auth.c_str());
-  }
-  const int body_len = body != nullptr ? static_cast<int>(strlen(body)) : 0;
-  if (body != nullptr)
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-
-  bool ok = false;
-  int status = 0;
+  const int status = container->status_code;
+  bool ok = status == 200;
   char *buf = nullptr;
   size_t used = 0;
-  esp_err_t err = esp_http_client_open(client, body_len);
-  if (err == ESP_OK && (body_len == 0 || esp_http_client_write(client, body, body_len) == body_len)) {
-    esp_http_client_fetch_headers(client);
-    status = esp_http_client_get_status_code(client);
-    ok = status == 200;
-    if (ok && into != nullptr) {
-      // Into the caller's buffer: what does not fit fails.
-      while (true) {
-        if (used == into_cap) {
-          ok = false;
-          break;
-        }
-        const int n = esp_http_client_read(client, reinterpret_cast<char *>(into) + used, static_cast<int>(into_cap - used));
-        if (n < 0) {
-          ok = false;
-          break;
-        }
-        if (n == 0)
-          break;
-        used += static_cast<size_t>(n);
-      }
-    } else if (ok && response != nullptr) {
-      size_t cap = 0;
-      while (true) {
-        if (used == cap) {
-          const size_t grow = cap == 0 ? 16 * 1024 : cap * 2;
-          auto *bigger = grow <= CHANNEL_RESPONSE_MAX
-                             ? static_cast<char *>(heap_caps_realloc(buf, grow, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT))
-                             : nullptr;
-          if (bigger == nullptr) {
-            ok = false;
-            break;
-          }
-          buf = bigger;
-          cap = grow;
-        }
-        const int n = esp_http_client_read(client, buf + used, static_cast<int>(cap - used));
-        if (n < 0) {
-          ok = false;
-          break;
-        }
-        if (n == 0)
-          break;
-        used += static_cast<size_t>(n);
+  // Read till the whole answer is there; what does not fit fails.
+  auto read_into = [&](uint8_t *dst, size_t room) -> int {
+    uint32_t last = millis();
+    while (true) {
+      const int n = container->read(dst, room);
+      switch (http_request::http_read_loop_result(n, last, this->channel_http_request_->get_timeout(),
+                                                  container->is_read_complete())) {
+        case http_request::HttpReadLoopResult::DATA:
+          return n;
+        case http_request::HttpReadLoopResult::COMPLETE:
+          return 0;
+        case http_request::HttpReadLoopResult::RETRY:
+          continue;
+        default:
+          return -1;
       }
     }
+  };
+  if (ok && into != nullptr) {
+    while (true) {
+      if (used == into_cap) {
+        ok = false;
+        break;
+      }
+      const int n = read_into(into + used, into_cap - used);
+      if (n < 0) {
+        ok = false;
+        break;
+      }
+      if (n == 0)
+        break;
+      used += static_cast<size_t>(n);
+    }
+  } else if (ok && response != nullptr) {
+    size_t cap = 0;
+    while (true) {
+      if (used == cap) {
+        const size_t grow = cap == 0 ? 16 * 1024 : cap * 2;
+        auto *bigger = grow <= CHANNEL_RESPONSE_MAX
+                           ? static_cast<char *>(heap_caps_realloc(buf, grow, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT))
+                           : nullptr;
+        if (bigger == nullptr) {
+          ok = false;
+          break;
+        }
+        buf = bigger;
+        cap = grow;
+      }
+      const int n = read_into(reinterpret_cast<uint8_t *>(buf) + used, cap - used);
+      if (n < 0) {
+        ok = false;
+        break;
+      }
+      if (n == 0)
+        break;
+      used += static_cast<size_t>(n);
+    }
   }
-  esp_http_client_close(client);
-  esp_http_client_cleanup(client);
+  container->end();
 
   if (!ok) {
-    ESP_LOGW(TAG, "%s%s failed (%s, HTTP %d)", this->channel_url_.c_str(), path, esp_err_to_name(err), status);
+    ESP_LOGW(TAG, "%s%s failed (HTTP %d)", this->channel_url_.c_str(), path, status);
     heap_caps_free(buf);
     return false;
   }

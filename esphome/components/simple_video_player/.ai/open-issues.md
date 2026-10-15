@@ -49,7 +49,7 @@ Remove an entry only when Olli confirms the fix on the device.
 | # | Issue | Status |
 |---|---|---|
 | D1 | `alloc_waiter_` is one slot: two requesters (playback, draw, spice) overwrite each other; one waits the full 2 s | CODE |
-| D2 | Reclaim waits (2 s) are shorter than an HA picture fetch (15 s HTTP); a video start during one can fail with BUFFER_ALLOCATION_FAILED | CODE |
+| D2 | Reclaim waits (2 s) are shorter than an HA picture fetch (`http_request` timeout, device: 15 s); a video start during one can fail with BUFFER_ALLOCATION_FAILED | CODE |
 | D3 | `media_lock_` held during the 2 s waits (up to 3 allocations = 6 s) | CODE |
 | D4 | `dev_lock_` held across blocking socket sends while the main loop waits portMAX on it (U:592-609, 1190-1205 vs 307, 331) | CODE |
 | D5 | `stream_play_audio_` reachable from net task and spice task without a lock | PLAUSIBLE |

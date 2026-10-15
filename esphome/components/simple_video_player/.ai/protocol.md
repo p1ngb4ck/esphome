@@ -46,7 +46,7 @@ u32 = frame_id (low 10 bits) | payload size (high 22 bits).
 | 'R' | seq | echo answer |
 | 'E' | 1/0 | AVI playback ended |
 
-## 2. HTTP, panel -> relay (channel task, Bearer token, 15 s, <=256 KiB, 200 only)
+## 2. HTTP, panel -> relay (channel task, `http_request` component and its timeout, Bearer token, <=256 KiB, 200 only)
 
 | Endpoint | Request | Response |
 |---|---|---|
