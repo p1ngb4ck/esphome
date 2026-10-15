@@ -80,6 +80,9 @@ void SimpleVideoPlayer::setup_media_player_() {
 #endif
   this->build_media_traits_();
   this->media_player_->add_on_state_callback([this](media_player::MediaPlayerState state) {
+#if defined(SVP_AUDIO_FILES) && defined(SVP_CHANNEL_LIST)
+    this->audio_remote_player_(state);
+#endif
 #ifdef SVP_SPICE
     // A SPICE session's sound comes first on the device they share.
     if ((state == media_player::MEDIA_PLAYER_STATE_PLAYING || state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING) &&

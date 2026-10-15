@@ -683,7 +683,25 @@ void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
   xTaskNotifyGive(this->task_handle_);
 }
 
+PlayerState SimpleVideoPlayer::get_state() const {
+  const PlayerState state = this->state_.load(std::memory_order_acquire);
+#if defined(SVP_AUDIO_FILES) && defined(SVP_MEDIA_PLAYER) && defined(SVP_CHANNEL_LIST)
+  if (state == PlayerState::STOPPED && this->media_player_ != nullptr &&
+      this->audio_remote_.load(std::memory_order_acquire) == AUDIO_REMOTE_PLAYING) {
+    if (this->media_player_->state == media_player::MEDIA_PLAYER_STATE_PLAYING)
+      return PlayerState::PLAYING;
+    if (this->media_player_->state == media_player::MEDIA_PLAYER_STATE_PAUSED)
+      return PlayerState::PAUSED;
+  }
+#endif
+  return state;
+}
+
 void SimpleVideoPlayer::pause() {
+#if defined(SVP_AUDIO_FILES) && defined(SVP_MEDIA_PLAYER) && defined(SVP_CHANNEL_LIST)
+  if (this->audio_remote_command_(media_player::MEDIA_PLAYER_COMMAND_PAUSE))
+    return;
+#endif
   PlayerState expected = PlayerState::PLAYING;
   if (this->state_.compare_exchange_strong(expected, PlayerState::PAUSED, std::memory_order_acq_rel)) {
     this->note_state_();
@@ -696,6 +714,10 @@ void SimpleVideoPlayer::pause() {
 }
 
 void SimpleVideoPlayer::resume() {
+#if defined(SVP_AUDIO_FILES) && defined(SVP_MEDIA_PLAYER) && defined(SVP_CHANNEL_LIST)
+  if (this->audio_remote_command_(media_player::MEDIA_PLAYER_COMMAND_PLAY))
+    return;
+#endif
 #if defined(SVP_DSI_OUTPUT) && defined(SVP_USE_LVGL)
   if (this->paused_ui_) {
     // LVGL draws the paused UI onto the panel. resume() may be running inside an LVGL event (a
@@ -717,6 +739,9 @@ void SimpleVideoPlayer::resume() {
 }
 
 void SimpleVideoPlayer::stop() {
+#if defined(SVP_AUDIO_FILES) && defined(SVP_MEDIA_PLAYER) && defined(SVP_CHANNEL_LIST)
+  this->audio_remote_command_(media_player::MEDIA_PLAYER_COMMAND_STOP);
+#endif
   this->start_pending_.store(false, std::memory_order_release);
   this->end_session_();
 }
@@ -2896,6 +2921,9 @@ void SimpleVideoPlayer::audio_start_(size_t pos) {
     return;
   }
 #endif
+#if defined(SVP_MEDIA_PLAYER) && defined(SVP_CHANNEL_LIST)
+  this->audio_remote_command_(media_player::MEDIA_PLAYER_COMMAND_STOP);  // a Home Assistant track before
+#endif
   this->audio_pos_ = pos;
   this->audio_current_ = true;
   this->start_pending_.store(false, std::memory_order_release);
@@ -3043,6 +3071,7 @@ void SimpleVideoPlayer::audio_advance_() {
   } else {
     // The end of the queue: what the speaker still holds plays out.
     this->audio_current_ = false;
+    this->audio_remote_.store(AUDIO_REMOTE_NONE, std::memory_order_release);
     if (this->file_speaker_open_) {
       this->file_speaker_->finish();
       this->file_speaker_open_ = false;

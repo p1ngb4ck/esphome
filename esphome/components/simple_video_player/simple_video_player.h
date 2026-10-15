@@ -704,10 +704,11 @@ class SimpleVideoPlayer : public Component
   // State Query
   //========================================================================
 
-  PlayerState get_state() const { return this->state_; }
-  bool is_playing() const { return this->state_ == PlayerState::PLAYING; }
-  bool is_paused() const { return this->state_ == PlayerState::PAUSED; }
-  bool is_stopped() const { return this->state_ == PlayerState::STOPPED; }
+  /// A Home Assistant track of the audio queue plays on the media player: its state then.
+  PlayerState get_state() const;
+  bool is_playing() const { return this->get_state() == PlayerState::PLAYING; }
+  bool is_paused() const { return this->get_state() == PlayerState::PAUSED; }
+  bool is_stopped() const { return this->get_state() == PlayerState::STOPPED; }
   PlaybackError get_last_error() const { return this->last_error_; }
   const std::string &get_current_file() const { return this->video_path_; }
   /// Whether what shows came over the network (an svp_relay AVI or udisp rectangles) rather than
@@ -952,6 +953,12 @@ class SimpleVideoPlayer : public Component
                      uint8_t *into = nullptr, size_t into_cap = 0);
   void ha_browse_task_();
   void ha_play_request_(const std::string &id);
+#if defined(SVP_AUDIO_FILES) && defined(SVP_MEDIA_PLAYER)
+  // The media player's state: the queue's Home Assistant track started, or ended (the queue goes on).
+  void audio_remote_player_(media_player::MediaPlayerState state);
+  // Its track asked to stop, pause or play on.
+  bool audio_remote_command_(media_player::MediaPlayerCommand command);
+#endif
   void image_task_();
   void options_get_task_();
   void options_set_task_();

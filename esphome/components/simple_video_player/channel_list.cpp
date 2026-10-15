@@ -85,6 +85,37 @@ void SimpleVideoPlayer::ha_play(const std::string &id) {
   this->ha_play_request_(id);
 }
 
+#if defined(SVP_AUDIO_FILES) && defined(SVP_MEDIA_PLAYER)
+void SimpleVideoPlayer::audio_remote_player_(media_player::MediaPlayerState state) {
+  const uint8_t remote = this->audio_remote_.load(std::memory_order_acquire);
+  if (remote == AUDIO_REMOTE_NONE)
+    return;
+  if (remote == AUDIO_REMOTE_ASKED && state == media_player::MEDIA_PLAYER_STATE_PLAYING) {
+    this->audio_remote_.store(AUDIO_REMOTE_PLAYING, std::memory_order_release);
+  } else if (remote == AUDIO_REMOTE_PLAYING && state == media_player::MEDIA_PLAYER_STATE_IDLE) {
+    this->audio_advance_req_.store(true, std::memory_order_release);  // played to its end: loop() goes on
+  }
+  this->audio_changed_.store(true, std::memory_order_release);
+}
+
+bool SimpleVideoPlayer::audio_remote_command_(media_player::MediaPlayerCommand command) {
+  if (this->media_player_ == nullptr)
+    return false;
+  if (command == media_player::MEDIA_PLAYER_COMMAND_STOP) {
+    // Not the end of the track: the queue stays where it is.
+    if (this->audio_remote_.exchange(AUDIO_REMOTE_NONE, std::memory_order_acq_rel) == AUDIO_REMOTE_NONE)
+      return false;
+    this->audio_advance_req_.store(false, std::memory_order_release);
+    this->audio_changed_.store(true, std::memory_order_release);
+  } else if (this->audio_remote_.load(std::memory_order_acquire) != AUDIO_REMOTE_PLAYING ||
+             this->state_.load(std::memory_order_acquire) != PlayerState::STOPPED) {
+    return false;
+  }
+  this->media_player_->make_call().set_command(command).perform();
+  return true;
+}
+#endif
+
 void SimpleVideoPlayer::ha_play_request_(const std::string &id) {
   if (this->channel_lock_ == nullptr || id.empty())
     return;
