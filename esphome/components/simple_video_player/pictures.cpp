@@ -31,6 +31,10 @@ static std::string lower(std::string text) {
 }
 
 static bool picture_format(const std::string &name, runtime_image::ImageFormat *format) {
+  if (name.rfind("media-source://", 0) == 0) {
+    *format = runtime_image::JPEG;  // Home Assistant's: the relay sends a JPEG
+    return true;
+  }
   const size_t dot = name.rfind('.');
   if (dot == std::string::npos)
     return false;
@@ -75,6 +79,10 @@ void SimpleVideoPlayer::pictures_setup_() {
   const int32_t dh = std::max(lv_display_get_vertical_resolution(display), this->pic_h_);
   this->pic_page_bytes_ =
       align_up(static_cast<size_t>(lv_draw_buf_width_to_stride(dw, LV_COLOR_FORMAT_RGB565)) * dh, PsramPool::ALIGN);
+#ifdef SVP_CHANNEL_LIST
+  this->pic_remote_w_ = dw;
+  this->pic_remote_h_ = dh;
+#endif
 #if defined(USE_RUNTIME_IMAGE_PNG) || defined(USE_RUNTIME_IMAGE_BMP)
   this->pic_image_ = std::make_unique<runtime_image::RuntimeImage>(runtime_image::AUTO, image::IMAGE_TYPE_RGB565,
                                                                    image::TRANSPARENCY_OPAQUE);
@@ -251,6 +259,10 @@ bool SimpleVideoPlayer::set_current_directory(size_t index) {
 void SimpleVideoPlayer::refresh_images() {
   if (this->pic_dir_.empty())
     return;
+#ifdef SVP_CHANNEL_LIST
+  if (this->pic_dir_.rfind("media-source://", 0) == 0)
+    return;  // a Home Assistant folder: listed by ha_browse()
+#endif
   if (this->pic_select_.empty()) {
     if (const ImageEntry *entry = this->get_current_image())
       this->pic_select_ = entry->path.c_str();
@@ -349,6 +361,40 @@ bool SimpleVideoPlayer::show_image(const std::string &path) {
   this->pic_select_ = path;
   return this->open_directory(path.substr(0, slash));
 }
+
+#ifdef SVP_CHANNEL_LIST
+bool SimpleVideoPlayer::ha_show_pictures(size_t index) {
+  if (!this->pic_ready_ || index >= this->ha_items_.size() || this->ha_items_[index].dir)
+    return false;
+  PsramVector<ImageEntry> found;
+  int show = -1;
+  for (size_t i = 0; i < this->ha_items_.size() && found.size() < MAX_IMAGES; i++) {
+    const HaItem &item = this->ha_items_[i];
+    if (item.dir)
+      continue;
+    if (i == index)
+      show = static_cast<int>(found.size());
+    found.push_back(ImageEntry{item.id, item.title, 0});
+  }
+  if (show < 0)
+    return false;
+  this->pic_dir_ = this->ha_id_.c_str();
+  this->pic_dir_index_ = SIZE_MAX;
+  this->pic_list_pending_ = false;
+  this->pic_select_.clear();
+  this->pic_generation_++;  // a read in flight belongs to the old list
+  this->images_ = std::move(found);
+  for (ThumbSlot &slot : this->thumb_slots_) {
+    slot.image = -1;
+    slot.loaded = false;
+  }
+  this->current_image_ = -1;
+  this->pic_wanted_ = -1;
+  this->picture_callbacks_.call();
+  this->place_thumbnail_window_(static_cast<size_t>(show));
+  return this->show_image(static_cast<size_t>(show));
+}
+#endif
 
 bool SimpleVideoPlayer::next_image() {
   if (this->images_.empty())
@@ -554,6 +600,38 @@ void SimpleVideoPlayer::start_read_(bool thumbnail, size_t index, size_t slot, b
     return;
   }
   const ImageEntry &entry = this->images_[index];
+#ifdef SVP_CHANNEL_LIST
+  if (remote_image_(entry)) {
+    // Home Assistant's: fetched by the channel task, the relay fitting it into the file's room.
+    PicFile *file = this->free_file_();
+    if (file == nullptr || !this->reserve_file_(file, PICTURE_STEP)) {
+      ESP_LOGW(TAG, "%s: no room in the PSRAM pool for the file", entry.filename.c_str());
+      if (!thumbnail && !preload)
+        this->pic_wanted_ = -1;
+      return;
+    }
+    file->index = -1;
+    file->length = 0;
+    PictureRead &read = this->pic_read_;
+    read = PictureRead{};
+    read.active = true;
+    read.thumbnail = thumbnail;
+    read.preload = preload;
+    read.index = index;
+    read.slot = slot;
+    read.generation = this->pic_generation_;
+    read.file = file;
+    read.limit = file->capacity - 16;  // room past it for the decoder, as with a file
+    xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
+    this->pic_remote_id_ = entry.path;
+    xSemaphoreGive(this->channel_lock_);
+    if (!this->channel_request_(CHANNEL_CMD_IMAGE, 0)) {
+      read.failed = true;  // the task's queue is full: not read this time
+      read.done = true;
+    }
+    return;
+  }
+#endif
   const char *why = nullptr;
   const char *rel = nullptr;
   storage::PathStorage *storage = nullptr;

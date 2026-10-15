@@ -253,6 +253,7 @@ void SimpleVideoPlayer::loop() {
   this->run_pending_start_();
 #ifdef SVP_CHANNEL_LIST
   this->channel_loop_();
+  this->ha_loop_();
 #endif
 #ifdef SVP_PICTURES
   this->pictures_loop_();

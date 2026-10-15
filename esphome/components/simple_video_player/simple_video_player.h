@@ -448,6 +448,44 @@ class SimpleVideoPlayer : public Component
   uint32_t get_channel_list_version() const { return this->channel_version_; }
   // The channel played last, -1 for none.
   int get_channel_index() const { return this->channel_index_; }
+
+  // Home Assistant media through svp_relay: the media sources that have a type ("audio", "video",
+  // "image"; id empty) or a folder of one, listed for the main loop (add_on_ha_browse_callback); a
+  // sound or video played through the relay, pictures shown on the picture canvas like local ones.
+  struct HaItem {
+    PsramString title;
+    PsramString id;
+    bool dir{false};
+  };
+  void ha_browse(const std::string &type, const std::string &id);
+  // The sources of a type, listed last; whether the callback is for them (else for a folder).
+  const PsramVector<HaItem> &ha_source_items() const { return this->ha_src_items_; }
+  const PsramString &ha_sources_type() const { return this->ha_src_type_; }
+  bool ha_sources_listed() const { return this->ha_src_ok_; }
+  bool ha_last_sources() const { return this->ha_last_sources_; }
+  // The folder listed last.
+  const PsramVector<HaItem> &ha_items() const { return this->ha_items_; }
+  const PsramString &ha_type() const { return this->ha_type_; }
+  const PsramString &ha_id() const { return this->ha_id_; }
+  const PsramString &ha_title() const { return this->ha_title_; }
+  const PsramString &ha_path() const { return this->ha_path_; }
+  const PsramString &ha_parent() const { return this->ha_parent_; }  // empty: none
+  bool ha_listed() const { return this->ha_ok_; }  // false: the last listing failed
+  void ha_play(const std::string &id);
+  // The pictures of the folder listed, from ha_items()[index] on.
+  bool ha_show_pictures(size_t index);
+  void add_on_ha_browse_callback(std::function<void()> &&callback) { this->ha_callbacks_.add(std::move(callback)); }
+
+  // This panel's settings in svp_relay (its options in Home Assistant), read and changed here.
+  void relay_options_fetch();
+  bool relay_options_ok() const { return this->opt_ok_; }
+  std::string relay_option(const std::string &key) const;
+  // The values a setting takes, one per line (an LVGL dropdown's options); empty: free.
+  std::string relay_choices(const std::string &key) const;
+  void relay_option_set(const std::string &key, const std::string &value);
+  void add_on_relay_options_callback(std::function<void()> &&callback) {
+    this->opt_callbacks_.add(std::move(callback));
+  }
 #endif
 
   //========================================================================
@@ -836,18 +874,34 @@ class SimpleVideoPlayer : public Component
   static void stream_wake_cb_(void *arg) { static_cast<SimpleVideoPlayer *>(arg)->stream_wake_(); }
   int stream_wake_fd_{-1};
 #ifdef SVP_CHANNEL_LIST
-  enum : uint8_t { CHANNEL_CMD_REFRESH, CHANNEL_CMD_PLAY, CHANNEL_CMD_STOP };
+  enum : uint8_t {
+    CHANNEL_CMD_REFRESH,
+    CHANNEL_CMD_PLAY,
+    CHANNEL_CMD_STOP,
+    CHANNEL_CMD_HA_BROWSE,
+    CHANNEL_CMD_HA_PLAY,
+    CHANNEL_CMD_IMAGE,
+    CHANNEL_CMD_OPTIONS_GET,
+    CHANNEL_CMD_OPTIONS_SET,
+  };
   struct ChannelCmd {
     uint8_t cmd;
     uint16_t index;
   };
   bool setup_channel_list_();
-  void channel_request_(uint8_t cmd, uint16_t index);
+  bool channel_request_(uint8_t cmd, uint16_t index);
   void channel_loop_();
+  void ha_loop_();
   static void channel_task_entry_(void *param);
   void channel_task_loop_();
   /// Blocking HTTP to the relay (channel task only). response: PSRAM buffer, caller frees.
-  bool channel_http_(const char *path, const char *body, char **response, size_t *response_len);
+  bool channel_http_(const char *path, const char *body, char **response, size_t *response_len,
+                     uint8_t *into = nullptr, size_t into_cap = 0);
+  void ha_browse_task_();
+  void image_task_();
+  void options_get_task_();
+  void options_set_task_();
+  static bool remote_image_(const ImageEntry &entry);
 #endif
 #ifdef USE_AUDIO
   /// PCM payload bytes from the sender (network task): converted to the speaker's channel count and
@@ -1723,6 +1777,27 @@ class SimpleVideoPlayer : public Component
   bool channel_requested_once_{false};
   uint32_t channel_version_{0};
   int channel_index_{-1};
+  // Home Assistant media (channel_lock_ for what the task and the main loop share).
+  PsramVector<std::pair<PsramString, PsramString>> ha_reqs_;  // type, id: listings asked for, in turn
+  PsramString ha_play_id_;
+  PsramVector<HaItem> ha_src_items_, ha_new_src_items_;
+  PsramString ha_src_type_, ha_new_src_type_;
+  bool ha_src_ok_{false}, ha_new_src_ok_{false}, ha_last_sources_{false};
+  std::atomic<bool> ha_new_src_{false};
+  PsramVector<HaItem> ha_items_, ha_new_items_;
+  PsramString ha_type_, ha_id_, ha_title_, ha_path_, ha_parent_;
+  PsramString ha_new_type_, ha_new_id_, ha_new_title_, ha_new_path_, ha_new_parent_;
+  bool ha_ok_{false}, ha_new_ok_{false};
+  std::atomic<bool> ha_new_{false};
+  CallbackManager<void()> ha_callbacks_;
+  PsramString pic_remote_id_;     // the picture the task fetches into pic_read_.file
+  int32_t pic_remote_w_{0}, pic_remote_h_{0};  // no larger than the display (the relay fits it)
+  // svp_relay settings: key and value, key and choices (one per line); sets waiting for the task.
+  PsramVector<std::pair<PsramString, PsramString>> opt_values_, opt_new_values_, opt_choices_, opt_new_choices_,
+      opt_sets_;
+  bool opt_ok_{false}, opt_new_ok_{false};
+  std::atomic<bool> opt_new_{false};
+  CallbackManager<void()> opt_callbacks_;
 #endif
 
   jpeg_decoder_handle_t hw_jpeg_decoder_{nullptr};
