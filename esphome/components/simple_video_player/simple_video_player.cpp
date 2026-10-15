@@ -2054,11 +2054,13 @@ bool SimpleVideoPlayer::plan_pool_() {
     this->stream_max_frame_bytes_ = pool_round(this->frame_bytes_ / 4);
     fixed += STREAM_FRAME_COUNT * static_cast<size_t>(this->stream_max_frame_bytes_) + pool_round(STREAM_RECV_BYTES);
 #ifdef SVP_SPICE
-    fixed += pool_round(sizeof(SpiceState)) + pool_round(STREAM_FRAME_COUNT * SPICE_MAX_CLIPS * sizeof(StreamRect)) +
-             pool_round(sizeof(SpiceCursor)) + pool_round(SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape)) +
+    fixed += pool_round(sizeof(SpiceState)) + pool_round(sizeof(SpiceCursor)) + pool_round(SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape)) +
              2 * pool_round(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3) +
              pool_round(this->spice_saved_count_ * sizeof(SpiceSaved)) +
              pool_round(this->spice_saved_count_ * sizeof(ESPPreferenceObject));
+    if (!this->spice_file_path_.empty())
+      fixed += pool_round(this->spice_saved_count_ * SPICE_SAVED_USB * sizeof(SpiceSavedUsb)) +
+               pool_round(this->spice_file_bytes_());
 #endif
 #ifdef USE_AUDIO
     if (this->speaker_ != nullptr)

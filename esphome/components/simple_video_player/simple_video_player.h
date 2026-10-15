@@ -1604,23 +1604,14 @@ class SimpleVideoPlayer : public Component
 #endif
 
 #ifdef SVP_STREAM
-  struct StreamRect {
-    int16_t x, y, w, h;
-  };
-  enum : uint8_t { STREAM_PICTURE_JPEG = 0, STREAM_PICTURE_BGRX = 1 };
   struct StreamFrame {
     uint8_t *data{nullptr};
     size_t capacity{0};
-    int32_t x{0}, y{0};  // the picture's top left on the output (off it for a clipped SPICE picture)
+    int32_t x{0}, y{0};  // the picture's top left on the output
     uint16_t w{0}, h{0};
     uint32_t total{0};
     uint32_t received{0};
     bool direct{false};  // for the display, else the canvas page
-    uint8_t kind{STREAM_PICTURE_JPEG};
-    uint32_t stride{0};      // STREAM_PICTURE_BGRX: bytes per row
-    bool bottom_up{false};   // STREAM_PICTURE_BGRX: the last row first
-    uint8_t clip_count{0};   // 0: all of the picture; else only these parts (output coordinates)
-    StreamRect *clips{nullptr};
   };
   static constexpr uint8_t STREAM_FRAME_COUNT = 4;
   static constexpr size_t STREAM_RECV_BYTES = 32768;     // one recv(), into stream_recv_buf_ (pool)
@@ -1677,26 +1668,14 @@ class SimpleVideoPlayer : public Component
   uint32_t stream_stats_ms_{0};                // the last report (network task)
 #endif
 #ifdef SVP_SPICE
-  static constexpr uint8_t SPICE_MAX_CLIPS = 16;
-  static constexpr uint8_t SPICE_MAX_STREAMS = 64;  // SPICE_MAX_NUM_STREAMS
   static constexpr size_t SPICE_SCRATCH_BYTES = 20480;  // internal RAM: a 64x64 cursor's message fits
-  struct SpiceStreamInfo {
-    bool used;
-    bool top_down;
-    int32_t left, top, right, bottom;  // where its pictures go
-    uint32_t width, height;            // its pictures' size
-    uint8_t clip_count;                // 0: all of dest
-    StreamRect clips[SPICE_MAX_CLIPS];
-  };
   struct SpiceState {
     char host[64];
     char password[61];  // SPICE_MAX_PASSWORD_LENGTH + 1
     uint16_t port;
-    SpiceStreamInfo streams[SPICE_MAX_STREAMS];
   };
   SpiceState *spice_{nullptr};          // PSRAM pool
-  uint8_t *spice_scratch_{nullptr};     // PSRAM pool: messages other than pictures
-  StreamRect *spice_clips_{nullptr};    // PSRAM pool: SPICE_MAX_CLIPS per stream frame
+  uint8_t *spice_scratch_{nullptr};     // internal RAM: the session's messages
   SemaphoreHandle_t spice_lock_{nullptr};  // spice_->host/password/port
   TaskHandle_t spice_task_{nullptr};
   int spice_wake_fd_{-1};

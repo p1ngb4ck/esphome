@@ -6,11 +6,6 @@
 // on the speaker, and USB devices redirected through its usbredir channels (select/spice_usb.cpp). The
 // wire layouts follow spice-protocol (spice/protocol.h, spice/enums.h) and the demarshallers
 // spice-common's spice_codegen.py generates from spice.proto; the behaviour spice-gtk's channels.
-//
-// Pictures drawn: JPEG and JPEG_ALPHA (its JPEG part) of DRAW_COPY, MJPEG streams, and plain 32-bit
-// bitmaps. The client asks for QUIC compression, which the server turns into JPEG where it may be
-// lossy -- with jpeg-wan-compression=always (dcc_compress_image()). Other images (QUIC, LZ, GLZ, LZ4)
-// are not drawn. The desktop is drawn as it comes: it should be the output's size.
 
 #include "simple_video_player.h"
 
@@ -68,8 +63,6 @@ constexpr uint32_t COMMON_CAP_AUTH_SELECTION = 1u << 0;
 constexpr uint32_t COMMON_CAP_AUTH_SPICE = 1u << 1;
 constexpr uint32_t COMMON_CAP_MINI_HEADER = 1u << 3;
 constexpr uint32_t AUTH_SPICE = 1;  // SPICE_COMMON_CAP_AUTH_SPICE
-// No MULTI_CODEC: the server then streams MJPEG only (dcc_create_video_encoder()).
-constexpr uint32_t DISPLAY_CAPS = (1u << 0) | (1u << 6);  // SIZED_STREAM, PREF_COMPRESSION
 constexpr uint32_t LINK_ERR_NEED_SECURED = 5;
 constexpr uint32_t LINK_ERR_PERMISSION_DENIED = 7;
 
@@ -121,54 +114,14 @@ constexpr uint16_t MSGC_SPICEVMC_DATA = 101;
 constexpr uint8_t BUTTON_LEFT = 1, BUTTON_MIDDLE = 2, BUTTON_RIGHT = 3, BUTTON_UP = 4, BUTTON_DOWN = 5, BUTTON_SIDE = 6,
                   BUTTON_EXTRA = 7;
 constexpr uint16_t button_mask(uint8_t button) { return static_cast<uint16_t>(1u << (button - 1)); }
-constexpr uint16_t MSG_DISPLAY_COPY_BITS = 104;
-constexpr uint16_t MSG_DISPLAY_STREAM_CREATE = 122;
-constexpr uint16_t MSG_DISPLAY_STREAM_DATA = 123;
-constexpr uint16_t MSG_DISPLAY_STREAM_CLIP = 124;
-constexpr uint16_t MSG_DISPLAY_STREAM_DESTROY = 125;
-constexpr uint16_t MSG_DISPLAY_STREAM_DESTROY_ALL = 126;
-constexpr uint16_t MSG_DISPLAY_DRAW_FILL = 302;
-constexpr uint16_t MSG_DISPLAY_DRAW_COPY = 304;
-constexpr uint16_t MSG_DISPLAY_DRAW_LAST = 313;  // DRAW_ALPHA_BLEND
-constexpr uint16_t MSG_DISPLAY_SURFACE_CREATE = 314;
-constexpr uint16_t MSG_DISPLAY_SURFACE_DESTROY = 315;
-constexpr uint16_t MSG_DISPLAY_STREAM_DATA_SIZED = 316;
-constexpr uint16_t MSG_DISPLAY_DRAW_COMPOSITE = 318;
-constexpr uint16_t MSGC_DISPLAY_INIT = 101;
-constexpr uint16_t MSGC_DISPLAY_PREFERRED_COMPRESSION = 103;
-
-constexpr uint8_t IMAGE_TYPE_BITMAP = 0;
-constexpr uint8_t IMAGE_TYPE_JPEG = 105;
-constexpr uint8_t IMAGE_TYPE_JPEG_ALPHA = 108;
-constexpr uint8_t BITMAP_FMT_32BIT = 8;
-constexpr uint8_t BITMAP_FMT_RGBA = 9;
-constexpr uint8_t BITMAP_FLAGS_PAL_FROM_CACHE = 1u << 1;
-constexpr uint8_t BITMAP_FLAGS_TOP_DOWN = 1u << 2;
-constexpr uint16_t ROPD_OP_PUT = 1u << 3;
-constexpr uint8_t CLIP_TYPE_RECTS = 1;
-constexpr uint8_t STREAM_FLAGS_TOP_DOWN = 1u << 0;
-constexpr uint8_t VIDEO_CODEC_MJPEG = 1;
-constexpr uint8_t IMAGE_COMPRESSION_QUIC = 4;
-constexpr uint32_t SURFACE_FLAGS_PRIMARY = 1u << 0;
-
 constexpr uint32_t CONNECT_TIMEOUT_S = 5;
 constexpr uint32_t RECV_TIMEOUT_S = 30;
 constexpr uint32_t SEND_TIMEOUT_S = 10;
 constexpr uint32_t TAKEOVER_WAIT_MS = 3000;
-constexpr uint32_t FRAME_WAIT_MS = 100;
 
 // Warned once a session.
 enum : uint32_t {
-  WARN_IMAGE = 1u << 0,
-  WARN_DRAW = 1u << 1,
-  WARN_SCALED = 1u << 2,
-  WARN_TOO_LARGE = 1u << 3,
-  WARN_CLIPS = 1u << 4,
-  WARN_COPY_BITS = 1u << 5,
-  WARN_CODEC = 1u << 6,
-  WARN_BOTTOM_UP = 1u << 7,
   WARN_SUB_LIST = 1u << 8,
-  WARN_SURFACE = 1u << 9,
   WARN_CURSOR = 1u << 10,
   WARN_CURSOR_CACHE = 1u << 11,
   WARN_SOUND = 1u << 12,
@@ -192,19 +145,6 @@ inline uint64_t rd64(const uint8_t *p) { return rd32(p) | (static_cast<uint64_t>
 inline void put64(uint8_t *p, uint64_t v) {
   for (int i = 0; i < 8; i++)
     p[i] = static_cast<uint8_t>(v >> (8 * i));
-}
-
-struct Rect {
-  int32_t left, top, right, bottom;
-  bool empty() const { return right <= left || bottom <= top; }
-  Rect cut(const Rect &o) const {
-    return {std::max(left, o.left), std::max(top, o.top), std::min(right, o.right), std::min(bottom, o.bottom)};
-  }
-};
-// SpiceRect on the wire: top, left, bottom, right.
-inline Rect rd_rect(const uint8_t *p) {
-  return {static_cast<int32_t>(rd32(p + 4)), static_cast<int32_t>(rd32(p)), static_cast<int32_t>(rd32(p + 12)),
-          static_cast<int32_t>(rd32(p + 8))};
 }
 
 bool send_all(int fd, const uint8_t *data, size_t len) {
@@ -414,11 +354,9 @@ int connect_to(const struct sockaddr_in &addr) {
 class SpiceSession {
  public:
   using StreamFrame = SimpleVideoPlayer::StreamFrame;
-  using StreamRect = SimpleVideoPlayer::StreamRect;
 #ifdef SVP_STREAM_TOUCH
   using StreamTouch = SimpleVideoPlayer::StreamTouch;
 #endif
-  using SpiceStreamInfo = SimpleVideoPlayer::SpiceStreamInfo;
   using SpiceCursorShape = SimpleVideoPlayer::SpiceCursorShape;
 
   explicit SpiceSession(SimpleVideoPlayer *player) : p_(player) {}
@@ -448,19 +386,10 @@ class SpiceSession {
   bool handle_one_(Channel &ch);
   bool handle_message_(Channel &ch, uint16_t type, const uint8_t *body, uint32_t size);
   bool handle_list_(Channel &ch, const uint8_t *body, uint32_t size);
-  bool handle_picture_(Channel &ch, uint16_t type, uint32_t size, const uint8_t *body);
   bool handle_channels_(const uint8_t *body, uint32_t size);
   bool open_display_();
-  bool open_display_here_();
   bool take_panel_();
   void release_panel_();
-  bool draw_copy_(StreamFrame *f, uint32_t size);
-  bool stream_data_(StreamFrame *f, uint32_t size, bool sized);
-  void stream_create_(const uint8_t *body, uint32_t size);
-  void stream_clip_(SpiceStreamInfo &stream, const uint8_t *clip, const uint8_t *end);
-  bool parts_(StreamFrame *f, const Rect &area, const uint8_t *wire_rects, uint32_t wire_count,
-              const StreamRect *stored, uint8_t stored_count);
-  bool fits_output_(uint32_t w, uint32_t h) const;
   // Inputs.
   bool inputs_pending_();
 #ifdef SVP_STREAM_INPUT
@@ -498,7 +427,6 @@ class SpiceSession {
 
   SimpleVideoPlayer *p_;
   Channel main_;
-  Channel display_;
   Channel inputs_;
   Channel cursor_;
   Channel playback_;
@@ -512,7 +440,6 @@ class SpiceSession {
   uint16_t port_{0};
   bool channels_done_{false};
   uint32_t session_id_{0};
-  int64_t surface_id_{-1};
   uint32_t out_w_{0}, out_h_{0};
   bool direct_{false};
   uint32_t warned_{0};
@@ -674,255 +601,6 @@ bool SpiceSession::skip_(Channel &ch, uint32_t len) {
   return true;
 }
 
-bool SpiceSession::fits_output_(uint32_t w, uint32_t h) const {
-  // Decoded rows and columns come padded to 16 into an output-sized buffer.
-  return ((w + 15) & ~15u) * ((h + 15) & ~15u) <= ((this->out_w_ + 15) & ~15u) * ((this->out_h_ + 15) & ~15u);
-}
-
-// The parts of a picture that show: area (where it goes), cut by the clip rectangles (on the wire or
-// a stream's), the output and the picture itself. false: none.
-bool SpiceSession::parts_(StreamFrame *f, const Rect &area, const uint8_t *wire_rects, uint32_t wire_count,
-                          const StreamRect *stored, uint8_t stored_count) {
-  const Rect picture{f->x, f->y, f->x + f->w, f->y + f->h};
-  const Rect output{0, 0, static_cast<int32_t>(this->out_w_), static_cast<int32_t>(this->out_h_)};
-  const Rect base = area.cut(picture).cut(output);
-  f->clip_count = 0;
-  if (base.empty())
-    return false;
-  auto add = [f, &base](const Rect &r) {
-    const Rect part = r.cut(base);
-    if (part.empty())
-      return true;
-    if (f->clip_count == SimpleVideoPlayer::SPICE_MAX_CLIPS)
-      return false;
-    f->clips[f->clip_count++] = {static_cast<int16_t>(part.left), static_cast<int16_t>(part.top),
-                                 static_cast<int16_t>(part.right - part.left),
-                                 static_cast<int16_t>(part.bottom - part.top)};
-    return true;
-  };
-  bool all_fit = true;
-  if (wire_rects != nullptr) {
-    for (uint32_t i = 0; i < wire_count && all_fit; i++)
-      all_fit = add(rd_rect(wire_rects + 16 * i));
-  } else if (stored != nullptr && stored_count > 0) {
-    for (uint8_t i = 0; i < stored_count && all_fit; i++)
-      all_fit = add({stored[i].x, stored[i].y, stored[i].x + stored[i].w, stored[i].y + stored[i].h});
-  } else {
-    add(base);
-  }
-  if (!all_fit) {
-    if (this->first_(WARN_CLIPS))
-      ESP_LOGW(TAG, "A picture in more than %u parts: drawn whole (it may cover a window over it)",
-               SimpleVideoPlayer::SPICE_MAX_CLIPS);
-    f->clip_count = 0;
-    add(base);
-  }
-  return f->clip_count > 0;
-}
-
-// DRAW_COPY: DisplayBase, then Copy (src_bitmap, src_area, rop_descriptor, scale_mode, mask).
-bool SpiceSession::draw_copy_(StreamFrame *f, uint32_t size) {
-  const uint8_t *b = f->data;
-  if (size < 21 || static_cast<int64_t>(rd32(b)) != this->surface_id_)
-    return false;  // an off-screen surface: not shown
-  const Rect box = rd_rect(b + 4);
-  uint32_t at = 21, clip_count = 0;
-  const uint8_t *clips = nullptr;
-  if (b[20] == CLIP_TYPE_RECTS) {
-    if (size < 25)
-      return false;
-    clip_count = rd32(b + 21);
-    if (clip_count > (size - 25) / 16)
-      return false;
-    clips = b + 25;
-    at = 25 + 16 * clip_count;
-  }
-  if (at + 36 > size)
-    return false;
-  const uint32_t image = rd32(b + at);
-  const Rect src = rd_rect(b + at + 4);
-  if (rd16(b + at + 20) != ROPD_OP_PUT || rd32(b + at + 32) != 0) {
-    if (this->first_(WARN_DRAW))
-      ESP_LOGW(TAG, "A masked or blended copy is not drawn");
-    return false;
-  }
-  if (box.right - box.left != src.right - src.left || box.bottom - box.top != src.bottom - src.top) {
-    if (this->first_(WARN_SCALED))
-      ESP_LOGW(TAG, "A scaled copy is not drawn");
-    return false;
-  }
-  if (image == 0 || image > size || size - image < 18)
-    return false;
-  const uint8_t *img = b + image;
-  const uint8_t type = img[8];
-  const uint32_t w = rd32(img + 10), h = rd32(img + 14);
-  if (w == 0 || h == 0 || w > 0x7FFF || h > 0x7FFF)
-    return false;
-  uint32_t data_at, data_len;
-  if (type == IMAGE_TYPE_JPEG) {
-    if (size - image < 22)
-      return false;
-    data_len = rd32(img + 18);
-    data_at = image + 22;
-    f->kind = SimpleVideoPlayer::STREAM_PICTURE_JPEG;
-  } else if (type == IMAGE_TYPE_JPEG_ALPHA) {
-    // The JPEG, then the alpha plane (LZ): a desktop is opaque, the JPEG is all of it.
-    if (size - image < 27)
-      return false;
-    data_len = rd32(img + 19);
-    data_at = image + 27;
-    f->kind = SimpleVideoPlayer::STREAM_PICTURE_JPEG;
-  } else if (type == IMAGE_TYPE_BITMAP) {
-    if (size - image < 32)
-      return false;
-    const uint8_t format = img[18], flags = img[19];
-    const uint32_t stride = rd32(img + 28);
-    if (format != BITMAP_FMT_32BIT && format != BITMAP_FMT_RGBA) {
-      if (this->first_(WARN_IMAGE))
-        ESP_LOGW(TAG, "Bitmaps of format %u are not drawn", format);
-      return false;
-    }
-    if (rd32(img + 20) != w || rd32(img + 24) != h || stride < 4 * w)
-      return false;
-    data_at = image + 32 + ((flags & BITMAP_FLAGS_PAL_FROM_CACHE) ? 8 : 4);
-    data_len = stride * h;
-    f->kind = SimpleVideoPlayer::STREAM_PICTURE_BGRX;
-    f->stride = stride;
-    f->bottom_up = (flags & BITMAP_FLAGS_TOP_DOWN) == 0;
-  } else {
-    if (this->first_(WARN_IMAGE))
-      ESP_LOGW(TAG,
-               "Images of type %u are not drawn: start the server with image-compression=quic and "
-               "jpeg-wan-compression=always",
-               type);
-    return false;
-  }
-  if (data_at > size || data_len > size - data_at)
-    return false;
-  if (!this->fits_output_(w, h)) {
-    if (this->first_(WARN_TOO_LARGE))
-      ESP_LOGW(TAG, "A picture larger than the output is not drawn");
-    return false;
-  }
-  f->x = box.left - src.left;
-  f->y = box.top - src.top;
-  f->w = static_cast<uint16_t>(w);
-  f->h = static_cast<uint16_t>(h);
-  if (!this->parts_(f, box, clips, clip_count, nullptr, 0))
-    return false;
-  // The picture to the start of the buffer: the decoder reads it from there.
-  std::memmove(f->data, f->data + data_at, data_len);
-  f->received = data_len;
-  f->total = data_len;
-  return true;
-}
-
-// STREAM_DATA: id, multi_media_time, data_size, data. STREAM_DATA_SIZED: id, multi_media_time,
-// width, height, dest, data_size, data.
-bool SpiceSession::stream_data_(StreamFrame *f, uint32_t size, bool sized) {
-  const uint8_t *b = f->data;
-  const uint32_t header = sized ? 36 : 12;
-  if (size < header)
-    return false;
-  const uint32_t id = rd32(b);
-  if (id >= SimpleVideoPlayer::SPICE_MAX_STREAMS || !this->p_->spice_->streams[id].used)
-    return false;
-  const SpiceStreamInfo &stream = this->p_->spice_->streams[id];
-  Rect dest{stream.left, stream.top, stream.right, stream.bottom};
-  uint32_t w = stream.width, h = stream.height;
-  if (sized) {
-    w = rd32(b + 8);
-    h = rd32(b + 12);
-    dest = rd_rect(b + 16);
-  }
-  const uint32_t data_len = rd32(b + header - 4);
-  if (data_len > size - header || w == 0 || h == 0 || w > 0x7FFF || h > 0x7FFF)
-    return false;
-  if (!stream.top_down) {
-    if (this->first_(WARN_BOTTOM_UP))
-      ESP_LOGW(TAG, "A bottom-up stream is not drawn");
-    return false;
-  }
-  if (static_cast<int64_t>(dest.right) - dest.left != w || static_cast<int64_t>(dest.bottom) - dest.top != h) {
-    if (this->first_(WARN_SCALED))
-      ESP_LOGW(TAG, "A scaled stream is not drawn");
-    return false;
-  }
-  if (!this->fits_output_(w, h)) {
-    if (this->first_(WARN_TOO_LARGE))
-      ESP_LOGW(TAG, "A picture larger than the output is not drawn");
-    return false;
-  }
-  f->kind = SimpleVideoPlayer::STREAM_PICTURE_JPEG;
-  f->x = dest.left;
-  f->y = dest.top;
-  f->w = static_cast<uint16_t>(w);
-  f->h = static_cast<uint16_t>(h);
-  if (!this->parts_(f, dest, nullptr, 0, stream.clips, stream.clip_count))
-    return false;
-  std::memmove(f->data, f->data + header, data_len);
-  f->received = data_len;
-  f->total = data_len;
-  return true;
-}
-
-void SpiceSession::stream_clip_(SpiceStreamInfo &stream, const uint8_t *clip, const uint8_t *end) {
-  stream.clip_count = 0;
-  if (end - clip < 1 || clip[0] != CLIP_TYPE_RECTS)
-    return;
-  if (end - clip < 5)
-    return;
-  const uint32_t count = rd32(clip + 1);
-  if (count > static_cast<uint32_t>(end - clip - 5) / 16)
-    return;
-  if (count == 0) {
-    stream.clip_count = 0;  // empty: nothing shows
-    stream.used = false;
-    return;
-  }
-  if (count > SimpleVideoPlayer::SPICE_MAX_CLIPS) {
-    if (this->first_(WARN_CLIPS))
-      ESP_LOGW(TAG, "A stream in more than %u parts: drawn whole (it may cover a window over it)",
-               SimpleVideoPlayer::SPICE_MAX_CLIPS);
-    return;
-  }
-  for (uint32_t i = 0; i < count; i++) {
-    const Rect r = rd_rect(clip + 5 + 16 * i);
-    stream.clips[i] = {static_cast<int16_t>(r.left), static_cast<int16_t>(r.top),
-                       static_cast<int16_t>(r.right - r.left), static_cast<int16_t>(r.bottom - r.top)};
-  }
-  stream.clip_count = static_cast<uint8_t>(count);
-}
-
-// STREAM_CREATE: surface_id, id, flags, codec_type, stamp, stream_width, stream_height, src_width,
-// src_height, dest, clip.
-void SpiceSession::stream_create_(const uint8_t *body, uint32_t size) {
-  if (size < 51)
-    return;
-  const uint32_t id = rd32(body + 4);
-  if (id >= SimpleVideoPlayer::SPICE_MAX_STREAMS)
-    return;
-  SpiceStreamInfo &stream = this->p_->spice_->streams[id];
-  stream.used = false;
-  if (static_cast<int64_t>(rd32(body)) != this->surface_id_)
-    return;
-  if (body[9] != VIDEO_CODEC_MJPEG) {
-    if (this->first_(WARN_CODEC))
-      ESP_LOGW(TAG, "A stream in codec %u is not drawn", body[9]);
-    return;
-  }
-  stream.top_down = (body[8] & STREAM_FLAGS_TOP_DOWN) != 0;
-  stream.width = rd32(body + 18);
-  stream.height = rd32(body + 22);
-  const Rect dest = rd_rect(body + 34);
-  stream.left = dest.left;
-  stream.top = dest.top;
-  stream.right = dest.right;
-  stream.bottom = dest.bottom;
-  stream.used = true;
-  this->stream_clip_(stream, body + 50, body + size);
-}
-
 bool SpiceSession::handle_list_(Channel &ch, const uint8_t *body, uint32_t size) {
   // SpiceSubMessageList: size:2, then the offsets of SpiceSubMessage (type:2, size:4, data).
   if (size < 2)
@@ -942,45 +620,6 @@ bool SpiceSession::handle_list_(Channel &ch, const uint8_t *body, uint32_t size)
       return false;
   }
   return true;
-}
-
-// A picture message into a stream frame and to the draw task. body: the message already read
-// (inside a list), else nullptr and it is read from the socket.
-bool SpiceSession::handle_picture_(Channel &ch, uint16_t type, uint32_t size, const uint8_t *body) {
-  StreamFrame *f = nullptr;
-  if (size <= this->p_->stream_max_frame_bytes_) {
-    while (xQueueReceive(this->p_->stream_empty_q_, &f, pdMS_TO_TICKS(FRAME_WAIT_MS)) != pdTRUE) {
-      if (this->stopping_())
-        return body != nullptr || this->skip_(ch, size);
-    }
-  }
-  if (f == nullptr) {
-    if (this->first_(WARN_TOO_LARGE))
-      ESP_LOGW(TAG, "A picture of more than %u bytes is not drawn (psram_pool_size sets the limit)",
-               static_cast<unsigned>(this->p_->stream_max_frame_bytes_));
-    return body != nullptr || this->skip_(ch, size);
-  }
-  bool ok = true;
-  if (body != nullptr) {
-    std::memcpy(f->data, body, size);
-  } else {
-    ok = recv_all(ch.fd, f->data, size);
-  }
-  bool draw = false;
-  if (ok) {
-    f->direct = this->direct_;
-    if (type == MSG_DISPLAY_DRAW_COPY) {
-      draw = this->draw_copy_(f, size);
-    } else {
-      draw = this->stream_data_(f, size, type == MSG_DISPLAY_STREAM_DATA_SIZED);
-    }
-  }
-  if (draw) {
-    xQueueSend(this->p_->stream_filled_q_, &f, portMAX_DELAY);
-  } else {
-    xQueueSend(this->p_->stream_empty_q_, &f, 0);
-  }
-  return ok;
 }
 
 bool SpiceSession::handle_message_(Channel &ch, uint16_t type, const uint8_t *body, uint32_t size) {
@@ -1051,55 +690,7 @@ bool SpiceSession::handle_message_(Channel &ch, uint16_t type, const uint8_t *bo
     this->playback_message_(type, body, size);
     return true;
   }
-  if (ch.type == CHANNEL_USBREDIR)
-    return true;  // its data is read by usb_read_()
-  switch (type) {
-    case MSG_DISPLAY_SURFACE_CREATE:
-      // surface_id, width, height, format, flags
-      if (size >= 20 && (rd32(body + 16) & SURFACE_FLAGS_PRIMARY)) {
-        this->surface_id_ = rd32(body);
-        const uint32_t w = rd32(body + 4), h = rd32(body + 8);
-        if ((w != this->out_w_ || h != this->out_h_) && this->first_(WARN_SURFACE))
-          ESP_LOGW(TAG, "The desktop is not the output's size: only what fits shows");
-        ESP_LOGI(TAG, "Desktop %" PRIu32 "x%" PRIu32 ", output %" PRIu32 "x%" PRIu32, w, h, this->out_w_, this->out_h_);
-      }
-      return true;
-    case MSG_DISPLAY_SURFACE_DESTROY:
-      if (size >= 4 && static_cast<int64_t>(rd32(body)) == this->surface_id_)
-        this->surface_id_ = -1;
-      return true;
-    case MSG_DISPLAY_STREAM_CREATE:
-      this->stream_create_(body, size);
-      return true;
-    case MSG_DISPLAY_STREAM_CLIP:
-      if (size >= 5 && rd32(body) < SimpleVideoPlayer::SPICE_MAX_STREAMS) {
-        SpiceStreamInfo &stream = this->p_->spice_->streams[rd32(body)];
-        if (stream.used)
-          this->stream_clip_(stream, body + 4, body + size);
-      }
-      return true;
-    case MSG_DISPLAY_STREAM_DESTROY:
-      if (size >= 4 && rd32(body) < SimpleVideoPlayer::SPICE_MAX_STREAMS)
-        this->p_->spice_->streams[rd32(body)].used = false;
-      return true;
-    case MSG_DISPLAY_STREAM_DESTROY_ALL:
-      for (auto &stream : this->p_->spice_->streams)
-        stream.used = false;
-      return true;
-    case MSG_DISPLAY_DRAW_COPY:
-    case MSG_DISPLAY_STREAM_DATA:
-    case MSG_DISPLAY_STREAM_DATA_SIZED:
-      return this->handle_picture_(ch, type, size, body);
-    case MSG_DISPLAY_COPY_BITS:
-      if (this->first_(WARN_COPY_BITS))
-        ESP_LOGW(TAG, "COPY_BITS is not drawn");
-      return true;
-    default:
-      if (((type >= MSG_DISPLAY_DRAW_FILL && type <= MSG_DISPLAY_DRAW_LAST) || type == MSG_DISPLAY_DRAW_COMPOSITE) &&
-          this->first_(WARN_DRAW))
-        ESP_LOGW(TAG, "Drawing command %u is not drawn", type);
-      return true;  // marks, resets, cache and monitor messages: nothing to do here
-  }
+  return true;  // usbredir: its data is read by usb_read_()
 }
 
 bool SpiceSession::handle_one_(Channel &ch) {
@@ -1118,10 +709,7 @@ bool SpiceSession::handle_one_(Channel &ch) {
       return false;
   }
   bool ok;
-  if (&ch == &this->display_ &&
-      (type == MSG_DISPLAY_DRAW_COPY || type == MSG_DISPLAY_STREAM_DATA || type == MSG_DISPLAY_STREAM_DATA_SIZED)) {
-    ok = this->handle_picture_(ch, type, size, nullptr);
-  } else if (ch.type == CHANNEL_USBREDIR && type == MSG_SPICEVMC_DATA) {
+  if (ch.type == CHANNEL_USBREDIR && type == MSG_SPICEVMC_DATA) {
     ch.vmc_left = size;  // read into its slot as it takes it (usb_read_())
     ok = true;
   } else if (&ch == &this->cursor_ && size > SimpleVideoPlayer::SPICE_SCRATCH_BYTES) {
@@ -1150,21 +738,6 @@ bool SpiceSession::open_display_() {
   return false;
 }
 
-// The display channel here (before svp_relay drew it): not linked any more.
-bool SpiceSession::open_display_here_() {
-  if (!this->link_(this->display_, CHANNEL_DISPLAY, 0, DISPLAY_CAPS))
-    return false;
-  // No image cache and no GLZ window: nothing comes from a cache (dcc_handle_init()).
-  uint8_t init[14] = {};
-  init[0] = 1;  // pixmap_cache_id; pixmap_cache_size 0
-  init[9] = 1;  // glz_dictionary_id; glz_dictionary_window_size 0
-  const uint8_t compression = IMAGE_COMPRESSION_QUIC;
-  if (!this->send_(this->display_, MSGC_DISPLAY_INIT, init, sizeof(init)) ||
-      !this->send_(this->display_, MSGC_DISPLAY_PREFERRED_COMPRESSION, &compression, 1))
-    return false;
-  return this->take_panel_();
-}
-
 // The panel to this session, before everything else (desktop_take_panel_()); LVGL pauses for it
 // (loop()) as for a sender. What plays sound stops only on the device the session's sound takes
 // (spice_sound_take_()).
@@ -1172,8 +745,6 @@ bool SpiceSession::take_panel_() {
   SimpleVideoPlayer *p = this->p_;
   if (!p->desktop_take_panel_(this->direct_, this->wifi_held_))
     return false;
-  for (auto &stream : p->spice_->streams)
-    stream.used = false;
   for (uint8_t i = 0; i < SimpleVideoPlayer::SPICE_CURSOR_CACHE; i++)
     p->spice_cursor_cache_[i].valid = false;
   this->pointer_x_ = static_cast<int32_t>(this->out_w_ / 2);
@@ -1214,7 +785,7 @@ void SpiceSession::close_() {
       this->p_->spice_usb_[i]->link_close();
   }
 #endif
-  for (Channel *ch : {&this->main_, &this->display_, &this->inputs_, &this->cursor_, &this->playback_, &this->usb_[0],
+  for (Channel *ch : {&this->main_, &this->inputs_, &this->cursor_, &this->playback_, &this->usb_[0],
                       &this->usb_[1], &this->usb_[2], &this->usb_[3]}) {
     if (ch->fd >= 0) {
       ::close(ch->fd);
@@ -1823,7 +1394,6 @@ void SpiceSession::run(const char *host, uint16_t port, const char *password) {
       }
     };
     add(this->main_);
-    add(this->display_);
     for (Channel *ch : others)
       add(*ch);
 #ifdef SVP_SPICE_USB
@@ -1856,8 +1426,6 @@ void SpiceSession::run(const char *host, uint16_t port, const char *password) {
       break;
     }
     if (FD_ISSET(this->main_.fd, &readable) && !this->handle_one_(this->main_))
-      break;
-    if (this->display_.fd >= 0 && FD_ISSET(this->display_.fd, &readable) && !this->handle_one_(this->display_))
       break;
     for (Channel *ch : others) {
       if (ch->fd >= 0 && FD_ISSET(ch->fd, &readable) && !this->handle_one_(*ch))

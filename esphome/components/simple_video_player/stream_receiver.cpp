@@ -179,8 +179,6 @@ bool SimpleVideoPlayer::setup_stream_() {
   // Internal RAM: every message but a picture is read into it.
   this->spice_scratch_ =
       static_cast<uint8_t *>(heap_caps_malloc(SPICE_SCRATCH_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  this->spice_clips_ =
-      reinterpret_cast<StreamRect *>(this->pool_.alloc(STREAM_FRAME_COUNT * SPICE_MAX_CLIPS * sizeof(StreamRect)));
   this->spice_cursor_ = reinterpret_cast<SpiceCursor *>(this->pool_.alloc(sizeof(SpiceCursor)));
   this->spice_cursor_cache_ =
       reinterpret_cast<SpiceCursorShape *>(this->pool_.alloc(SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape)));
@@ -199,7 +197,7 @@ bool SimpleVideoPlayer::setup_stream_() {
   this->spice_lock_ = xSemaphoreCreateMutex();
   this->spice_cursor_lock_ = xSemaphoreCreateMutex();
   this->spice_wake_fd_ = eventfd(0, 0);
-  if (this->spice_ == nullptr || this->spice_scratch_ == nullptr || this->spice_clips_ == nullptr ||
+  if (this->spice_ == nullptr || this->spice_scratch_ == nullptr ||
       this->spice_cursor_ == nullptr || this->spice_cursor_cache_ == nullptr || this->spice_cursor_under_ == nullptr ||
       this->spice_cursor_patch_ == nullptr || this->spice_saved_ == nullptr || this->spice_saved_prefs_ == nullptr ||
       !file_ok ||
@@ -212,8 +210,6 @@ bool SimpleVideoPlayer::setup_stream_() {
     std::memset(this->spice_cursor_, 0, sizeof(SpiceCursor));
     std::memset(this->spice_cursor_cache_, 0, SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape));
     this->spice_saved_setup_();
-    for (size_t i = 0; i < STREAM_FRAME_COUNT; i++)
-      this->stream_frames_[i].clips = this->spice_clips_ + i * SPICE_MAX_CLIPS;
   }
 #endif
   if (!create_psram_task(stream_draw_task_entry_, "svp_stream_draw", 4096, this, 2, &this->stream_draw_task_, 1)) {
@@ -741,8 +737,6 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
     frame->total = total;
     frame->received = 0;
     frame->direct = direct;
-    frame->kind = STREAM_PICTURE_JPEG;
-    frame->clip_count = 0;
     this->stream_current_ = frame;
   }
 }
@@ -1068,36 +1062,24 @@ void SimpleVideoPlayer::stream_draw_loop_() {
       const int64_t draw_start = esp_timer_get_time();
 #endif
       if (target != nullptr && this->stream_render_(frame, &decode_cfg, target, target_len)) {
-        // Rows are padded to 16; one part goes with its offsets into the picture and the rest of its rows.
+        // Rows are padded to 16: the rest of each row is skipped.
         const uint16_t padded_w = (frame->w + 15) & ~15;
-        const StreamRect whole{static_cast<int16_t>(frame->x), static_cast<int16_t>(frame->y),
-                               static_cast<int16_t>(frame->w), static_cast<int16_t>(frame->h)};
-        const uint8_t parts = frame->clip_count == 0 ? 1 : frame->clip_count;
 #ifdef SVP_SPICE
-        // The SPICE cursor off what is drawn over it first, and on again after.
+        // The desktop's cursor off what is drawn over it first, and on again after.
         const bool spice = this->spice_on_.load(std::memory_order_acquire);
-        bool cursor_off = false;
-        for (uint8_t i = 0; spice && !cursor_off && i < parts; i++) {
-          const StreamRect &part = frame->clip_count == 0 ? whole : frame->clips[i];
-          cursor_off = this->spice_cursor_over_(part.x, part.y, part.w, part.h);
-        }
+        const bool cursor_off = spice && this->spice_cursor_over_(frame->x, frame->y, frame->w, frame->h);
         if (cursor_off)
           this->spice_cursor_hide_();
 #endif
-        for (uint8_t i = 0; i < parts; i++) {
-          const StreamRect &part = frame->clip_count == 0 ? whole : frame->clips[i];
-          const int src_x = part.x - frame->x;
-          const int src_y = part.y - frame->y;
 #ifdef SVP_DSI_OUTPUT
-          if (frame->direct)
-            this->dsi_->draw_pixels_at(part.x, part.y, part.w, part.h, target, display::COLOR_ORDER_RGB, bitness, false,
-                                       src_x, src_y, padded_w - src_x - part.w);
+        if (frame->direct)
+          this->dsi_->draw_pixels_at(frame->x, frame->y, frame->w, frame->h, target, display::COLOR_ORDER_RGB, bitness,
+                                     false, 0, 0, padded_w - frame->w);
 #endif
 #ifdef SVP_CANVAS_OUTPUT
-          if (!frame->direct)
-            this->stream_copy_to_canvas_(part.x, part.y, part.w, part.h, src_x, src_y, frame->w);
+        if (!frame->direct)
+          this->stream_copy_to_canvas_(frame->x, frame->y, frame->w, frame->h, 0, 0, frame->w);
 #endif
-        }
 #ifdef SVP_SPICE
         if (spice && (this->spice_cursor_dirty_.exchange(false, std::memory_order_acq_rel) || cursor_off)) {
           this->spice_cursor_hide_();
@@ -1117,39 +1099,10 @@ void SimpleVideoPlayer::stream_draw_loop_() {
 }
 
 bool SimpleVideoPlayer::stream_render_(StreamFrame *frame, jpeg_decode_cfg_t *cfg, uint8_t *target, size_t target_len) {
-  if (frame->kind == STREAM_PICTURE_JPEG) {
-    uint32_t out_size = 0;
-    return jpeg_decoder_process(this->hw_jpeg_decoder_, cfg, frame->data, frame->received, target,
-                                static_cast<uint32_t>(target_len), &out_size) == ESP_OK &&
-           out_size > 0;
-  }
-  // A plain bitmap (SPICE): B, G, R, X per pixel, into the decoder's layout (lowest byte blue; RGB565
-  // little-endian), rows padded to 16 as the decoder pads them.
-  const size_t bpp = cfg->output_format == JPEG_DECODE_OUT_FORMAT_RGB565 ? 2 : 3;
-  const size_t row_bytes = static_cast<size_t>((frame->w + 15) & ~15) * bpp;
-  if (row_bytes * frame->h > target_len)
-    return false;
-  for (uint16_t row = 0; row < frame->h; row++) {
-    const uint8_t *src = frame->data + static_cast<size_t>(frame->bottom_up ? frame->h - 1 - row : row) * frame->stride;
-    uint8_t *dst = target + row * row_bytes;
-    if (bpp == 3) {
-      for (uint16_t col = 0; col < frame->w; col++, src += 4, dst += 3) {
-        dst[0] = src[0];
-        dst[1] = src[1];
-        dst[2] = src[2];
-      }
-    } else {
-      for (uint16_t col = 0; col < frame->w; col++, src += 4, dst += 2) {
-        const uint16_t v = static_cast<uint16_t>(((src[2] & 0xF8) << 8) | ((src[1] & 0xFC) << 3) | (src[0] >> 3));
-        dst[0] = static_cast<uint8_t>(v & 0xFF);
-        dst[1] = static_cast<uint8_t>(v >> 8);
-      }
-    }
-  }
-  // Written by the CPU, read by the display's DMA.
-  esp_cache_msync(target, row_bytes * frame->h,
-                  ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
-  return true;
+  uint32_t out_size = 0;
+  return jpeg_decoder_process(this->hw_jpeg_decoder_, cfg, frame->data, frame->received, target,
+                              static_cast<uint32_t>(target_len), &out_size) == ESP_OK &&
+         out_size > 0;
 }
 
 #ifdef SVP_CANVAS_OUTPUT
@@ -1157,7 +1110,7 @@ void SimpleVideoPlayer::stream_copy_to_canvas_(uint16_t x, uint16_t y, uint16_t 
                                                uint16_t src_y, uint16_t src_w) {
   // Rows of the decoded rectangle are padded to 16 pixels; the page's rows are the canvas buffer's
   // (ALIGN_UP(width,16), as loop() hands it to LVGL). Bounds were checked against the canvas size
-  // in stream_feed_() (and spice_client.cpp).
+  // in stream_feed_().
   uint8_t *page = this->output_buffers_[0];
   const uint8_t *rect = this->output_buffers_[1];
   const size_t page_stride = static_cast<size_t>((this->canvas_size_w_ + 15) & ~15) * 3;
