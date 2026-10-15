@@ -309,7 +309,9 @@ class SimpleVideoPlayer : public Component
   // Audio files (audio_file_speaker_id, a resampler in front of the speaker): a queue of their own,
   // apart from the video playlist, played in the same sessions as a video (one at a time).
   void set_audio_file_speaker(speaker::Speaker *speaker) { this->file_speaker_ = speaker; }
-  void audio_queue_add(const std::string &path);
+  /// path: a file, or a Home Assistant media source id (played by svp_relay); title: shown for it
+  /// (empty: the file's name).
+  void audio_queue_add(const std::string &path, const std::string &title = "");
   void audio_queue_clear();
   /// Plays track `index` of the queue.
   void audio_play(size_t index);
@@ -330,12 +332,17 @@ class SimpleVideoPlayer : public Component
   /// Counts the changes of the queue's tracks (added, cleared).
   uint32_t audio_queue_generation() const { return this->audio_queue_gen_; }
   const PsramString &audio_queue_item(size_t index) const { return this->audio_queue_[index]; }
+  std::string audio_queue_title(size_t index) const;
   /// The queue's track that plays or played last; -1 for none.
   int audio_queue_index() const {
     return this->audio_current_ ? static_cast<int>(this->audio_order_[this->audio_pos_]) : -1;
   }
-  /// The session plays a track of the queue: get_state() and get_current_file() are its.
-  bool is_audio_session() const { return this->audio_session_.load(std::memory_order_acquire); }
+  /// The session plays a track of the queue: get_state() is its (a Home Assistant track's is the
+  /// network session's).
+  bool is_audio_session() const {
+    return this->audio_session_.load(std::memory_order_acquire) ||
+           this->audio_remote_.load(std::memory_order_acquire) != AUDIO_REMOTE_NONE;
+  }
   /// Main loop: the queue, its track or the state of a track changed.
   void add_on_audio_callback(std::function<void()> &&callback) { this->audio_callbacks_.add(std::move(callback)); }
 #endif
@@ -944,6 +951,7 @@ class SimpleVideoPlayer : public Component
   bool channel_http_(const char *path, const char *body, char **response, size_t *response_len,
                      uint8_t *into = nullptr, size_t into_cap = 0);
   void ha_browse_task_();
+  void ha_play_request_(const std::string &id);
   void image_task_();
   void options_get_task_();
   void options_set_task_();
@@ -1189,6 +1197,7 @@ class SimpleVideoPlayer : public Component
   // Main loop only. audio_order_ is the queue's order of play (shuffled or as added), audio_pos_
   // the place in it of the track that plays or played last.
   PsramVector<PsramString> audio_queue_;
+  PsramVector<PsramString> audio_titles_;  // per track; empty: its file's name
   PsramVector<uint16_t> audio_order_;
   size_t audio_pos_{0};
   uint32_t audio_queue_gen_{0};
@@ -1199,6 +1208,9 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> audio_session_{false};
   std::atomic<bool> audio_start_pending_{false};
   std::atomic<bool> audio_advance_req_{false};  // the track played to its end
+  // A Home Assistant track of the queue: asked of svp_relay, then its network session plays it.
+  static constexpr uint8_t AUDIO_REMOTE_NONE = 0, AUDIO_REMOTE_ASKED = 1, AUDIO_REMOTE_PLAYING = 2;
+  std::atomic<uint8_t> audio_remote_{AUDIO_REMOTE_NONE};
   std::atomic<bool> audio_file_eof_{false};     // the reader has handed on the whole file
   std::atomic<bool> audio_changed_{false};
   // The file speaker stays open from one track to the next of the same format; audio task while a

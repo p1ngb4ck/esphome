@@ -656,6 +656,15 @@ void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
   this->last_error_.store(PlaybackError::NONE, std::memory_order_relaxed);
 #ifdef SVP_AUDIO_FILES
   this->audio_session_.store(false, std::memory_order_release);
+  // The network session of the queue's Home Assistant track plays it; any other session ends it.
+  {
+#ifdef SVP_STREAM
+    uint8_t asked = AUDIO_REMOTE_ASKED;
+    if (!this->net_session_ ||
+        !this->audio_remote_.compare_exchange_strong(asked, AUDIO_REMOTE_PLAYING, std::memory_order_acq_rel))
+#endif
+      this->audio_remote_.store(AUDIO_REMOTE_NONE, std::memory_order_release);
+  }
 #endif
   this->playback_task_stop_ = false;
   this->start_req_.store(0, std::memory_order_release);
@@ -1261,8 +1270,13 @@ void SimpleVideoPlayer::playback_loop_() {
     if (payload == 0) {  // EOF sentinel
       this->return_slot_(slot);
 #ifdef SVP_STREAM
-      if (this->net_session_)
+      if (this->net_session_) {
         this->stream_played_to_end_.store(true, std::memory_order_release);
+#ifdef SVP_AUDIO_FILES
+        if (this->audio_remote_.load(std::memory_order_acquire) == AUDIO_REMOTE_PLAYING)
+          this->audio_advance_req_.store(true, std::memory_order_release);  // the queue goes on
+#endif
+      }
 #endif
       ESP_LOGI(TAG, "Playback finished");
 #ifdef SVP_STREAM
@@ -2885,27 +2899,56 @@ void SimpleVideoPlayer::audio_start_(size_t pos) {
   this->audio_pos_ = pos;
   this->audio_current_ = true;
   this->start_pending_.store(false, std::memory_order_release);
+#ifdef SVP_CHANNEL_LIST
+  const PsramString &track = this->audio_queue_[this->audio_order_[pos]];
+  if (track.rfind("media-source://", 0) == 0) {
+    // Home Assistant's: svp_relay streams it; its network session ending at the end goes on.
+    this->audio_start_pending_.store(false, std::memory_order_release);
+    this->end_session_();
+    if (this->file_speaker_open_ && !this->session_busy_()) {
+      this->file_speaker_->finish();
+      this->file_speaker_open_ = false;
+    }
+    this->audio_remote_.store(AUDIO_REMOTE_ASKED, std::memory_order_release);
+    this->audio_track_started_ms_ = millis();
+    this->audio_changed_.store(true, std::memory_order_release);
+    this->ha_play_request_(track.c_str());
+    return;
+  }
+#endif
+  this->audio_remote_.store(AUDIO_REMOTE_NONE, std::memory_order_release);
   this->audio_start_pending_.store(true, std::memory_order_release);
   this->audio_changed_.store(true, std::memory_order_release);
   this->end_session_();
   this->run_pending_start_();
 }
 
-void SimpleVideoPlayer::audio_queue_add(const std::string &path) {
+void SimpleVideoPlayer::audio_queue_add(const std::string &path, const std::string &title) {
   if (this->audio_queue_.size() >= MAX_PLAYLIST)
     return;
   this->audio_queue_.emplace_back(path.c_str());
+  this->audio_titles_.emplace_back(title.c_str());
   this->audio_order_.push_back(static_cast<uint16_t>(this->audio_queue_.size() - 1));
   this->audio_queue_gen_++;
   this->audio_changed_.store(true, std::memory_order_release);
 }
 
+std::string SimpleVideoPlayer::audio_queue_title(size_t index) const {
+  if (index >= this->audio_queue_.size())
+    return "";
+  if (index < this->audio_titles_.size() && !this->audio_titles_[index].empty())
+    return this->audio_titles_[index].c_str();
+  const PsramString &path = this->audio_queue_[index];
+  return path.substr(path.rfind('/') + 1).c_str();
+}
+
 void SimpleVideoPlayer::audio_queue_clear() {
-  if (this->audio_session_.load(std::memory_order_acquire) ||
-      this->audio_start_pending_.load(std::memory_order_acquire))
+  if (this->is_audio_session() || this->audio_start_pending_.load(std::memory_order_acquire))
     this->stop();
   this->audio_start_pending_.store(false, std::memory_order_release);
+  this->audio_remote_.store(AUDIO_REMOTE_NONE, std::memory_order_release);
   this->audio_queue_.clear();
+  this->audio_titles_.clear();
   this->audio_order_.clear();
   this->audio_queue_gen_++;
   this->audio_pos_ = 0;
@@ -2931,7 +2974,7 @@ void SimpleVideoPlayer::audio_next() {
     this->audio_order_build_(this->audio_queue_.size());
     this->audio_start_(0);
   } else {
-    if (this->audio_session_.load(std::memory_order_acquire))
+    if (this->is_audio_session())
       this->stop();
     this->audio_current_ = false;
     this->audio_changed_.store(true, std::memory_order_release);
@@ -2942,7 +2985,7 @@ void SimpleVideoPlayer::audio_previous() {
   if (this->audio_order_.empty())
     return;
   static constexpr uint32_t RESTART_AFTER_MS = 3000;
-  const bool playing = this->audio_session_.load(std::memory_order_acquire) && !this->is_stopped();
+  const bool playing = this->is_audio_session() && !this->is_stopped();
   if (!this->audio_current_) {
     this->audio_play_or_resume();
   } else if (playing && millis() - this->audio_track_started_ms_ > RESTART_AFTER_MS) {
@@ -2957,7 +3000,7 @@ void SimpleVideoPlayer::audio_previous() {
 }
 
 void SimpleVideoPlayer::audio_play_or_resume() {
-  if (this->audio_session_.load(std::memory_order_acquire)) {
+  if (this->is_audio_session()) {
     if (this->is_paused()) {
       this->resume();
       return;

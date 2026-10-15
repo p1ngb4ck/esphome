@@ -79,6 +79,13 @@ void SimpleVideoPlayer::ha_browse(const std::string &type, const std::string &id
 }
 
 void SimpleVideoPlayer::ha_play(const std::string &id) {
+#ifdef SVP_AUDIO_FILES
+  this->audio_remote_.store(AUDIO_REMOTE_NONE, std::memory_order_release);  // not the queue's track
+#endif
+  this->ha_play_request_(id);
+}
+
+void SimpleVideoPlayer::ha_play_request_(const std::string &id) {
   if (this->channel_lock_ == nullptr || id.empty())
     return;
   xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
@@ -137,6 +144,9 @@ void SimpleVideoPlayer::channel_play(int index) {
   if (index < 0 || static_cast<size_t>(index) >= this->channel_names_.size())
     return;
   this->channel_index_ = index;
+#ifdef SVP_AUDIO_FILES
+  this->audio_remote_.store(AUDIO_REMOTE_NONE, std::memory_order_release);
+#endif
   this->channel_request_(CHANNEL_CMD_PLAY, static_cast<uint16_t>(index));
 }
 
