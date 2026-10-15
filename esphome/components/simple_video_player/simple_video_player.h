@@ -996,7 +996,7 @@ class SimpleVideoPlayer : public Component
 #endif
 #ifdef SVP_AUDIO_COVER
   // The cover art in each canvas, one after the other: the relay fits a JPEG into the canvas' size,
-  // the picture task's hardware decoder writes it into the view's buffer (own PSRAM, kept), LVGL shows
+  // the picture task's hardware decoder writes it into the view's buffer (the pool's, kept), LVGL shows
   // it at its own size (centred). A canvas lets go of its buffer before it is written, and LVGL is
   // touched only while it runs.
   struct CoverView {
@@ -1029,6 +1029,7 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> cover_job_{false};
   std::atomic<bool> cover_decoded_{false};
   bool cover_decode_ok_{false};
+  size_t cover_bytes_();
   bool cover_buffers_();
   void cover_loop_();
   void cover_task_();     // channel task

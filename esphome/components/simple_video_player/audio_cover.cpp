@@ -6,7 +6,6 @@
 #include "esphome/core/log.h"
 
 #include <esp_cache.h>
-#include <esp_heap_caps.h>
 
 #include <cinttypes>
 #include <cstdio>
@@ -31,20 +30,13 @@ static size_t decoded_size(const jpeg_decode_picture_info_t &info, uint32_t *pad
   return static_cast<size_t>(pw) * ph * 2;
 }
 
-static uint8_t *psram_dma_alloc(size_t size) {
-  // SPIRAM only: never internal RAM instead.
-  return static_cast<uint8_t *>(heap_caps_aligned_alloc(DMA_ALIGN, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-}
-
 void SimpleVideoPlayer::on_svp_cover() {
   this->cover_wanted_ = true;
   this->cover_clear_ = false;
 }
 
-// Main loop, LVGL running: the buffers, once (the canvases' sizes are the configuration's).
-bool SimpleVideoPlayer::cover_buffers_() {
-  if (this->cover_file_ != nullptr)
-    return true;
+// Setup, plan_pool_(): the pool's share of the cover art, for the canvases' sizes (the configuration's).
+size_t SimpleVideoPlayer::cover_bytes_() {
   size_t total = 0;
   for (size_t i = 0; i < this->cover_view_count_; i++) {
     CoverView &view = this->cover_views_[i];
@@ -60,23 +52,24 @@ bool SimpleVideoPlayer::cover_buffers_() {
     view.capacity = view.w > 0 && view.h > 0 ? align_up(align_up(view.w, 16) * align_up(view.h, 16) * 2, DMA_ALIGN) : 0;
     total += view.capacity;
   }
-  const size_t file = align_up(COVER_FILE_MAX + 16, DMA_ALIGN);
-  total += file;
+  return total + align_up(COVER_FILE_MAX + 16, DMA_ALIGN);
+}
+
+// Setup, after plan_pool_(): the buffers from the pool, kept (their share is reserved).
+bool SimpleVideoPlayer::cover_buffers_() {
   bool ok = true;
   for (size_t i = 0; ok && i < this->cover_view_count_; i++) {
     CoverView &view = this->cover_views_[i];
-    view.data = view.capacity != 0 ? psram_dma_alloc(view.capacity) : nullptr;
+    view.data = view.capacity != 0 ? this->pool_.alloc(view.capacity) : nullptr;
     ok = view.data != nullptr;
   }
   if (ok)
-    this->cover_file_ = psram_dma_alloc(file);
+    this->cover_file_ = this->pool_.alloc(align_up(COVER_FILE_MAX + 16, DMA_ALIGN));
   if (ok && this->cover_file_ != nullptr)
     return true;
-  ESP_LOGE(TAG, "No PSRAM for the cover art (%u bytes, largest block %u) -- cover art disabled",
-           static_cast<unsigned>(total),
-           static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
+  ESP_LOGE(TAG, "No room in the PSRAM pool for the cover art -- cover art disabled");
   for (size_t i = 0; i < this->cover_view_count_; i++) {
-    heap_caps_free(this->cover_views_[i].data);
+    this->pool_.free(this->cover_views_[i].data);
     this->cover_views_[i].data = nullptr;
   }
   this->cover_failed_ = true;
@@ -99,7 +92,8 @@ void SimpleVideoPlayer::cover_clear_views_() {
 }
 
 void SimpleVideoPlayer::cover_loop_() {
-  if (this->cover_view_count_ == 0 || this->cover_failed_ || !this->pic_ready_ || this->channel_q_ == nullptr)
+  if (this->cover_view_count_ == 0 || this->cover_failed_ || this->cover_file_ == nullptr || !this->pic_ready_ ||
+      this->channel_q_ == nullptr)
     return;
   // Nothing of LVGL while it is paused: everything waits for it.
   if (this->lvgl_component_ == nullptr || this->lvgl_component_->is_paused())
@@ -107,8 +101,6 @@ void SimpleVideoPlayer::cover_loop_() {
   switch (this->cover_step_) {
     case CoverStep::IDLE:
       if (this->cover_wanted_) {
-        if (!this->cover_buffers_())
-          return;
         this->cover_view_ = 0;
       } else if (this->cover_clear_) {
         this->cover_clear_ = false;
