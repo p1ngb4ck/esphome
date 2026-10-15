@@ -36,8 +36,10 @@ CONF_ON_DISCONNECTED = "on_disconnected"
 CONF_ON_PAIRED = "on_paired"
 CONF_ON_STREAMING_START = "on_streaming_start"
 CONF_ON_STREAMING_STOP = "on_streaming_stop"
+CONF_PAGING_INTERVAL = "paging_interval"
 CONF_PAIR_ON_BOOT_IF_EMPTY = "pair_on_boot_if_empty"
 CONF_PIN_CODE = "pin_code"
+CONF_RECONNECT = "reconnect"
 CONF_SETTLE_TIME = "settle_time"
 CONF_TARGET_NAME = "target_name"
 
@@ -47,6 +49,10 @@ StartPairingAction = a2dp_source_ns.class_("StartPairingAction", automation.Acti
 ForgetDeviceAction = a2dp_source_ns.class_("ForgetDeviceAction", automation.Action)
 StopPairingAction = a2dp_source_ns.class_("StopPairingAction", automation.Action)
 PairWithNameAction = a2dp_source_ns.class_("PairWithNameAction", automation.Action)
+PauseReconnectAction = a2dp_source_ns.class_("PauseReconnectAction", automation.Action)
+ResumeReconnectAction = a2dp_source_ns.class_(
+    "ResumeReconnectAction", automation.Action
+)
 IsConnectedCondition = a2dp_source_ns.class_(
     "IsConnectedCondition", automation.Condition
 )
@@ -104,6 +110,18 @@ CONFIG_SCHEMA = cv.All(
             # Open the pairing window at boot when nothing is stored yet. Turn
             # off if pairing should only ever happen on request.
             cv.Optional(CONF_PAIR_ON_BOOT_IF_EMPTY, default=True): cv.boolean,
+            # Not connected: wait for the stored device to connect on its own
+            # (listen), or also call it every paging_interval (paging). It is
+            # called once at boot either way.
+            cv.Optional(CONF_RECONNECT, default="listen"): cv.one_of(
+                "listen", "paging", lower=True
+            ),
+            cv.Optional(CONF_PAGING_INTERVAL, default="30s"): cv.All(
+                cv.positive_time_period_seconds,
+                cv.Range(
+                    min=cv.TimePeriod(seconds=10), max=cv.TimePeriod(seconds=600)
+                ),
+            ),
             cv.Optional(CONF_ON_PAIRED): automation.validate_automation(
                 {
                     cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
@@ -203,6 +221,8 @@ async def to_code(config):
     cg.add(var.set_buffer_duration_ms(config[CONF_BUFFER_DURATION].total_milliseconds))
     cg.add(var.set_idle_timeout_ms(config[CONF_IDLE_TIMEOUT].total_milliseconds))
     cg.add(var.set_pair_on_boot_if_empty(config[CONF_PAIR_ON_BOOT_IF_EMPTY]))
+    cg.add(var.set_paging(config[CONF_RECONNECT] == "paging"))
+    cg.add(var.set_paging_interval(config[CONF_PAGING_INTERVAL].total_seconds))
 
     for conf in config.get(CONF_ON_PAIRED, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
@@ -306,6 +326,18 @@ A2DP_ACTION_SCHEMA = automation.maybe_simple_id(
 @automation.register_action(
     "a2dp_source.forget_device",
     ForgetDeviceAction,
+    A2DP_ACTION_SCHEMA,
+    synchronous=True,
+)
+@automation.register_action(
+    "a2dp_source.pause_reconnect",
+    PauseReconnectAction,
+    A2DP_ACTION_SCHEMA,
+    synchronous=True,
+)
+@automation.register_action(
+    "a2dp_source.resume_reconnect",
+    ResumeReconnectAction,
     A2DP_ACTION_SCHEMA,
     synchronous=True,
 )

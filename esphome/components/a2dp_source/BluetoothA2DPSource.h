@@ -125,6 +125,12 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   /// ESPHome: false suspends the media stream while staying connected (no packets are sent),
   /// true starts it again. Callable from any task.
   void set_media_active(bool active);
+  /// ESPHome: outside a pairing window, page the stored device every interval (true) or only wait
+  /// for it to connect (false). Callable from any task.
+  void set_paging(bool enabled) { paging_enabled.store(enabled); }
+  void set_paging_interval_ms(uint32_t ms) { paging_interval_ms.store(ms); }
+  /// ESPHome: no paging while true (e.g. while something plays). Callable from any task.
+  void set_reconnect_paused(bool paused) { reconnect_paused.store(paused); }
 
   /// activate / deactivate the automatic reconnection to the last address (per
   /// default this is on) If active is true, will retry up to max_retries times
@@ -291,6 +297,10 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   const char* dev_name = "ESP32_A2DP_SRC";
   bool ssp_enabled = false;
   std::atomic<bool> media_wanted{true};  // ESPHome
+  std::atomic<bool> paging_enabled{false};
+  std::atomic<uint32_t> paging_interval_ms{30000};
+  std::atomic<bool> reconnect_paused{false};
+  unsigned long last_page_ms = 0;
   std::vector<const char*> bt_names;
   esp_bt_pin_type_t pin_type;
   esp_bt_pin_code_t pin_code;

@@ -65,6 +65,20 @@ class A2DPSource : public Component
   void set_buffer_duration_ms(uint32_t ms) { this->buffer_duration_ms_ = ms; }
   void set_idle_timeout_ms(uint32_t ms) { this->idle_timeout_ms_ = ms; }
   void set_pair_on_boot_if_empty(bool enable) { this->pair_on_boot_if_empty_ = enable; }
+  /// @brief Not connected, outside a pairing window: page the stored device every interval (true),
+  ///        or wait for it to connect on its own (false). It is paged once at boot either way.
+  void set_paging(bool enabled) {
+    this->paging_ = enabled;
+    this->source_.set_paging(enabled);
+  }
+  bool is_paging() const { return this->paging_; }
+  void set_paging_interval(uint32_t seconds) {
+    this->paging_interval_s_ = seconds;
+    this->source_.set_paging_interval_ms(seconds * 1000);
+  }
+  uint32_t get_paging_interval() const { return this->paging_interval_s_; }
+  /// @brief No paging while paused (e.g. while something plays).
+  void set_reconnect_paused(bool paused) { this->source_.set_reconnect_paused(paused); }
   void set_device_select(A2DPDeviceSelect *select) { this->device_select_ = select; }
 #ifdef USE_A2DP_SOURCE_NUMBER
   void set_delay_number(number::Number *number) { this->delay_number_ = number; }
@@ -178,6 +192,8 @@ class A2DPSource : public Component
   uint32_t buffer_duration_ms_{100};
   uint8_t volume_{60};
   bool pair_on_boot_if_empty_{true};
+  bool paging_{false};
+  uint32_t paging_interval_s_{30};
 
   std::atomic<bool> pairing_mode_{false};
   std::atomic<bool> connected_{false};
@@ -242,6 +258,16 @@ template<typename... Ts> class StopPairingAction : public Action<Ts...>, public 
 template<typename... Ts> class ForgetDeviceAction : public Action<Ts...>, public Parented<A2DPSource> {
  public:
   void play(Ts... x) override { this->parent_->forget_device(); }
+};
+
+template<typename... Ts> class PauseReconnectAction : public Action<Ts...>, public Parented<A2DPSource> {
+ public:
+  void play(Ts... x) override { this->parent_->set_reconnect_paused(true); }
+};
+
+template<typename... Ts> class ResumeReconnectAction : public Action<Ts...>, public Parented<A2DPSource> {
+ public:
+  void play(Ts... x) override { this->parent_->set_reconnect_paused(false); }
 };
 
 template<typename... Ts> class PairWithNameAction : public Action<Ts...>, public Parented<A2DPSource> {

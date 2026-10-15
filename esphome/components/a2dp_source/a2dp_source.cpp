@@ -621,6 +621,11 @@ void A2DPSource::dump_config() {
   }
   ESP_LOGCONFIG(TAG, "  Buffer: %" PRIu32 " ms", this->buffer_duration_ms_);
   ESP_LOGCONFIG(TAG, "  Idle timeout: %" PRIu32 " ms", this->idle_timeout_ms_);
+  if (this->paging_) {
+    ESP_LOGCONFIG(TAG, "  Reconnect: paging every %" PRIu32 " s", this->paging_interval_s_);
+  } else {
+    ESP_LOGCONFIG(TAG, "  Reconnect: listen");
+  }
   ESP_LOGCONFIG(TAG, "  Device stored: %s", YESNO(this->has_stored_device()));
 }
 

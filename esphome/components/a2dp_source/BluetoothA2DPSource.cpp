@@ -678,6 +678,7 @@ void BluetoothA2DPSource::av_hdl_stack_evt(uint16_t event, void *p_param) {
         ESP_LOGW(BT_AV_TAG, "Reconnecting to %s", to_str(last_connection));
         memcpy(peer_bd_addr, last_connection, ESP_BD_ADDR_LEN);
         connect_to(last_connection);
+        last_page_ms = get_millis();
         s_a2d_state = APP_AV_STATE_CONNECTING;
       } else {
         ESP_LOGVV(BT_AV_TAG, "Starting device discovery...");
@@ -792,6 +793,13 @@ void BluetoothA2DPSource::bt_app_av_state_unconnected_hdlr(uint16_t event,
   switch (event) {
     case ESP_A2D_CONNECTION_STATE_EVT: {
       esp_a2d_cb_param_t *a2d = (esp_a2d_cb_param_t *)(param);
+      if (a2d && a2d->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+        // ESPHome: the device connected on its own (it pages us).
+        memcpy(peer_bd_addr, a2d->conn_stat.remote_bda, ESP_BD_ADDR_LEN);
+        s_a2d_state = APP_AV_STATE_CONNECTED;
+        s_media_state = APP_AV_MEDIA_STATE_IDLE;
+        break;
+      }
       if (a2d && a2d->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
         // Retry reconnect logic if enabled
         if (handle_reconnect_logic()) {
@@ -854,6 +862,18 @@ bool BluetoothA2DPSource::handle_reconnect_logic() {
     ESP_LOGVV(BT_AV_TAG, "Auto-reconnect disabled, not attempting to reconnect");
     return false;
   }
+  // ESPHome: outside a pairing window the stored device is paged only when paging is on, nothing
+  // holds it off, and once per interval; else the device connects on its own.
+  if (discovery_gate != nullptr && !discovery_gate() && has_last_connection()) {
+    if (!paging_enabled.load() || reconnect_paused.load())
+      return true;
+    const unsigned long now = get_millis();
+    if (last_page_ms != 0 && now - last_page_ms < paging_interval_ms.load())
+      return true;
+    last_page_ms = now;
+    connect_to(last_connection);
+    return true;
+  }
   if (reconnect_status == AutoReconnect && reconnect_retries > 0) {
     ESP_LOGVV(BT_AV_TAG, "Attempting auto-reconnect, retries left: %d", reconnect_retries);
     reconnect_retries--;
@@ -861,12 +881,6 @@ bool BluetoothA2DPSource::handle_reconnect_logic() {
     return true;
   } else if (reconnect_status == AutoReconnect) {
     reconnect_retries = max_reconnect_retries;
-    // ESPHome: outside a pairing window the stored device is paged on every heartbeat
-    // instead, so it connects whenever it is switched on.
-    if (discovery_gate != nullptr && !discovery_gate() && has_last_connection()) {
-      connect_to(last_connection);
-      return true;
-    }
     ESP_LOGI(BT_AV_TAG, "Auto-reconnect retries exhausted, starting device discovery");
     reconnect_status = NoReconnect;
     s_a2d_state = APP_AV_STATE_DISCOVERING;
