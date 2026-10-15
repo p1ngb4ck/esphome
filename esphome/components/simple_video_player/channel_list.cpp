@@ -360,7 +360,8 @@ void SimpleVideoPlayer::ha_browse_task_() {
       title.assign(root["title"] | "");
       where.assign(root["path"] | "");
       parent.assign(root["parent"] | "");
-      for (JsonObject item : root["items"].as<JsonArray>()) {
+      JsonArray list = root["items"].as<JsonArray>();
+      for (JsonObject item : list) {
         if (items.size() >= HA_ITEMS_MAX)
           break;
         const char *item_id = item["id"] | "";
@@ -423,7 +424,8 @@ void SimpleVideoPlayer::options_get_task_() {
   bool ok = this->channel_http_(path, nullptr, &body, &len);
   if (ok) {
     ok = json::parse_json(reinterpret_cast<const uint8_t *>(body), len, [&](JsonObject root) -> bool {
-      for (JsonPair pair : root["values"].as<JsonObject>()) {
+      JsonObject values_in = root["values"].as<JsonObject>();
+      for (JsonPair pair : values_in) {
         JsonVariant value = pair.value();
         PsramString text;
         if (value.is<bool>()) {
@@ -435,7 +437,8 @@ void SimpleVideoPlayer::options_get_task_() {
         }
         values.emplace_back(PsramString(pair.key().c_str()), std::move(text));
       }
-      for (JsonPair pair : root["choices"].as<JsonObject>()) {
+      JsonObject choices_in = root["choices"].as<JsonObject>();
+      for (JsonPair pair : choices_in) {
         PsramString lines;
         for (JsonVariant choice : pair.value().as<JsonArray>()) {
           if (!lines.empty())
