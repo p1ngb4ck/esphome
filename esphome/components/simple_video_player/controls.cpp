@@ -201,7 +201,7 @@ bool SimpleVideoPlayer::build_controls_bar_(ControlsBar &bar) {
     if (bar.audio) {
       // A tap or drag on it seeks (on release).
       bar.seek_target = ControlsTarget{this, &bar, CTL_BUTTON_COUNT};
-      lv_obj_add_flag(bar.seek, LV_OBJ_FLAG_CLICKABLE);
+      lv_obj_set_clickable(bar.seek, true);
       lv_obj_add_event_cb(bar.seek, &SimpleVideoPlayer::audio_seek_event_, LV_EVENT_ALL, &bar.seek_target);
     }
 #endif

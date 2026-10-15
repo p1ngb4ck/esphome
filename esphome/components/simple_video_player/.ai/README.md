@@ -76,6 +76,8 @@ round without Olli's go.
 - LVGL updates are event-driven, guarded by "LVGL runs" and "element active". No interval-driven
   LVGL updates; anything periodic checks the situation first and returns when in doubt.
 - Controls over a playing video are pre-rendered before playback; never LVGL-drawn during it.
+- LVGL 9.6 API: flags only through the dedicated setters (`lv_obj_set_hidden`, `lv_obj_set_clickable`, ...);
+  never `lv_obj_add_flag` / `lv_obj_remove_flag` (deprecated, warnings), in C++ and in YAML lambdas.
 - The device never resizes, rescales or reflows at runtime. Its picture size is fixed in YAML; the
   panel reports it to the relay ('V'); only the relay fits pictures to it.
 - UI: design (mockup) first, Olli approves, then implement. Highlights by colour only. Touch and keys
