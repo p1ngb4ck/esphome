@@ -97,7 +97,8 @@ round without Olli's go.
   (open-issues.md or the session's TODO file).
 - Commits: `git -c user.name=p1ngb4ck -c user.email=kleinecke.oliver@googlemail.com commit --no-verify`,
   push to `origin testing_dev`, no trailers, never amend.
-- Device configs delivered: `lvgl_media.yaml`, `esp32-p4-media.yaml` only. Relay: zip.
+- Device configs delivered: `lvgl_media.yaml`, `esp32-p4-media.yaml` only, sent to Olli as files
+  (SendUserFile) every time either changes. Relay: zip, sent the same way.
 
 ## 4. Change procedure (every change, no exceptions)
 
