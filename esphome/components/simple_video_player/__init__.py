@@ -174,16 +174,28 @@ CONF_STREAM_OUTPUT = "stream_output"
 CONF_STREAM_STATISTICS = "stream_statistics"
 CONF_SPICE = "spice"
 CONF_CONNECTIONS = "connections"
+CONF_CONNECTIONS_FILE = "connections_file"
 CONF_HOST = "host"
 CONF_INDEX = "index"
 SPICE_CONNECTIONS_DEFAULT = 8
 
 
+def _storage_path(value):
+    value = cv.string_strict(value)
+    if not value.startswith("/") or value.endswith("/"):
+        raise cv.Invalid("a file's storage path, as /sd/desktops.txt")
+    return value
+
+
 def _spice(value):
-    """spice: true, or spice: {connections: N}: how many connections (name, host, port) are kept."""
+    """spice: true, or spice: {connections: N, connections_file: path}: how many connections (name,
+    host, port) are kept, and where (the file: with each one's USB devices; else preferences)."""
     if isinstance(value, dict):
         return cv.Schema(
-            {cv.Optional(CONF_CONNECTIONS, default=SPICE_CONNECTIONS_DEFAULT): cv.int_range(min=1, max=16)}
+            {
+                cv.Optional(CONF_CONNECTIONS, default=SPICE_CONNECTIONS_DEFAULT): cv.int_range(min=1, max=16),
+                cv.Optional(CONF_CONNECTIONS_FILE): _storage_path,
+            }
         )(value)
     return {CONF_CONNECTIONS: SPICE_CONNECTIONS_DEFAULT} if cv.boolean(value) else False
 
@@ -987,6 +999,8 @@ async def to_code(config):
         if config.get(CONF_SPICE):
             cg.add_define("SVP_SPICE")
             cg.add(var.set_spice_connections(config[CONF_SPICE][CONF_CONNECTIONS]))
+            if CONF_CONNECTIONS_FILE in config[CONF_SPICE]:
+                cg.add(var.set_spice_connections_file(config[CONF_SPICE][CONF_CONNECTIONS_FILE]))
             if CONF_SPICE_SOUND_SHARES in config:
                 cg.add(var.set_spice_sound_shares(*config[CONF_SPICE_SOUND_SHARES]))
             # USB redirection's transfer buffers (and every other USB driver's) in PSRAM.

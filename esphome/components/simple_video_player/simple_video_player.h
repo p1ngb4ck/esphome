@@ -405,6 +405,9 @@ class SimpleVideoPlayer : public Component
   }
   // Saved connections: name, host and port (the password is given at each connect), spice: connections.
   void set_spice_connections(uint8_t count) { this->spice_saved_count_ = count; }
+  /// The saved connections, each with the USB device of every redirection slot, in this file (a
+  /// storage path) instead of preferences; read at boot, written whenever one changes.
+  void set_spice_connections_file(const std::string &path) { this->spice_file_path_ = path; }
   uint8_t spice_saved_count() const { return this->spice_saved_count_; }
   /// The connection saved at index; false when there is none.
   bool spice_saved(uint8_t index, std::string &name, std::string &host, uint16_t &port) const;
@@ -428,6 +431,8 @@ class SimpleVideoPlayer : public Component
   void add_spice_usb_slot(SpiceUsbSlot *slot);
   /// Main loop: a slot picked the device at addr; the others let it go.
   void spice_usb_selected(SpiceUsbSlot *slot, uint8_t addr);
+  /// Main loop: a slot's device was picked or let go; kept with the saved connection in use.
+  void spice_usb_changed(SpiceUsbSlot *slot);
 #endif
 #endif
 #endif
@@ -1757,6 +1762,33 @@ class SimpleVideoPlayer : public Component
   size_t desktop_cursor_at_{0};
   bool desktop_cursor_ok_{false};
   void spice_saved_setup_();
+  // The connections file (spice_file_path_): one line per connection, read and written whole through
+  // the storage worker (main loop); its text in spice_file_buf_ (PSRAM pool).
+  static constexpr uint8_t SPICE_SAVED_USB = 4;  // USB devices kept per connection
+  static constexpr size_t SPICE_FILE_LINE = 512;
+  struct SpiceSavedUsb {
+    uint16_t vid, pid;  // vid 0: none
+    char serial[64];
+  };
+  std::string spice_file_path_;
+  SpiceSavedUsb *spice_saved_usb_{nullptr};  // PSRAM pool, spice_saved_count_ * SPICE_SAVED_USB
+  char *spice_file_buf_{nullptr};
+  size_t spice_file_len_{0};
+  size_t spice_file_got_{0};
+  storage::StreamHandle spice_file_handle_{};
+  bool spice_file_loaded_{false};  // read (or found missing): written from now on
+  bool spice_file_busy_{false};
+  bool spice_file_dirty_{false};
+  int8_t spice_active_saved_{-1};  // the saved connection connected last, -1: none
+  bool spice_usb_applying_{false};
+  size_t spice_file_bytes_() const { return static_cast<size_t>(this->spice_saved_count_) * SPICE_FILE_LINE; }
+  void spice_file_load_();
+  void spice_file_read_();
+  void spice_file_read_done_(storage::StorageError err);
+  void spice_file_parse_();
+  void spice_file_save_();
+  void spice_file_write_();
+  void spice_saved_changed_(uint8_t index);
 #ifdef SVP_SPICE_USB
   static constexpr uint8_t SPICE_USB_SLOTS = 4;
   SpiceUsbSlot *spice_usb_[SPICE_USB_SLOTS]{};

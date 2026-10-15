@@ -41,6 +41,10 @@ class SpiceUsbSlot : public select::Select, public usb_host::USBClient {
   void refresh_options();
   void forget_selection(uint8_t addr);
   uint8_t wanted_addr() const { return this->want_addr_; }
+  /// Main loop: the device of a saved connection (vid 0: none), picked once it is plugged in.
+  void want_device(uint16_t vid, uint16_t pid, const char *serial);
+  /// The picked device's ids (vid 0: none).
+  void selected_device(uint16_t &vid, uint16_t &pid, char *serial, size_t serial_len) const;
 
   // Spice task.
   void link_open(SpiceVmcLink *link);
@@ -121,6 +125,8 @@ class SpiceUsbSlot : public select::Select, public usb_host::USBClient {
   };
 
   void control(const std::string &value) override;
+  /// The device present that matches want_vid_/pid_/serial_, 0 if none.
+  uint8_t find_wanted_() const;
   void on_connected() override;
   void on_disconnected() override;
   /// Main loop: take, give back or change the device as wanted.
@@ -162,6 +168,9 @@ class SpiceUsbSlot : public select::Select, public usb_host::USBClient {
   uint8_t label_addr_[MAX_DEVICES + 1]{};
   uint8_t label_count_{0};
   uint8_t want_addr_{0};    // 0: none
+  // A saved connection's device, picked when it comes (want_vid_ 0: none).
+  uint16_t want_vid_{0}, want_pid_{0};
+  char want_serial_[64]{};
   uint8_t taking_addr_{0};  // take_device() asked for it, not bound yet (main loop)
 
   std::atomic<bool> link_up_{false};

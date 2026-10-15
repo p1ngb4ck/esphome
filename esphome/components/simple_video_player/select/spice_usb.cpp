@@ -191,6 +191,10 @@ void SpiceUsbSlot::refresh_options() {
     count++;
   }
   this->label_count_ = count;
+  if (this->want_addr_ == 0 && this->want_vid_ != 0 && (this->want_addr_ = this->find_wanted_()) != 0) {
+    want_present = true;
+    this->parent_->spice_usb_selected(this, this->want_addr_);  // the other slots let it go
+  }
   // A take under way for a device that went: nothing is bound any more.
   bool taking_present = false;
   for (uint8_t i = 1; i < count; i++)
@@ -222,16 +226,55 @@ void SpiceUsbSlot::control(const std::string &value) {
   if (addr != 0)
     this->parent_->spice_usb_selected(this, addr);  // the other slots let it go
   this->want_addr_ = addr;
+  this->want_vid_ = 0;
   this->publish_state(value);
   this->apply_();
+  this->parent_->spice_usb_changed(this);
 }
 
 void SpiceUsbSlot::forget_selection(uint8_t addr) {
   if (this->want_addr_ != addr)
     return;
   this->want_addr_ = 0;
+  this->want_vid_ = 0;
   this->publish_state(this->labels_[0]);
   this->apply_();
+  this->parent_->spice_usb_changed(this);
+}
+
+void SpiceUsbSlot::want_device(uint16_t vid, uint16_t pid, const char *serial) {
+  this->want_vid_ = vid;
+  this->want_pid_ = pid;
+  std::snprintf(this->want_serial_, sizeof(this->want_serial_), "%s", serial != nullptr ? serial : "");
+  this->want_addr_ = 0;
+  this->refresh_options();
+}
+
+uint8_t SpiceUsbSlot::find_wanted_() const {
+  for (const auto &dev : this->usb_->get_devices()) {
+    if (dev.gone || dev.desc == nullptr || dev.desc->idVendor != this->want_vid_ ||
+        dev.desc->idProduct != this->want_pid_)
+      continue;
+    char serial[usb_host::DESC_STRING_BUF_SIZE] = "";
+    usb_host::copy_descriptor_string(dev.info.str_desc_serial_num, serial);
+    if (this->want_serial_[0] == '\0' || std::strcmp(serial, this->want_serial_) == 0)
+      return dev.addr;
+  }
+  return 0;
+}
+
+void SpiceUsbSlot::selected_device(uint16_t &vid, uint16_t &pid, char *serial, size_t serial_len) const {
+  vid = pid = 0;
+  serial[0] = '\0';
+  for (const auto &dev : this->usb_->get_devices()) {
+    if (this->want_addr_ == 0 || dev.addr != this->want_addr_ || dev.gone || dev.desc == nullptr)
+      continue;
+    vid = dev.desc->idVendor;
+    pid = dev.desc->idProduct;
+    char text[usb_host::DESC_STRING_BUF_SIZE] = "";
+    usb_host::copy_descriptor_string(dev.info.str_desc_serial_num, text);
+    std::snprintf(serial, serial_len, "%s", text);
+  }
 }
 
 void SpiceUsbSlot::loop() {

@@ -189,12 +189,20 @@ bool SimpleVideoPlayer::setup_stream_() {
   this->spice_saved_ = reinterpret_cast<SpiceSaved *>(this->pool_.alloc(this->spice_saved_count_ * sizeof(SpiceSaved)));
   this->spice_saved_prefs_ = reinterpret_cast<ESPPreferenceObject *>(
       this->pool_.alloc(this->spice_saved_count_ * sizeof(ESPPreferenceObject)));
+  bool file_ok = true;
+  if (!this->spice_file_path_.empty()) {
+    this->spice_saved_usb_ = reinterpret_cast<SpiceSavedUsb *>(
+        this->pool_.alloc(this->spice_saved_count_ * SPICE_SAVED_USB * sizeof(SpiceSavedUsb)));
+    this->spice_file_buf_ = reinterpret_cast<char *>(this->pool_.alloc(this->spice_file_bytes_()));
+    file_ok = this->spice_saved_usb_ != nullptr && this->spice_file_buf_ != nullptr;
+  }
   this->spice_lock_ = xSemaphoreCreateMutex();
   this->spice_cursor_lock_ = xSemaphoreCreateMutex();
   this->spice_wake_fd_ = eventfd(0, 0);
   if (this->spice_ == nullptr || this->spice_scratch_ == nullptr || this->spice_clips_ == nullptr ||
       this->spice_cursor_ == nullptr || this->spice_cursor_cache_ == nullptr || this->spice_cursor_under_ == nullptr ||
       this->spice_cursor_patch_ == nullptr || this->spice_saved_ == nullptr || this->spice_saved_prefs_ == nullptr ||
+      !file_ok ||
       this->spice_lock_ == nullptr || this->spice_cursor_lock_ == nullptr || this->spice_wake_fd_ < 0 ||
       !create_psram_task(spice_task_entry_, "svp_spice", 8192, this, 4, &this->spice_task_, tskNO_AFFINITY)) {
     ESP_LOGE(TAG, "SPICE client disabled: no room for it");

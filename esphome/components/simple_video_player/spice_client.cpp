@@ -22,6 +22,7 @@
 #include "esp_cache.h"
 
 #include "esphome/core/log.h"
+#include "esphome/components/storage/storage_worker.h"
 #include "esp_random.h"
 #include "esp_idf_version.h"
 
@@ -2139,6 +2140,7 @@ void SimpleVideoPlayer::spice_connect(const std::string &host, uint16_t port, co
     ESP_LOGE(TAG, "The password is longer than %u characters", static_cast<unsigned>(PASSWORD_MAX));
     return;
   }
+  this->spice_active_saved_ = -1;  // a saved one's is set by spice_connect_saved()
   xSemaphoreTake(this->spice_lock_, portMAX_DELAY);
   std::snprintf(this->spice_->host, sizeof(this->spice_->host), "%s", host.c_str());
   std::snprintf(this->spice_->password, sizeof(this->spice_->password), "%s", password.c_str());
@@ -2403,10 +2405,28 @@ void SimpleVideoPlayer::spice_cursor_update_() {
 }
 
 //========================================================================
-// Saved connections: name, host, port in preferences (the password never: it is given at each connect)
+// Saved connections: name, host, port in preferences, or with their USB devices in the connections
+// file (the password never: it is given at each connect)
 //========================================================================
 
 void SimpleVideoPlayer::spice_saved_setup_() {
+  if (!this->spice_file_path_.empty()) {
+    for (uint8_t i = 0; i < this->spice_saved_count_; i++)
+      this->spice_saved_[i] = SpiceSaved{};
+    std::memset(this->spice_saved_usb_, 0, sizeof(SpiceSavedUsb) * this->spice_saved_count_ * SPICE_SAVED_USB);
+    if (storage::global_storage_registry == nullptr)
+      return;
+    // Its storage may come later (a card put in): read, or written, once it is there.
+    storage::global_storage_registry->add_on_registered_callback([this](storage::Storage *) {
+      if (!this->spice_file_loaded_) {
+        this->spice_file_load_();
+      } else if (this->spice_file_dirty_) {
+        this->spice_file_save_();
+      }
+    });
+    this->spice_file_load_();
+    return;
+  }
   const uint32_t key = fnv1_hash("simple_video_player.spice_saved");
   for (uint8_t i = 0; i < this->spice_saved_count_; i++) {
     new (&this->spice_saved_prefs_[i]) ESPPreferenceObject(global_preferences->make_preference<SpiceSaved>(key + i));
@@ -2444,7 +2464,16 @@ void SimpleVideoPlayer::spice_save(uint8_t index, const std::string &name, const
   std::snprintf(entry.host, sizeof(entry.host), "%s", host.c_str());
   entry.port = port;
   entry.used = true;
-  this->spice_saved_prefs_[index].save(&entry);
+  this->spice_saved_changed_(index);
+}
+
+// The entry at index changed: kept where the connections are.
+void SimpleVideoPlayer::spice_saved_changed_(uint8_t index) {
+  if (this->spice_file_path_.empty()) {
+    this->spice_saved_prefs_[index].save(&this->spice_saved_[index]);
+  } else {
+    this->spice_file_save_();
+  }
   this->spice_callbacks_.call();
 }
 
@@ -2463,8 +2492,11 @@ void SimpleVideoPlayer::spice_forget(uint8_t index) {
   if (this->spice_saved_ == nullptr || index >= this->spice_saved_count_)
     return;
   this->spice_saved_[index] = SpiceSaved{};
-  this->spice_saved_prefs_[index].save(&this->spice_saved_[index]);
-  this->spice_callbacks_.call();
+  if (this->spice_saved_usb_ != nullptr)
+    std::memset(&this->spice_saved_usb_[index * SPICE_SAVED_USB], 0, sizeof(SpiceSavedUsb) * SPICE_SAVED_USB);
+  if (this->spice_active_saved_ == index)
+    this->spice_active_saved_ = -1;
+  this->spice_saved_changed_(index);
 }
 
 void SimpleVideoPlayer::spice_connect_saved(uint8_t index, const std::string &password) {
@@ -2475,6 +2507,251 @@ void SimpleVideoPlayer::spice_connect_saved(uint8_t index, const std::string &pa
     return;
   }
   this->spice_connect(host, port, password);
+  if (this->spice_saved_usb_ == nullptr)
+    return;
+  this->spice_active_saved_ = static_cast<int8_t>(index);
+#ifdef SVP_SPICE_USB
+  // The slots take this connection's devices (where plugged in, else as they come).
+  this->spice_usb_applying_ = true;
+  for (uint8_t i = 0; i < this->spice_usb_count_ && i < SPICE_SAVED_USB; i++) {
+    const SpiceSavedUsb &usb = this->spice_saved_usb_[index * SPICE_SAVED_USB + i];
+    this->spice_usb_[i]->want_device(usb.vid, usb.pid, usb.serial);
+  }
+  this->spice_usb_applying_ = false;
+#endif
+}
+
+#ifdef SVP_SPICE_USB
+void SimpleVideoPlayer::spice_usb_changed(SpiceUsbSlot *slot) {
+  if (this->spice_usb_applying_ || this->spice_active_saved_ < 0 || this->spice_saved_usb_ == nullptr)
+    return;
+  for (uint8_t i = 0; i < this->spice_usb_count_ && i < SPICE_SAVED_USB; i++) {
+    if (this->spice_usb_[i] != slot)
+      continue;
+    SpiceSavedUsb &usb = this->spice_saved_usb_[this->spice_active_saved_ * SPICE_SAVED_USB + i];
+    SpiceSavedUsb now{};
+    slot->selected_device(now.vid, now.pid, now.serial, sizeof(now.serial));
+    if (now.vid == usb.vid && now.pid == usb.pid && std::strcmp(now.serial, usb.serial) == 0)
+      return;
+    usb = now;
+    this->spice_saved_changed_(static_cast<uint8_t>(this->spice_active_saved_));
+  }
+}
+#endif
+
+//------------------------------------------------------------------------
+// The connections file: "index\tname\thost\tport" and per USB slot "\tvid:pid:serial" ("-": none),
+// one line per connection. Read and written whole, on the main loop through the storage worker (each
+// step after the last one's completion, the next one deferred to the loop).
+//------------------------------------------------------------------------
+
+void SimpleVideoPlayer::spice_file_load_() {
+  storage::StorageWorker *worker = storage::global_storage_worker;
+  if (this->spice_file_busy_ || this->spice_file_loaded_ || worker == nullptr)
+    return;
+  const char *rel = nullptr;
+  storage::PathStorage *ps = storage::global_storage_registry->resolve_path(this->spice_file_path_.c_str(), &rel);
+  if (ps == nullptr)
+    return;  // its storage registers later
+  this->spice_file_busy_ = true;
+  this->spice_file_len_ = 0;
+  const storage::StorageError err =
+      worker->begin_read(ps, rel, &this->spice_file_handle_, [this](storage::StorageError e) {
+        if (e == storage::StorageError::STORAGE_ERROR_OK) {
+          this->defer([this]() { this->spice_file_read_(); });
+          return;
+        }
+        this->spice_file_busy_ = false;
+        if (e == storage::StorageError::STORAGE_ERROR_NOT_FOUND) {
+          // None yet: made with the first connection saved.
+          this->spice_file_loaded_ = true;
+          if (this->spice_file_dirty_)
+            this->spice_file_save_();
+        } else {
+          ESP_LOGW(TAG, "%s not read: %s", this->spice_file_path_.c_str(), storage::error_to_string(e));
+        }
+      });
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
+    this->spice_file_busy_ = false;
+    if (err == storage::StorageError::STORAGE_ERROR_NOT_READY)
+      this->set_timeout("spice_file", 500, [this]() { this->spice_file_load_(); });
+  }
+}
+
+void SimpleVideoPlayer::spice_file_read_() {
+  const size_t room = this->spice_file_bytes_() - 1 - this->spice_file_len_;
+  if (room == 0) {
+    this->spice_file_read_done_(storage::StorageError::STORAGE_ERROR_OK);
+    return;
+  }
+  const storage::StorageError err = storage::global_storage_worker->read_chunk(
+      this->spice_file_handle_, reinterpret_cast<uint8_t *>(this->spice_file_buf_) + this->spice_file_len_, room,
+      &this->spice_file_got_, [this](storage::StorageError e) {
+        if (e != storage::StorageError::STORAGE_ERROR_OK || this->spice_file_got_ == 0) {
+          this->defer([this, e]() { this->spice_file_read_done_(e); });
+          return;
+        }
+        this->spice_file_len_ += this->spice_file_got_;
+        this->defer([this]() { this->spice_file_read_(); });
+      });
+  if (err == storage::StorageError::STORAGE_ERROR_NOT_READY) {
+    this->defer([this]() { this->spice_file_read_(); });
+  } else if (err != storage::StorageError::STORAGE_ERROR_OK) {
+    this->spice_file_read_done_(err);
+  }
+}
+
+void SimpleVideoPlayer::spice_file_read_done_(storage::StorageError err) {
+  const storage::StorageError closed =
+      storage::global_storage_worker->end_read(this->spice_file_handle_, [this, err](storage::StorageError) {
+        this->spice_file_busy_ = false;
+        if (err != storage::StorageError::STORAGE_ERROR_OK) {
+          ESP_LOGW(TAG, "%s not read: %s", this->spice_file_path_.c_str(), storage::error_to_string(err));
+          return;
+        }
+        this->spice_file_parse_();
+        this->spice_file_loaded_ = true;
+        this->spice_callbacks_.call();
+        if (this->spice_file_dirty_)
+          this->spice_file_save_();
+      });
+  if (closed == storage::StorageError::STORAGE_ERROR_NOT_READY)
+    this->defer([this, err]() { this->spice_file_read_done_(err); });
+}
+
+void SimpleVideoPlayer::spice_file_parse_() {
+  char *text = this->spice_file_buf_;
+  text[this->spice_file_len_] = '\0';
+  for (char *line = text; line != nullptr && *line != '\0';) {
+    char *next = std::strchr(line, '\n');
+    if (next != nullptr)
+      *next++ = '\0';
+    char *fields[4 + SPICE_SAVED_USB] = {};
+    size_t count = 0;
+    for (char *field = line; field != nullptr && count < 4 + SPICE_SAVED_USB;) {
+      fields[count++] = field;
+      field = std::strchr(field, '\t');
+      if (field != nullptr)
+        *field++ = '\0';
+    }
+    line = next;
+    if (count < 4)
+      continue;
+    const unsigned long index = std::strtoul(fields[0], nullptr, 10);
+    if (index >= this->spice_saved_count_ || fields[2][0] == '\0')
+      continue;
+    SpiceSaved &entry = this->spice_saved_[index];
+    std::snprintf(entry.name, sizeof(entry.name), "%s", fields[1]);
+    std::snprintf(entry.host, sizeof(entry.host), "%s", fields[2]);
+    entry.port = static_cast<uint16_t>(std::strtoul(fields[3], nullptr, 10));
+    entry.used = true;
+    for (size_t i = 0; i < SPICE_SAVED_USB; i++) {
+      SpiceSavedUsb &usb = this->spice_saved_usb_[index * SPICE_SAVED_USB + i];
+      usb = SpiceSavedUsb{};
+      unsigned vid = 0, pid = 0;
+      int at = 0;
+      if (4 + i < count && std::sscanf(fields[4 + i], "%4x:%4x:%n", &vid, &pid, &at) == 2 && at > 0) {
+        usb.vid = static_cast<uint16_t>(vid);
+        usb.pid = static_cast<uint16_t>(pid);
+        std::snprintf(usb.serial, sizeof(usb.serial), "%s", fields[4 + i] + at);
+      }
+    }
+  }
+}
+
+// Written whole once the file was read (never over one not read yet); a change meanwhile writes again.
+void SimpleVideoPlayer::spice_file_save_() {
+  if (this->spice_file_path_.empty())
+    return;
+  this->spice_file_dirty_ = true;
+  if (!this->spice_file_loaded_ || this->spice_file_busy_ || storage::global_storage_worker == nullptr)
+    return;
+  const char *rel = nullptr;
+  storage::PathStorage *ps = storage::global_storage_registry->resolve_path(this->spice_file_path_.c_str(), &rel);
+  if (ps == nullptr)
+    return;  // written once its storage is there
+  // Tabs and line breaks would end a field or line: spaces in their place.
+  auto clean = [](const char *text, char *out, size_t size) {
+    std::snprintf(out, size, "%s", text);
+    for (char *c = out; *c != '\0'; c++) {
+      if (*c == '\t' || *c == '\n' || *c == '\r')
+        *c = ' ';
+    }
+  };
+  size_t len = 0;
+  const size_t cap = this->spice_file_bytes_();
+  for (uint8_t i = 0; i < this->spice_saved_count_; i++) {
+    const SpiceSaved &entry = this->spice_saved_[i];
+    if (!entry.used)
+      continue;
+    char name[sizeof(entry.name)], host[sizeof(entry.host)];
+    clean(entry.name, name, sizeof(name));
+    clean(entry.host, host, sizeof(host));
+    len += std::snprintf(this->spice_file_buf_ + len, cap - len, "%u\t%s\t%s\t%u", i, name, host, entry.port);
+    for (uint8_t u = 0; u < SPICE_SAVED_USB && len < cap; u++) {
+      const SpiceSavedUsb &usb = this->spice_saved_usb_[i * SPICE_SAVED_USB + u];
+      char serial[sizeof(usb.serial)];
+      clean(usb.serial, serial, sizeof(serial));
+      if (usb.vid == 0) {
+        len += std::snprintf(this->spice_file_buf_ + len, cap - len, "\t-");
+      } else {
+        len += std::snprintf(this->spice_file_buf_ + len, cap - len, "\t%04x:%04x:%s", usb.vid, usb.pid, serial);
+      }
+    }
+    if (len < cap)
+      len += std::snprintf(this->spice_file_buf_ + len, cap - len, "\n");
+    len = std::min(len, cap - 1);
+  }
+  this->spice_file_len_ = len;
+  this->spice_file_busy_ = true;
+  this->spice_file_dirty_ = false;
+  const storage::StorageError err =
+      storage::global_storage_worker->begin_write(ps, rel, &this->spice_file_handle_, [this](storage::StorageError e) {
+        if (e != storage::StorageError::STORAGE_ERROR_OK) {
+          ESP_LOGW(TAG, "%s not written: %s", this->spice_file_path_.c_str(), storage::error_to_string(e));
+          this->spice_file_busy_ = false;
+          this->spice_file_dirty_ = true;
+          return;
+        }
+        this->defer([this]() { this->spice_file_write_(); });
+      });
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
+    this->spice_file_busy_ = false;
+    this->spice_file_dirty_ = true;
+    if (err == storage::StorageError::STORAGE_ERROR_NOT_READY)
+      this->set_timeout("spice_file", 500, [this]() { this->spice_file_save_(); });
+  }
+}
+
+void SimpleVideoPlayer::spice_file_write_() {
+  auto close = [this]() {
+    const storage::StorageError err =
+        storage::global_storage_worker->end_write(this->spice_file_handle_, [this](storage::StorageError) {
+          this->spice_file_busy_ = false;
+          if (this->spice_file_dirty_)
+            this->defer([this]() { this->spice_file_save_(); });
+        });
+    if (err == storage::StorageError::STORAGE_ERROR_NOT_READY)
+      this->defer([this]() { this->spice_file_write_(); });
+  };
+  if (this->spice_file_len_ == 0) {
+    close();
+    return;
+  }
+  const storage::StorageError err = storage::global_storage_worker->write_chunk(
+      this->spice_file_handle_, reinterpret_cast<const uint8_t *>(this->spice_file_buf_), this->spice_file_len_,
+      [this](storage::StorageError e) {
+        if (e != storage::StorageError::STORAGE_ERROR_OK) {
+          ESP_LOGW(TAG, "%s not written: %s", this->spice_file_path_.c_str(), storage::error_to_string(e));
+          this->spice_file_dirty_ = true;
+        }
+        this->spice_file_len_ = 0;  // written: what is left is to close it
+        this->defer([this]() { this->spice_file_write_(); });
+      });
+  if (err == storage::StorageError::STORAGE_ERROR_NOT_READY)
+    this->defer([this]() { this->spice_file_write_(); });
+  else if (err != storage::StorageError::STORAGE_ERROR_OK)
+    close();
 }
 
 void SimpleVideoPlayer::spice_task_entry_(void *param) { static_cast<SimpleVideoPlayer *>(param)->spice_loop_(); }
