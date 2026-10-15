@@ -102,7 +102,7 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 #ifdef SVP_AUDIO_COVER
-  this->cover_buffers_();
+  this->cover_bytes_();  // the canvases' sizes; their buffers come from the pool when cover art shows
 #endif
 
   if (!this->init_decoder_()) {
@@ -2122,9 +2122,6 @@ bool SimpleVideoPlayer::plan_pool_() {
   if (this->file_speaker_ != nullptr)
     fixed += pool_round(AUDIO_FILE_RING_SIZE);
 #endif
-#ifdef SVP_AUDIO_COVER
-  fixed += this->cover_bytes_();
-#endif
   this->index_reserve_ = pool_round(std::clamp<size_t>(pool / 32, 128 * 1024, MIB));
   fixed += this->index_reserve_ + pool_round(CACHE_BUFFER_SIZE) + 32 * PsramPool::ALIGN;  // pieces end on whole cache lines
 
@@ -2171,6 +2168,16 @@ uint8_t *SimpleVideoPlayer::media_alloc_(size_t size) {
 }
 
 bool SimpleVideoPlayer::acquire_session_buffers_() {
+#ifdef SVP_PICTURES
+  // Pictures and cover art give their buffers back first: the video's come from one free stretch.
+  bool missing = this->ring_buf_ == nullptr || this->index_buf_ == nullptr;
+  for (auto &slot : this->frame_slots_)
+    missing = missing || slot.data == nullptr;
+  if (missing && this->pic_ready_) {
+    this->pool_reclaim_req_.store(true, std::memory_order_release);
+    this->wait_alloc_answer_([this]() { return !this->pool_reclaim_req_.load(std::memory_order_acquire); });
+  }
+#endif
   xSemaphoreTake(this->media_lock_, portMAX_DELAY);
   for (auto &slot : this->frame_slots_) {
     if (slot.data == nullptr) {

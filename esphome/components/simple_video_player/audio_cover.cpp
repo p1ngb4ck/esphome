@@ -35,7 +35,7 @@ void SimpleVideoPlayer::on_svp_cover() {
   this->cover_clear_ = false;
 }
 
-// Setup, plan_pool_(): the pool's share of the cover art, for the canvases' sizes (the configuration's).
+// Setup: the canvases' sizes (the configuration's) and what their buffers take of the pool once cover art shows.
 size_t SimpleVideoPlayer::cover_bytes_() {
   size_t total = 0;
   for (size_t i = 0; i < this->cover_view_count_; i++) {
@@ -55,25 +55,52 @@ size_t SimpleVideoPlayer::cover_bytes_() {
   return total + align_up(COVER_FILE_MAX + 16, DMA_ALIGN);
 }
 
-// Setup, after plan_pool_(): the buffers from the pool, kept (their share is reserved).
+// From the pool; when it is full, the video's idle buffers make room (taken again by the next video).
+uint8_t *SimpleVideoPlayer::cover_alloc_(size_t size) {
+  uint8_t *piece = this->pool_.alloc(size);
+  if (piece == nullptr && this->release_media_())
+    piece = this->pool_.alloc(size);
+  return piece;
+}
+
+// Main loop, no video: the buffers from the pool while cover art is wanted (a video takes them back,
+// release_cover_buffers_()).
 bool SimpleVideoPlayer::cover_buffers_() {
   bool ok = true;
   for (size_t i = 0; ok && i < this->cover_view_count_; i++) {
     CoverView &view = this->cover_views_[i];
-    view.data = view.capacity != 0 ? this->pool_.alloc(view.capacity) : nullptr;
+    if (view.data == nullptr && view.capacity != 0)
+      view.data = this->cover_alloc_(view.capacity);
     ok = view.data != nullptr;
   }
-  if (ok)
-    this->cover_file_ = this->pool_.alloc(align_up(COVER_FILE_MAX + 16, DMA_ALIGN));
+  if (ok && this->cover_file_ == nullptr)
+    this->cover_file_ = this->cover_alloc_(align_up(COVER_FILE_MAX + 16, DMA_ALIGN));
   if (ok && this->cover_file_ != nullptr)
     return true;
-  ESP_LOGE(TAG, "No room in the PSRAM pool for the cover art -- cover art disabled");
+  ESP_LOGE(TAG, "No room in the PSRAM pool for the cover art");
+  this->release_cover_buffers_();
+  return false;
+}
+
+// Main loop, nothing fetched or decoded meanwhile: the cover art's buffers back to the pool (a video
+// wants it). The canvases let go first; what showed is fetched again afterwards.
+void SimpleVideoPlayer::release_cover_buffers_() {
+  if (this->cover_shown_)
+    this->cover_wanted_ = true;
+  if (this->lvgl_component_ == nullptr || this->lvgl_component_->is_paused()) {
+    this->cover_detach_pending_ = this->cover_detach_pending_ || this->cover_shown_;  // once LVGL runs
+  } else {
+    this->cover_clear_views_();
+  }
+  this->cover_shown_ = false;
   for (size_t i = 0; i < this->cover_view_count_; i++) {
     this->pool_.free(this->cover_views_[i].data);
     this->cover_views_[i].data = nullptr;
   }
-  this->cover_failed_ = true;
-  return false;
+  this->pool_.free(this->cover_file_);
+  this->cover_file_ = nullptr;
+  this->cover_step_ = CoverStep::IDLE;
+  this->cover_view_ = 0;
 }
 
 // LVGL running: the canvas shows nothing (no longer reads the buffer).
@@ -92,15 +119,27 @@ void SimpleVideoPlayer::cover_clear_views_() {
 }
 
 void SimpleVideoPlayer::cover_loop_() {
-  if (this->cover_view_count_ == 0 || this->cover_failed_ || this->cover_file_ == nullptr || !this->pic_ready_ ||
-      this->channel_q_ == nullptr)
+  if (this->cover_view_count_ == 0 || !this->pic_ready_ || this->channel_q_ == nullptr)
     return;
   // Nothing of LVGL while it is paused: everything waits for it.
   if (this->lvgl_component_ == nullptr || this->lvgl_component_->is_paused())
     return;
+  if (this->cover_detach_pending_) {
+    // Given back to the pool while LVGL was paused: the canvases still point at it.
+    this->cover_detach_pending_ = false;
+    for (size_t i = 0; i < this->cover_view_count_; i++)
+      this->cover_detach_(this->cover_views_[i]);
+  }
   switch (this->cover_step_) {
     case CoverStep::IDLE:
       if (this->cover_wanted_) {
+        // Not while a video plays or takes the pool: the buffers are its then.
+        if (this->pictures_held_() || this->pool_reclaim_req_.load(std::memory_order_acquire))
+          return;
+        if (!this->cover_buffers_()) {
+          this->cover_wanted_ = false;
+          return;
+        }
         this->cover_view_ = 0;
       } else if (this->cover_clear_) {
         this->cover_clear_ = false;

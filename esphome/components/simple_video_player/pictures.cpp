@@ -161,6 +161,12 @@ void SimpleVideoPlayer::pictures_loop_() {
         this->pic_decoded_.store(false, std::memory_order_relaxed);
       }
     }
+#ifdef SVP_AUDIO_COVER
+    // Cover art being fetched into its buffer: that ends first.
+    if (this->cover_step_ == CoverStep::FETCHING && !this->cover_fetched_.load(std::memory_order_acquire))
+      return;
+    this->release_cover_buffers_();
+#endif
     this->release_picture_buffers_();
     this->pool_reclaim_req_.store(false, std::memory_order_release);
     this->answer_alloc_();
