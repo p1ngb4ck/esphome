@@ -848,6 +848,44 @@ class SimpleVideoPlayer : public Component
   friend class SpiceSession;  // spice_client.cpp: one session, over the stream's frames and outputs
   static void spice_task_entry_(void *param);
   void spice_loop_();
+  // A desktop session's share of the panel (SPICE, VNC), spice task.
+  /// The output the session draws on: the display, else the canvas, and its size.
+  void desktop_output_(bool &direct, uint32_t &w, uint32_t &h);
+  /// The panel to the session: a playing video ends, a stream sender is let go, no cursor yet.
+  /// false: they did not let go in time.
+  bool desktop_take_panel_(bool direct, bool &wifi_held);
+  /// The panel back (panel_held: what desktop_take_panel_() took).
+  void desktop_release_panel_(bool &panel_held, bool &wifi_held);
+  /// The probe of spice_connect(): a VNC server greets first, a SPICE server waits for the client.
+  enum class DesktopKind : uint8_t { UNREACHED, SPICE, VNC };
+  DesktopKind desktop_probe_(const char *host, uint16_t port);
+  /// The desktop's picture through svp_relay (whole JPEGs of the output's size, as its stream sender):
+  /// asked for, its sender let in. connection_id: the SPICE session's. false: the relay refused it.
+  bool desktop_relay_start_(const char *kind, const char *host, uint16_t port, const char *password,
+                            uint32_t connection_id);
+  void desktop_relay_stop_();
+  /// A VNC session: all of it through the relay, the panel's keys, mouse and touches too.
+  void desktop_vnc_(const char *host, uint16_t port, const char *password);
+  struct SpiceCursorShape;
+  /// Network task: the relay's VNC pointer shape shown, or (changed) where it is.
+  void desktop_cursor_set_(const SpiceCursorShape *shape);
+  void desktop_cursor_changed_();
+  /// Leaving a session on the panel: the close key held, two fingers held.
+  struct DesktopClose {
+    enum Key : uint8_t { OTHER, TAKEN, TAPPED };
+    bool key_held{false};
+    uint16_t page{0}, usage{0};
+    uint32_t key_at{0};
+    bool fingers{false};
+    uint32_t fingers_at{0};
+    /// A key: TAKEN (the close key went down: nothing to send yet), TAPPED (it was let go before its
+    /// time: press and release it on the desktop), OTHER (as it is).
+    Key key(const SimpleVideoPlayer *p, uint8_t action, uint16_t page, uint16_t usage, bool pressed);
+    /// Two or more fingers down (true the first time: the finger on the desktop lets go), or fewer.
+    bool two_fingers(bool down);
+    /// The ms until the session ends on the panel (UINT32_MAX: nothing held); 0: now.
+    uint32_t due(const SimpleVideoPlayer *p) const;
+  };
   /// Draw task, output held: the SPICE cursor taken off (what was under it back), or drawn where it is
   /// now (what is under it kept).
   void spice_cursor_hide_();
@@ -1707,6 +1745,17 @@ class SimpleVideoPlayer : public Component
   std::atomic<uint8_t> spice_close_keys_{1};
   std::atomic<uint32_t> spice_close_hold_ms_{1000};
   std::atomic<uint32_t> spice_touch_hold_ms_{1000};
+  bool desktop_took_{false};  // spice task: the session of this connect took the panel
+  // The relay's sender of the desktop's picture: let in from its address while wanted; gone: it
+  // disconnected (the session ends with it). relay_inputs: keys, mouse and touches go to it (VNC).
+  std::atomic<uint32_t> desktop_relay_addr_{0};
+  std::atomic<bool> desktop_sender_wanted_{false};
+  std::atomic<bool> desktop_sender_gone_{false};
+  std::atomic<bool> desktop_relay_inputs_{false};
+  // Network task: the pointer's shape from the relay (udisp 0x23) as it arrives.
+  uint32_t desktop_cursor_left_{0};
+  size_t desktop_cursor_at_{0};
+  bool desktop_cursor_ok_{false};
   void spice_saved_setup_();
 #ifdef SVP_SPICE_USB
   static constexpr uint8_t SPICE_USB_SLOTS = 4;

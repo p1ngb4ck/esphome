@@ -49,6 +49,10 @@ static constexpr uint32_t STREAM_STATS_MS = 1000;
 #endif
 static constexpr uint8_t UDISP_TYPE_INPUT = 0x21;  // the sender asks for 'K', 'X', 'P' (x 1) or no more (x 0)
 static constexpr uint8_t UDISP_TYPE_ECHO = 0x22;   // the sender asks for 'R' with x back at once
+// svp_relay's VNC desktop: the pointer's shape (x, y hot spot; w x h B, G, R, A; w 0: hidden), and
+// where it is (x, y), drawn over the picture like a SPICE cursor.
+static constexpr uint8_t UDISP_TYPE_CURSOR = 0x23;
+static constexpr uint8_t UDISP_TYPE_POINTER = 0x24;
 static constexpr uint32_t STREAM_ECHO_PENDING = 1u << 16;
 static constexpr uint32_t STREAM_AUDIO_DEFAULT_RATE = 48000;
 static constexpr size_t UDISP_HEADER_BYTES = 16;
@@ -303,11 +307,15 @@ void SimpleVideoPlayer::stream_net_loop_() {
       char peer_text[16] = {};
       ::inet_ntoa_r(peer.sin_addr, peer_text, sizeof(peer_text));
 #ifdef SVP_SPICE
-      if (this->spice_on_.load(std::memory_order_acquire)) {
-        ESP_LOGI(TAG, "Sender from %s refused: a SPICE session holds the panel", peer_text);
+      // While a desktop session holds the panel, only svp_relay's sender of its picture comes in.
+      const bool desktop_sender = this->desktop_sender_wanted_.load(std::memory_order_acquire) &&
+                                  peer.sin_addr.s_addr == this->desktop_relay_addr_.load(std::memory_order_acquire);
+      if (this->spice_on_.load(std::memory_order_acquire) && !desktop_sender) {
+        ESP_LOGI(TAG, "Sender from %s refused: a desktop session holds the panel", peer_text);
         ::close(client);
         continue;
       }
+      this->desktop_cursor_left_ = 0;
 #endif
       this->stream_sender_busy_.store(true, std::memory_order_release);
       ESP_LOGI(TAG, "Sender connected from %s", peer_text);
@@ -525,6 +533,14 @@ void SimpleVideoPlayer::stream_net_loop_() {
       this->stream_connected_.store(false, std::memory_order_release);
       ::close(client);
       this->stream_sender_busy_.store(false, std::memory_order_release);
+#ifdef SVP_SPICE
+      if (desktop_sender) {
+        // The desktop's picture is gone: its session ends with it.
+        this->desktop_sender_wanted_.store(false, std::memory_order_release);
+        this->desktop_sender_gone_.store(true, std::memory_order_release);
+        this->spice_wake();
+      }
+#endif
     }
     ::close(listener);
   }
@@ -539,6 +555,23 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
       len -= take;
       continue;
     }
+
+#ifdef SVP_SPICE
+    if (this->desktop_cursor_left_ > 0) {
+      const size_t take = std::min<size_t>(this->desktop_cursor_left_, len);
+      // Into a cache entry, which only a SPICE session's cursor channel uses otherwise.
+      SpiceCursorShape &shape = this->spice_cursor_cache_[0];
+      if (this->desktop_cursor_ok_)
+        std::memcpy(reinterpret_cast<uint8_t *>(shape.px) + this->desktop_cursor_at_, data, take);
+      this->desktop_cursor_at_ += take;
+      this->desktop_cursor_left_ -= take;
+      data += take;
+      len -= take;
+      if (this->desktop_cursor_left_ == 0 && this->desktop_cursor_ok_)
+        this->desktop_cursor_set_(&shape);
+      continue;
+    }
+#endif
 
 #ifdef USE_AUDIO
     if (this->stream_audio_left_ > 0) {
@@ -609,6 +642,34 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
       this->stream_echo_.store(STREAM_ECHO_PENDING | x, std::memory_order_release);
       this->stream_wake_();
     }
+#ifdef SVP_SPICE
+    if (type == UDISP_TYPE_CURSOR && this->spice_on_.load(std::memory_order_relaxed)) {
+      SpiceCursorShape &shape = this->spice_cursor_cache_[0];
+      this->desktop_cursor_ok_ =
+          w <= SPICE_CURSOR_MAX && h <= SPICE_CURSOR_MAX && total == static_cast<uint32_t>(w) * h * 4;
+      if (this->desktop_cursor_ok_) {
+        shape.w = w;
+        shape.h = h;
+        shape.hot_x = std::min<uint16_t>(x, w > 0 ? w - 1 : 0);
+        shape.hot_y = std::min<uint16_t>(y, h > 0 ? h - 1 : 0);
+        shape.valid = w > 0 && h > 0;
+      }
+      this->desktop_cursor_at_ = 0;
+      this->desktop_cursor_left_ = total;
+      if (total == 0 && this->desktop_cursor_ok_)
+        this->desktop_cursor_set_(&shape);
+      continue;
+    }
+    if (type == UDISP_TYPE_POINTER && this->spice_on_.load(std::memory_order_relaxed)) {
+      xSemaphoreTake(this->spice_cursor_lock_, portMAX_DELAY);
+      this->spice_cursor_->x = x;
+      this->spice_cursor_->y = y;
+      xSemaphoreGive(this->spice_cursor_lock_);
+      this->desktop_cursor_changed_();
+      this->stream_skip_ = total;
+      continue;
+    }
+#endif
     // Heartbeats/END (and sound without a speaker) are counted out like any payload.
     if (type != UDISP_TYPE_JPG || this->stream_drop_sender_.load(std::memory_order_relaxed)) {
       this->stream_skip_ = total;
@@ -770,6 +831,11 @@ void SimpleVideoPlayer::stream_send_pending_(int client) {
     if (::send(client, message, sizeof(message), MSG_DONTWAIT) != static_cast<int>(sizeof(message)))
       this->stream_status_pending_.store(true, std::memory_order_release);
   }
+#ifdef SVP_SPICE
+  // A SPICE session reads them itself (its inputs channel).
+  if (this->spice_inputs_on_.load(std::memory_order_acquire))
+    return;
+#endif
 #ifdef SVP_STREAM_TOUCH
   if (this->stream_touch_q_ == nullptr)
     return;
@@ -807,8 +873,9 @@ void SimpleVideoPlayer::stream_send_pending_(int client) {
 bool SimpleVideoPlayer::stream_on_input(const uint8_t *message, uint8_t length) {
   bool wanted = this->stream_input_wanted_.load(std::memory_order_acquire);
 #ifdef SVP_SPICE
-  // A SPICE session takes them for its inputs channel.
-  const bool spice = this->spice_on_.load(std::memory_order_acquire);
+  // A SPICE session takes them for its inputs channel; a VNC session's go to svp_relay's sender.
+  const bool spice = this->spice_on_.load(std::memory_order_acquire) &&
+                     !this->desktop_relay_inputs_.load(std::memory_order_acquire);
   if (spice)
     wanted = this->spice_inputs_on_.load(std::memory_order_acquire);
 #endif
@@ -1226,7 +1293,9 @@ void SimpleVideoPlayer::stream_on_touch(const touchscreen::TouchPoints_t &points
   if (this->stream_touch_q_ == nullptr)
     return;
 #ifdef SVP_SPICE
-  if (this->spice_on_.load(std::memory_order_acquire) && !this->spice_inputs_on_.load(std::memory_order_acquire))
+  const bool spice = this->spice_on_.load(std::memory_order_acquire) &&
+                     !this->desktop_relay_inputs_.load(std::memory_order_acquire);
+  if (spice && !this->spice_inputs_on_.load(std::memory_order_acquire))
     return;
 #endif
   // Touches go to a udisp sender whose picture is shown, and to an AVI sender while it plays.
@@ -1277,7 +1346,7 @@ void SimpleVideoPlayer::stream_on_touch(const touchscreen::TouchPoints_t &points
   }
 #ifdef SVP_SPICE
   // A SPICE session takes them for its inputs channel.
-  if (this->spice_on_.load(std::memory_order_acquire)) {
+  if (spice) {
     this->spice_wake();
     return;
   }

@@ -11,6 +11,11 @@
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 
+#ifdef SVP_SPICE
+#include <lwip/netdb.h>
+#include <lwip/sockets.h>
+#endif
+
 #include <atomic>
 #include <cctype>
 #include <cstring>
@@ -417,6 +422,57 @@ void SimpleVideoPlayer::options_set_task_() {
     this->channel_http_("/options", payload.c_str(), nullptr, nullptr);
   }
 }
+
+#ifdef SVP_SPICE
+// Spice task (blocking): the relay connects to the stream port and draws the desktop, then answers.
+bool SimpleVideoPlayer::desktop_relay_start_(const char *kind, const char *host, uint16_t port, const char *password,
+                                             uint32_t connection_id) {
+  // Its sender is let in from the relay's address only.
+  const std::string &url = this->channel_url_;
+  size_t from = url.find("://");
+  from = from == std::string::npos ? 0 : from + 3;
+  const size_t to = url.find_first_of(":/", from);
+  const std::string name = url.substr(from, to == std::string::npos ? std::string::npos : to - from);
+  struct addrinfo hints {};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  struct addrinfo *result = nullptr;
+  uint32_t relay = 0;
+  if (::getaddrinfo(name.c_str(), nullptr, &hints, &result) == 0 && result != nullptr) {
+    relay = reinterpret_cast<struct sockaddr_in *>(result->ai_addr)->sin_addr.s_addr;
+    ::freeaddrinfo(result);
+  }
+  if (relay == 0) {
+    ESP_LOGE(TAG, "svp_relay's address %s not found", name.c_str());
+    return false;
+  }
+  this->desktop_relay_addr_.store(relay, std::memory_order_release);
+  this->desktop_sender_gone_.store(false, std::memory_order_release);
+  this->desktop_sender_wanted_.store(true, std::memory_order_release);
+  const std::string payload = json::build_json([&](JsonObject root) {
+    root["port"] = this->stream_port_;
+    root["action"] = "start";
+    root["kind"] = kind;
+    root["host"] = host;
+    root["server_port"] = port;
+    root["password"] = password;
+    root["connection_id"] = connection_id;
+  });
+  if (this->channel_http_("/desktop", payload.c_str(), nullptr, nullptr))
+    return true;
+  this->desktop_sender_wanted_.store(false, std::memory_order_release);
+  ESP_LOGE(TAG, "svp_relay did not show the desktop (its log says why)");
+  return false;
+}
+
+void SimpleVideoPlayer::desktop_relay_stop_() {
+  const std::string payload = json::build_json([&](JsonObject root) {
+    root["port"] = this->stream_port_;
+    root["action"] = "stop";
+  });
+  this->channel_http_("/desktop", payload.c_str(), nullptr, nullptr);
+}
+#endif
 
 bool SimpleVideoPlayer::channel_http_(const char *path, const char *body, char **response, size_t *response_len,
                                       uint8_t *into, size_t into_cap) {

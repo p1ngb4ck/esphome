@@ -1,5 +1,7 @@
-// SPICE client: a SPICE server's desktop (QEMU/libvirt, x11spice, ...) on the stream's output, drawn
-// by the stream draw task like udisp rectangles (stream_receiver.cpp); its inputs channel fed with the
+// SPICE client: a SPICE server's desktop (QEMU/libvirt, x11spice, ...) on the stream's output. Its
+// display channel is svp_relay's, which joins the session and sends whole JPEGs of the output's size
+// as the stream's sender (open_display_()); a VNC server's desktop comes all through the relay
+// (desktop_vnc_()). Here: the session's inputs channel fed with the
 // panel's keys, mouse and touches, its cursor drawn over the desktop by the draw task, its sound played
 // on the speaker, and USB devices redirected through its usbredir channels (select/spice_usb.cpp). The
 // wire layouts follow spice-protocol (spice/protocol.h, spice/enums.h) and the demarshallers
@@ -356,6 +358,56 @@ uint32_t key_code(uint16_t xt, bool release) {
   return 0xE0u | (static_cast<uint32_t>(code & 0xFF) << 8);
 }
 
+bool resolve_host(const char *host, uint16_t port, struct sockaddr_in &addr) {
+  struct addrinfo hints {};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  struct addrinfo *result = nullptr;
+  char port_text[6];
+  std::snprintf(port_text, sizeof(port_text), "%u", port);
+  if (::getaddrinfo(host, port_text, &hints, &result) != 0 || result == nullptr) {
+    ESP_LOGE(TAG, "%s not found", host);
+    return false;
+  }
+  std::memcpy(&addr, result->ai_addr, sizeof(addr));
+  ::freeaddrinfo(result);
+  return true;
+}
+
+// A TCP connection to addr, its timeouts set; -1: none.
+int connect_to(const struct sockaddr_in &addr) {
+  int fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (fd < 0)
+    return -1;
+  const int flags = ::fcntl(fd, F_GETFL, 0);
+  ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  int result = ::connect(fd, reinterpret_cast<const struct sockaddr *>(&addr), sizeof(addr));
+  if (result < 0 && errno == EINPROGRESS) {
+    fd_set writable;
+    FD_ZERO(&writable);
+    FD_SET(fd, &writable);
+    struct timeval tv = {.tv_sec = CONNECT_TIMEOUT_S, .tv_usec = 0};
+    int error = 0;
+    socklen_t error_len = sizeof(error);
+    if (::select(fd + 1, nullptr, &writable, nullptr, &tv) == 1 &&
+        ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &error_len) == 0 && error == 0)
+      result = 0;
+  }
+  if (result < 0) {
+    ::close(fd);
+    return -1;
+  }
+  ::fcntl(fd, F_SETFL, flags);
+  int one = 1;
+  ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+  ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+  struct timeval recv_timeout = {.tv_sec = RECV_TIMEOUT_S, .tv_usec = 0};
+  struct timeval send_timeout = {.tv_sec = SEND_TIMEOUT_S, .tv_usec = 0};
+  ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
+  ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
+  return fd;
+}
+
 }  // namespace
 
 class SpiceSession {
@@ -398,6 +450,7 @@ class SpiceSession {
   bool handle_picture_(Channel &ch, uint16_t type, uint32_t size, const uint8_t *body);
   bool handle_channels_(const uint8_t *body, uint32_t size);
   bool open_display_();
+  bool open_display_here_();
   bool take_panel_();
   void release_panel_();
   bool draw_copy_(StreamFrame *f, uint32_t size);
@@ -454,6 +507,9 @@ class SpiceSession {
 #endif
   struct sockaddr_in addr_ {};
   const char *password_{nullptr};
+  const char *host_{nullptr};
+  uint16_t port_{0};
+  bool channels_done_{false};
   uint32_t session_id_{0};
   int64_t surface_id_{-1};
   uint32_t out_w_{0}, out_h_{0};
@@ -477,11 +533,7 @@ class SpiceSession {
   uint32_t cursor_tick_{0};
   bool sound_ok_{false};  // the playback stream is one the speaker plays
   // Leaving the session on the panel (as the dashboard): the close key held, two fingers held.
-  bool close_key_held_{false};
-  uint16_t close_page_{0}, close_usage_{0};
-  uint32_t close_key_at_{0};
-  bool two_fingers_{false};
-  uint32_t two_fingers_at_{0};
+  SimpleVideoPlayer::DesktopClose close_;
 };
 
 bool SpiceSession::first_(uint32_t what) {
@@ -491,54 +543,9 @@ bool SpiceSession::first_(uint32_t what) {
   return true;
 }
 
-bool SpiceSession::resolve_(const char *host, uint16_t port) {
-  struct addrinfo hints {};
-  hints.ai_family = AF_INET;
-  hints.ai_socktype = SOCK_STREAM;
-  struct addrinfo *result = nullptr;
-  char port_text[6];
-  std::snprintf(port_text, sizeof(port_text), "%u", port);
-  if (::getaddrinfo(host, port_text, &hints, &result) != 0 || result == nullptr) {
-    ESP_LOGE(TAG, "%s not found", host);
-    return false;
-  }
-  std::memcpy(&this->addr_, result->ai_addr, sizeof(this->addr_));
-  ::freeaddrinfo(result);
-  return true;
-}
+bool SpiceSession::resolve_(const char *host, uint16_t port) { return resolve_host(host, port, this->addr_); }
 
-int SpiceSession::connect_() {
-  int fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (fd < 0)
-    return -1;
-  const int flags = ::fcntl(fd, F_GETFL, 0);
-  ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-  int result = ::connect(fd, reinterpret_cast<struct sockaddr *>(&this->addr_), sizeof(this->addr_));
-  if (result < 0 && errno == EINPROGRESS) {
-    fd_set writable;
-    FD_ZERO(&writable);
-    FD_SET(fd, &writable);
-    struct timeval tv = {.tv_sec = CONNECT_TIMEOUT_S, .tv_usec = 0};
-    int error = 0;
-    socklen_t error_len = sizeof(error);
-    if (::select(fd + 1, nullptr, &writable, nullptr, &tv) == 1 &&
-        ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &error_len) == 0 && error == 0)
-      result = 0;
-  }
-  if (result < 0) {
-    ::close(fd);
-    return -1;
-  }
-  ::fcntl(fd, F_SETFL, flags);
-  int one = 1;
-  ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-  ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
-  struct timeval recv_timeout = {.tv_sec = RECV_TIMEOUT_S, .tv_usec = 0};
-  struct timeval send_timeout = {.tv_sec = SEND_TIMEOUT_S, .tv_usec = 0};
-  ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
-  ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
-  return fd;
-}
+int SpiceSession::connect_() { return connect_to(this->addr_); }
 
 // The link (spice_channel_send_link(), spice_channel_recv_link_msg(), spice_channel_recv_auth()).
 bool SpiceSession::link_(Channel &ch, uint8_t type, uint8_t id, uint32_t channel_caps) {
@@ -1022,8 +1029,10 @@ bool SpiceSession::handle_message_(Channel &ch, uint16_t type, const uint8_t *bo
       ESP_LOGD(TAG, "Mouse mode %s", this->client_mouse_ ? "client" : "server");
       return true;
     }
-    if (type == MSG_MAIN_CHANNELS_LIST && this->display_.fd < 0)
+    if (type == MSG_MAIN_CHANNELS_LIST && !this->channels_done_) {
+      this->channels_done_ = true;
       return this->handle_channels_(body, size);
+    }
     return true;
   }
   if (&ch == &this->inputs_) {
@@ -1129,7 +1138,19 @@ bool SpiceSession::handle_one_(Channel &ch) {
   return ok;
 }
 
+// The display channel is the relay's (whole JPEGs of the output's size, as the stream's sender): it
+// joins this session by its id. The panel is taken first, so the relay's sender is let in.
 bool SpiceSession::open_display_() {
+  if (!this->take_panel_())
+    return false;
+  if (this->p_->desktop_relay_start_("spice", this->host_, this->port_, this->password_, this->session_id_))
+    return true;
+  this->p_->desktop_took_ = false;
+  return false;
+}
+
+// The display channel here (before svp_relay drew it): not linked any more.
+bool SpiceSession::open_display_here_() {
   if (!this->link_(this->display_, CHANNEL_DISPLAY, 0, DISPLAY_CAPS))
     return false;
   // No image cache and no GLZ window: nothing comes from a cache (dcc_handle_init()).
@@ -1143,69 +1164,26 @@ bool SpiceSession::open_display_() {
   return this->take_panel_();
 }
 
-// The panel to this session, before everything else: a playing video ends, a stream sender is let
-// go, and both are refused from then on (spice_refuses_(), the network task); LVGL pauses for it
+// The panel to this session, before everything else (desktop_take_panel_()); LVGL pauses for it
 // (loop()) as for a sender. What plays sound stops only on the device the session's sound takes
 // (spice_sound_take_()).
 bool SpiceSession::take_panel_() {
   SimpleVideoPlayer *p = this->p_;
-  p->spice_on_.store(true, std::memory_order_release);
-  p->start_pending_.store(false, std::memory_order_release);
-  if (p->picture_session_busy_())
-    p->end_session_();
-  p->stream_drop_sender_.store(true, std::memory_order_release);
-  p->stream_wake_();
-  for (const uint32_t start = millis();
-       p->stream_sender_busy_.load(std::memory_order_acquire) || p->picture_session_busy_();) {
-    if (millis() - start > TAKEOVER_WAIT_MS) {
-      ESP_LOGE(TAG, "The playing video or stream sender did not let go of the panel");
-      p->stream_drop_sender_.store(false, std::memory_order_release);
-      p->spice_on_.store(false, std::memory_order_release);
-      return false;
-    }
-    vTaskDelay(pdMS_TO_TICKS(20));
-  }
-  p->stream_drop_sender_.store(false, std::memory_order_release);
+  if (!p->desktop_take_panel_(this->direct_, this->wifi_held_))
+    return false;
   for (auto &stream : p->spice_->streams)
     stream.used = false;
-  // No cursor yet; the draw task holds nothing of one (it draws nothing of this session yet).
-  xSemaphoreTake(p->spice_cursor_lock_, portMAX_DELAY);
-  p->spice_cursor_->visible = false;
-  p->spice_cursor_->shape.valid = false;
-  xSemaphoreGive(p->spice_cursor_lock_);
   for (uint8_t i = 0; i < SimpleVideoPlayer::SPICE_CURSOR_CACHE; i++)
     p->spice_cursor_cache_[i].valid = false;
-  p->spice_cursor_drawn_ = false;
-  p->spice_cursor_dirty_.store(false, std::memory_order_release);
-  p->spice_direct_out_.store(this->direct_, std::memory_order_release);
   this->pointer_x_ = static_cast<int32_t>(this->out_w_ / 2);
   this->pointer_y_ = static_cast<int32_t>(this->out_h_ / 2);
-  p->stream_connected_.store(true, std::memory_order_release);
   this->panel_held_ = true;
   this->took_panel_ = true;
-  p->spice_connecting_.store(false, std::memory_order_release);
-  SimpleVideoPlayer::hold_wifi_(this->wifi_held_, true);
   ESP_LOGI(TAG, "Connected to %s:%u", inet_ntoa(this->addr_.sin_addr), ntohs(this->addr_.sin_port));
-  p->spice_changed_.store(true, std::memory_order_release);
-  App.wake_loop_threadsafe();
   return true;
 }
 
-void SpiceSession::release_panel_() {
-  SimpleVideoPlayer *p = this->p_;
-  p->spice_inputs_on_.store(false, std::memory_order_release);
-  p->spice_sound_on_.store(false, std::memory_order_release);
-  SimpleVideoPlayer::hold_wifi_(this->wifi_held_, false);
-  if (this->panel_held_) {
-    this->panel_held_ = false;
-    p->stream_connected_.store(false, std::memory_order_release);
-    if (p->stream_draw_task_ != nullptr)
-      xTaskNotifyGive(p->stream_draw_task_);  // no longer waits for the output
-  }
-  p->spice_on_.store(false, std::memory_order_release);
-  p->spice_changed_.store(true, std::memory_order_release);
-  App.wake_loop_threadsafe();
-}
+void SpiceSession::release_panel_() { this->p_->desktop_release_panel_(this->panel_held_, this->wifi_held_); }
 
 void SpiceSession::drop_(Channel &ch) {
   if (ch.fd < 0)
@@ -1374,20 +1352,11 @@ bool SpiceSession::key_(const uint8_t *m) {
     }
   }
   // The close key: held long it ends the session (close_due_()), let go before it is the desktop's.
-  const uint8_t keys = this->p_->spice_close_keys_.load(std::memory_order_acquire);
-  const bool close_key =
-      (action == lvgl::KeyBindings::ACT_BACK && (keys & 1)) || (action == lvgl::KeyBindings::ACT_HOME && (keys & 2));
-  if (pressed && close_key && !this->close_key_held_) {
-    this->close_key_held_ = true;
-    this->close_page_ = page;
-    this->close_usage_ = usage;
-    this->close_key_at_ = millis();
+  const auto close = this->close_.key(this->p_, action, page, usage, pressed);
+  if (close == SimpleVideoPlayer::DesktopClose::TAKEN)
     return true;
-  }
-  if (!pressed && this->close_key_held_ && page == this->close_page_ && usage == this->close_usage_) {
-    this->close_key_held_ = false;
+  if (close == SimpleVideoPlayer::DesktopClose::TAPPED)
     return xt == 0 || (this->send_key_(xt, true) && this->send_key_(xt, false));
-  }
   if (xt == 0)
     return true;  // a mouse button (page 9) comes with the pointer
   return this->send_key_(xt, pressed);
@@ -1444,17 +1413,13 @@ bool SpiceSession::pointer_(const uint8_t *m) {
 // are the panel's gesture: held long they end the session (close_due_()).
 bool SpiceSession::touch_(const StreamTouch &touch) {
   if (touch.count >= 2) {
-    if (!this->two_fingers_) {
-      this->two_fingers_ = true;
-      this->two_fingers_at_ = millis();
-      if (this->touch_down_) {
-        this->touch_down_ = false;
-        return this->buttons_(this->mouse_buttons_);
-      }
+    if (this->close_.two_fingers(true) && this->touch_down_) {
+      this->touch_down_ = false;
+      return this->buttons_(this->mouse_buttons_);
     }
     return true;
   }
-  this->two_fingers_ = false;
+  this->close_.two_fingers(false);
   int found = -1;
   for (uint8_t i = 0; i < touch.count; i++) {
     if (!this->touch_down_ || touch.id[i] == this->touch_id_) {
@@ -1831,39 +1796,14 @@ bool SpiceSession::usb_read_(Channel &ch, SpiceUsbSlot *slot) {
 }
 #endif
 
-uint32_t SpiceSession::close_due_() const {
-  const uint32_t now = millis();
-  uint32_t due = UINT32_MAX;
-  auto left = [now](uint32_t since, uint32_t hold) { return now - since >= hold ? 0 : hold - (now - since); };
-  if (this->close_key_held_)
-    due = std::min(due, left(this->close_key_at_, this->p_->spice_close_hold_ms_.load(std::memory_order_acquire)));
-  if (this->two_fingers_)
-    due = std::min(due, left(this->two_fingers_at_, this->p_->spice_touch_hold_ms_.load(std::memory_order_acquire)));
-  return due;
-}
+uint32_t SpiceSession::close_due_() const { return this->close_.due(this->p_); }
 
 void SpiceSession::run(const char *host, uint16_t port, const char *password) {
   SimpleVideoPlayer *p = this->p_;
   this->password_ = password;
-#ifdef SVP_DSI_OUTPUT
-  if (p->stream_direct_()) {
-    this->direct_ = true;
-    this->out_w_ = p->dsi_out_w_;
-    this->out_h_ = p->dsi_out_h_;
-#ifdef SVP_USE_LVGL
-    if (p->lvgl_component_ != nullptr && p->lvgl_component_->get_rotation() != display::DISPLAY_ROTATION_0_DEGREES)
-      ESP_LOGW(TAG, "The panel is turned: the desktop shows on its native %" PRIu32 "x%" PRIu32 " unturned",
-               this->out_w_, this->out_h_);
-#endif
-  }
-#endif
-#ifdef SVP_CANVAS_OUTPUT
-  if (!p->stream_direct_()) {
-    this->direct_ = false;
-    this->out_w_ = p->canvas_size_w_;
-    this->out_h_ = p->canvas_size_h_;
-  }
-#endif
+  this->host_ = host;
+  this->port_ = port;
+  p->desktop_output_(this->direct_, this->out_w_, this->out_h_);
   ESP_LOGI(TAG, "Connecting to %s:%u", host, port);
   if (!this->resolve_(host, port) || !this->link_(this->main_, CHANNEL_MAIN, 0, 0)) {
     this->close_();
@@ -1906,6 +1846,10 @@ void SpiceSession::run(const char *host, uint16_t port, const char *password) {
     }
     if (this->stopping_())
       break;
+    if (p->desktop_sender_gone_.load(std::memory_order_acquire)) {
+      ESP_LOGW(TAG, "svp_relay's picture ended");
+      break;
+    }
     if (this->close_due_() == 0) {
       ESP_LOGI(TAG, "Ended on the panel");
       break;
@@ -1932,7 +1876,247 @@ void SpiceSession::run(const char *host, uint16_t port, const char *password) {
   }
   ESP_LOGI(TAG, "Disconnected");
   this->close_();
+  p->desktop_sender_wanted_.store(false, std::memory_order_release);
   this->release_panel_();
+}
+
+//========================================================================
+// A desktop session's share of the panel (SPICE, VNC), spice task
+//========================================================================
+
+void SimpleVideoPlayer::desktop_output_(bool &direct, uint32_t &w, uint32_t &h) {
+#ifdef SVP_DSI_OUTPUT
+  if (this->stream_direct_()) {
+    direct = true;
+    w = this->dsi_out_w_;
+    h = this->dsi_out_h_;
+#ifdef SVP_USE_LVGL
+    if (this->lvgl_component_ != nullptr &&
+        this->lvgl_component_->get_rotation() != display::DISPLAY_ROTATION_0_DEGREES)
+      ESP_LOGW(TAG, "The panel is turned: the desktop shows on its native %" PRIu32 "x%" PRIu32 " unturned", w, h);
+#endif
+  }
+#endif
+#ifdef SVP_CANVAS_OUTPUT
+  if (!this->stream_direct_()) {
+    direct = false;
+    w = this->canvas_size_w_;
+    h = this->canvas_size_h_;
+  }
+#endif
+}
+
+// A playing video ends, a stream sender is let go, and both are refused from then on
+// (spice_refuses_(), the network task).
+bool SimpleVideoPlayer::desktop_take_panel_(bool direct, bool &wifi_held) {
+  this->spice_on_.store(true, std::memory_order_release);
+  this->start_pending_.store(false, std::memory_order_release);
+  if (this->picture_session_busy_())
+    this->end_session_();
+  this->stream_drop_sender_.store(true, std::memory_order_release);
+  this->stream_wake_();
+  for (const uint32_t start = millis();
+       this->stream_sender_busy_.load(std::memory_order_acquire) || this->picture_session_busy_();) {
+    if (millis() - start > TAKEOVER_WAIT_MS) {
+      ESP_LOGE(TAG, "The playing video or stream sender did not let go of the panel");
+      this->stream_drop_sender_.store(false, std::memory_order_release);
+      this->spice_on_.store(false, std::memory_order_release);
+      return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+  this->stream_drop_sender_.store(false, std::memory_order_release);
+  // No cursor yet; the draw task holds nothing of one (it draws nothing of this session yet).
+  xSemaphoreTake(this->spice_cursor_lock_, portMAX_DELAY);
+  this->spice_cursor_->visible = false;
+  this->spice_cursor_->shape.valid = false;
+  xSemaphoreGive(this->spice_cursor_lock_);
+  this->spice_cursor_drawn_ = false;
+  this->spice_cursor_dirty_.store(false, std::memory_order_release);
+  this->spice_direct_out_.store(direct, std::memory_order_release);
+  this->stream_connected_.store(true, std::memory_order_release);
+  this->desktop_took_ = true;
+  this->spice_connecting_.store(false, std::memory_order_release);
+  hold_wifi_(wifi_held, true);
+  this->spice_changed_.store(true, std::memory_order_release);
+  App.wake_loop_threadsafe();
+  return true;
+}
+
+void SimpleVideoPlayer::desktop_release_panel_(bool &panel_held, bool &wifi_held) {
+  this->spice_inputs_on_.store(false, std::memory_order_release);
+  this->spice_sound_on_.store(false, std::memory_order_release);
+  hold_wifi_(wifi_held, false);
+  if (panel_held) {
+    panel_held = false;
+    this->stream_connected_.store(false, std::memory_order_release);
+    if (this->stream_draw_task_ != nullptr)
+      xTaskNotifyGive(this->stream_draw_task_);  // no longer waits for the output
+  }
+  this->spice_on_.store(false, std::memory_order_release);
+  this->spice_changed_.store(true, std::memory_order_release);
+  App.wake_loop_threadsafe();
+}
+
+SimpleVideoPlayer::DesktopClose::Key SimpleVideoPlayer::DesktopClose::key(const SimpleVideoPlayer *p, uint8_t action,
+                                                                          uint16_t page, uint16_t usage,
+                                                                          bool pressed) {
+  const uint8_t keys = p->spice_close_keys_.load(std::memory_order_acquire);
+#ifdef SVP_STREAM_INPUT
+  const bool close_key =
+      (action == lvgl::KeyBindings::ACT_BACK && (keys & 1)) || (action == lvgl::KeyBindings::ACT_HOME && (keys & 2));
+#else
+  const bool close_key = false;
+  (void) keys;
+  (void) action;
+#endif
+  if (pressed && close_key && !this->key_held) {
+    this->key_held = true;
+    this->page = page;
+    this->usage = usage;
+    this->key_at = millis();
+    return TAKEN;
+  }
+  if (!pressed && this->key_held && page == this->page && usage == this->usage) {
+    this->key_held = false;
+    return TAPPED;
+  }
+  return OTHER;
+}
+
+bool SimpleVideoPlayer::DesktopClose::two_fingers(bool down) {
+  if (!down) {
+    this->fingers = false;
+    return false;
+  }
+  if (this->fingers)
+    return false;
+  this->fingers = true;
+  this->fingers_at = millis();
+  return true;
+}
+
+uint32_t SimpleVideoPlayer::DesktopClose::due(const SimpleVideoPlayer *p) const {
+  const uint32_t now = millis();
+  uint32_t due = UINT32_MAX;
+  auto left = [now](uint32_t since, uint32_t hold) { return now - since >= hold ? 0 : hold - (now - since); };
+  if (this->key_held)
+    due = std::min(due, left(this->key_at, p->spice_close_hold_ms_.load(std::memory_order_acquire)));
+  if (this->fingers)
+    due = std::min(due, left(this->fingers_at, p->spice_touch_hold_ms_.load(std::memory_order_acquire)));
+  return due;
+}
+
+// A greeting comes within this after the connection, from a server that sends first.
+static constexpr uint32_t PROBE_WAIT_MS = 1500;
+
+SimpleVideoPlayer::DesktopKind SimpleVideoPlayer::desktop_probe_(const char *host, uint16_t port) {
+  struct sockaddr_in addr {};
+  if (!resolve_host(host, port, addr))
+    return DesktopKind::UNREACHED;
+  const int fd = connect_to(addr);
+  if (fd < 0) {
+    ESP_LOGE(TAG, "Could not connect to %s:%u", host, port);
+    return DesktopKind::UNREACHED;
+  }
+  // Woken by the greeting, a disconnect or the wake fd; nothing read (MSG_PEEK) nor sent.
+  DesktopKind kind = DesktopKind::SPICE;
+  for (const uint32_t start = millis();;) {
+    const uint32_t spent = millis() - start;
+    if (spent >= PROBE_WAIT_MS || this->spice_request_.load(std::memory_order_acquire) != 0)
+      break;
+    fd_set readable;
+    FD_ZERO(&readable);
+    FD_SET(fd, &readable);
+    FD_SET(this->spice_wake_fd_, &readable);
+    const uint32_t left = PROBE_WAIT_MS - spent;
+    struct timeval wait = {.tv_sec = static_cast<time_t>(left / 1000),
+                           .tv_usec = static_cast<suseconds_t>((left % 1000) * 1000)};
+    if (::select(std::max(fd, this->spice_wake_fd_) + 1, &readable, nullptr, nullptr, &wait) <= 0)
+      break;
+    if (FD_ISSET(this->spice_wake_fd_, &readable)) {
+      uint64_t count;
+      ::read(this->spice_wake_fd_, &count, sizeof(count));
+    }
+    if (!FD_ISSET(fd, &readable))
+      continue;
+    uint8_t greeting[4];
+    const int got = ::recv(fd, greeting, sizeof(greeting), MSG_PEEK);
+    if (got <= 0)
+      break;
+    if (got < static_cast<int>(sizeof(greeting))) {
+      vTaskDelay(pdMS_TO_TICKS(10));  // the rest of a greeting split up
+      continue;
+    }
+    if (std::memcmp(greeting, "RFB ", sizeof(greeting)) == 0)
+      kind = DesktopKind::VNC;  // rfbproto: ProtocolVersion, "RFB 003.008\n"
+    break;
+  }
+  ::close(fd);
+  return kind;
+}
+
+// The panel, then the relay's picture; until the panel ends it or the relay's sender goes.
+void SimpleVideoPlayer::desktop_vnc_(const char *host, uint16_t port, const char *password) {
+  bool direct = true, wifi_held = false;
+  uint32_t out_w = 0, out_h = 0;
+  this->desktop_output_(direct, out_w, out_h);
+  if (!this->desktop_take_panel_(direct, wifi_held))
+    return;
+  bool panel_held = true;
+  // Keys, mouse and touches go to the relay's sender; what came before the session is not its.
+#ifdef SVP_STREAM_INPUT
+  if (this->stream_input_q_ != nullptr)
+    xQueueReset(this->stream_input_q_);
+#endif
+#ifdef SVP_STREAM_TOUCH
+  if (this->stream_touch_q_ != nullptr)
+    xQueueReset(this->stream_touch_q_);
+#endif
+  this->desktop_relay_inputs_.store(true, std::memory_order_release);
+  if (!this->desktop_relay_start_("vnc", host, port, password, 0)) {
+    this->desktop_took_ = false;
+  } else {
+    ESP_LOGI(TAG, "VNC desktop of %s:%u through svp_relay", host, port);
+    while (this->spice_request_.load(std::memory_order_acquire) == 0 &&
+           !this->desktop_sender_gone_.load(std::memory_order_acquire)) {
+      fd_set readable;
+      FD_ZERO(&readable);
+      FD_SET(this->spice_wake_fd_, &readable);
+      if (::select(this->spice_wake_fd_ + 1, &readable, nullptr, nullptr, nullptr) < 0)
+        break;
+      uint64_t count;
+      ::read(this->spice_wake_fd_, &count, sizeof(count));
+    }
+    if (!this->desktop_sender_gone_.load(std::memory_order_acquire))
+      this->desktop_relay_stop_();
+    ESP_LOGI(TAG, "Disconnected");
+  }
+  this->desktop_relay_inputs_.store(false, std::memory_order_release);
+  this->desktop_sender_wanted_.store(false, std::memory_order_release);
+  this->desktop_release_panel_(panel_held, wifi_held);
+}
+
+void SimpleVideoPlayer::desktop_cursor_set_(const SpiceCursorShape *shape) {
+  xSemaphoreTake(this->spice_cursor_lock_, portMAX_DELAY);
+  SpiceCursorShape &now = this->spice_cursor_->shape;
+  now.w = shape->w;
+  now.h = shape->h;
+  now.hot_x = shape->hot_x;
+  now.hot_y = shape->hot_y;
+  now.valid = shape->valid;
+  if (shape->valid)
+    std::memcpy(now.px, shape->px, static_cast<size_t>(shape->w) * shape->h * sizeof(uint32_t));
+  this->spice_cursor_->visible = shape->valid;
+  xSemaphoreGive(this->spice_cursor_lock_);
+  this->desktop_cursor_changed_();
+}
+
+void SimpleVideoPlayer::desktop_cursor_changed_() {
+  this->spice_cursor_dirty_.store(true, std::memory_order_release);
+  // The draw task takes a null frame for a cursor change; a full queue brings it with the next frame.
+  StreamFrame *none = nullptr;
+  xQueueSend(this->stream_filled_q_, &none, 0);
 }
 
 bool SimpleVideoPlayer::spice_refuses_() const {
@@ -2322,10 +2506,20 @@ void SimpleVideoPlayer::spice_loop_() {
     this->spice_connecting_.store(true, std::memory_order_release);
     this->spice_changed_.store(true, std::memory_order_release);
     App.wake_loop_threadsafe();
-    SpiceSession session(this);
-    session.run(host, port, password);
+    this->desktop_took_ = false;
+    this->desktop_sender_gone_.store(false, std::memory_order_release);
+    // A VNC server greets first, a SPICE server waits for the client.
+    const DesktopKind kind = this->desktop_probe_(host, port);
+    if (this->spice_request_.load(std::memory_order_acquire) != 0) {
+      // Asked anew meanwhile.
+    } else if (kind == DesktopKind::VNC) {
+      this->desktop_vnc_(host, port, password);
+    } else if (kind == DesktopKind::SPICE) {
+      SpiceSession session(this);
+      session.run(host, port, password);
+    }
     std::memset(password, 0, sizeof(password));
-    this->spice_failed_.store(!session.took_panel(), std::memory_order_release);
+    this->spice_failed_.store(!this->desktop_took_, std::memory_order_release);
     this->spice_connecting_.store(false, std::memory_order_release);
     this->spice_changed_.store(true, std::memory_order_release);
     App.wake_loop_threadsafe();

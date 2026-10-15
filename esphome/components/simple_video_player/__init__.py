@@ -375,6 +375,10 @@ def _validate_stream(config):
         raise cv.Invalid(f"'{CONF_STREAM_STATISTICS}' is about the stream: it needs '{CONF_STREAM_PORT}'.")
     if config.get(CONF_SPICE) and CONF_STREAM_PORT not in config:
         raise cv.Invalid(f"'{CONF_SPICE}' draws through the stream's output: it needs '{CONF_STREAM_PORT}'.")
+    if config.get(CONF_SPICE) and CONF_CHANNEL_LIST not in config:
+        raise cv.Invalid(
+            f"'{CONF_SPICE}': the desktop's picture comes through svp_relay: it needs '{CONF_CHANNEL_LIST}'."
+        )
     if CONF_TOUCHSCREEN_ID in config and CONF_STREAM_PORT not in config and CONF_CONTROLS not in config:
         raise cv.Invalid(
             f"'{CONF_TOUCHSCREEN_ID}' is for a stream sender ('{CONF_STREAM_PORT}') or '{CONF_CONTROLS}'."
