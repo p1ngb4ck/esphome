@@ -1625,7 +1625,52 @@ SimpleVideoPlayer::DesktopKind SimpleVideoPlayer::desktop_probe_(const char *hos
   return kind;
 }
 
-// The panel, then the relay's picture; until the panel ends it or the relay's sender goes.
+#ifdef SVP_SPICE_USB
+namespace {
+constexpr uint16_t USBIP_PORT = 3240;
+constexpr uint16_t USBIP_VERSION = 0x0111;
+constexpr uint16_t USBIP_REQ_DEVLIST = 0x8005, USBIP_REP_DEVLIST = 0x0005;
+constexpr uint16_t USBIP_REQ_IMPORT = 0x8003, USBIP_REP_IMPORT = 0x0003;
+
+// A slot's USB/IP connection: what the slot sends goes out on it.
+struct UsbipLink : SpiceVmcLink {
+  int fd{-1};
+  bool vmc_send(const uint8_t *head, size_t head_len, const uint8_t *data, size_t data_len) override {
+    return send_all(this->fd, head, head_len) && (data_len == 0 || send_all(this->fd, data, data_len));
+  }
+};
+
+int usbip_listen() {
+  const int fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (fd < 0)
+    return -1;
+  int one = 1;
+  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  struct sockaddr_in addr {};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  addr.sin_port = htons(USBIP_PORT);
+  if (::bind(fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0 || ::listen(fd, 2) < 0) {
+    ESP_LOGE(TAG, "USB/IP: port %u not available", USBIP_PORT);
+    ::close(fd);
+    return -1;
+  }
+  return fd;
+}
+
+inline void put_be16(uint8_t *p, uint16_t v) {
+  p[0] = static_cast<uint8_t>(v >> 8);
+  p[1] = static_cast<uint8_t>(v);
+}
+inline void put_be32(uint8_t *p, uint32_t v) {
+  for (int i = 0; i < 4; i++)
+    p[i] = static_cast<uint8_t>(v >> (24 - 8 * i));
+}
+}  // namespace
+#endif
+
+// The panel, then the relay's picture; until the panel ends it or the relay's sender goes. The USB
+// slots' devices are exported over USB/IP meanwhile (select/usbip.cpp).
 void SimpleVideoPlayer::desktop_vnc_(const char *host, uint16_t port, const char *password) {
   bool direct = true, wifi_held = false;
   uint32_t out_w = 0, out_h = 0;
@@ -1647,16 +1692,142 @@ void SimpleVideoPlayer::desktop_vnc_(const char *host, uint16_t port, const char
     this->desktop_took_ = false;
   } else {
     ESP_LOGI(TAG, "VNC desktop of %s:%u through svp_relay", host, port);
+#ifdef SVP_SPICE_USB
+    UsbipLink links[SPICE_USB_SLOTS];
+    const int listener = this->spice_usb_count_ > 0 ? usbip_listen() : -1;
+    auto attached = [this, &links]() {
+      uint8_t bits = 0;
+      for (uint8_t i = 0; i < this->spice_usb_count_; i++)
+        bits = static_cast<uint8_t>(bits | (links[i].fd >= 0 ? 1u << i : 0));
+      if (this->usbip_attached_.exchange(bits, std::memory_order_acq_rel) != bits) {
+        this->spice_changed_.store(true, std::memory_order_release);
+        App.wake_loop_threadsafe();
+      }
+    };
+    auto drop = [this, &links, &attached](uint8_t i) {
+      this->spice_usb_[i]->link_close();
+      ::close(links[i].fd);
+      links[i].fd = -1;
+      attached();
+    };
+    // A client's first request: the list of the slots' devices, or one of them to import.
+    auto accept = [this, &links, &attached, listener]() {
+      const int fd = ::accept(listener, nullptr, nullptr);
+      if (fd < 0)
+        return;
+      int one = 1;
+      ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+      struct timeval timeout = {.tv_sec = RECV_TIMEOUT_S, .tv_usec = 0};
+      ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+      ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+      uint8_t op[8];
+      if (!recv_all(fd, op, sizeof(op))) {
+        ::close(fd);
+        return;
+      }
+      const uint16_t code = static_cast<uint16_t>((op[2] << 8) | op[3]);
+      if (code == USBIP_REQ_DEVLIST) {
+        uint8_t *out = this->spice_scratch_;
+        size_t at = 12;
+        uint32_t count = 0;
+        for (uint8_t i = 0; i < this->spice_usb_count_; i++) {
+          const size_t n = this->spice_usb_[i]->usbip_entry(out + at, SPICE_SCRATCH_BYTES - at, true);
+          at += n;
+          count += n != 0 ? 1 : 0;
+        }
+        put_be16(out, USBIP_VERSION);
+        put_be16(out + 2, USBIP_REP_DEVLIST);
+        put_be32(out + 4, 0);
+        put_be32(out + 8, count);
+        send_all(fd, out, at);
+        ::close(fd);
+        return;
+      }
+      uint8_t busid[32];
+      int slot = -1;
+      if (code == USBIP_REQ_IMPORT && recv_all(fd, busid, sizeof(busid))) {
+        busid[sizeof(busid) - 1] = '\0';
+        unsigned bus = 0, n = 0;
+        if (std::sscanf(reinterpret_cast<const char *>(busid), "%u-%u", &bus, &n) == 2 && bus == 1 && n >= 1 &&
+            n <= this->spice_usb_count_ && links[n - 1].fd < 0) {
+          uint8_t entry[0x138];
+          if (this->spice_usb_[n - 1]->usbip_entry(entry, sizeof(entry), false) != 0)
+            slot = static_cast<int>(n - 1);
+        }
+      }
+      if (slot < 0) {
+        // Status 1: no such device here, or it is imported already (OP_REP_IMPORT ends with it).
+        uint8_t reply[8];
+        put_be16(reply, USBIP_VERSION);
+        put_be16(reply + 2, USBIP_REP_IMPORT);
+        put_be32(reply + 4, 1);
+        send_all(fd, reply, sizeof(reply));
+        ::close(fd);
+        return;
+      }
+      // Answered once the slot has the device open (its service()).
+      links[slot].fd = fd;
+      this->spice_usb_[slot]->link_open(&links[slot], SpiceUsbSlot::Proto::USBIP);
+      attached();
+      ESP_LOGI(TAG, "USB/IP: slot %d imported", slot + 1);
+    };
+#endif
     while (this->spice_request_.load(std::memory_order_acquire) == 0 &&
            !this->desktop_sender_gone_.load(std::memory_order_acquire)) {
       fd_set readable;
       FD_ZERO(&readable);
       FD_SET(this->spice_wake_fd_, &readable);
-      if (::select(this->spice_wake_fd_ + 1, &readable, nullptr, nullptr, nullptr) < 0)
+      int top = this->spice_wake_fd_;
+#ifdef SVP_SPICE_USB
+      if (listener >= 0) {
+        FD_SET(listener, &readable);
+        top = std::max(top, listener);
+      }
+      for (uint8_t i = 0; i < this->spice_usb_count_; i++) {
+        size_t room = 0;
+        if (links[i].fd >= 0)
+          this->spice_usb_[i]->rx_space(room);
+        if (room > 0) {  // else it waits for a free transfer or the device: read no further
+          FD_SET(links[i].fd, &readable);
+          top = std::max(top, links[i].fd);
+        }
+      }
+#endif
+      if (::select(top + 1, &readable, nullptr, nullptr, nullptr) < 0)
         break;
-      uint64_t count;
-      ::read(this->spice_wake_fd_, &count, sizeof(count));
+      if (FD_ISSET(this->spice_wake_fd_, &readable)) {
+        uint64_t count;
+        ::read(this->spice_wake_fd_, &count, sizeof(count));
+      }
+#ifdef SVP_SPICE_USB
+      if (listener >= 0 && FD_ISSET(listener, &readable))
+        accept();
+      for (uint8_t i = 0; i < this->spice_usb_count_; i++) {
+        if (links[i].fd < 0)
+          continue;
+        SpiceUsbSlot *slot = this->spice_usb_[i];
+        bool ok = true;
+        if (FD_ISSET(links[i].fd, &readable)) {
+          size_t room = 0;
+          uint8_t *into = slot->rx_space(room);
+          const int got = room > 0 ? ::recv(links[i].fd, into, room, 0) : 0;
+          ok = got > 0 && slot->rx_done(static_cast<size_t>(got));
+        }
+        if (!ok || !slot->service()) {
+          ESP_LOGI(TAG, "USB/IP: slot %u detached", i + 1);
+          drop(i);
+        }
+      }
+#endif
     }
+#ifdef SVP_SPICE_USB
+    for (uint8_t i = 0; i < this->spice_usb_count_; i++) {
+      if (links[i].fd >= 0)
+        drop(i);
+    }
+    if (listener >= 0)
+      ::close(listener);
+#endif
     if (!this->desktop_sender_gone_.load(std::memory_order_acquire))
       this->desktop_relay_stop_();
     ESP_LOGI(TAG, "Disconnected");
@@ -1737,8 +1908,10 @@ void SimpleVideoPlayer::spice_wake() {
 
 #ifdef SVP_SPICE_USB
 void SimpleVideoPlayer::add_spice_usb_slot(SpiceUsbSlot *slot) {
-  if (this->spice_usb_count_ < SPICE_USB_SLOTS)
+  if (this->spice_usb_count_ < SPICE_USB_SLOTS) {
+    slot->set_index(this->spice_usb_count_);
     this->spice_usb_[this->spice_usb_count_++] = slot;
+  }
 }
 
 void SimpleVideoPlayer::spice_usb_selected(SpiceUsbSlot *slot, uint8_t addr) {

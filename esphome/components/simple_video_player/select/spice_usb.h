@@ -25,6 +25,8 @@ class SpiceVmcLink {
 /// One usbredir channel of the SPICE server (the n-th slot takes channel id n): the panel's USB device
 /// picked here is redirected to it while a session runs, taken from the drivers that hold it until then.
 /// The panel is the usb-host of the usbredir protocol (usbredir's docs/usb-redirection-protocol.md).
+/// In a VNC session the same device is exported over USB/IP instead (usbip.cpp): bus id "1-<n+1>",
+/// imported by the desktop's host with `usbip attach`.
 ///
 /// Threads: the select, routing and the device's open/close on the main loop; the protocol, transfers
 /// and their completions on the spice task (completions are handed over from the USB task).
@@ -36,6 +38,9 @@ class SpiceUsbSlot : public select::Select, public usb_host::USBClient {
   void dump_config() override;
 
   void set_parent(SimpleVideoPlayer *parent) { this->parent_ = parent; }
+  /// Its place among the slots: the usbredir channel id, and USB/IP bus id 1-<index+1>.
+  void set_index(uint8_t index) { this->index_ = index; }
+  uint8_t index() const { return this->index_; }
 
   /// Main loop: the device list changed (USBHost), or another slot took `addr`.
   void refresh_options();
@@ -46,8 +51,13 @@ class SpiceUsbSlot : public select::Select, public usb_host::USBClient {
   /// The picked device's ids (vid 0: none).
   void selected_device(uint16_t &vid, uint16_t &pid, char *serial, size_t serial_len) const;
 
+  enum class Proto : uint8_t { USBREDIR, USBIP };
+  /// USB/IP: the device as OP_REP_DEVLIST describes it (with its interfaces), its size; 0: none picked.
+  /// Any task (a snapshot the main loop keeps).
+  size_t usbip_entry(uint8_t *out, size_t cap, bool interfaces) const;
+
   // Spice task.
-  void link_open(SpiceVmcLink *link);
+  void link_open(SpiceVmcLink *link, Proto proto = Proto::USBREDIR);
   void link_close();
   /// Where the next bytes from the channel go and how many; 0: waits for a free transfer.
   uint8_t *rx_space(size_t &room);
@@ -88,6 +98,12 @@ class SpiceUsbSlot : public select::Select, public usb_host::USBClient {
     IsoStream *iso{nullptr};
     IntIn *intr{nullptr};
     uint8_t filled{0};  // ISO OUT: packets in it
+    // USB/IP: the URB's direction, size asked for, and an UNLINK waiting for it (seqnum, 0: none).
+    bool usbip_in{false};
+    uint32_t usbip_len{0};
+    uint32_t usbip_unlink{0};
+    uint16_t usbip_packets{0};
+    uint8_t usbip_index{0};  // iso: which of usbip_iso_
   };
   struct IsoStream {
     bool on{false};
@@ -125,6 +141,8 @@ class SpiceUsbSlot : public select::Select, public usb_host::USBClient {
   };
 
   void control(const std::string &value) override;
+  /// Main loop: the picked device's USB/IP description, for usbip_entry().
+  void usbip_snapshot_();
   /// The device present that matches want_vid_/pid_/serial_, 0 if none.
   uint8_t find_wanted_() const;
   void on_connected() override;
@@ -159,9 +177,22 @@ class SpiceUsbSlot : public select::Select, public usb_host::USBClient {
   /// All transfers back, streams stopped (the device goes, or the channel ends).
   void drain_();
   size_t header_len_() const { return this->ids64_ ? 16 : 12; }
+  // USB/IP (usbip.cpp), spice task.
+  static constexpr uint8_t USBIP_ISO_XFERS = 8;
+  static constexpr uint16_t USBIP_ISO_PKTS = 64;
+  bool usbip_service_();
+  uint8_t *usbip_rx_space_(size_t &room);
+  bool usbip_rx_done_(size_t n);
+  bool usbip_begin_submit_();
+  bool usbip_submit_(Xfer *x);
+  bool usbip_complete_(Xfer *x);
+  bool usbip_unlink_(uint32_t seqnum, uint32_t target);
+  bool usbip_send_ret_unlink_(uint32_t seqnum, int32_t status);
+  Xfer *usbip_take_(Kind kind, size_t bytes, uint16_t packets);
   bool usable_() const { return this->device_ready_.load(std::memory_order_acquire); }
 
   SimpleVideoPlayer *parent_{nullptr};
+  uint8_t index_{0};
   usb_host::USBHost *usb_{nullptr};
   // Options: [0] "None", then a device each (main loop).
   char (*labels_)[LABEL_BYTES]{nullptr};
@@ -200,7 +231,7 @@ class SpiceUsbSlot : public select::Select, public usb_host::USBClient {
   uint8_t *stage_{nullptr};  // STAGE_BYTES, internal RAM
   Rx rx_{Rx::HEADER};
   AltChange alt_;
-  uint8_t hdr_[16]{};
+  uint8_t hdr_[48]{};  // usbredir: up to 16; USB/IP: 48
   size_t have_{0};
   uint32_t type_{0};
   uint32_t body_len_{0};
@@ -209,6 +240,17 @@ class SpiceUsbSlot : public select::Select, public usb_host::USBClient {
   Xfer *rx_xfer_{nullptr};
   size_t data_len_{0};
   size_t type_header_len_{0};
+  // USB/IP.
+  Proto proto_{Proto::USBREDIR};
+  Xfer *usbip_iso_{nullptr};          // PSRAM: USBIP_ISO_XFERS
+  uint32_t *usbip_offsets_{nullptr};  // PSRAM: USBIP_ISO_PKTS offsets per iso transfer, as the client laid them
+  uint32_t usbip_flags_{0};           // the URB being read: its transfer_flags
+  int32_t usbip_packets_{-1};         // its number_of_packets (-1: not isochronous)
+  SemaphoreHandle_t usbip_lock_{nullptr};
+  static constexpr size_t USBIP_ENTRY_BYTES = 0x138 + 4 * 32;
+  uint8_t *usbip_entry_{nullptr};  // PSRAM; main loop: the picked device, as OP_REP_DEVLIST lists it
+  size_t usbip_entry_len_{0};
+  uint8_t usbip_entry_ifaces_{0};
 };
 
 }  // namespace esphome::simple_video_player

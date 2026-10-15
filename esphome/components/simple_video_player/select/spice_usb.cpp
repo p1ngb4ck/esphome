@@ -129,9 +129,17 @@ void SpiceUsbSlot::setup() {
       heap_caps_calloc(MAX_DEVICES + 1, LABEL_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   this->stage_ = static_cast<uint8_t *>(heap_caps_malloc(STAGE_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   this->dev_lock_ = xSemaphoreCreateMutex();
-  this->done_q_ = xQueueCreate(GEN_XFERS + INT_XFERS + ISO_STREAMS * ISO_URBS, sizeof(Xfer *));
-  bool ok =
-      this->labels_ != nullptr && this->stage_ != nullptr && this->dev_lock_ != nullptr && this->done_q_ != nullptr;
+  this->done_q_ = xQueueCreate(GEN_XFERS + INT_XFERS + ISO_STREAMS * ISO_URBS + USBIP_ISO_XFERS, sizeof(Xfer *));
+  this->usbip_lock_ = xSemaphoreCreateMutex();
+  this->usbip_offsets_ = static_cast<uint32_t *>(heap_caps_malloc(
+      static_cast<size_t>(USBIP_ISO_XFERS) * USBIP_ISO_PKTS * sizeof(uint32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  this->usbip_entry_ = static_cast<uint8_t *>(heap_caps_calloc(1, USBIP_ENTRY_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  // Zeroed: each Xfer as its defaults (nothing, not busy).
+  this->usbip_iso_ =
+      static_cast<Xfer *>(heap_caps_calloc(USBIP_ISO_XFERS, sizeof(Xfer), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  bool ok = this->labels_ != nullptr && this->stage_ != nullptr && this->dev_lock_ != nullptr &&
+            this->done_q_ != nullptr && this->usbip_lock_ != nullptr && this->usbip_offsets_ != nullptr &&
+            this->usbip_entry_ != nullptr && this->usbip_iso_ != nullptr;
   // Transfer buffers: USB DMA memory, PSRAM with CONFIG_USB_HOST_DWC_DMA_CAP_MEMORY_IN_PSRAM (set with
   // the SPICE client); refused anywhere else.
   auto alloc = [this, &ok](Xfer &x, size_t bytes, int packets) {
@@ -215,6 +223,7 @@ void SpiceUsbSlot::refresh_options() {
   }
   this->publish_state(this->labels_[shown]);
   this->apply_();
+  this->usbip_snapshot_();
 }
 
 void SpiceUsbSlot::control(const std::string &value) {
@@ -366,7 +375,7 @@ void SpiceUsbSlot::xfer_done_(usb_transfer_t *t) {
   x->slot->parent_->spice_wake();
 }
 
-void SpiceUsbSlot::link_open(SpiceVmcLink *link) {
+void SpiceUsbSlot::link_open(SpiceVmcLink *link, Proto proto) {
   // What came back after the last channel ended is for no one.
   Xfer *x;
   while (xQueueReceive(this->done_q_, &x, 0) == pdTRUE) {
@@ -380,7 +389,10 @@ void SpiceUsbSlot::link_open(SpiceVmcLink *link) {
   this->rx_ = Rx::HEADER;
   this->have_ = 0;
   this->rx_xfer_ = nullptr;
-  this->send_hello_();
+  this->proto_ = proto;
+  this->usbip_packets_ = -1;
+  if (proto == Proto::USBREDIR)
+    this->send_hello_();
   this->link_up_.store(true, std::memory_order_release);
   this->enable_loop_soon_any_context();
 }
@@ -488,6 +500,8 @@ bool SpiceUsbSlot::send_device_info_() {
 bool SpiceUsbSlot::service() {
   if (this->link_ == nullptr)
     return true;
+  if (this->proto_ == Proto::USBIP)
+    return this->usbip_service_();
   Xfer *x;
   while (xQueueReceive(this->done_q_, &x, 0) == pdTRUE) {
     x->in_flight = false;
@@ -547,6 +561,8 @@ bool SpiceUsbSlot::service() {
 }
 
 uint8_t *SpiceUsbSlot::rx_space(size_t &room) {
+  if (this->proto_ == Proto::USBIP)
+    return this->usbip_rx_space_(room);
   switch (this->rx_) {
     case Rx::HEADER:
       room = (this->peer_hello_ ? this->header_len_() : 12) - this->have_;
@@ -572,6 +588,8 @@ uint8_t *SpiceUsbSlot::rx_space(size_t &room) {
 }
 
 bool SpiceUsbSlot::rx_done(size_t n) {
+  if (this->proto_ == Proto::USBIP)
+    return this->usbip_rx_done_(n);
   this->have_ += n;
   switch (this->rx_) {
     case Rx::HEADER: {
@@ -761,6 +779,8 @@ bool SpiceUsbSlot::submit_(Xfer *x) {
 
 // A transfer back (or never submitted): its answer to the guest.
 bool SpiceUsbSlot::complete_(Xfer *x) {
+  if (this->proto_ == Proto::USBIP)
+    return this->usbip_complete_(x);
   usb_transfer_t *t = x->t;
   if ((x->kind == Kind::INTERRUPT_IN && x->intr == nullptr) || (x->kind == Kind::ISO && x->iso == nullptr)) {
     x->busy = false;
@@ -1158,6 +1178,7 @@ bool SpiceUsbSlot::start_int_(uint64_t id, uint8_t ep) {
     for (uint8_t i = 0; i < INT_PER_EP; i++) {
       Xfer *x = taken[i];
       x->busy = true;
+      x->kind = Kind::INTERRUPT_IN;  // USB/IP uses them for URBs of either direction
       x->intr = in;
       in->x[i] = x;
       usb_transfer_t *t = x->t;
@@ -1389,6 +1410,14 @@ void SpiceUsbSlot::drain_() {
     if (x.in_flight && x.kind != Kind::CONTROL && x.kind != Kind::SET_ALT)
       this->cancel_ep_(x.ep);
   }
+  // USB/IP's URBs on interrupt and isochronous endpoints too.
+  for (auto *pool : {static_cast<Xfer *>(this->int_), static_cast<Xfer *>(this->usbip_iso_)}) {
+    const size_t count = pool == this->int_ ? INT_XFERS : USBIP_ISO_XFERS;
+    for (size_t i = 0; i < count; i++) {
+      if (this->proto_ == Proto::USBIP && pool[i].in_flight)
+        this->cancel_ep_(pool[i].ep);
+    }
+  }
   if (this->rx_xfer_ != nullptr) {
     this->rx_xfer_->busy = false;
     this->rx_xfer_ = nullptr;
@@ -1412,6 +1441,8 @@ void SpiceUsbSlot::drain_() {
       any = any || g.in_flight;
     for (auto &i : this->int_)
       any = any || i.in_flight;
+    for (uint8_t i = 0; i < USBIP_ISO_XFERS; i++)
+      any = any || this->usbip_iso_[i].in_flight;
     for (auto &s : this->iso_) {
       for (uint8_t i = 0; i < s.urbs; i++)
         any = any || s.x[i].in_flight;

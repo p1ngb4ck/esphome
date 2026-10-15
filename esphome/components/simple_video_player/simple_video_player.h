@@ -433,6 +433,9 @@ class SimpleVideoPlayer : public Component
   void spice_usb_selected(SpiceUsbSlot *slot, uint8_t addr);
   /// Main loop: a slot's device was picked or let go; kept with the saved connection in use.
   void spice_usb_changed(SpiceUsbSlot *slot);
+  /// VNC session: the slot's device is imported by the desktop's host (`usbip attach -r <panel> -b
+  /// 1-<slot+1>`); its change runs the spice callbacks.
+  bool usbip_attached(uint8_t slot) const { return (this->usbip_attached_.load(std::memory_order_acquire) >> slot) & 1; }
 #endif
 #endif
 #endif
@@ -1736,6 +1739,7 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> desktop_sender_wanted_{false};
   std::atomic<bool> desktop_sender_gone_{false};
   std::atomic<bool> desktop_relay_inputs_{false};
+  std::atomic<uint8_t> usbip_attached_{0};  // bit per USB slot (spice task)
   // Network task: the pointer's shape from the relay (udisp 0x23) as it arrives.
   uint32_t desktop_cursor_left_{0};
   size_t desktop_cursor_at_{0};
