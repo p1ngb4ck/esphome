@@ -301,15 +301,9 @@ SpiceUsbSlot::Xfer *SpiceUsbSlot::usbip_take_(Kind kind, size_t bytes, uint16_t 
       continue;
     usb_transfer_t *t = x.t;
     if (t == nullptr || t->num_isoc_packets != packets || t->data_buffer_size < bytes) {
-      if (t != nullptr)
-        usb_host_transfer_free(t);
+      this->xfer_free_(t);
       t = nullptr;
-      if (usb_host_transfer_alloc(bytes, packets, &t) != ESP_OK || t == nullptr) {
-        x.t = nullptr;
-        return nullptr;
-      }
-      if (!esp_ptr_external_ram(t->data_buffer)) {
-        usb_host_transfer_free(t);
+      if (!this->xfer_alloc_(&t, bytes, packets)) {
         x.t = nullptr;
         return nullptr;
       }

@@ -179,11 +179,6 @@ bool SimpleVideoPlayer::setup_stream_() {
   // Internal RAM: every message but a picture is read into it.
   this->spice_scratch_ =
       static_cast<uint8_t *>(heap_caps_malloc(SPICE_SCRATCH_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  this->spice_cursor_ = reinterpret_cast<SpiceCursor *>(this->pool_.alloc(sizeof(SpiceCursor)));
-  this->spice_cursor_cache_ =
-      reinterpret_cast<SpiceCursorShape *>(this->pool_.alloc(SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape)));
-  this->spice_cursor_under_ = this->pool_.alloc(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3);
-  this->spice_cursor_patch_ = this->pool_.alloc(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3);
   this->spice_saved_ = reinterpret_cast<SpiceSaved *>(this->pool_.alloc(this->spice_saved_count_ * sizeof(SpiceSaved)));
   this->spice_saved_prefs_ = reinterpret_cast<ESPPreferenceObject *>(
       this->pool_.alloc(this->spice_saved_count_ * sizeof(ESPPreferenceObject)));
@@ -196,19 +191,16 @@ bool SimpleVideoPlayer::setup_stream_() {
   }
   this->spice_lock_ = xSemaphoreCreateMutex();
   this->spice_cursor_lock_ = xSemaphoreCreateMutex();
+  this->desktop_lock_ = xSemaphoreCreateMutex();
   this->spice_wake_fd_ = eventfd(0, 0);
-  if (this->spice_ == nullptr || this->spice_scratch_ == nullptr ||
-      this->spice_cursor_ == nullptr || this->spice_cursor_cache_ == nullptr || this->spice_cursor_under_ == nullptr ||
-      this->spice_cursor_patch_ == nullptr || this->spice_saved_ == nullptr || this->spice_saved_prefs_ == nullptr ||
-      !file_ok ||
-      this->spice_lock_ == nullptr || this->spice_cursor_lock_ == nullptr || this->spice_wake_fd_ < 0 ||
+  if (this->spice_ == nullptr || this->spice_scratch_ == nullptr || this->spice_saved_ == nullptr ||
+      this->spice_saved_prefs_ == nullptr || !file_ok || this->spice_lock_ == nullptr ||
+      this->spice_cursor_lock_ == nullptr || this->desktop_lock_ == nullptr || this->spice_wake_fd_ < 0 ||
       !create_psram_task(spice_task_entry_, "svp_spice", 8192, this, 4, &this->spice_task_, tskNO_AFFINITY)) {
     ESP_LOGE(TAG, "SPICE client disabled: no room for it");
     this->spice_task_ = nullptr;
   } else {
     std::memset(this->spice_, 0, sizeof(SpiceState));
-    std::memset(this->spice_cursor_, 0, sizeof(SpiceCursor));
-    std::memset(this->spice_cursor_cache_, 0, SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape));
     this->spice_saved_setup_();
   }
 #endif
@@ -570,15 +562,15 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
     if (this->desktop_cursor_left_ > 0) {
       const size_t take = std::min<size_t>(this->desktop_cursor_left_, len);
       // Into a cache entry, which only a SPICE session's cursor channel uses otherwise.
-      SpiceCursorShape &shape = this->spice_cursor_cache_[0];
-      if (this->desktop_cursor_ok_)
-        std::memcpy(reinterpret_cast<uint8_t *>(shape.px) + this->desktop_cursor_at_, data, take);
+      SpiceCursorShape *shape = this->spice_cursor_cache_;  // null: the session's buffers given back
+      if (this->desktop_cursor_ok_ && shape != nullptr)
+        std::memcpy(reinterpret_cast<uint8_t *>(shape->px) + this->desktop_cursor_at_, data, take);
       this->desktop_cursor_at_ += take;
       this->desktop_cursor_left_ -= take;
       data += take;
       len -= take;
-      if (this->desktop_cursor_left_ == 0 && this->desktop_cursor_ok_)
-        this->desktop_cursor_set_(&shape);
+      if (this->desktop_cursor_left_ == 0 && this->desktop_cursor_ok_ && shape != nullptr)
+        this->desktop_cursor_set_(shape);
       continue;
     }
 #endif
@@ -653,7 +645,8 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
       this->stream_wake_();
     }
 #ifdef SVP_SPICE
-    if (type == UDISP_TYPE_CURSOR && this->spice_on_.load(std::memory_order_relaxed)) {
+    if (type == UDISP_TYPE_CURSOR && this->spice_on_.load(std::memory_order_relaxed) &&
+        this->spice_cursor_cache_ != nullptr) {
       SpiceCursorShape &shape = this->spice_cursor_cache_[0];
       this->desktop_cursor_ok_ =
           w <= SPICE_CURSOR_MAX && h <= SPICE_CURSOR_MAX && total == static_cast<uint32_t>(w) * h * 4;
@@ -672,8 +665,10 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
     }
     if (type == UDISP_TYPE_POINTER && this->spice_on_.load(std::memory_order_relaxed)) {
       xSemaphoreTake(this->spice_cursor_lock_, portMAX_DELAY);
-      this->spice_cursor_->x = x;
-      this->spice_cursor_->y = y;
+      if (this->spice_cursor_ != nullptr) {
+        this->spice_cursor_->x = x;
+        this->spice_cursor_->y = y;
+      }
       xSemaphoreGive(this->spice_cursor_lock_);
       this->desktop_cursor_changed_();
       this->stream_skip_ = total;

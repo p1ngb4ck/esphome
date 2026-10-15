@@ -56,9 +56,12 @@ class SpiceUsbSlot : public select::Select, public usb_host::USBClient {
   /// Any task (a snapshot the main loop keeps).
   size_t usbip_entry(uint8_t *out, size_t cap, bool interfaces) const;
 
-  // Spice task.
-  void link_open(SpiceVmcLink *link, Proto proto = Proto::USBREDIR);
+  // Spice task. false: no room in the pool for its transfers (the channel is not opened).
+  bool link_open(SpiceVmcLink *link, Proto proto = Proto::USBREDIR);
   void link_close();
+  /// No session: the transfers' buffers back to the player's pool (those not in flight). Any task, under
+  /// the player's desktop_lock_.
+  bool release_buffers();
   /// Where the next bytes from the channel go and how many; 0: waits for a free transfer.
   uint8_t *rx_space(size_t &room);
   /// n bytes arrived at rx_space(). false: a protocol error, the channel ends.
@@ -190,6 +193,19 @@ class SpiceUsbSlot : public select::Select, public usb_host::USBClient {
   bool usbip_send_ret_unlink_(uint32_t seqnum, int32_t status);
   Xfer *usbip_take_(Kind kind, size_t bytes, uint16_t packets);
   bool usable_() const { return this->device_ready_.load(std::memory_order_acquire); }
+  // Transfer buffers from the player's pool, only while a remote desktop session has them: the transfer
+  // is made with a buffer of its own of a cache line, the pool's piece takes its place meanwhile and it
+  // goes back before usb_host_transfer_free() (which frees the transfer's own).
+  struct PoolBuf {
+    usb_transfer_t *t;
+    uint8_t *own;
+    size_t own_size;
+    uint8_t *piece;
+  };
+  static constexpr size_t POOL_BUFS = GEN_XFERS + INT_XFERS + ISO_STREAMS * ISO_URBS + USBIP_ISO_XFERS;
+  bool xfer_alloc_(usb_transfer_t **t, size_t bytes, int packets);
+  void xfer_free_(usb_transfer_t *t);
+  PoolBuf *pool_bufs_{nullptr};  // PSRAM: POOL_BUFS
 
   SimpleVideoPlayer *parent_{nullptr};
   uint8_t index_{0};

@@ -137,35 +137,14 @@ void SpiceUsbSlot::setup() {
   // Zeroed: each Xfer as its defaults (nothing, not busy).
   this->usbip_iso_ =
       static_cast<Xfer *>(heap_caps_calloc(USBIP_ISO_XFERS, sizeof(Xfer), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  bool ok = this->labels_ != nullptr && this->stage_ != nullptr && this->dev_lock_ != nullptr &&
-            this->done_q_ != nullptr && this->usbip_lock_ != nullptr && this->usbip_offsets_ != nullptr &&
-            this->usbip_entry_ != nullptr && this->usbip_iso_ != nullptr;
-  // Transfer buffers: USB DMA memory, PSRAM with CONFIG_USB_HOST_DWC_DMA_CAP_MEMORY_IN_PSRAM (set with
-  // the SPICE client); refused anywhere else.
-  auto alloc = [this, &ok](Xfer &x, size_t bytes, int packets) {
-    if (!ok)
-      return;
-    if (usb_host_transfer_alloc(bytes, packets, &x.t) != ESP_OK || x.t == nullptr) {
-      ok = false;
-      return;
-    }
-    if (!esp_ptr_external_ram(x.t->data_buffer)) {
-      ESP_LOGE(TAG, "USB transfer buffers are not in PSRAM (CONFIG_USB_HOST_DWC_DMA_CAP_MEMORY_IN_PSRAM)");
-      usb_host_transfer_free(x.t);
-      x.t = nullptr;
-      ok = false;
-      return;
-    }
-    x.slot = this;
-    x.t->callback = xfer_done_;
-    x.t->context = &x;
-  };
-  for (auto &x : this->gen_)
-    alloc(x, GEN_BYTES, 0);
-  for (auto &x : this->int_) {
-    alloc(x, INT_BYTES, 0);
+  this->pool_bufs_ =
+      static_cast<PoolBuf *>(heap_caps_calloc(POOL_BUFS, sizeof(PoolBuf), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  // The transfers come with a session (link_open()), their buffers from the player's pool.
+  const bool ok = this->labels_ != nullptr && this->stage_ != nullptr && this->dev_lock_ != nullptr &&
+                  this->done_q_ != nullptr && this->usbip_lock_ != nullptr && this->usbip_offsets_ != nullptr &&
+                  this->usbip_entry_ != nullptr && this->usbip_iso_ != nullptr && this->pool_bufs_ != nullptr;
+  for (auto &x : this->int_)
     x.kind = Kind::INTERRUPT_IN;
-  }
   if (!ok) {
     ESP_LOGE(TAG, "No memory for the USB redirection");
     this->mark_failed();
@@ -375,12 +354,95 @@ void SpiceUsbSlot::xfer_done_(usb_transfer_t *t) {
   x->slot->parent_->spice_wake();
 }
 
-void SpiceUsbSlot::link_open(SpiceVmcLink *link, Proto proto) {
+// As the USB host's own urb_alloc() sets them (usb_private.c): the fields are const for its users only.
+static void set_buffer(usb_transfer_t *t, uint8_t *buffer, size_t size) {
+  *const_cast<uint8_t **>(&t->data_buffer) = buffer;
+  *const_cast<size_t *>(&t->data_buffer_size) = size;
+}
+
+bool SpiceUsbSlot::xfer_alloc_(usb_transfer_t **out, size_t bytes, int packets) {
+  *out = nullptr;
+  PoolBuf *entry = nullptr;
+  for (size_t i = 0; entry == nullptr && i < POOL_BUFS; i++) {
+    if (this->pool_bufs_[i].t == nullptr)
+      entry = &this->pool_bufs_[i];
+  }
+  // Whole cache lines (the host syncs data_buffer_size of it), as the pool hands them out.
+  const size_t size = (bytes + PsramPool::ALIGN - 1) & ~(PsramPool::ALIGN - 1);
+  usb_transfer_t *t = nullptr;
+  if (entry == nullptr || usb_host_transfer_alloc(1, packets, &t) != ESP_OK || t == nullptr)
+    return false;
+  uint8_t *piece = this->parent_->desktop_alloc(size);
+  if (piece == nullptr) {
+    usb_host_transfer_free(t);
+    return false;
+  }
+  *entry = PoolBuf{t, t->data_buffer, t->data_buffer_size, piece};
+  set_buffer(t, piece, size);
+  *out = t;
+  return true;
+}
+
+void SpiceUsbSlot::xfer_free_(usb_transfer_t *t) {
+  if (t == nullptr)
+    return;
+  for (size_t i = 0; i < POOL_BUFS; i++) {
+    PoolBuf &entry = this->pool_bufs_[i];
+    if (entry.t != t)
+      continue;
+    set_buffer(t, entry.own, entry.own_size);
+    this->parent_->desktop_free(entry.piece);
+    entry = PoolBuf{};
+    break;
+  }
+  usb_host_transfer_free(t);
+}
+
+bool SpiceUsbSlot::release_buffers() {
+  if (this->link_up_.load(std::memory_order_acquire) || this->pool_bufs_ == nullptr)
+    return false;
+  bool released = false;
+  auto give = [this, &released](Xfer &x) {
+    if (x.t != nullptr && !x.in_flight) {
+      this->xfer_free_(x.t);
+      x.t = nullptr;
+      released = true;
+    }
+  };
+  for (auto &x : this->gen_)
+    give(x);
+  for (auto &x : this->int_)
+    give(x);
+  for (uint8_t i = 0; i < USBIP_ISO_XFERS; i++)
+    give(this->usbip_iso_[i]);
+  return released;
+}
+
+bool SpiceUsbSlot::link_open(SpiceVmcLink *link, Proto proto) {
   // What came back after the last channel ended is for no one.
   Xfer *x;
   while (xQueueReceive(this->done_q_, &x, 0) == pdTRUE) {
     x->in_flight = false;
     this->complete_(x);
+  }
+  // The session's transfers (kept from the last one, or from the pool now).
+  bool ok = true;
+  auto take = [this, &ok](Xfer &xfer, size_t bytes) {
+    if (ok && xfer.t == nullptr)
+      ok = this->xfer_alloc_(&xfer.t, bytes, 0);
+    if (xfer.t != nullptr) {
+      xfer.slot = this;
+      xfer.t->callback = xfer_done_;
+      xfer.t->context = &xfer;
+    }
+  };
+  for (auto &g : this->gen_)
+    take(g, GEN_BYTES);
+  for (auto &i : this->int_)
+    take(i, INT_BYTES);
+  if (!ok) {
+    ESP_LOGE(TAG, "No room in the PSRAM pool for the USB redirection");
+    return false;
   }
   this->link_ = link;
   this->peer_hello_ = false;
@@ -395,6 +457,7 @@ void SpiceUsbSlot::link_open(SpiceVmcLink *link, Proto proto) {
     this->send_hello_();
   this->link_up_.store(true, std::memory_order_release);
   this->enable_loop_soon_any_context();
+  return true;
 }
 
 void SpiceUsbSlot::link_close() {
@@ -924,7 +987,7 @@ bool SpiceUsbSlot::complete_(Xfer *x) {
       }
       for (uint8_t i = 0; i < s->urbs; i++) {
         if (s->x[i].t != nullptr)
-          usb_host_transfer_free(s->x[i].t);
+          this->xfer_free_(s->x[i].t);
         s->x[i] = Xfer{};
       }
       s->on = false;
@@ -1254,12 +1317,7 @@ bool SpiceUsbSlot::start_iso_(uint64_t id, uint8_t ep, uint8_t pkts, uint8_t urb
     // Sized by the guest's request: made for this stream, freed when it ends.
     for (uint8_t i = 0; i < urbs && st == ST_SUCCESS; i++) {
       Xfer &x = s->x[i];
-      if (usb_host_transfer_alloc(static_cast<size_t>(mps) * pkts, pkts, &x.t) != ESP_OK || x.t == nullptr) {
-        x.t = nullptr;
-        st = ST_IOERROR;
-        break;
-      }
-      if (!esp_ptr_external_ram(x.t->data_buffer)) {
+      if (!this->xfer_alloc_(&x.t, static_cast<size_t>(mps) * pkts, pkts)) {
         st = ST_IOERROR;
         break;
       }
@@ -1305,7 +1363,7 @@ bool SpiceUsbSlot::start_iso_(uint64_t id, uint8_t ep, uint8_t pkts, uint8_t urb
       } else {
         for (uint8_t i = 0; i < urbs; i++) {
           if (s->x[i].t != nullptr)
-            usb_host_transfer_free(s->x[i].t);
+            this->xfer_free_(s->x[i].t);
           s->x[i] = Xfer{};
         }
         s->urbs = 0;
@@ -1330,7 +1388,7 @@ bool SpiceUsbSlot::stop_iso_(uint64_t id, uint8_t ep, bool reply) {
     } else {
       for (uint8_t i = 0; i < s.urbs; i++) {
         if (s.x[i].t != nullptr)
-          usb_host_transfer_free(s.x[i].t);
+          this->xfer_free_(s.x[i].t);
         s.x[i] = Xfer{};
       }
       s.urbs = 0;

@@ -254,6 +254,11 @@ void SimpleVideoPlayer::loop() {
   }
 #endif
 #ifdef SVP_SPICE
+  if (this->media_release_req_.load(std::memory_order_acquire)) {
+    this->release_media_();
+    this->media_release_req_.store(false, std::memory_order_release);
+    this->answer_alloc_();
+  }
   if (this->spice_sound_claim_.exchange(false, std::memory_order_acq_rel))
     this->spice_sound_take_();
   if (this->spice_changed_.exchange(false, std::memory_order_acq_rel))
@@ -2108,8 +2113,8 @@ bool SimpleVideoPlayer::plan_pool_() {
     this->stream_max_frame_bytes_ = pool_round(this->frame_bytes_ / 4);
     fixed += STREAM_FRAME_COUNT * static_cast<size_t>(this->stream_max_frame_bytes_) + pool_round(STREAM_RECV_BYTES);
 #ifdef SVP_SPICE
-    fixed += pool_round(sizeof(SpiceState)) + pool_round(sizeof(SpiceCursor)) + pool_round(SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape)) +
-             2 * pool_round(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3) +
+    // The cursors' buffers only while a desktop session runs (desktop_buffers_take_()): not in the plan.
+    fixed += pool_round(sizeof(SpiceState)) +
              pool_round(this->spice_saved_count_ * sizeof(SpiceSaved)) +
              pool_round(this->spice_saved_count_ * sizeof(ESPPreferenceObject));
     if (!this->spice_file_path_.empty())
@@ -2169,6 +2174,10 @@ uint8_t *SimpleVideoPlayer::media_alloc_(size_t size) {
     this->wait_alloc_answer_([this]() { return !this->pool_reclaim_req_.load(std::memory_order_acquire); });
     piece = this->pool_.alloc(size);
   }
+#endif
+#ifdef SVP_SPICE
+  if (piece == nullptr && this->release_desktop_())
+    piece = this->pool_.alloc(size);
 #endif
   if (piece == nullptr)
     ESP_LOGE(TAG, "PSRAM pool: no room for %zu bytes (%zu of %zu used, largest free %zu)", size, this->pool_.used(),
@@ -2412,6 +2421,9 @@ bool SimpleVideoPlayer::release_media_() {
 #ifdef SVP_STREAM
   if (this->output_lock_ != nullptr)
     xSemaphoreGive(this->output_lock_);
+#endif
+#ifdef SVP_SPICE
+  released = this->release_desktop_() || released;
 #endif
   return released;
 }

@@ -446,6 +446,10 @@ class SimpleVideoPlayer : public Component
   void set_spice_touch_hold(float seconds) {
     this->spice_touch_hold_ms_.store(static_cast<uint32_t>(seconds * 1000), std::memory_order_release);
   }
+  /// A remote desktop session's memory, from the pool (what pictures and a video kept went back to it
+  /// as the session took the panel).
+  uint8_t *desktop_alloc(size_t size);
+  void desktop_free(uint8_t *piece) { this->pool_.free(piece); }
 #ifdef SVP_SPICE_USB
   void add_spice_usb_slot(SpiceUsbSlot *slot);
   /// Main loop: a slot picked the device at addr; the others let it go.
@@ -899,6 +903,13 @@ class SimpleVideoPlayer : public Component
   /// The panel to the session: a playing video ends, a stream sender is let go, no cursor yet.
   /// false: they did not let go in time.
   bool desktop_take_panel_(bool direct, bool &wifi_held);
+  /// Spice task, as the session takes the panel: pictures' and a video's buffers back to the pool (main
+  /// loop), the session's cursor buffers from it.
+  bool desktop_buffers_take_();
+  /// The desktop's buffers back to the pool while no session runs (media wants the room); any task.
+  bool release_desktop_();
+  SemaphoreHandle_t desktop_lock_{nullptr};  // its buffers: taken, or given back
+  std::atomic<bool> media_release_req_{false};  // main loop: release_media_() for a desktop session
   /// The panel back (panel_held: what desktop_take_panel_() took).
   void desktop_release_panel_(bool &panel_held, bool &wifi_held);
   /// The probe of spice_connect(): a VNC server greets first, a SPICE server waits for the client.
@@ -1824,7 +1835,7 @@ class SimpleVideoPlayer : public Component
     int32_t x, y;  // the hot spot on the output
     bool visible;
   };
-  SpiceCursor *spice_cursor_{nullptr};             // PSRAM pool
+  SpiceCursor *spice_cursor_{nullptr};             // PSRAM pool, while a session has them
   SpiceCursorShape *spice_cursor_cache_{nullptr};  // PSRAM pool, SPICE_CURSOR_CACHE (spice task)
   SemaphoreHandle_t spice_cursor_lock_{nullptr};
   std::atomic<bool> spice_cursor_dirty_{false};

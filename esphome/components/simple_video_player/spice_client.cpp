@@ -865,7 +865,8 @@ bool SpiceSession::handle_channels_(const uint8_t *body, uint32_t size) {
     }
     this->usb_link_[i].session = this;
     this->usb_link_[i].channel = &this->usb_[i];
-    p->spice_usb_[i]->link_open(&this->usb_link_[i]);
+    if (!p->spice_usb_[i]->link_open(&this->usb_link_[i]))
+      this->drop_(this->usb_[i]);
   }
 #endif
   return true;
@@ -1495,6 +1496,10 @@ bool SimpleVideoPlayer::desktop_take_panel_(bool direct, bool &wifi_held) {
     vTaskDelay(pdMS_TO_TICKS(20));
   }
   this->stream_drop_sender_.store(false, std::memory_order_release);
+  if (!this->desktop_buffers_take_()) {
+    this->spice_on_.store(false, std::memory_order_release);
+    return false;
+  }
   // No cursor yet; the draw task holds nothing of one (it draws nothing of this session yet).
   xSemaphoreTake(this->spice_cursor_lock_, portMAX_DELAY);
   this->spice_cursor_->visible = false;
@@ -1510,6 +1515,78 @@ bool SimpleVideoPlayer::desktop_take_panel_(bool direct, bool &wifi_held) {
   this->spice_changed_.store(true, std::memory_order_release);
   App.wake_loop_threadsafe();
   return true;
+}
+
+uint8_t *SimpleVideoPlayer::desktop_alloc(size_t size) {
+  uint8_t *piece = this->pool_.alloc(size);
+  if (piece == nullptr)
+    ESP_LOGE(TAG, "PSRAM pool: no room for the desktop's %zu bytes (%zu of %zu used, largest free %zu)", size,
+             this->pool_.used(), this->pool_.size(), this->pool_.largest_free());
+  return piece;
+}
+
+bool SimpleVideoPlayer::desktop_buffers_take_() {
+  // Media and the desktop exclude each other: what pictures and a video keep goes back to the pool
+  // first (main loop), for the session's cursors now and its USB transfers later.
+#ifdef SVP_PICTURES
+  if (this->pic_ready_) {
+    this->pool_reclaim_req_.store(true, std::memory_order_release);
+    this->wait_alloc_answer_([this]() { return !this->pool_reclaim_req_.load(std::memory_order_acquire); });
+  }
+#endif
+  this->media_release_req_.store(true, std::memory_order_release);
+  this->wait_alloc_answer_([this]() { return !this->media_release_req_.load(std::memory_order_acquire); });
+  xSemaphoreTake(this->desktop_lock_, portMAX_DELAY);
+  if (this->spice_cursor_ == nullptr)
+    this->spice_cursor_ = reinterpret_cast<SpiceCursor *>(this->desktop_alloc(sizeof(SpiceCursor)));
+  if (this->spice_cursor_cache_ == nullptr)
+    this->spice_cursor_cache_ =
+        reinterpret_cast<SpiceCursorShape *>(this->desktop_alloc(SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape)));
+  if (this->spice_cursor_under_ == nullptr)
+    this->spice_cursor_under_ = this->desktop_alloc(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3);
+  if (this->spice_cursor_patch_ == nullptr)
+    this->spice_cursor_patch_ = this->desktop_alloc(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3);
+  const bool ok = this->spice_cursor_ != nullptr && this->spice_cursor_cache_ != nullptr &&
+                  this->spice_cursor_under_ != nullptr && this->spice_cursor_patch_ != nullptr;
+  if (ok) {
+    std::memset(this->spice_cursor_, 0, sizeof(SpiceCursor));
+    std::memset(this->spice_cursor_cache_, 0, SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape));
+  }
+  xSemaphoreGive(this->desktop_lock_);
+  return ok;
+}
+
+bool SimpleVideoPlayer::release_desktop_() {
+  if (this->desktop_lock_ == nullptr || this->spice_on_.load(std::memory_order_acquire))
+    return false;
+  xSemaphoreTake(this->desktop_lock_, portMAX_DELAY);
+  bool released = false;
+  if (!this->spice_on_.load(std::memory_order_acquire)) {
+    // Nothing draws a cursor any more (the draw task under output_lock_, the senders under spice_cursor_lock_).
+    if (this->output_lock_ != nullptr)
+      xSemaphoreTake(this->output_lock_, portMAX_DELAY);
+    xSemaphoreTake(this->spice_cursor_lock_, portMAX_DELAY);
+    released = this->spice_cursor_ != nullptr || this->spice_cursor_cache_ != nullptr ||
+               this->spice_cursor_under_ != nullptr || this->spice_cursor_patch_ != nullptr;
+    this->pool_.free(reinterpret_cast<uint8_t *>(this->spice_cursor_));
+    this->pool_.free(reinterpret_cast<uint8_t *>(this->spice_cursor_cache_));
+    this->pool_.free(this->spice_cursor_under_);
+    this->pool_.free(this->spice_cursor_patch_);
+    this->spice_cursor_ = nullptr;
+    this->spice_cursor_cache_ = nullptr;
+    this->spice_cursor_under_ = nullptr;
+    this->spice_cursor_patch_ = nullptr;
+    this->spice_cursor_drawn_ = false;
+    xSemaphoreGive(this->spice_cursor_lock_);
+    if (this->output_lock_ != nullptr)
+      xSemaphoreGive(this->output_lock_);
+#ifdef SVP_SPICE_USB
+    for (uint8_t i = 0; i < this->spice_usb_count_; i++)
+      released = this->spice_usb_[i]->release_buffers() || released;
+#endif
+  }
+  xSemaphoreGive(this->desktop_lock_);
+  return released;
 }
 
 void SimpleVideoPlayer::desktop_release_panel_(bool &panel_held, bool &wifi_held) {
@@ -1755,6 +1832,9 @@ void SimpleVideoPlayer::desktop_vnc_(const char *host, uint16_t port, const char
             slot = static_cast<int>(n - 1);
         }
       }
+      // Its transfers from the pool: none, and the import is refused as for no device.
+      if (slot >= 0 && !this->spice_usb_[slot]->link_open(&links[slot], SpiceUsbSlot::Proto::USBIP))
+        slot = -1;
       if (slot < 0) {
         // Status 1: no such device here, or it is imported already (OP_REP_IMPORT ends with it).
         uint8_t reply[8];
@@ -1767,7 +1847,6 @@ void SimpleVideoPlayer::desktop_vnc_(const char *host, uint16_t port, const char
       }
       // Answered once the slot has the device open (its service()).
       links[slot].fd = fd;
-      this->spice_usb_[slot]->link_open(&links[slot], SpiceUsbSlot::Proto::USBIP);
       attached();
       ESP_LOGI(TAG, "USB/IP: slot %d imported", slot + 1);
     };
@@ -1839,6 +1918,10 @@ void SimpleVideoPlayer::desktop_vnc_(const char *host, uint16_t port, const char
 
 void SimpleVideoPlayer::desktop_cursor_set_(const SpiceCursorShape *shape) {
   xSemaphoreTake(this->spice_cursor_lock_, portMAX_DELAY);
+  if (this->spice_cursor_ == nullptr) {  // the session's buffers given back meanwhile
+    xSemaphoreGive(this->spice_cursor_lock_);
+    return;
+  }
   SpiceCursorShape &now = this->spice_cursor_->shape;
   now.w = shape->w;
   now.h = shape->h;
@@ -2022,7 +2105,7 @@ void SimpleVideoPlayer::spice_out_write_(int32_t x, int32_t y, int32_t w, int32_
 }
 
 void SimpleVideoPlayer::spice_cursor_hide_() {
-  if (!this->spice_cursor_drawn_)
+  if (!this->spice_cursor_drawn_ || this->spice_cursor_under_ == nullptr)
     return;
   this->spice_cursor_drawn_ = false;
   this->spice_out_write_(this->spice_cursor_rx_, this->spice_cursor_ry_, this->spice_cursor_rw_, this->spice_cursor_rh_,
@@ -2052,6 +2135,10 @@ void SimpleVideoPlayer::spice_cursor_show_() {
   }
 #endif
   xSemaphoreTake(this->spice_cursor_lock_, portMAX_DELAY);
+  if (this->spice_cursor_ == nullptr || this->spice_cursor_under_ == nullptr || this->spice_cursor_patch_ == nullptr) {
+    xSemaphoreGive(this->spice_cursor_lock_);  // the session's buffers given back meanwhile
+    return;
+  }
   const SpiceCursor &c = *this->spice_cursor_;
   const SpiceCursorShape &s = c.shape;
   if (!c.visible || !s.valid) {
