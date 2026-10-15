@@ -1178,7 +1178,10 @@ class SimpleVideoPlayer : public Component
   size_t output_reserve_{0};    // the larger of the display's decode buffer and the canvas pair
   size_t controls_reserve_{0};  // both controls pictures
   size_t index_reserve_{0};     // a file's index
-  uint32_t max_audio_latency_ms_{0};  // what the ring holds of the picture: 100 ms per MiB
+  // The most the sound runs ahead of the picture (audio_latency, e.g. a Bluetooth device's delay):
+  // the sound buffers are sized for it.
+  static constexpr uint32_t MAX_AUDIO_LEAD_MS = 1600;
+  uint32_t max_audio_latency_ms_{0};
   // Internal RAM: raw MJPEG reads, index and audio-chunk scratch.
   static constexpr size_t CACHE_BUFFER_SIZE = 64 * 1024;
   float target_fps_{30.0f};  // Target frame rate

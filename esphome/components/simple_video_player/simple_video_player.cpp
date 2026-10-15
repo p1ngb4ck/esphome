@@ -2130,11 +2130,9 @@ bool SimpleVideoPlayer::plan_pool_() {
   size_t ring = ring_for(fixed);
 #ifdef USE_AUDIO
   if (this->speaker_ != nullptr && ring != 0) {
-    // The sound buffers hold what the ring lets the sound run ahead; sized for the larger ring, they
-    // fit the smaller one that is left.
-    const auto latency = static_cast<uint32_t>(ring * 100 / MIB);
-    ring = ring_for(fixed + pool_round(audio_input_bytes(latency)) + pool_round(audio_decoded_bytes(latency)) +
-                    pool_round(AUDIO_TEMP_BUFFER_SIZE));
+    // The sound buffers hold the most the sound may run ahead of the picture (MAX_AUDIO_LEAD_MS).
+    ring = ring_for(fixed + pool_round(audio_input_bytes(MAX_AUDIO_LEAD_MS)) +
+                    pool_round(audio_decoded_bytes(MAX_AUDIO_LEAD_MS)) + pool_round(AUDIO_TEMP_BUFFER_SIZE));
   }
 #endif
   if (ring == 0) {
@@ -2143,7 +2141,7 @@ bool SimpleVideoPlayer::plan_pool_() {
     return false;
   }
   this->ring_size_ = ring;
-  this->max_audio_latency_ms_ = static_cast<uint32_t>(ring * 100 / MIB);
+  this->max_audio_latency_ms_ = MAX_AUDIO_LEAD_MS;
   return true;
 }
 

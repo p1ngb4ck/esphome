@@ -127,15 +127,15 @@ reports the media player's state instead while `state_` is STOPPED and `audio_re
 | Router | `add_on_output_callback` S:50 -> `on_audio_output_changed_` MS:170 | new wanted rate/channels, resend 'A/L/N/F' to the sender |
 | Router format | players only `set_audio_stream_info` | `audio_router` starts its output with the first sound, and starts it again (stop, wait until stopped, start) when a player's stream format differs from the one it was started for (audio_router.cpp `play()`); the player never starts/stops |
 
-A/V sync: `audio_latency` (BT delay) clamped to `max_audio_latency_ms_` = ring x 100 / MiB (S:680,
-S:2146); sound released when the cursor leads by `audio_lead_frames_`; picture clock anchored that
+A/V sync: `audio_latency` (BT delay; device YAML: only while the media output is Bluetooth) clamped
+to `max_audio_latency_ms_` = `MAX_AUDIO_LEAD_MS` 1600 ms (S:680); the sound buffers are sized for it; sound released when the cursor leads by `audio_lead_frames_`; picture clock anchored that
 much later (S:1199-1211, S:1332-1336).
 
 ## 9. PSRAM pool and buffers (today)
 
 Pool: `psram_pool_size` (default 12 MiB, 6-28; device 13 MB = 13,000,000). Plan in `plan_pool_()`
 S:2080-2148: everything listed as "fixed" is reserved; the **read-ahead ring gets all the rest**
-(whole 256 KiB chunks), and the audio rings and `max_audio_latency_ms_` are derived from the ring.
+(whole 256 KiB chunks); the audio rings are sized for `MAX_AUDIO_LEAD_MS` (1600 ms).
 
 | Buffer | Size | Taken / returned | Content | In plan |
 |---|---|---|---|---|
