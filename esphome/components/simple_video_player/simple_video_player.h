@@ -392,6 +392,9 @@ class SimpleVideoPlayer : public Component
   void spice_connect(const std::string &host, uint16_t port, const std::string &password);
   void spice_disconnect();
   bool is_spice_connected() const { return this->spice_on_.load(std::memory_order_acquire); }
+  /// A connect under way; the last one ended without a session (refused, unreachable, wrong password).
+  bool is_spice_connecting() const { return this->spice_connecting_.load(std::memory_order_acquire); }
+  bool spice_failed() const { return this->spice_failed_.load(std::memory_order_acquire); }
   /// Any task: the SPICE task has work (input, USB completions).
   void spice_wake();
   /// Whether the speaker's sound reaches the device the audio files / the media player play on
@@ -1602,6 +1605,8 @@ class SimpleVideoPlayer : public Component
   int spice_wake_fd_{-1};
   std::atomic<uint8_t> spice_request_{0};  // 1 connect, 2 disconnect
   std::atomic<bool> spice_on_{false};
+  std::atomic<bool> spice_connecting_{false};
+  std::atomic<bool> spice_failed_{false};
   std::atomic<bool> spice_inputs_on_{false};    // the session's inputs channel takes keys, mouse, touches
   std::atomic<bool> spice_sound_on_{false};     // the session's playback channel is open
   std::atomic<bool> spice_sound_claim_{false};  // loop(): what plays on the session's sound device stops

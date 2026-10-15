@@ -17,7 +17,6 @@ from esphome.const import (
     CONF_BITS_PER_SAMPLE,
     CONF_CHANNEL,
     CONF_HEIGHT,
-    CONF_HOST,
     CONF_ID,
     CONF_MODE,
     CONF_NAME,
@@ -175,6 +174,7 @@ CONF_STREAM_OUTPUT = "stream_output"
 CONF_STREAM_STATISTICS = "stream_statistics"
 CONF_SPICE = "spice"
 CONF_CONNECTIONS = "connections"
+CONF_HOST = "host"
 CONF_INDEX = "index"
 SPICE_CONNECTIONS_DEFAULT = 8
 

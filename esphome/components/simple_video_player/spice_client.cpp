@@ -371,6 +371,7 @@ class SpiceSession {
   explicit SpiceSession(SimpleVideoPlayer *player) : p_(player) {}
   ~SpiceSession() { this->close_(); }
   void run(const char *host, uint16_t port, const char *password);
+  bool took_panel() const { return this->took_panel_; }
 
  protected:
 #ifdef SVP_SPICE_USB
@@ -459,6 +460,7 @@ class SpiceSession {
   bool direct_{false};
   uint32_t warned_{0};
   bool panel_held_{false};
+  bool took_panel_{false};
   bool wifi_held_{false};
   // Inputs (spice task).
   bool client_mouse_{false};  // SPICE_MOUSE_MODE_CLIENT: positions, else motions
@@ -1180,6 +1182,8 @@ bool SpiceSession::take_panel_() {
   this->pointer_y_ = static_cast<int32_t>(this->out_h_ / 2);
   p->stream_connected_.store(true, std::memory_order_release);
   this->panel_held_ = true;
+  this->took_panel_ = true;
+  p->spice_connecting_.store(false, std::memory_order_release);
   SimpleVideoPlayer::hold_wifi_(this->wifi_held_, true);
   ESP_LOGI(TAG, "Connected to %s:%u", inet_ntoa(this->addr_.sin_addr), ntohs(this->addr_.sin_port));
   p->spice_changed_.store(true, std::memory_order_release);
@@ -2314,9 +2318,17 @@ void SimpleVideoPlayer::spice_loop_() {
         ::read(this->spice_wake_fd_, &count, sizeof(count));
       }
     }
+    this->spice_failed_.store(false, std::memory_order_release);
+    this->spice_connecting_.store(true, std::memory_order_release);
+    this->spice_changed_.store(true, std::memory_order_release);
+    App.wake_loop_threadsafe();
     SpiceSession session(this);
     session.run(host, port, password);
     std::memset(password, 0, sizeof(password));
+    this->spice_failed_.store(!session.took_panel(), std::memory_order_release);
+    this->spice_connecting_.store(false, std::memory_order_release);
+    this->spice_changed_.store(true, std::memory_order_release);
+    App.wake_loop_threadsafe();
   }
 }
 
