@@ -461,7 +461,7 @@ class SpiceSession {
   uint32_t cursor_tick_{0};
   bool sound_ok_{false};  // the playback stream is one the speaker plays
   // Leaving the session on the panel (as the dashboard): the close key held, two fingers held.
-  SimpleVideoPlayer::DesktopClose close_;
+  SimpleVideoPlayer::DesktopClose closing_;
 };
 
 bool SpiceSession::first_(uint32_t what) {
@@ -924,7 +924,7 @@ bool SpiceSession::key_(const uint8_t *m) {
     }
   }
   // The close key: held long it ends the session (close_due_()), let go before it is the desktop's.
-  const auto close = this->close_.key(this->p_, action, page, usage, pressed);
+  const auto close = this->closing_.key(this->p_, action, page, usage, pressed);
   if (close == SimpleVideoPlayer::DesktopClose::TAKEN)
     return true;
   if (close == SimpleVideoPlayer::DesktopClose::TAPPED)
@@ -985,13 +985,13 @@ bool SpiceSession::pointer_(const uint8_t *m) {
 // are the panel's gesture: held long they end the session (close_due_()).
 bool SpiceSession::touch_(const StreamTouch &touch) {
   if (touch.count >= 2) {
-    if (this->close_.two_fingers(true) && this->touch_down_) {
+    if (this->closing_.two_fingers(true) && this->touch_down_) {
       this->touch_down_ = false;
       return this->buttons_(this->mouse_buttons_);
     }
     return true;
   }
-  this->close_.two_fingers(false);
+  this->closing_.two_fingers(false);
   int found = -1;
   for (uint8_t i = 0; i < touch.count; i++) {
     if (!this->touch_down_ || touch.id[i] == this->touch_id_) {
@@ -1368,7 +1368,7 @@ bool SpiceSession::usb_read_(Channel &ch, SpiceUsbSlot *slot) {
 }
 #endif
 
-uint32_t SpiceSession::close_due_() const { return this->close_.due(this->p_); }
+uint32_t SpiceSession::close_due_() const { return this->closing_.due(this->p_); }
 
 void SpiceSession::run(const char *host, uint16_t port, const char *password) {
   SimpleVideoPlayer *p = this->p_;
