@@ -90,9 +90,14 @@ void SimpleVideoPlayer::audio_remote_player_(media_player::MediaPlayerState stat
   const uint8_t remote = this->audio_remote_.load(std::memory_order_acquire);
   if (remote == AUDIO_REMOTE_NONE)
     return;
+  // Idle soon after its svp_play_audio: the last track stopping, or the new one not begun yet.
+  static constexpr uint32_t END_GUARD_MS = 2000;
   if (remote == AUDIO_REMOTE_ASKED && state == media_player::MEDIA_PLAYER_STATE_PLAYING) {
+    // Started without its svp_play_audio seen here.
+    this->audio_remote_play_ms_ = millis();
     this->audio_remote_.store(AUDIO_REMOTE_PLAYING, std::memory_order_release);
-  } else if (remote == AUDIO_REMOTE_PLAYING && state == media_player::MEDIA_PLAYER_STATE_IDLE) {
+  } else if (remote == AUDIO_REMOTE_PLAYING && state == media_player::MEDIA_PLAYER_STATE_IDLE &&
+      millis() - this->audio_remote_play_ms_ >= END_GUARD_MS) {
     this->audio_advance_req_.store(true, std::memory_order_release);  // played to its end: loop() goes on
   }
   this->audio_changed_.store(true, std::memory_order_release);
@@ -107,8 +112,7 @@ bool SimpleVideoPlayer::audio_remote_command_(media_player::MediaPlayerCommand c
       return false;
     this->audio_advance_req_.store(false, std::memory_order_release);
     this->audio_changed_.store(true, std::memory_order_release);
-  } else if (this->audio_remote_.load(std::memory_order_acquire) != AUDIO_REMOTE_PLAYING ||
-             this->state_.load(std::memory_order_acquire) != PlayerState::STOPPED) {
+  } else if (this->audio_remote_.load(std::memory_order_acquire) != AUDIO_REMOTE_PLAYING) {
     return false;
   }
   this->media_player_->make_call().set_command(command).perform();

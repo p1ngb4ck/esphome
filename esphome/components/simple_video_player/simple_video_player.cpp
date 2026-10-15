@@ -244,7 +244,8 @@ void SimpleVideoPlayer::loop() {
     }
   }
   if (this->audio_advance_req_.load(std::memory_order_acquire) &&
-      this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED && !this->session_busy_()) {
+      (this->audio_remote_.load(std::memory_order_acquire) != AUDIO_REMOTE_NONE ||
+       (this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED && !this->session_busy_()))) {
     this->audio_advance_req_.store(false, std::memory_order_relaxed);
     this->audio_advance_();
   }
@@ -661,15 +662,12 @@ void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
   this->last_error_.store(PlaybackError::NONE, std::memory_order_relaxed);
 #ifdef SVP_AUDIO_FILES
   this->audio_session_.store(false, std::memory_order_release);
-  // The network session of the queue's Home Assistant track plays it; any other session ends it.
-  {
+  // The queue's Home Assistant track plays on the media player: a local session ends it, one of
+  // svp_relay's runs beside it.
 #ifdef SVP_STREAM
-    uint8_t asked = AUDIO_REMOTE_ASKED;
-    if (!this->net_session_ ||
-        !this->audio_remote_.compare_exchange_strong(asked, AUDIO_REMOTE_PLAYING, std::memory_order_acq_rel))
+  if (!this->net_session_)
 #endif
-      this->audio_remote_.store(AUDIO_REMOTE_NONE, std::memory_order_release);
-  }
+    this->audio_remote_.store(AUDIO_REMOTE_NONE, std::memory_order_release);
 #endif
   this->playback_task_stop_ = false;
   this->start_req_.store(0, std::memory_order_release);
@@ -691,12 +689,13 @@ void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
 PlayerState SimpleVideoPlayer::get_state() const {
   const PlayerState state = this->state_.load(std::memory_order_acquire);
 #if defined(SVP_AUDIO_FILES) && defined(SVP_MEDIA_PLAYER) && defined(SVP_CHANNEL_LIST)
-  if (state == PlayerState::STOPPED && this->media_player_ != nullptr &&
-      this->audio_remote_.load(std::memory_order_acquire) == AUDIO_REMOTE_PLAYING) {
+  // The queue's Home Assistant track: the media player's state, whatever session runs beside it.
+  if (this->media_player_ != nullptr && this->audio_remote_.load(std::memory_order_acquire) != AUDIO_REMOTE_NONE) {
     if (this->media_player_->state == media_player::MEDIA_PLAYER_STATE_PLAYING)
       return PlayerState::PLAYING;
     if (this->media_player_->state == media_player::MEDIA_PLAYER_STATE_PAUSED)
       return PlayerState::PAUSED;
+    return PlayerState::STOPPED;
   }
 #endif
   return state;
@@ -751,7 +750,10 @@ void SimpleVideoPlayer::stop() {
   }
 #endif
 #if defined(SVP_AUDIO_FILES) && defined(SVP_MEDIA_PLAYER) && defined(SVP_CHANNEL_LIST)
-  this->audio_remote_command_(media_player::MEDIA_PLAYER_COMMAND_STOP);
+  if (this->audio_remote_command_(media_player::MEDIA_PLAYER_COMMAND_STOP)) {
+    this->start_pending_.store(false, std::memory_order_release);
+    return;  // the queue's Home Assistant track: a session of svp_relay's beside it goes on
+  }
 #endif
   this->start_pending_.store(false, std::memory_order_release);
   this->end_session_();
@@ -1308,10 +1310,6 @@ void SimpleVideoPlayer::playback_loop_() {
 #ifdef SVP_STREAM
       if (this->net_session_) {
         this->stream_played_to_end_.store(true, std::memory_order_release);
-#ifdef SVP_AUDIO_FILES
-        if (this->audio_remote_.load(std::memory_order_acquire) == AUDIO_REMOTE_PLAYING)
-          this->audio_advance_req_.store(true, std::memory_order_release);  // the queue goes on
-#endif
       }
 #endif
       ESP_LOGI(TAG, "Playback finished");
@@ -2942,9 +2940,10 @@ void SimpleVideoPlayer::audio_start_(size_t pos) {
 #ifdef SVP_CHANNEL_LIST
   const PsramString &track = this->audio_queue_[this->audio_order_[pos]];
   if (track.rfind("media-source://", 0) == 0) {
-    // Home Assistant's: svp_relay streams it; its network session ending at the end goes on.
+    // Home Assistant's: svp_relay plays it on the media player; its going idle at the end goes on.
     this->audio_start_pending_.store(false, std::memory_order_release);
-    this->end_session_();
+    if (!this->is_network_session())
+      this->end_session_();  // a local session; svp_relay's go on
     if (this->file_speaker_open_ && !this->session_busy_()) {
       this->file_speaker_->finish();
       this->file_speaker_open_ = false;

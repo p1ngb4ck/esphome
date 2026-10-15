@@ -128,11 +128,26 @@ void SimpleVideoPlayer::build_media_traits_() {
 
 void SimpleVideoPlayer::on_svp_play_audio(std::string url, bool announce) {
   ESP_LOGD(TAG, "Play audio%s: %s", announce ? " (announcement)" : "", url.c_str());
+#if defined(SVP_AUDIO_FILES) && defined(SVP_CHANNEL_LIST)
+  // svp_relay plays the queue's Home Assistant track asked for.
+  uint8_t asked = AUDIO_REMOTE_ASKED;
+  if (!announce && this->audio_remote_.compare_exchange_strong(asked, AUDIO_REMOTE_PLAYING, std::memory_order_acq_rel)) {
+    this->audio_remote_play_ms_ = millis();
+    this->audio_changed_.store(true, std::memory_order_release);
+  }
+#endif
   this->media_player_->make_call().set_media_url(url).set_announcement(announce).perform();
 }
 
 void SimpleVideoPlayer::on_svp_audio_command(std::string command) {
   ESP_LOGD(TAG, "Audio command: %s", command.c_str());
+#if defined(SVP_AUDIO_FILES) && defined(SVP_CHANNEL_LIST)
+  // Stopped from Home Assistant: the queue's track stops as on the panel (not its end: no next).
+  if (strcasecmp(command.c_str(), "STOP") == 0 && this->audio_remote_.load(std::memory_order_acquire) != AUDIO_REMOTE_NONE) {
+    this->stop();
+    return;
+  }
+#endif
 #ifdef USE_SPEAKER
   // Mute covers the video's sound too.
   if (this->speaker_ != nullptr) {

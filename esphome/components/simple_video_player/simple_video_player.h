@@ -1215,9 +1215,11 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> audio_session_{false};
   std::atomic<bool> audio_start_pending_{false};
   std::atomic<bool> audio_advance_req_{false};  // the track played to its end
-  // A Home Assistant track of the queue: asked of svp_relay, then its network session plays it.
+  // A Home Assistant track of the queue: asked of svp_relay, then the media player plays it (its
+  // svp_play_audio came); svp_relay's own sessions (TV, dashboard, desktop) run beside it.
   static constexpr uint8_t AUDIO_REMOTE_NONE = 0, AUDIO_REMOTE_ASKED = 1, AUDIO_REMOTE_PLAYING = 2;
   std::atomic<uint8_t> audio_remote_{AUDIO_REMOTE_NONE};
+  uint32_t audio_remote_play_ms_{0};  // when its svp_play_audio came: an idle player before is the last track's
   // The queue plays (a track, or between two): not stopped and not past its end. In the status
   // (svp_relay: the panel is not idle then); main loop.
   bool audio_halted_{false};
