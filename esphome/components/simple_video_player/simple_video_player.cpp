@@ -673,12 +673,8 @@ void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
   this->last_error_.store(PlaybackError::NONE, std::memory_order_relaxed);
 #ifdef SVP_AUDIO_FILES
   this->audio_session_.store(false, std::memory_order_release);
-  // The queue's Home Assistant track plays on the media player: a local session ends it, one of
-  // svp_relay's runs beside it.
-#ifdef SVP_STREAM
-  if (!this->net_session_)
-#endif
-    this->audio_remote_.store(AUDIO_REMOTE_NONE, std::memory_order_release);
+  // Any session ends the queue's Home Assistant track (svp_relay stops its sound for one of its own).
+  this->audio_remote_.store(AUDIO_REMOTE_NONE, std::memory_order_release);
 #endif
   this->playback_task_stop_ = false;
   this->start_req_.store(0, std::memory_order_release);
@@ -700,8 +696,9 @@ void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
 PlayerState SimpleVideoPlayer::get_state() const {
   const PlayerState state = this->state_.load(std::memory_order_acquire);
 #if defined(SVP_AUDIO_FILES) && defined(SVP_MEDIA_PLAYER) && defined(SVP_CHANNEL_LIST)
-  // The queue's Home Assistant track: the media player's state, whatever session runs beside it.
-  if (this->media_player_ != nullptr && this->audio_remote_.load(std::memory_order_acquire) != AUDIO_REMOTE_NONE) {
+  // The queue's Home Assistant track while no session of the player's runs: the media player's state.
+  if (state == PlayerState::STOPPED && this->media_player_ != nullptr &&
+      this->audio_remote_.load(std::memory_order_acquire) != AUDIO_REMOTE_NONE) {
     if (this->media_player_->state == media_player::MEDIA_PLAYER_STATE_PLAYING)
       return PlayerState::PLAYING;
     if (this->media_player_->state == media_player::MEDIA_PLAYER_STATE_PAUSED)
