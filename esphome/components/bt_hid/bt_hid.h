@@ -117,6 +117,8 @@ class BTHIDDevice : public Component,
   void on_pin_request();
   uint8_t handle() const { return this->handle_; }
   uint32_t next_connect_ms() const { return this->next_connect_ms_; }
+  /// Paged once after boot and on connect(); otherwise the device connects on its own.
+  bool page_pending() const { return this->page_pending_; }
   void connect_attempted(uint32_t now);
   bool on_pairing_candidate(const uint8_t *bda, uint32_t device_class, const std::string &name);
   void end_pairing(bool success, const char *reason);
@@ -159,6 +161,7 @@ class BTHIDDevice : public Component,
   bool auto_connect_{true};
   bool fixed_address_{false};
   bool restored_{false};
+  bool page_pending_{true};
 };
 
 class PasskeyTrigger : public Trigger<uint32_t> {

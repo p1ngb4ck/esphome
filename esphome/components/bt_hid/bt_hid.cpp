@@ -491,7 +491,7 @@ void host_loop() {
     return;
   for (auto *dev : h.devices) {
     if (dev->is_connected() || !dev->has_address() || !dev->get_auto_connect() ||
-        static_cast<int32_t>(now - dev->next_connect_ms()) < 0)
+        (!dev->page_pending() && h.pairing != dev) || static_cast<int32_t>(now - dev->next_connect_ms()) < 0)
       continue;
     if (esp_bt_hid_host_connect(const_cast<uint8_t *>(dev->address())) == ESP_OK) {
       h.connecting = true;
@@ -607,6 +607,7 @@ void BTHIDDevice::dump_config() {
 
 void BTHIDDevice::connect() {
   this->auto_connect_ = true;
+  this->page_pending_ = true;
   this->retry_ms_ = 0;
   this->next_connect_ms_ = millis();
 }
@@ -880,6 +881,7 @@ void BTHIDDevice::scan(uint32_t duration_ms) {
 }
 
 void BTHIDDevice::connect_attempted(uint32_t now) {
+  this->page_pending_ = false;
   this->retry_ms_ = this->retry_ms_ == 0 ? RETRY_MIN_MS : std::min(this->retry_ms_ * 2, RETRY_MAX_MS);
   this->next_connect_ms_ = now + this->retry_ms_;
 }
