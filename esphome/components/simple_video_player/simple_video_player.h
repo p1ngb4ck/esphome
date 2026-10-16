@@ -1146,7 +1146,9 @@ class SimpleVideoPlayer : public Component
   CoverView cover_views_[COVER_VIEWS];
   size_t cover_view_count_{0};
   CoverStep cover_step_{CoverStep::IDLE};
-  size_t cover_view_{0};       // the view being fetched or decoded
+  size_t cover_view_{0};       // position in cover_order_ of the view being fetched or decoded
+  uint8_t cover_order_[COVER_VIEWS]{};  // fetch order: the view shown at the start first
+  CoverView &cover_current_() { return this->cover_views_[this->cover_order_[this->cover_view_]]; }
   bool cover_wanted_{false};   // svp_cover: all views again
   bool cover_clear_{false};    // a local track: no cover art
   bool cover_shown_{false};

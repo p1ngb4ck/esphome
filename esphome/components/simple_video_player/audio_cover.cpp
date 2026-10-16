@@ -140,6 +140,21 @@ void SimpleVideoPlayer::cover_loop_() {
           this->cover_wanted_ = false;
           return;
         }
+        // The view shown now first (LVGL runs here), then the others.
+        size_t first = this->cover_view_count_;
+        for (size_t i = 0; i < this->cover_view_count_; i++) {
+          if (lv_obj_is_visible(this->cover_views_[i].canvas)) {
+            first = i;
+            break;
+          }
+        }
+        size_t n = 0;
+        if (first < this->cover_view_count_)
+          this->cover_order_[n++] = static_cast<uint8_t>(first);
+        for (size_t i = 0; i < this->cover_view_count_; i++) {
+          if (i != first)
+            this->cover_order_[n++] = static_cast<uint8_t>(i);
+        }
         this->cover_view_ = 0;
       } else if (this->cover_clear_) {
         this->cover_clear_ = false;
@@ -149,8 +164,8 @@ void SimpleVideoPlayer::cover_loop_() {
         return;  // all views done
       }
       this->cover_wanted_ = false;
-      this->cover_fetch_w_ = this->cover_views_[this->cover_view_].w;
-      this->cover_fetch_h_ = this->cover_views_[this->cover_view_].h;
+      this->cover_fetch_w_ = this->cover_current_().w;
+      this->cover_fetch_h_ = this->cover_current_().h;
       this->cover_fetched_.store(false, std::memory_order_relaxed);
       if (!this->channel_request_(CHANNEL_CMD_COVER, 0)) {
         this->cover_wanted_ = this->cover_view_ == 0;  // the task's queue is full: again next loop
@@ -177,7 +192,7 @@ void SimpleVideoPlayer::cover_loop_() {
         this->cover_clear_views_();  // none
         return;
       }
-      CoverView &view = this->cover_views_[this->cover_view_];
+      CoverView &view = this->cover_current_();
       jpeg_decode_picture_info_t info{};
       if (this->hw_jpeg_decoder_ == nullptr ||
           jpeg_decoder_get_info(this->cover_file_, static_cast<uint32_t>(this->cover_len_), &info) != ESP_OK ||
@@ -205,7 +220,8 @@ void SimpleVideoPlayer::cover_loop_() {
       if (!this->cover_decoded_.load(std::memory_order_acquire))
         return;
       this->cover_step_ = CoverStep::IDLE;
-      CoverView &view = this->cover_views_[this->cover_view_++];
+      CoverView &view = this->cover_current_();
+      this->cover_view_++;
       if (this->cover_wanted_ || this->cover_clear_ || !this->cover_decode_ok_)
         return;
       lv_draw_buf_init(&view.buf, view.shown_w, view.shown_h, LV_COLOR_FORMAT_RGB565, view.stride, view.data,
@@ -234,7 +250,7 @@ void SimpleVideoPlayer::cover_task_() {
 // Picture task: cover_file_ into the view's buffer at the JPEG's own size.
 void SimpleVideoPlayer::cover_decode_() {
   this->cover_decode_ok_ = false;
-  CoverView &view = this->cover_views_[this->cover_view_];
+  CoverView &view = this->cover_current_();
   jpeg_decode_picture_info_t info{};
   if (jpeg_decoder_get_info(this->cover_file_, static_cast<uint32_t>(this->cover_len_), &info) != ESP_OK)
     return;
