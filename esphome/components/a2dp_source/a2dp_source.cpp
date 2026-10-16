@@ -288,12 +288,12 @@ bool A2DPSource::pair_device(const bt_pairing::ScannedDevice &device) {
   this->picked_valid_ = true;
   this->pairing_mode_.store(true);
   this->switch_pending_ = false;
-  this->restore_valid_ = false;
+  // The stored device (connected again if it was) comes back if the pairing does not succeed.
+  memcpy(this->restore_addr_, *this->source_.get_last_peer_address(), ESP_BD_ADDR_LEN);
+  this->restore_valid_ = this->source_.has_stored_peer();
+  this->restore_connect_ = this->connected_.load();
   if (this->connected_.load()) {
-    // The one connected goes first; the search resumes once it has (loop()). It comes back if the
-    // pairing does not succeed.
-    memcpy(this->restore_addr_, this->connected_addr_, ESP_BD_ADDR_LEN);
-    this->restore_valid_ = true;
+    // The one connected goes first; the search resumes once it has (loop()).
     ESP_LOGI(TAG, "Disconnecting %s to pair another device", this->source_.to_str(this->connected_addr_));
     this->source_.disconnect();
     return true;
@@ -344,7 +344,11 @@ void A2DPSource::restore_stored_() {
   esp_bd_addr_t addr;
   memcpy(addr, this->restore_addr_, ESP_BD_ADDR_LEN);
   ESP_LOGI(TAG, "Pairing did not succeed, back to %s", this->source_.to_str(addr));
-  this->source_.connect_to_device(addr);
+  if (this->restore_connect_) {
+    this->source_.connect_to_device(addr);
+  } else {
+    this->source_.store_device(addr);
+  }
 }
 #endif
 
@@ -380,8 +384,9 @@ void A2DPSource::stop_pairing() {
   this->best_valid_ = false;
   ESP_LOGI(TAG, "Pairing window closed");
 #ifdef USE_BT_PAIRING
-  if (!this->picked_valid_)
-    this->restore_stored_();
+  // A pick still pending ends with the window.
+  this->picked_valid_ = false;
+  this->restore_stored_();
 #endif
 }
 
@@ -669,7 +674,7 @@ void A2DPSource::loop() {
       this->rejected_ = true;
       esp_a2d_source_disconnect(this->connected_addr_);
     } else {
-      this->source_.keep_peer();
+      this->source_.keep_peer(this->connected_addr_);
       if (is_picked)
         this->restore_valid_ = false;
 #endif

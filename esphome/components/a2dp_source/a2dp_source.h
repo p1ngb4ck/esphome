@@ -203,6 +203,7 @@ class A2DPSource : public Component
   bool rejected_{false};  // a device not paired was sent away: its disconnect is not reported
   uint8_t restore_addr_[ESP_BD_ADDR_LEN]{};  // connected before a pairing; back to it if that fails
   bool restore_valid_{false};
+  bool restore_connect_{false};  // it was connected: connected to again
   bool reporting_disconnect_{false};  // connected_address() still names the device that went
   void restore_stored_();
   void check_pick_failed_(uint8_t conn_state);

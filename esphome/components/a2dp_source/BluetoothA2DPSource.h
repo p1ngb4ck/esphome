@@ -284,11 +284,19 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
     set_last_connection(addr);
     return reconnect();
   }
-  /// ESPHome: makes this paired device the stored one (kept in NVS) without connecting.
-  void store_device(esp_bd_addr_t addr) { set_last_connection(addr); }
-  /// ESPHome: the device connected now becomes the stored one, reconnected to later.
-  void keep_peer() {
-    set_last_connection(peer_bd_addr);
+  /// ESPHome: makes this paired device the stored one (kept in NVS, whatever the reconnect status)
+  /// without connecting.
+  void store_device(esp_bd_addr_t addr) {
+    if (memcmp(addr, last_connection, ESP_BD_ADDR_LEN) == 0)
+      return;
+    write_address(last_bda_nvs_name(), addr);
+    memcpy(last_connection, addr, ESP_BD_ADDR_LEN);
+  }
+  /// ESPHome: a device is stored.
+  bool has_stored_peer() { return has_last_connection(); }
+  /// ESPHome: the device that connected becomes the stored one, reconnected to later.
+  void keep_peer(esp_bd_addr_t addr) {
+    store_device(addr);
     is_autoreconnect_allowed = true;
   }
 
