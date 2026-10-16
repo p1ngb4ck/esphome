@@ -475,9 +475,11 @@ void SimpleVideoPlayer::options_get_task_() {
       JsonObject choices_in = root["choices"].as<JsonObject>();
       for (JsonPair pair : choices_in) {
         PsramString lines;
+        bool first = true;
         for (JsonVariant choice : pair.value().as<JsonArray>()) {
-          if (!lines.empty())
+          if (!first)
             lines += '\n';
+          first = false;
           lines += choice.as<const char *>() != nullptr ? choice.as<const char *>() : "";
         }
         choices.emplace_back(PsramString(pair.key().c_str()), std::move(lines));
