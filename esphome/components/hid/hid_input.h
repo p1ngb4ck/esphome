@@ -59,6 +59,15 @@ static_assert(sizeof(LayoutKey) == 20 && sizeof(LayoutCompose) == 12, "the .kbl 
 /// the keys, the compositions. `out` points into `data` (4-byte aligned), which must outlive it.
 bool parse_layout(const uint8_t *data, size_t len, KeyboardLayout *out);
 
+/// A device behind an input (USB: the one connected; Bluetooth: each paired one), for a layout of
+/// its own: key is what names it across connections, "usb:046d:c31c" (":" and its serial number
+/// when it reports one) or "bt:AA:BB:CC:DD:EE:FF".
+struct InputDevice {
+  std::string key;
+  std::string name;
+  bool connected;
+};
+
 // Key names, emitted by hid/__init__.py from its table.
 struct KeyName {
   uint16_t page;
@@ -112,6 +121,13 @@ class HIDInput : public key_provider::KeyProvider {
   /// HIDDeviceKind bits of the devices connected behind this input; 0 when none is.
   virtual uint8_t get_device_kinds() const { return 0; }
 
+  /// Main loop: the devices behind it.
+  virtual void list_devices(std::vector<InputDevice> &out) const {}
+  /// What one of them types with; null: the input's own (set_layout()).
+  virtual void set_device_layout(const std::string &key, const KeyboardLayout *layout) {}
+  /// Main loop: a device behind it came or went, was paired or forgotten.
+  template<typename F> void add_on_devices_callback(F &&cb) { this->devices_cb_.add(std::forward<F>(cb)); }
+
   uint8_t get_modifiers() const { return this->modifiers_; }
   uint8_t get_leds() const { return this->leds_; }
   uint8_t get_pointer_buttons() const { return this->buttons_; }
@@ -133,7 +149,13 @@ class HIDInput : public key_provider::KeyProvider {
   CallbackManager<void(const std::string &)> text_cb_;
   CallbackManager<void(int16_t, int16_t, int16_t, int16_t, uint8_t)> pointer_cb_;
   CallbackManager<void(uint16_t, uint16_t, int32_t)> control_cb_;
+  CallbackManager<void()> devices_cb_;
+  /// The layout typed with: the device's own where it has one (device_layout_), else the input's.
+  const KeyboardLayout *active_layout_() const {
+    return this->device_layout_ != nullptr ? this->device_layout_ : this->layout_;
+  }
   const KeyboardLayout *layout_{nullptr};
+  const KeyboardLayout *device_layout_{nullptr};
   const char *log_name_{""};
   std::vector<uint32_t> down_;  // page << 16 | usage of every key held
   char32_t dead_{0};

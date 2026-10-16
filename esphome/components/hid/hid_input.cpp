@@ -264,11 +264,12 @@ void HIDInput::type_key_(uint16_t usage) {
 }
 
 const LayoutKey *HIDInput::layout_key_(uint16_t usage) const {
-  if (this->layout_ == nullptr)
+  const KeyboardLayout *layout = this->active_layout_();
+  if (layout == nullptr)
     return nullptr;
-  for (uint16_t i = 0; i < this->layout_->key_count; i++) {
-    if (this->layout_->keys[i].usage == usage)
-      return &this->layout_->keys[i];
+  for (uint16_t i = 0; i < layout->key_count; i++) {
+    if (layout->keys[i].usage == usage)
+      return &layout->keys[i];
   }
   return nullptr;
 }
@@ -290,20 +291,22 @@ char32_t HIDInput::layout_char(uint16_t usage) const {
 }
 
 bool HIDInput::layout_has_level3() const {
-  if (this->layout_ == nullptr)
+  const KeyboardLayout *layout = this->active_layout_();
+  if (layout == nullptr)
     return false;
-  for (uint16_t i = 0; i < this->layout_->key_count; i++) {
-    if (this->layout_->keys[i].chars[2] != 0 || this->layout_->keys[i].chars[3] != 0)
+  for (uint16_t i = 0; i < layout->key_count; i++) {
+    if (layout->keys[i].chars[2] != 0 || layout->keys[i].chars[3] != 0)
       return true;
   }
   return false;
 }
 
 char32_t HIDInput::compose_(char32_t mark, char32_t base) const {
-  if (this->layout_ == nullptr)
+  const KeyboardLayout *layout = this->active_layout_();
+  if (layout == nullptr)
     return 0;
-  for (uint16_t i = 0; i < this->layout_->compose_count; i++) {
-    const auto &entry = this->layout_->compose[i];
+  for (uint16_t i = 0; i < layout->compose_count; i++) {
+    const auto &entry = layout->compose[i];
     if (entry.mark == mark && entry.base == base)
       return entry.result;
   }

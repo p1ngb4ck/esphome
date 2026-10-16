@@ -39,6 +39,9 @@ class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
   void register_raw_driver(RawHIDDriver *driver) { this->raw_driver_ = driver; }
   /// Main loop.
   uint8_t get_device_kinds() const override;
+  /// The device connected, if one is.
+  void list_devices(std::vector<hid::InputDevice> &out) const override;
+  void set_device_layout(const std::string &key, const hid::KeyboardLayout *layout) override;
 #ifdef USE_TEXT_SENSOR
   void register_device_name_sensor(text_sensor::TextSensor *sensor) { this->device_name_sensor_ = sensor; }
 #endif
@@ -82,6 +85,8 @@ class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
   void xbox360_(Interface &intf, const uint8_t *data, size_t length);
 
   std::vector<Interface> interfaces_{};
+  std::string device_key_;  // the device connected: "usb:vvvv:pppp[:serial]", "" none
+  std::string device_name_;
   std::atomic<uint32_t> generation_{0};
   LockFreeQueue<Report, QUEUE_SIZE> reports_{};
   EventPool<Report, QUEUE_SIZE - 1> report_pool_{};

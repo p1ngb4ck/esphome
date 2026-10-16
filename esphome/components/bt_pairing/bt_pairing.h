@@ -140,6 +140,9 @@ class BTPairing : public Component
   uint8_t get_device_kinds() const override;
   /// The device the HID event being handled came from: its name, else its address.
   const std::string &event_device() const { return this->event_device_; }
+  /// The paired devices of its HID slots ("bt:AA:BB:CC:DD:EE:FF"); each types with its own layout.
+  void list_devices(std::vector<hid::InputDevice> &out) const override;
+  void set_device_layout(const std::string &key, const hid::KeyboardLayout *layout) override;
 #endif
   /// A slot's device: its name, else its address; "" when it has none.
   std::string device_label(const PairingTarget *target) const;
@@ -214,6 +217,15 @@ class BTPairing : public Component
   std::vector<PairingTarget *> targets_;
 #ifdef USE_BT_PAIRING_HID
   std::vector<hid::HIDInput *> hid_slots_;
+  std::vector<PairingTarget *> hid_targets_;  // the slots' targets, as hid_slots_
+  struct DeviceLayout {
+    uint8_t address[6];
+    const hid::KeyboardLayout *layout;
+  };
+  std::vector<DeviceLayout> device_layouts_;
+  /// The layout of the device a slot holds now; null: this input's own.
+  const hid::KeyboardLayout *slot_layout_(const PairingTarget *target) const;
+  void devices_changed_() { this->devices_cb_.call(); }
 #endif
   std::vector<ScannedDevice> scanned_;
   BTPairingSelect *device_select_{nullptr};

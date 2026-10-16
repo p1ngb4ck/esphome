@@ -84,6 +84,9 @@ void BTPairing::loop() {
         this->loaded_ = true;
         ESP_LOGI(TAG, "%u paired device(s) loaded", static_cast<unsigned>(this->records_.size()));
         this->log_records();
+#ifdef USE_BT_PAIRING_HID
+        this->devices_changed_();
+#endif
         break;
       case LoadResult::EMPTY:
         this->loaded_ = true;
@@ -169,6 +172,9 @@ bool BTPairing::store(const PairingRecord &record) {
   this->dirty_ = true;
   this->next_attempt_ms_ = millis();
   this->enable_loop();
+#ifdef USE_BT_PAIRING_HID
+  this->devices_changed_();
+#endif
   return true;
 }
 
@@ -183,6 +189,9 @@ void BTPairing::forget_index_(size_t index) {
   this->dirty_ = true;
   this->next_attempt_ms_ = millis();
   this->enable_loop();
+#ifdef USE_BT_PAIRING_HID
+  this->devices_changed_();
+#endif
 }
 
 void BTPairing::delete_bond(const uint8_t *address, Transport transport) {
@@ -645,6 +654,9 @@ void BTPairing::on_connection(const PairingTarget *target, bool connected) {
   const std::string label = this->device_label(target);
   this->status_(label + (connected ? " connected" : " disconnected"));
   this->connection_callbacks_.call(label, connected);
+#ifdef USE_BT_PAIRING_HID
+  this->devices_changed_();
+#endif
 }
 
 #ifdef USE_BT_PAIRING_HID
@@ -657,13 +669,17 @@ uint8_t BTPairing::get_device_kinds() const {
 
 void BTPairing::add_hid_slot(hid::HIDInput *input, PairingTarget *target) {
   this->hid_slots_.push_back(input);
+  this->hid_targets_.push_back(target);
   input->add_on_key_event_callback([this, target](uint16_t page, uint16_t usage, bool pressed) {
     this->event_device_ = this->device_label(target);
 #if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
     ESP_LOGD(TAG, "[%s] %s %s", this->event_device_.c_str(), hid::key_name(page, usage).c_str(),
              pressed ? "pressed" : "released");
 #endif
+    // The key types with the layout of the device it came from.
+    this->device_layout_ = this->slot_layout_(target);
     this->key_(page, usage, pressed);
+    this->device_layout_ = nullptr;
   });
   input->add_on_pointer_callback([this, target](int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
     this->event_device_ = this->device_label(target);
@@ -676,6 +692,59 @@ void BTPairing::add_hid_slot(hid::HIDInput *input, PairingTarget *target) {
   });
 }
 #endif
+
+const hid::KeyboardLayout *BTPairing::slot_layout_(const PairingTarget *target) const {
+  if (this->device_layouts_.empty() || target->pairing_slot() == 0)
+    return nullptr;
+  const PairingRecord *record = this->find_slot(target->pairing_slot());
+  if (record == nullptr)
+    return nullptr;
+  for (const auto &entry : this->device_layouts_) {
+    if (memcmp(entry.address, record->address, sizeof(entry.address)) == 0)
+      return entry.layout;
+  }
+  return nullptr;
+}
+
+void BTPairing::list_devices(std::vector<hid::InputDevice> &out) const {
+  char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
+  for (const auto &record : this->records_) {
+    bool hid = false;
+    bool connected = false;
+    for (const PairingTarget *target : this->hid_targets_) {
+      if (target->pairing_slot() == record.slot) {
+        hid = true;
+        connected = target->is_device_connected();
+      }
+    }
+    if (!hid)
+      continue;
+    format_mac_addr_upper(record.address, mac);
+    out.push_back({std::string("bt:") + mac, record.name[0] != '\0' ? record.name : mac, connected});
+  }
+}
+
+void BTPairing::set_device_layout(const std::string &key, const hid::KeyboardLayout *layout) {
+  uint8_t address[6];
+  if (key.rfind("bt:", 0) != 0 || !parse_address(key.substr(3), address))
+    return;
+  for (auto it = this->device_layouts_.begin(); it != this->device_layouts_.end(); ++it) {
+    if (memcmp(it->address, address, sizeof(address)) == 0) {
+      if (layout == nullptr) {
+        this->device_layouts_.erase(it);
+      } else {
+        it->layout = layout;
+      }
+      return;
+    }
+  }
+  if (layout != nullptr) {
+    DeviceLayout entry{};
+    memcpy(entry.address, address, sizeof(address));
+    entry.layout = layout;
+    this->device_layouts_.push_back(entry);
+  }
+}
 
 bool BTPairing::pair_address(const std::string &address) {
   uint8_t bda[6];

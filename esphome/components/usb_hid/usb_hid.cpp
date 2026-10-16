@@ -5,6 +5,7 @@
 #include "esphome/core/log.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace esphome::usb_hid {
@@ -25,7 +26,33 @@ void USBHIDClient::setup() {
   this->add_vendor_match(XBOX360_VID, XBOX360_PID_WIRED, 0xFF, XBOX_SUBCLASS);
   this->add_vendor_match(XBOX360_VID, XBOX360_PID_WIRELESS, 0xFF, XBOX_SUBCLASS);
   this->add_vendor_match(BITDO_VID, BITDO_PID_XBOX, 0xFF, XBOX_SUBCLASS);
+  // Which device it is, for a layout of its own (hid::InputDevice).
+  this->add_on_connection_callback([this](bool connected) {
+    this->device_key_.clear();
+    this->device_name_.clear();
+    this->device_layout_ = nullptr;
+    usb_host::UsbDeviceInfo info{};
+    if (connected && this->get_device_info(info)) {
+      char key[16];
+      snprintf(key, sizeof(key), "usb:%04x:%04x", info.vendor_id, info.product_id);
+      this->device_key_ = key;
+      if (info.serial_number[0] != '\0')
+        this->device_key_ += std::string(":") + info.serial_number;
+      this->device_name_ = info.product[0] != '\0' ? info.product : std::string("USB ") + (key + 4);
+    }
+    this->devices_cb_.call();
+  });
   usb_host::USBClient::setup();
+}
+
+void USBHIDClient::list_devices(std::vector<hid::InputDevice> &out) const {
+  if (!this->device_key_.empty())
+    out.push_back({this->device_key_, this->device_name_, true});
+}
+
+void USBHIDClient::set_device_layout(const std::string &key, const hid::KeyboardLayout *layout) {
+  if (key == this->device_key_)
+    this->device_layout_ = layout;
 }
 
 void USBHIDClient::dump_config() {
