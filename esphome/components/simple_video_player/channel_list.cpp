@@ -191,6 +191,11 @@ void SimpleVideoPlayer::channel_loop_() {
     this->channel_requested_once_ = true;
     this->channel_request_(CHANNEL_CMD_REFRESH, 0);
   }
+#ifdef SVP_USE_LVGL
+  // The dropdown's options are LVGL's: a list that came while LVGL is paused waits for it to run.
+  if (this->channel_widget_ != nullptr && this->lvgl_component_ != nullptr && this->lvgl_component_->is_paused())
+    return;
+#endif
   if (!this->channel_new_.exchange(false, std::memory_order_acq_rel))
     return;
   // LVGL keeps pointers into channel_names_: swap the lists and set the options in one go, here on
