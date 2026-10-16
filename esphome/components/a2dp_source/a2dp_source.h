@@ -181,9 +181,11 @@ class A2DPSource : public Component
   // The stored device connected without a record in bt_pairing: kept with the name it reports
   // (asked for with Read Remote Name; the answer comes on Bluedroid's task).
   uint8_t name_addr_[ESP_BD_ADDR_LEN]{};
-  char name_buf_[sizeof(bt_pairing::PairingRecord::name)]{};
+  char name_buf_[sizeof(bt_pairing::PairingRecord::name)]{};   // main loop
+  char rmt_name_[sizeof(bt_pairing::PairingRecord::name)]{};   // Bluedroid's task, then name_ready_
   std::atomic<bool> name_wanted_{false};
   std::atomic<bool> name_ready_{false};
+  bool keep_pending_{false};  // stored once bt_pairing has its database
 #endif
   RingbufHandle_t ring_{nullptr};
   size_t ring_bytes_{0};

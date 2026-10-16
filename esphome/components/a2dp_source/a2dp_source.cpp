@@ -86,11 +86,11 @@ bool A2DPSource::gap_handler_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t
 #ifdef USE_BT_PAIRING
   if (event == ESP_BT_GAP_READ_REMOTE_NAME_EVT && self->name_wanted_.load() &&
       memcmp(param->read_rmt_name.bda, self->name_addr_, ESP_BD_ADDR_LEN) == 0) {
-    self->name_buf_[0] = '\0';
+    self->rmt_name_[0] = '\0';
     if (param->read_rmt_name.stat == ESP_BT_STATUS_SUCCESS) {
-      strncpy(self->name_buf_, reinterpret_cast<const char *>(param->read_rmt_name.rmt_name),
-              sizeof(self->name_buf_) - 1);
-      self->name_buf_[sizeof(self->name_buf_) - 1] = '\0';
+      strncpy(self->rmt_name_, reinterpret_cast<const char *>(param->read_rmt_name.rmt_name),
+              sizeof(self->rmt_name_) - 1);
+      self->rmt_name_[sizeof(self->rmt_name_) - 1] = '\0';
     }
     self->name_wanted_.store(false);
     self->name_ready_.store(true);
@@ -590,13 +590,17 @@ void A2DPSource::loop() {
         uint8_t *peer = *this->source_.get_peer_address();
         if (memcmp(peer, *this->source_.get_last_peer_address(), ESP_BD_ADDR_LEN) == 0 &&
             this->pairing_->find_address(peer) == nullptr && !this->name_wanted_.load()) {
+          // Kept at once (named as the scan saw it, if it did), renamed once it answers.
           memcpy(this->name_addr_, peer, ESP_BD_ADDR_LEN);
-          this->name_wanted_.store(true);
-          if (esp_bt_gap_read_remote_name(this->name_addr_) != ESP_OK) {
-            this->name_buf_[0] = '\0';
-            this->name_wanted_.store(false);
-            this->name_ready_.store(true);
+          this->name_buf_[0] = '\0';
+          for (const auto &device : this->pairing_->scanned_devices()) {
+            if (memcmp(device.address, peer, ESP_BD_ADDR_LEN) == 0)
+              strncpy(this->name_buf_, device.name.c_str(), sizeof(this->name_buf_) - 1);
           }
+          this->keep_pending_ = true;
+          this->name_wanted_.store(true);
+          if (esp_bt_gap_read_remote_name(this->name_addr_) != ESP_OK)
+            this->name_wanted_.store(false);
         }
       }
       this->pairing_->on_connection(this, true);
@@ -605,12 +609,19 @@ void A2DPSource::loop() {
   }
 #ifdef USE_BT_PAIRING
   if (this->pairing_ != nullptr && this->name_ready_.exchange(false)) {
+    if (this->rmt_name_[0] != '\0') {
+      memcpy(this->name_buf_, this->rmt_name_, sizeof(this->name_buf_));
+      this->keep_pending_ = true;
+    }
+  }
+  if (this->pairing_ != nullptr && this->keep_pending_ && this->pairing_->is_loaded()) {
     bt_pairing::PairingRecord record{};
     memcpy(record.address, this->name_addr_, sizeof(record.address));
     record.transport = static_cast<uint8_t>(bt_pairing::Transport::CLASSIC);
     record.slot = this->slot_;
     memcpy(record.name, this->name_buf_, sizeof(record.name));
     record.name[sizeof(record.name) - 1] = '\0';
+    this->keep_pending_ = false;
     if (this->pairing_->store(record)) {
       ESP_LOGI(TAG, "Kept %s '%s' in the paired devices", this->source_.to_str(this->name_addr_), record.name);
       this->pairing_->on_connection(this, this->connected_.load());
