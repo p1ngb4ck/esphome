@@ -66,7 +66,8 @@ struct Host {
   bool paging_paused{false};
   uint32_t paging_interval_ms{30000};
   uint32_t next_page_ms{0};
-  size_t page_turn{0};  // the device whose turn it is
+  size_t page_turn{0};    // the device whose turn it is
+  bool paging_now{false};  // the attempt under way is paging's: its interval counts from its end
   uint32_t connecting_since{0};
 };
 
@@ -356,6 +357,10 @@ void handle_event(HostEvent &e) {
       if (e.status == ESP_HIDH_OK && e.conn == ESP_HIDH_CONN_STATE_CONNECTING)
         break;
       h.connecting = false;
+      if (h.paging_now) {
+        h.paging_now = false;
+        h.next_page_ms = millis() + h.paging_interval_ms;
+      }
       const bool opened = e.status == ESP_HIDH_OK && e.conn == ESP_HIDH_CONN_STATE_CONNECTED && e.handle != 0xFF;
       BTHIDDevice *dev = opened ? find_or_adopt(e.bda) : find_by_address(e.bda);
       if (dev != nullptr && opened && !dev->get_auto_connect()) {
@@ -494,8 +499,13 @@ void host_loop() {
 
   // One outgoing connection at a time, and none while a scan runs: paging during an inquiry
   // fails, so a device found by a pairing scan is connected once the scan has stopped.
-  if (h.connecting && now - h.connecting_since > CONNECT_TIMEOUT_MS)
+  if (h.connecting && now - h.connecting_since > CONNECT_TIMEOUT_MS) {
     h.connecting = false;
+    if (h.paging_now) {
+      h.paging_now = false;
+      h.next_page_ms = now + h.paging_interval_ms;
+    }
+  }
   if (!h.ready || h.connecting || h.discovering)
     return;
   const size_t count = h.devices.size();
@@ -510,12 +520,14 @@ void host_loop() {
     if (!asked && (!h.paging || h.paging_paused || h.pairing != nullptr ||
                    static_cast<int32_t>(now - h.next_page_ms) < 0))
       continue;
-    if (esp_bt_hid_host_connect(const_cast<uint8_t *>(dev->address())) == ESP_OK) {
+    const bool started = esp_bt_hid_host_connect(const_cast<uint8_t *>(dev->address())) == ESP_OK;
+    if (started) {
       h.connecting = true;
       h.connecting_since = now;
     }
     dev->connect_attempted(now);
     if (!asked) {
+      h.paging_now = started;
       h.next_page_ms = now + h.paging_interval_ms;
       h.page_turn = (index + 1) % count;
     }
