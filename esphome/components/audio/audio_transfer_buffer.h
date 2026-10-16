@@ -66,7 +66,7 @@ class AudioTransferBuffer {
    */
  public:
   /// @brief Destructor that deallocates the transfer buffer
-  ~AudioTransferBuffer();
+  virtual ~AudioTransferBuffer();
 
   /// @brief Returns a pointer to the start of the transfer buffer where available() bytes of existing data can be read
   uint8_t *get_buffer_start() const { return this->data_start_; }
