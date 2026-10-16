@@ -1159,6 +1159,7 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> cover_decoded_{false};
   bool cover_decode_ok_{false};
   size_t cover_bytes_();
+  size_t cover_reserve_{0};  // the views' buffers and the file: their share of the picture + audio mode
   uint8_t *cover_alloc_(size_t size);
   bool cover_buffers_();
   void release_cover_buffers_();
@@ -1740,6 +1741,7 @@ class SimpleVideoPlayer : public Component
   PicPage *pic_shown_{nullptr};
   int32_t pic_w_{0}, pic_h_{0};           // the canvas size pictures are decoded for
   uint32_t pic_stride_{0};
+  size_t pictures_bytes_() const;  // the pictures' share of the picture + audio mode (pages and files)
   size_t pic_page_bytes_{0};              // a page: the display's whole size, any canvas size fits
   bool pic_buffers_failed_{false};        // the pool had no room for them; tried again after a video
   lv_draw_buf_t *pic_lvgl_buf_{nullptr};  // the canvas' own buffer, shown while no page is; none: external_buffer

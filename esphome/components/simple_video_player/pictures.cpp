@@ -69,6 +69,10 @@ static uint16_t to_rgb565(uint32_t color) {
 // Setup, loop
 //========================================================================
 
+size_t SimpleVideoPlayer::pictures_bytes_() const {
+  return this->pic_canvas_ != nullptr ? PIC_PAGE_COUNT * this->pic_page_bytes_ + PIC_FILE_COUNT * PICTURE_STEP : 0;
+}
+
 void SimpleVideoPlayer::pictures_setup_() {
   if (this->pic_canvas_ == nullptr)
     return;

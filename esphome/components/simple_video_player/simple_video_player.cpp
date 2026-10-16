@@ -102,7 +102,7 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 #ifdef SVP_AUDIO_COVER
-  this->cover_bytes_();  // the canvases' sizes; their buffers come from the pool when cover art shows
+  this->cover_reserve_ = this->cover_bytes_();  // the canvases' sizes; their buffers come with the mode
 #endif
 
   if (!this->init_decoder_()) {
@@ -203,6 +203,19 @@ void SimpleVideoPlayer::setup() {
 #endif
 #ifdef SVP_PICTURES
   this->pictures_setup_();
+  {
+    // Pictures and cover art (the picture + audio mode) take the room a video's buffers have in the
+    // other modes, handed over on the mode switch: their share must fit in it.
+    size_t share = this->pictures_bytes_();
+#ifdef SVP_AUDIO_COVER
+    share += this->cover_reserve_;
+#endif
+    const size_t room = this->ring_size_ + this->frame_bytes_ * FRAME_SLOT_COUNT + this->output_reserve_ +
+                        this->controls_reserve_ + this->index_reserve_;
+    if (share > room)
+      ESP_LOGE(TAG, "psram_pool_size too small: pictures and cover art take %u bytes, the media room is %u",
+               static_cast<unsigned>(share), static_cast<unsigned>(room));
+  }
 #endif
 #ifdef SVP_KEYBOARD
   this->keyboard_setup_();
