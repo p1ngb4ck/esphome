@@ -354,6 +354,9 @@ void handle_event(HostEvent &e) {
         ESP_LOGI(TAG, "[%s] Disconnected by request, refusing", mac);
         esp_bt_hid_host_disconnect(e.bda);
       } else if (dev != nullptr) {
+        // Another connection under way in Bluedroid (btc_hh_connect): the page has not gone out.
+        if (e.status == ESP_HIDH_BUSY)
+          dev->set_page_pending(true);
         dev->on_open(e.handle, opened, e.status);
         // A failed attempt is retried until the window closes: the PIN may still be typed.
         if (dev == h.pairing && opened)
@@ -494,6 +497,7 @@ void host_loop() {
         (!dev->page_pending() && h.pairing != dev) || static_cast<int32_t>(now - dev->next_connect_ms()) < 0)
       continue;
     if (esp_bt_hid_host_connect(const_cast<uint8_t *>(dev->address())) == ESP_OK) {
+      dev->set_page_pending(false);
       h.connecting = true;
       h.connecting_since = now;
     }
@@ -881,7 +885,6 @@ void BTHIDDevice::scan(uint32_t duration_ms) {
 }
 
 void BTHIDDevice::connect_attempted(uint32_t now) {
-  this->page_pending_ = false;
   this->retry_ms_ = this->retry_ms_ == 0 ? RETRY_MIN_MS : std::min(this->retry_ms_ * 2, RETRY_MAX_MS);
   this->next_connect_ms_ = now + this->retry_ms_;
 }

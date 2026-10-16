@@ -119,6 +119,7 @@ class BTHIDDevice : public Component,
   uint32_t next_connect_ms() const { return this->next_connect_ms_; }
   /// Paged once after boot and on connect(); otherwise the device connects on its own.
   bool page_pending() const { return this->page_pending_; }
+  void set_page_pending(bool pending) { this->page_pending_ = pending; }
   void connect_attempted(uint32_t now);
   bool on_pairing_candidate(const uint8_t *bda, uint32_t device_class, const std::string &name);
   void end_pairing(bool success, const char *reason);
