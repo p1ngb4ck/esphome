@@ -176,6 +176,10 @@ class BTPairing : public Component
   /// Pairs a listed device through the slot or source that takes its kind.
   void pair_with(size_t index);
   /// What the scan and a pick do, for the log, a screen or Home Assistant.
+  /// Main loop: the scan's list changed (a device found or named), while the scan still runs too.
+  template<typename F> void add_on_scanned_callback(F &&callback) {
+    this->scanned_callbacks_.add(std::forward<F>(callback));
+  }
   template<typename F> void add_on_status_callback(F &&callback) {
     this->status_callbacks_.add(std::forward<F>(callback));
   }
@@ -216,6 +220,7 @@ class BTPairing : public Component
   std::vector<PairingRecord> records_;
   CallbackManager<void(const PairingRecord &)> forget_callbacks_;
   CallbackManager<void(const std::string &)> status_callbacks_;
+  CallbackManager<void()> scanned_callbacks_;
   CallbackManager<void(const std::string &, bool)> connection_callbacks_;
 #ifdef USE_BT_PAIRING_HID
   std::string event_device_;

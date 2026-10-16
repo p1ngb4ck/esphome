@@ -552,6 +552,7 @@ void BTPairing::publish_scanned_() {
   if (this->device_select_ != nullptr)
     this->device_select_->set_devices(this->scanned_);
 #endif
+  this->scanned_callbacks_.call();
 }
 
 void BTPairing::scan_loop_() {
