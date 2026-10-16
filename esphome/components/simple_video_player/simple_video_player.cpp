@@ -883,6 +883,10 @@ void SimpleVideoPlayer::playback_task_entry_(void *param) {
 #ifdef SVP_STREAM
     player->stream_wake_();
 #endif
+#ifdef SVP_SPICE
+    if (player->spice_on_.load(std::memory_order_acquire))
+      player->spice_wake();  // a desktop taking the panel waits for this (desktop_take_panel_())
+#endif
   }
 }
 
@@ -905,6 +909,10 @@ void SimpleVideoPlayer::reader_task_entry_(void *param) {
     player->playback_wait_.wake();
 #ifdef SVP_STREAM
     player->stream_wake_();
+#endif
+#ifdef SVP_SPICE
+    if (player->spice_on_.load(std::memory_order_acquire))
+      player->spice_wake();
 #endif
   }
 }

@@ -549,6 +549,8 @@ void SimpleVideoPlayer::stream_net_loop_() {
       ::close(client);
       this->stream_sender_busy_.store(false, std::memory_order_release);
 #ifdef SVP_SPICE
+      if (this->spice_on_.load(std::memory_order_acquire))
+        this->spice_wake();  // a desktop taking the panel waits for this (desktop_take_panel_())
       if (desktop_sender) {
         // The desktop's picture is gone: its session ends with it.
         this->desktop_sender_wanted_.store(false, std::memory_order_release);

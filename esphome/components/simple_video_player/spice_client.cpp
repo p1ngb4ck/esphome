@@ -1492,16 +1492,35 @@ bool SimpleVideoPlayer::desktop_take_panel_(bool direct, bool &wifi_held) {
   xSemaphoreGive(this->session_lock_);
   this->stream_drop_sender_.store(true, std::memory_order_release);
   this->stream_wake_();
+  // Woken (spice_wake()) when the sender or the session's tasks let go. Wakes taken here for others
+  // (requests, USB) are given again once done.
+  bool woken = false;
   for (const uint32_t start = millis();
        this->stream_sender_busy_.load(std::memory_order_acquire) || this->picture_session_busy_();) {
-    if (millis() - start > TAKEOVER_WAIT_MS) {
-      ESP_LOGE(TAG, "The playing video or stream sender did not let go of the panel");
+    const uint32_t waited = millis() - start;
+    if (waited > TAKEOVER_WAIT_MS || this->spice_request_.load(std::memory_order_acquire) != 0) {
+      if (waited > TAKEOVER_WAIT_MS)
+        ESP_LOGE(TAG, "The playing video or stream sender did not let go of the panel");
       this->stream_drop_sender_.store(false, std::memory_order_release);
       this->spice_on_.store(false, std::memory_order_release);
+      if (woken)
+        this->spice_wake();
       return false;
     }
-    vTaskDelay(pdMS_TO_TICKS(20));
+    const uint32_t left_ms = TAKEOVER_WAIT_MS + 1 - waited;
+    fd_set readable;
+    FD_ZERO(&readable);
+    FD_SET(this->spice_wake_fd_, &readable);
+    struct timeval wait = {.tv_sec = static_cast<time_t>(left_ms / 1000),
+                           .tv_usec = static_cast<suseconds_t>((left_ms % 1000) * 1000)};
+    if (::select(this->spice_wake_fd_ + 1, &readable, nullptr, nullptr, &wait) == 1) {
+      uint64_t count;
+      ::read(this->spice_wake_fd_, &count, sizeof(count));
+      woken = true;
+    }
   }
+  if (woken)
+    this->spice_wake();
   this->stream_drop_sender_.store(false, std::memory_order_release);
   if (!this->desktop_buffers_take_()) {
     this->spice_on_.store(false, std::memory_order_release);
