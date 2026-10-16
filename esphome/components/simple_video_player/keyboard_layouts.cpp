@@ -35,9 +35,7 @@ void SimpleVideoPlayer::keyboard_setup_() {
   this->kbd_list_ = reinterpret_cast<char *>(this->pool_.alloc(KBD_LIST_BYTES));
   this->kbd_entries_ = reinterpret_cast<KbdEntry *>(this->pool_.alloc(KBD_MAX * sizeof(KbdEntry)));
   this->kbd_assign_ = reinterpret_cast<KbdAssignTable *>(this->pool_.alloc(sizeof(KbdAssignTable)));
-  this->kbd_assign_copy_ = reinterpret_cast<KbdAssignTable *>(this->pool_.alloc(sizeof(KbdAssignTable)));
-  bool ok = this->kbd_list_ != nullptr && this->kbd_entries_ != nullptr && this->kbd_assign_ != nullptr &&
-            this->kbd_assign_copy_ != nullptr;
+  bool ok = this->kbd_list_ != nullptr && this->kbd_entries_ != nullptr && this->kbd_assign_ != nullptr;
   for (KbdSlot &slot : this->kbd_slots_) {
     slot = KbdSlot{};
     slot.data = this->pool_.alloc(KBD_LAYOUT_BYTES);
@@ -49,6 +47,15 @@ void SimpleVideoPlayer::keyboard_setup_() {
   }
   std::memset(this->kbd_assign_, 0, sizeof(KbdAssignTable));
   this->kbd_pref_ = global_preferences->make_preference<KbdAssignTable>(fnv1_hash("simple_video_player.keyboards"));
+  if (this->kbd_pref_.load(this->kbd_assign_)) {
+    for (KbdAssign &entry : this->kbd_assign_->entries) {
+      entry.key[sizeof(entry.key) - 1] = '\0';
+      entry.layout[sizeof(entry.layout) - 1] = '\0';
+      entry.name[sizeof(entry.name) - 1] = '\0';
+    }
+  } else {
+    std::memset(this->kbd_assign_, 0, sizeof(KbdAssignTable));
+  }
   for (KbdInput &input : this->kbd_inputs_) {
     input.own = input.input->get_layout();
     // A device came or went: it gets its layout; a USB one is remembered.
@@ -80,8 +87,6 @@ void SimpleVideoPlayer::keyboard_setup_() {
   if (storage::global_storage_registry != nullptr) {
     // Its storage may come later (a card put in): the layouts that could not be had are tried again.
     storage::global_storage_registry->add_on_registered_callback([this](storage::Storage *) {
-      if (!this->kbd_table_loaded_)
-        this->keyboard_table_load_();
       for (KbdSlot &slot : this->kbd_slots_) {
         if (slot.state == KBD_FAILED)
           slot.state = KBD_EMPTY;
@@ -91,90 +96,7 @@ void SimpleVideoPlayer::keyboard_setup_() {
   }
   this->kbd_ready_ = true;
   this->keyboard_resolve_();
-  this->keyboard_table_load_();
-#ifdef SVP_KEYBOARD_ENTITIES
-  this->kbd_entity_labels_ =
-      reinterpret_cast<char (*)[KBD_ENTITY_LABEL]>(this->pool_.alloc(KBD_ENTITY_MAX * KBD_ENTITY_LABEL));
-  this->kbd_entity_keys_ =
-      reinterpret_cast<char (*)[sizeof(KbdAssign::key)]>(this->pool_.alloc(KBD_ENTITY_MAX * sizeof(KbdAssign::key)));
-  if (this->kbd_entity_labels_ == nullptr || this->kbd_entity_keys_ == nullptr) {
-    ESP_LOGE(TAG, "Keyboard device select disabled: no room in the PSRAM pool");
-    return;
-  }
-  this->kbd_callbacks_.add([this]() { this->keyboard_entities_(); });
-  this->keyboard_entities_();
-#endif
 }
-
-#ifdef SVP_KEYBOARD_ENTITIES
-#ifdef USE_SELECT
-void KeyboardDeviceSelect::control(size_t index) { this->parent_->keyboard_entity_pick(index); }
-#endif
-
-void SimpleVideoPlayer::keyboard_entity_pick(size_t index) {
-  if (index >= this->kbd_entity_count_)
-    return;
-  std::memcpy(this->kbd_entity_pick_, this->kbd_entity_keys_[index], sizeof(this->kbd_entity_pick_));
-  this->keyboard_entities_();
-}
-
-// The select's options: each keyboard's standard ("name (standard)") and each device of theirs (its
-// name, numbered when another has it too); the sensor: the layout of the one picked ("standard": its
-// keyboard's, "own": a standard's configured one).
-void SimpleVideoPlayer::keyboard_entities_() {
-  if (this->kbd_entity_labels_ == nullptr)
-    return;
-  const auto devices = this->keyboard_devices();
-  size_t count = 0;
-  size_t picked = 0;
-  bool found = false;
-  for (const auto &device : devices) {
-    if (count >= KBD_ENTITY_MAX)
-      break;
-    char *label = this->kbd_entity_labels_[count];
-    const bool standard = !device.key.empty() && device.key[0] == '@';
-    std::snprintf(label, KBD_ENTITY_LABEL, standard ? "%s (standard)" : "%s", device.name.c_str());
-    for (unsigned n = 2;; n++) {
-      bool taken = false;
-      for (size_t i = 0; i < count && !taken; i++)
-        taken = std::strcmp(this->kbd_entity_labels_[i], label) == 0;
-      if (!taken)
-        break;
-      std::snprintf(label, KBD_ENTITY_LABEL, standard ? "%s (standard) %u" : "%s %u", device.name.c_str(), n);
-    }
-    copy_field(this->kbd_entity_keys_[count], sizeof(KbdAssign::key), device.key);
-    if (!found && std::strcmp(this->kbd_entity_keys_[count], this->kbd_entity_pick_) == 0) {
-      picked = count;
-      found = true;
-    }
-    count++;
-  }
-  this->kbd_entity_count_ = count;
-  if (count == 0)
-    return;
-  if (!found)
-    std::memcpy(this->kbd_entity_pick_, this->kbd_entity_keys_[0], sizeof(this->kbd_entity_pick_));
-#ifdef USE_SELECT
-  if (this->kbd_select_ != nullptr) {
-    FixedVector<const char *> options;
-    options.init(count);
-    for (size_t i = 0; i < count; i++)
-      options.push_back(this->kbd_entity_labels_[i]);
-    this->kbd_select_->traits.set_options(options);
-    this->kbd_select_->publish_state(picked);
-  }
-#endif
-#ifdef USE_TEXT_SENSOR
-  if (this->kbd_layout_sensor_ != nullptr) {
-    const auto &device = devices[picked];
-    const bool standard = device.key[0] == '@';
-    this->kbd_layout_sensor_->publish_state(!device.layout.empty() ? device.layout
-                                            : standard            ? std::string("own")
-                                                                  : std::string("standard"));
-  }
-#endif
-}
-#endif
 
 void SimpleVideoPlayer::keyboard_loop_() {
 #ifdef SVP_CHANNEL_LIST
@@ -473,15 +395,7 @@ bool SimpleVideoPlayer::keyboard_assign(const std::string &key, const std::strin
   return true;
 }
 
-bool SimpleVideoPlayer::keyboard_assign_named(const std::string &device, const std::string &given) {
-  // "standard" / "own" (the layout sensor's words): none of its own.
-  const std::string layout = given == "standard" || given == "own" ? std::string() : given;
-#ifdef SVP_KEYBOARD_ENTITIES
-  for (size_t i = 0; i < this->kbd_entity_count_; i++) {
-    if (device == this->kbd_entity_labels_[i])
-      return this->keyboard_assign(this->kbd_entity_keys_[i], layout);
-  }
-#endif
+bool SimpleVideoPlayer::keyboard_assign_named(const std::string &device, const std::string &layout) {
   for (const auto &known : this->keyboard_devices()) {
     if (known.key == device || known.name == device || (known.key[0] == '@' && known.key.substr(1) == device))
       return this->keyboard_assign(known.key, layout);
@@ -587,8 +501,7 @@ void SimpleVideoPlayer::keyboard_resolve_() {
 
 // The read set up (keyboard_resolve_()), else the next download, from the file first.
 void SimpleVideoPlayer::keyboard_next_() {
-  // One stream at a time: not while the table is read or written.
-  if (!this->kbd_ready_ || this->kbd_step_ != KBD_IDLE || this->kbd_table_busy_)
+  if (!this->kbd_ready_ || this->kbd_step_ != KBD_IDLE)
     return;
   if (this->kbd_loading_ < 0 || this->kbd_slots_[this->kbd_loading_].state != KBD_LOADING) {
     // A download: into a free slot, kept in the directory only.
@@ -781,175 +694,13 @@ void SimpleVideoPlayer::keyboard_done_(bool ok) {
   }
   this->kbd_step_ = KBD_IDLE;
   this->kbd_loading_ = -1;
-  if (!this->kbd_table_loaded_) {
-    this->keyboard_table_load_();
-  } else if (this->kbd_table_dirty_ && !this->kbd_table_busy_) {
-    this->keyboard_table_write_();
-  }
   this->keyboard_resolve_();
   this->kbd_callbacks_.call();
 }
 
 void SimpleVideoPlayer::keyboard_save_() {
-  this->kbd_table_dirty_ = true;
-  if (this->kbd_table_loaded_ && !this->kbd_table_busy_)
-    this->keyboard_table_write_();
-}
-
-using storage::StorageError;
-
-void SimpleVideoPlayer::keyboard_table_failed_(const char *what, StorageError err) {
-  ESP_LOGW(TAG, "%s %s%s failed: %s", what, this->kbd_dir_default_.c_str(), KBD_TABLE_FILE,
-           storage::error_to_string(err));
-  this->kbd_table_busy_ = false;
-  this->keyboard_resolve_();
-}
-
-// Once a storage holds the directory (else again when one is registered).
-void SimpleVideoPlayer::keyboard_table_load_() {
-  if (this->kbd_table_loaded_ || this->kbd_table_busy_ || this->kbd_step_ != KBD_IDLE ||
-      storage::global_storage_registry == nullptr || storage::global_storage_worker == nullptr)
-    return;
-  const std::string path = this->kbd_dir_default_ + KBD_TABLE_FILE;
-  const char *rel = nullptr;
-  this->kbd_table_storage_ = storage::global_storage_registry->resolve_path(path.c_str(), &rel);
-  if (this->kbd_table_storage_ == nullptr)
-    return;
-  this->kbd_table_rel_ = rel;
-  this->kbd_table_len_ = 0;
-  this->kbd_table_busy_ = true;
-  const StorageError err = storage::global_storage_worker->begin_read(
-      this->kbd_table_storage_, this->kbd_table_rel_.c_str(), &this->kbd_table_handle_, [this](StorageError opened) {
-        if (opened == StorageError::STORAGE_ERROR_OK) {
-          this->keyboard_table_read_();
-          return;
-        }
-        this->kbd_table_busy_ = false;
-        if (opened != StorageError::STORAGE_ERROR_NOT_FOUND) {
-          this->keyboard_table_failed_("Reading", opened);
-          return;
-        }
-        // None yet: the preferences' table, of before, is taken over.
-        if (this->kbd_pref_.load(this->kbd_assign_)) {
-          ESP_LOGI(TAG, "Keyboard layouts given taken over from preferences");
-          this->kbd_table_dirty_ = true;
-        } else {
-          std::memset(this->kbd_assign_, 0, sizeof(KbdAssignTable));
-        }
-        this->keyboard_table_loaded_();
-      });
-  if (err != StorageError::STORAGE_ERROR_OK)
-    this->keyboard_table_failed_("Reading", err);
-}
-
-void SimpleVideoPlayer::keyboard_table_read_() {
-  auto *buf = reinterpret_cast<uint8_t *>(this->kbd_assign_copy_);
-  const StorageError err = storage::global_storage_worker->read_chunk(
-      this->kbd_table_handle_, buf + this->kbd_table_len_, sizeof(KbdAssignTable) - this->kbd_table_len_,
-      &this->kbd_table_got_, [this](StorageError read) {
-        if (read != StorageError::STORAGE_ERROR_OK) {
-          storage::global_storage_worker->end_read(this->kbd_table_handle_, [](StorageError) {});
-          this->keyboard_table_failed_("Reading", read);
-          return;
-        }
-        this->kbd_table_len_ += this->kbd_table_got_;
-        if (this->kbd_table_got_ != 0 && this->kbd_table_len_ < sizeof(KbdAssignTable)) {
-          this->keyboard_table_read_();
-          return;
-        }
-        storage::global_storage_worker->end_read(this->kbd_table_handle_, [this](StorageError) {
-          this->kbd_table_busy_ = false;
-          if (this->kbd_table_len_ == sizeof(KbdAssignTable)) {
-            std::memcpy(this->kbd_assign_, this->kbd_assign_copy_, sizeof(KbdAssignTable));
-          } else {
-            ESP_LOGW(TAG, "%s%s is not a keyboard table, starting empty", this->kbd_dir_default_.c_str(),
-                     KBD_TABLE_FILE);
-            std::memset(this->kbd_assign_, 0, sizeof(KbdAssignTable));
-          }
-          this->keyboard_table_loaded_();
-        });
-      });
-  if (err != StorageError::STORAGE_ERROR_OK) {
-    storage::global_storage_worker->end_read(this->kbd_table_handle_, [](StorageError) {});
-    this->keyboard_table_failed_("Reading", err);
-  }
-}
-
-void SimpleVideoPlayer::keyboard_table_loaded_() {
-  for (KbdAssign &entry : this->kbd_assign_->entries) {
-    entry.key[sizeof(entry.key) - 1] = '\0';
-    entry.layout[sizeof(entry.layout) - 1] = '\0';
-    entry.name[sizeof(entry.name) - 1] = '\0';
-  }
-  this->kbd_table_loaded_ = true;
-  this->keyboard_resolve_();
-  this->kbd_callbacks_.call();
-  if (this->kbd_table_dirty_)
-    this->keyboard_table_write_();
-}
-
-void SimpleVideoPlayer::keyboard_table_write_() {
-  storage::StorageWorker *worker = storage::global_storage_worker;
-  if (worker == nullptr || this->kbd_table_storage_ == nullptr || this->kbd_step_ != KBD_IDLE)
-    return;  // still dirty: written once the layout's stream is done (keyboard_done_())
-  // The directory made if need be (as a layout kept there), not while the worker's task is in it.
-  const char *dir_rel = nullptr;
-  storage::PathStorage *dir = storage::global_storage_registry->resolve_path(this->kbd_dir_default_.c_str(), &dir_rel);
-  if (dir != nullptr && !worker->has_active_task_io(dir) && dir_rel != nullptr && dir_rel[0] != '\0')
-    dir->mkdir(dir_rel);  // already there: an error, and nothing to do
-  std::memcpy(this->kbd_assign_copy_, this->kbd_assign_, sizeof(KbdAssignTable));
-  this->kbd_table_dirty_ = false;
-  this->kbd_table_tmp_ = this->kbd_table_rel_ + ".tmp";
-  this->kbd_table_busy_ = true;
-  const StorageError err = worker->begin_write(
-      this->kbd_table_storage_, this->kbd_table_tmp_.c_str(), &this->kbd_table_handle_, [this](StorageError opened) {
-        if (opened != StorageError::STORAGE_ERROR_OK) {
-          this->kbd_table_dirty_ = true;
-          this->keyboard_table_failed_("Writing", opened);
-          return;
-        }
-        const StorageError queued = storage::global_storage_worker->write_chunk(
-            this->kbd_table_handle_, reinterpret_cast<const uint8_t *>(this->kbd_assign_copy_),
-            sizeof(KbdAssignTable), [this](StorageError written) {
-              storage::global_storage_worker->end_write(this->kbd_table_handle_, [this, written](StorageError closed) {
-                if (written != StorageError::STORAGE_ERROR_OK || closed != StorageError::STORAGE_ERROR_OK) {
-                  this->kbd_table_dirty_ = true;
-                  this->keyboard_table_failed_("Writing", written != StorageError::STORAGE_ERROR_OK ? written : closed);
-                  return;
-                }
-                const StorageError moved = storage::global_storage_worker->async_move(
-                    this->kbd_table_storage_, this->kbd_table_tmp_.c_str(), this->kbd_table_storage_,
-                    this->kbd_table_rel_.c_str(),
-                    [this](StorageError result) {
-                      if (result != StorageError::STORAGE_ERROR_OK) {
-                        this->kbd_table_dirty_ = true;
-                        this->keyboard_table_failed_("Replacing", result);
-                        return;
-                      }
-                      this->kbd_table_busy_ = false;
-                      if (this->kbd_table_dirty_) {
-                        this->keyboard_table_write_();  // changed meanwhile
-                      } else {
-                        this->keyboard_resolve_();
-                      }
-                    },
-                    nullptr, true);
-                if (moved != StorageError::STORAGE_ERROR_OK) {
-                  this->kbd_table_dirty_ = true;
-                  this->keyboard_table_failed_("Replacing", moved);
-                }
-              });
-            });
-        if (queued != StorageError::STORAGE_ERROR_OK) {
-          storage::global_storage_worker->end_write(this->kbd_table_handle_, [](StorageError) {});
-          this->kbd_table_dirty_ = true;
-          this->keyboard_table_failed_("Writing", queued);
-        }
-      });
-  if (err != StorageError::STORAGE_ERROR_OK) {
-    this->kbd_table_dirty_ = true;
-    this->keyboard_table_failed_("Writing", err);
-  }
+  if (!this->kbd_pref_.save(this->kbd_assign_) || !global_preferences->sync())
+    ESP_LOGW(TAG, "The keyboards' layouts not saved for the next boot");
 }
 
 }  // namespace esphome::simple_video_player
