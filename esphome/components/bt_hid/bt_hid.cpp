@@ -58,11 +58,15 @@ struct Host {
   bool connecting{false};
   bool discovering{false};
   bool scan_requested{false};  // bt_hid.scan: its finds are logged
-  // Off: a paired device is only paged once after boot, on connect() and while pairing; it
-  // connects on its own. Paused: not paged either (the radio is busy with something else).
+  // Paging a device that is not there keeps the radio busy for up to ~26 s (Bluedroid pages it
+  // HID_HOST_MAX_CONN_RETRY more times after a page timeout), so: on, one device per interval, in
+  // turn; off (or paused: something plays), none, the devices connect on their own. connect() and
+  // a pairing page their device either way.
   bool paging{true};
   bool paging_paused{false};
-  uint32_t paging_interval_ms{0};  // 0: RETRY_MIN_MS doubling up to RETRY_MAX_MS
+  uint32_t paging_interval_ms{30000};
+  uint32_t next_page_ms{0};
+  size_t page_turn{0};  // the device whose turn it is
   uint32_t connecting_since{0};
 };
 
@@ -494,15 +498,27 @@ void host_loop() {
     h.connecting = false;
   if (!h.ready || h.connecting || h.discovering)
     return;
-  for (auto *dev : h.devices) {
-    if (dev->is_connected() || !dev->has_address() || !dev->get_auto_connect() || !dev->wants_page() ||
+  const size_t count = h.devices.size();
+  for (size_t i = 0; i < count; i++) {
+    const size_t index = (h.page_turn + i) % count;
+    BTHIDDevice *dev = h.devices[index];
+    if (dev->is_connected() || !dev->has_address() || !dev->get_auto_connect() ||
         static_cast<int32_t>(now - dev->next_connect_ms()) < 0)
+      continue;
+    // Asked for (connect(), its pairing), else paging: not while another device pairs.
+    const bool asked = dev->page_asked() || h.pairing == dev;
+    if (!asked && (!h.paging || h.paging_paused || h.pairing != nullptr ||
+                   static_cast<int32_t>(now - h.next_page_ms) < 0))
       continue;
     if (esp_bt_hid_host_connect(const_cast<uint8_t *>(dev->address())) == ESP_OK) {
       h.connecting = true;
       h.connecting_since = now;
     }
     dev->connect_attempted(now);
+    if (!asked) {
+      h.next_page_ms = now + h.paging_interval_ms;
+      h.page_turn = (index + 1) % count;
+    }
     break;
   }
 }
@@ -584,7 +600,6 @@ void BTHIDDevice::restore_paired() {
   this->restored_ = true;
   if ((from_global || this->stored_address_(bda)) && !this->has_address()) {
     this->set_bda_(bda);
-    this->page_once_ = true;
     char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
     format_mac_addr_upper(bda, mac);
     ESP_LOGI(TAG, "[%s] Paired device", mac);
@@ -613,14 +628,9 @@ void BTHIDDevice::dump_config() {
 
 void BTHIDDevice::connect() {
   this->auto_connect_ = true;
-  this->page_once_ = true;
+  this->page_asked_ = true;
   this->retry_ms_ = 0;
   this->next_connect_ms_ = millis();
-}
-
-bool BTHIDDevice::wants_page() const {
-  const Host &h = host();
-  return this->page_once_ || h.pairing == this || (h.paging && !h.paging_paused);
 }
 
 void BTHIDDevice::set_paging(bool paging) { host().paging = paging; }
@@ -897,14 +907,15 @@ void BTHIDDevice::scan(uint32_t duration_ms) {
   host().scan_requested = true;
 }
 
+// Paging waits for its interval (host_loop); a pairing tries again sooner and sooner apart.
 void BTHIDDevice::connect_attempted(uint32_t now) {
-  this->page_once_ = false;
-  const uint32_t interval = host().paging_interval_ms;
-  if (interval != 0 && host().pairing != this) {
-    this->retry_ms_ = interval;
-  } else {
-    this->retry_ms_ = this->retry_ms_ == 0 ? RETRY_MIN_MS : std::min(this->retry_ms_ * 2, RETRY_MAX_MS);
+  this->page_asked_ = false;
+  if (host().pairing != this) {
+    this->retry_ms_ = 0;
+    this->next_connect_ms_ = now;
+    return;
   }
+  this->retry_ms_ = this->retry_ms_ == 0 ? RETRY_MIN_MS : std::min(this->retry_ms_ * 2, RETRY_MAX_MS);
   this->next_connect_ms_ = now + this->retry_ms_;
 }
 
