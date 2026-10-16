@@ -1397,6 +1397,12 @@ class SimpleVideoPlayer : public Component
   std::shared_ptr<ring_buffer::RingBuffer>
       audio_decoded_ring_buffer_;                 // Ring buffer for decoded audio (in PSRAM, before conversion)
   uint8_t *audio_temp_buffer_{nullptr};           // Temporary buffer for audio processing (pool)
+  // One block for the sound ring (pool, setup()), as large as the larger kind the configuration uses.
+  // The ring over it is the kind the file needs: the input ring (compressed) or the decoded ring
+  // (PCM), the other one is null. Made anew over the same block only when the kind changes.
+  uint8_t *sound_block_{nullptr};
+  size_t sound_block_len_{0};
+  bool sound_ring_for_(bool compressed);
   uint8_t source_audio_channels_{0};              // Fixed source channel count (mirrors AUDIO_SOURCE_CHANNELS)
   uint8_t speaker_audio_channels_{1};             // Number of channels speaker expects
   uint32_t audio_sample_rate_{0};                 // Fixed sample rate (mirrors AUDIO_SAMPLE_RATE)
