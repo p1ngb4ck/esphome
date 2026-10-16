@@ -539,6 +539,15 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
   auto *out = reinterpret_cast<uint8_t *>(frames);
   size_t filled = 0;
 
+  const bool feeding = this->speaker_active_.load() && !this->speaker_finishing_.load();
+  if (this->priming_.load()) {
+    if (feeding && xRingbufferGetCurFreeSize(this->ring_) >= BYTES_PER_FRAME) {
+      memset(out, 0, wanted);
+      return frame_count;
+    }
+    this->priming_.store(false);
+  }
+
   while (filled < wanted) {
     size_t got = 0;
     void *item = xRingbufferReceiveUpTo(this->ring_, &got, pdMS_TO_TICKS(2), wanted - filled);
@@ -560,6 +569,8 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
     memset(out + filled, 0, wanted - filled);
     if (producer)
       this->underrun_frames_.fetch_add((uint32_t) ((wanted - filled) / BYTES_PER_FRAME));
+    if (feeding)
+      this->priming_.store(true);  // run dry: full again before it goes on
   }
   return frame_count;
 }

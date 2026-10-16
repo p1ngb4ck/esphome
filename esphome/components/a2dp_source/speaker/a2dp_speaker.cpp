@@ -43,8 +43,10 @@ void A2DPSpeaker::stop() {
 }
 
 void A2DPSpeaker::finish() {
-  if (this->state_ == speaker::STATE_RUNNING)
+  if (this->state_ == speaker::STATE_RUNNING) {
     this->state_ = speaker::STATE_STOPPING;
+    this->parent_->set_speaker_finishing();
+  }
 }
 
 bool A2DPSpeaker::has_buffered_data() const { return this->parent_->has_audio(); }

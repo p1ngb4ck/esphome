@@ -164,7 +164,17 @@ class A2DPSource : public Component
   size_t write_audio(const uint8_t *data, size_t length, TickType_t ticks_to_wait);
   void clear_audio();
   bool has_audio() const;
-  void set_speaker_active(bool active) { this->speaker_active_.store(active); }
+  /// @brief A speaker that becomes active starts the stream only once the buffer is full.
+  void set_speaker_active(bool active) {
+    if (!active) {
+      this->speaker_active_.store(false);
+    } else if (!this->speaker_active_.exchange(true)) {
+      this->priming_.store(true);
+    }
+    this->speaker_finishing_.store(false);
+  }
+  /// @brief The speaker's input ended: what is buffered plays out, however little.
+  void set_speaker_finishing() { this->speaker_finishing_.store(true); }
   /// @brief 0..127; sent to the sink as absolute volume when connected.
   void set_output_volume(uint8_t volume) { this->source_.set_volume(volume); }
   /// @brief Speaker frames handed to Bluetooth since the last call.
@@ -216,6 +226,8 @@ class A2DPSource : public Component
   RingbufHandle_t ring_{nullptr};
   size_t ring_bytes_{0};
   std::atomic<bool> speaker_active_{false};
+  std::atomic<bool> speaker_finishing_{false};
+  std::atomic<bool> priming_{false};  // silence until the buffer is full (speaker started, or run dry)
   std::atomic<uint32_t> played_frames_{0};
 
   std::string local_name_{"ESPHome Audio"};
