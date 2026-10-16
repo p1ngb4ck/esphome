@@ -326,9 +326,13 @@ void SimpleVideoPlayer::loop() {
     }
     const PlayerState state = this->state_.load(std::memory_order_acquire);
     // Back to LVGL once the playback task is gone (stopped, ended or failed), not between two
-    // videos of a playlist.
-    const bool ended = (state == PlayerState::STOPPED || state == PlayerState::ERROR) &&
-                       !this->playback_busy_.load(std::memory_order_acquire);
+    // videos of a playlist. An audio file's session takes no picture: it may have started in the
+    // same loop pass the video's task let go (run_pending_start_(), audio_advance_() above).
+    bool idle = state == PlayerState::STOPPED || state == PlayerState::ERROR;
+#ifdef SVP_AUDIO_FILES
+    idle = idle || this->audio_session_.load(std::memory_order_acquire);
+#endif
+    const bool ended = idle && !this->playback_busy_.load(std::memory_order_acquire);
     if (this->dsi_lvgl_paused_ && !streaming && ended && !this->advance_req_.load(std::memory_order_acquire) &&
         !this->start_pending_.load(std::memory_order_acquire)) {
       this->lvgl_component_->set_paused(false, false);
