@@ -110,8 +110,10 @@ reports the media player's state instead while `state_` is STOPPED and `audio_re
 - **DSI direct**: only when the video equals the panel's native size (S:997-1016). Decoded by HW JPEG
   into `decode_target_` (display depth), composited controls, then `dsi_->draw_pixels_at()` copies it
   into the panel framebuffer every frame (S:1395-1403). LVGL paused by `loop()` only (S:297-331);
-  given back once the playback task is gone and the state is STOPPED/ERROR or an audio-file session
-  runs (it takes no picture), not while a direct sender streams or a playlist advances.
+  per item at the start handshake: a direct item pauses it, a canvas item gives it back (only when the
+  mode changes); given back once the playback task is gone and the state is STOPPED/ERROR or an
+  audio-file session runs (it takes no picture), not while a direct sender streams or a playlist
+  advances. A direct sender pauses it only while no file session or playlist runs.
   No PPA in svp.
 - **Canvas**: RGB888 pair `output_buffers_[2]` at canvas size; decode into the back buffer, loop swaps
   the canvas draw buffer (S:419-441, S:1612-1625).

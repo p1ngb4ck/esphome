@@ -300,9 +300,11 @@ void SimpleVideoPlayer::loop() {
       this->prerender_controls_();
 #endif
 #if defined(SVP_DSI_OUTPUT) && defined(SVP_USE_LVGL)
-    if (this->direct_session_() && this->lvgl_component_ != nullptr && !this->dsi_lvgl_paused_) {
-      this->lvgl_component_->set_paused(true, false);
-      this->dsi_lvgl_paused_ = true;
+    // Each item of a playlist decides its output: the display pauses LVGL, a canvas needs it
+    // running. Switched only when the item before (or a direct sender) left the other mode.
+    if (this->lvgl_component_ != nullptr && this->direct_session_() != this->dsi_lvgl_paused_) {
+      this->dsi_lvgl_paused_ = this->direct_session_();
+      this->lvgl_component_->set_paused(this->dsi_lvgl_paused_, false);
     }
 #endif
     this->on_started_callbacks_.call();
@@ -320,7 +322,15 @@ void SimpleVideoPlayer::loop() {
     const bool streaming = false;
 #endif
 #ifdef SVP_USE_LVGL
-    if (streaming && this->lvgl_component_ != nullptr && !this->dsi_lvgl_paused_) {
+    // While a file plays, or its playlist goes on, its picture wins (output_lock_): a direct sender
+    // does not pause LVGL for a canvas video, nor before the canvas' last frame is handed over (below).
+    bool file_output = this->playback_busy_.load(std::memory_order_acquire) ||
+                       this->advance_req_.load(std::memory_order_acquire) ||
+                       this->start_pending_.load(std::memory_order_acquire);
+#ifdef SVP_CANVAS_OUTPUT
+    file_output = file_output || this->frame_ready_.load(std::memory_order_acquire);
+#endif
+    if (streaming && !file_output && this->lvgl_component_ != nullptr && !this->dsi_lvgl_paused_) {
       this->lvgl_component_->set_paused(true, false);
       this->dsi_lvgl_paused_ = true;
     }
