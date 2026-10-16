@@ -133,12 +133,15 @@ void SimpleVideoPlayer::setup() {
 
     const size_t input_bytes = audio_input_bytes(this->max_audio_latency_ms_);
     const size_t decoded_bytes = audio_decoded_bytes(this->max_audio_latency_ms_);
-    this->audio_input_ring_buffer_ = PoolRingBuffer::create(this->pool_.alloc(input_bytes), input_bytes);
-    this->audio_decoded_ring_buffer_ =
-        PoolRingBuffer::create(this->pool_.alloc(decoded_bytes), decoded_bytes);
-    this->audio_temp_buffer_ = this->pool_.alloc(AUDIO_TEMP_BUFFER_SIZE);
-    if (this->audio_input_ring_buffer_ == nullptr || this->audio_decoded_ring_buffer_ == nullptr ||
-        this->audio_temp_buffer_ == nullptr) {
+    if (AUDIO_INPUT_RING)
+      this->audio_input_ring_buffer_ = PoolRingBuffer::create(this->pool_.alloc(input_bytes), input_bytes);
+    if (AUDIO_DECODED_RING)
+      this->audio_decoded_ring_buffer_ = PoolRingBuffer::create(this->pool_.alloc(decoded_bytes), decoded_bytes);
+    if (AUDIO_TEMP_BUFFER)
+      this->audio_temp_buffer_ = this->pool_.alloc(AUDIO_TEMP_BUFFER_SIZE);
+    if ((AUDIO_INPUT_RING && this->audio_input_ring_buffer_ == nullptr) ||
+        (AUDIO_DECODED_RING && this->audio_decoded_ring_buffer_ == nullptr) ||
+        (AUDIO_TEMP_BUFFER && this->audio_temp_buffer_ == nullptr)) {
       ESP_LOGE(TAG, "No room in the PSRAM pool for the sound buffers");
       this->mark_failed();
       return;
@@ -2187,8 +2190,9 @@ bool SimpleVideoPlayer::plan_pool_() {
 #ifdef USE_AUDIO
   if (this->speaker_ != nullptr && ring != 0) {
     // The sound buffers hold the most the sound may run ahead of the picture (MAX_AUDIO_LEAD_MS).
-    ring = ring_for(fixed + pool_round(audio_input_bytes(MAX_AUDIO_LEAD_MS)) +
-                    pool_round(audio_decoded_bytes(MAX_AUDIO_LEAD_MS)) + pool_round(AUDIO_TEMP_BUFFER_SIZE));
+    ring = ring_for(fixed + (AUDIO_INPUT_RING ? pool_round(audio_input_bytes(MAX_AUDIO_LEAD_MS)) : 0) +
+                    (AUDIO_DECODED_RING ? pool_round(audio_decoded_bytes(MAX_AUDIO_LEAD_MS)) : 0) +
+                    (AUDIO_TEMP_BUFFER ? pool_round(AUDIO_TEMP_BUFFER_SIZE) : 0));
   }
 #endif
   if (ring == 0) {
@@ -2651,7 +2655,8 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   // Ring buffers + temp buffer already exist (allocated once in setup(), sized from the fixed
   // AUDIO_* constants) -- just clear out whatever a previous play() left in them so this session
   // starts clean. reset() is a cheap FreeRTOS ringbuffer reset, not a reallocation.
-  this->audio_input_ring_buffer_->reset();
+  if (this->audio_input_ring_buffer_)
+    this->audio_input_ring_buffer_->reset();
   if (this->audio_decoded_ring_buffer_) {
     this->audio_decoded_ring_buffer_->reset();
   }
@@ -2767,7 +2772,8 @@ void SimpleVideoPlayer::restart_audio_feed_() {
     std::weak_ptr<ring_buffer::RingBuffer> source = this->audio_input_ring_buffer_;
     ok = this->audio_decoder_->add_source(source) == ESP_OK;
   }
-  this->audio_input_ring_buffer_->reset();
+  if (this->audio_input_ring_buffer_)
+    this->audio_input_ring_buffer_->reset();
   if (this->audio_decoded_ring_buffer_)
     this->audio_decoded_ring_buffer_->reset();
   if (!use_decoder)

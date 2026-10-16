@@ -1360,6 +1360,23 @@ class SimpleVideoPlayer : public Component
   static size_t audio_decoded_bytes(uint32_t latency_ms) {
     return std::max<size_t>(AUDIO_BYTES_PER_SEC * std::max<uint32_t>(latency_ms + 250, 500) / 1000, 16 * 1024);
   }
+  // Only the sound buffers the configuration uses: the input ring for compressed sound (audio_codec
+  // mp3/flac, audio files), the decoded ring for PCM in a video; the temp buffer for both PCM and files.
+#if defined(SVP_AUDIO_SUPPORT_MP3) || defined(SVP_AUDIO_SUPPORT_FLAC) || defined(SVP_AUDIO_FILES)
+  static constexpr bool AUDIO_INPUT_RING = true;
+#else
+  static constexpr bool AUDIO_INPUT_RING = false;
+#endif
+#ifdef SVP_AUDIO_SUPPORT_PCM
+  static constexpr bool AUDIO_DECODED_RING = true;
+#else
+  static constexpr bool AUDIO_DECODED_RING = false;
+#endif
+#if defined(SVP_AUDIO_SUPPORT_PCM) || defined(SVP_AUDIO_FILES)
+  static constexpr bool AUDIO_TEMP_BUFFER = true;
+#else
+  static constexpr bool AUDIO_TEMP_BUFFER = false;
+#endif
   static constexpr size_t AUDIO_TEMP_BUFFER_SIZE = (AUDIO_BYTES_PER_SEC * 100 / 1000) > (8 * 1024)
                                                        ? (AUDIO_BYTES_PER_SEC * 100 / 1000)
                                                        : (8 * 1024);
