@@ -2079,6 +2079,12 @@ class SimpleVideoPlayer : public Component
   size_t kbd_len_{0};
   size_t kbd_got_{0};
   storage::StreamHandle kbd_handle_{};
+  // The layout on the keyboards, saved at once (preferences, synced): the one put on them at boot.
+  struct KbdSaved {
+    char name[40];
+  };
+  ESPPreferenceObject kbd_pref_;
+  void keyboard_save_();
   CallbackManager<void()> kbd_callbacks_;
   // From the channel task: the list (its length) / the layout into kbd_slot_[kbd_loading_].
   std::atomic<bool> kbd_list_done_{false}, kbd_get_done_{false};

@@ -8,8 +8,10 @@
 #ifdef SVP_KEYBOARD
 
 #include "esphome/core/log.h"
+#include "esphome/core/preferences.h"
 
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <strings.h>
 
@@ -31,6 +33,16 @@ void SimpleVideoPlayer::keyboard_setup_() {
   }
   for (hid::HIDInput *input : this->kbd_inputs_)
     this->kbd_own_.push_back(input->get_layout());
+  // The one saved, unless one was asked for already.
+  this->kbd_pref_ = global_preferences->make_preference<KbdSaved>(fnv1_hash("simple_video_player.keyboard"));
+  KbdSaved saved{};
+  if (!this->kbd_pending_ && this->kbd_pref_.load(&saved)) {
+    saved.name[sizeof(saved.name) - 1] = '\0';
+    if (saved.name[0] != '\0') {
+      this->kbd_wanted_.assign(saved.name);
+      this->kbd_pending_ = true;
+    }
+  }
   if (storage::global_storage_registry != nullptr) {
     // Its storage may come later (a card put in): a layout that could not be had is tried again.
     storage::global_storage_registry->add_on_registered_callback([this](storage::Storage *) {
@@ -232,6 +244,7 @@ void SimpleVideoPlayer::keyboard_next_() {
     this->kbd_active_ = -1;
     this->kbd_selected_.clear();
     ESP_LOGI(TAG, "The keyboards' own layouts");
+    this->keyboard_save_();
     this->keyboard_done_(true);
     return;
   }
@@ -321,7 +334,15 @@ bool SimpleVideoPlayer::keyboard_apply_(size_t len) {
   this->kbd_active_ = static_cast<int8_t>(slot);
   this->kbd_selected_ = this->kbd_loading_name_;
   ESP_LOGI(TAG, "Layout %s", this->kbd_selected_.c_str());
+  this->keyboard_save_();
   return true;
+}
+
+void SimpleVideoPlayer::keyboard_save_() {
+  KbdSaved saved{};
+  std::snprintf(saved.name, sizeof(saved.name), "%s", this->kbd_selected_.c_str());
+  if (!this->kbd_pref_.save(&saved) || !global_preferences->sync())
+    ESP_LOGW(TAG, "Layout %s not saved for the next boot", saved.name);
 }
 
 // The layout had from svp_relay into its file (the directory made if need be); it is on the keyboards
