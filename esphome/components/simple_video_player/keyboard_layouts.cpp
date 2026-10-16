@@ -96,7 +96,89 @@ void SimpleVideoPlayer::keyboard_setup_() {
   }
   this->kbd_ready_ = true;
   this->keyboard_resolve_();
+#ifdef SVP_KEYBOARD_ENTITIES
+  this->kbd_entity_labels_ =
+      reinterpret_cast<char (*)[KBD_ENTITY_LABEL]>(this->pool_.alloc(KBD_ENTITY_MAX * KBD_ENTITY_LABEL));
+  this->kbd_entity_keys_ =
+      reinterpret_cast<char (*)[sizeof(KbdAssign::key)]>(this->pool_.alloc(KBD_ENTITY_MAX * sizeof(KbdAssign::key)));
+  if (this->kbd_entity_labels_ == nullptr || this->kbd_entity_keys_ == nullptr) {
+    ESP_LOGE(TAG, "Keyboard device select disabled: no room in the PSRAM pool");
+    return;
+  }
+  this->kbd_callbacks_.add([this]() { this->keyboard_entities_(); });
+  this->keyboard_entities_();
+#endif
 }
+
+#ifdef SVP_KEYBOARD_ENTITIES
+#ifdef USE_SELECT
+void KeyboardDeviceSelect::control(size_t index) { this->parent_->keyboard_entity_pick(index); }
+#endif
+
+void SimpleVideoPlayer::keyboard_entity_pick(size_t index) {
+  if (index >= this->kbd_entity_count_)
+    return;
+  std::memcpy(this->kbd_entity_pick_, this->kbd_entity_keys_[index], sizeof(this->kbd_entity_pick_));
+  this->keyboard_entities_();
+}
+
+// The select's options: each keyboard's standard ("name (standard)") and each device of theirs (its
+// name, numbered when another has it too); the sensor: the layout of the one picked ("standard": its
+// keyboard's, "own": a standard's configured one).
+void SimpleVideoPlayer::keyboard_entities_() {
+  if (this->kbd_entity_labels_ == nullptr)
+    return;
+  const auto devices = this->keyboard_devices();
+  size_t count = 0;
+  size_t picked = 0;
+  bool found = false;
+  for (const auto &device : devices) {
+    if (count >= KBD_ENTITY_MAX)
+      break;
+    char *label = this->kbd_entity_labels_[count];
+    const bool standard = !device.key.empty() && device.key[0] == '@';
+    std::snprintf(label, KBD_ENTITY_LABEL, standard ? "%s (standard)" : "%s", device.name.c_str());
+    for (unsigned n = 2;; n++) {
+      bool taken = false;
+      for (size_t i = 0; i < count && !taken; i++)
+        taken = std::strcmp(this->kbd_entity_labels_[i], label) == 0;
+      if (!taken)
+        break;
+      std::snprintf(label, KBD_ENTITY_LABEL, standard ? "%s (standard) %u" : "%s %u", device.name.c_str(), n);
+    }
+    copy_field(this->kbd_entity_keys_[count], sizeof(KbdAssign::key), device.key);
+    if (!found && std::strcmp(this->kbd_entity_keys_[count], this->kbd_entity_pick_) == 0) {
+      picked = count;
+      found = true;
+    }
+    count++;
+  }
+  this->kbd_entity_count_ = count;
+  if (count == 0)
+    return;
+  if (!found)
+    std::memcpy(this->kbd_entity_pick_, this->kbd_entity_keys_[0], sizeof(this->kbd_entity_pick_));
+#ifdef USE_SELECT
+  if (this->kbd_select_ != nullptr) {
+    FixedVector<const char *> options;
+    options.init(count);
+    for (size_t i = 0; i < count; i++)
+      options.push_back(this->kbd_entity_labels_[i]);
+    this->kbd_select_->traits.set_options(options);
+    this->kbd_select_->publish_state(picked);
+  }
+#endif
+#ifdef USE_TEXT_SENSOR
+  if (this->kbd_layout_sensor_ != nullptr) {
+    const auto &device = devices[picked];
+    const bool standard = device.key[0] == '@';
+    this->kbd_layout_sensor_->publish_state(!device.layout.empty() ? device.layout
+                                            : standard            ? std::string("own")
+                                                                  : std::string("standard"));
+  }
+#endif
+}
+#endif
 
 void SimpleVideoPlayer::keyboard_loop_() {
 #ifdef SVP_CHANNEL_LIST
@@ -395,7 +477,15 @@ bool SimpleVideoPlayer::keyboard_assign(const std::string &key, const std::strin
   return true;
 }
 
-bool SimpleVideoPlayer::keyboard_assign_named(const std::string &device, const std::string &layout) {
+bool SimpleVideoPlayer::keyboard_assign_named(const std::string &device, const std::string &given) {
+  // "standard" / "own" (the layout sensor's words): none of its own.
+  const std::string layout = given == "standard" || given == "own" ? std::string() : given;
+#ifdef SVP_KEYBOARD_ENTITIES
+  for (size_t i = 0; i < this->kbd_entity_count_; i++) {
+    if (device == this->kbd_entity_labels_[i])
+      return this->keyboard_assign(this->kbd_entity_keys_[i], layout);
+  }
+#endif
   for (const auto &known : this->keyboard_devices()) {
     if (known.key == device || known.name == device || (known.key[0] == '@' && known.key.substr(1) == device))
       return this->keyboard_assign(known.key, layout);

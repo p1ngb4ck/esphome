@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components import display, media_player, speaker, touchscreen
+from esphome.components import display, media_player, select, speaker, text_sensor, touchscreen
 from esphome.components.audio import CONF_CODECS, CONF_FLAC, CONF_MP3
 from esphome.components.esp32 import (
     add_idf_sdkconfig_option,
@@ -69,6 +69,11 @@ def AUTO_LOAD(config):
     # PNG and BMP pictures are decoded by runtime_image (its formats enabled in to_code).
     if config and CONF_PICTURE_CANVAS_ID in config:
         load.append("runtime_image")
+    layouts = (config or {}).get(CONF_KEYBOARD_LAYOUTS) or {}
+    if CONF_DEVICE_SELECT in layouts:
+        load.append("select")
+    if CONF_LAYOUT_SENSOR in layouts:
+        load.append("text_sensor")
     return load
 
 
@@ -80,6 +85,7 @@ SimpleVideoPlayer = simple_video_player_ns.class_("SimpleVideoPlayer", cg.Compon
 http_request_ns = cg.esphome_ns.namespace("http_request")
 HttpRequestComponent = http_request_ns.class_("HttpRequestComponent", cg.Component)
 HIDInput = cg.esphome_ns.namespace("hid").class_("HIDInput")
+KeyboardDeviceSelect = simple_video_player_ns.class_("KeyboardDeviceSelect", select.Select)
 
 # Enums for speaker channel configuration -- is_class=True: the C++ side is a scoped `enum class`,
 # so codegen must emit `SpeakerChannelMode::SPEAKER_CHANNEL_*`, not a bare `SPEAKER_CHANNEL_*`.
@@ -194,6 +200,8 @@ CONF_KEYBOARD_LAYOUTS = "keyboard_layouts"
 CONF_LAYOUT = "layout"
 CONF_KEYBOARDS = "keyboards"
 CONF_DIRECTORY = "directory"
+CONF_DEVICE_SELECT = "device_select"
+CONF_LAYOUT_SENSOR = "layout_sensor"
 
 
 def _layout_name(value):
@@ -637,6 +645,14 @@ CONFIG_SCHEMA = cv.All(
                 {
                     cv.Required(CONF_KEYBOARDS): cv.ensure_list(_keyboard),
                     cv.Required(CONF_DIRECTORY): _storage_dir,
+                    # Home Assistant: a keyboard's standard or a device picked here, its layout in the
+                    # sensor; svp_relay offers the layouts to set (svp_keyboard_layout).
+                    cv.Optional(CONF_DEVICE_SELECT): select.select_schema(
+                        KeyboardDeviceSelect, icon="mdi:keyboard"
+                    ),
+                    cv.Optional(CONF_LAYOUT_SENSOR): text_sensor.text_sensor_schema(
+                        icon="mdi:keyboard-settings"
+                    ),
                 }
             ),
             # Touches go back to the stream sender, which replays them into its page.
@@ -1119,6 +1135,15 @@ async def to_code(config):
             input_var = await cg.get_variable(keyboard[CONF_ID])
             name = keyboard.get(CONF_NAME, str(keyboard[CONF_ID]))
             cg.add(var.add_keyboard(input_var, name, keyboard[CONF_LAYOUT]))
+        if device_select := layouts.get(CONF_DEVICE_SELECT):
+            cg.add_define("SVP_KEYBOARD_ENTITIES")
+            sel = await select.new_select(device_select, options=[])
+            cg.add(sel.set_parent(var))
+            cg.add(var.set_keyboard_select(sel))
+        if layout_sensor := layouts.get(CONF_LAYOUT_SENSOR):
+            cg.add_define("SVP_KEYBOARD_ENTITIES")
+            sensor = await text_sensor.new_text_sensor(layout_sensor)
+            cg.add(var.set_keyboard_layout_sensor(sensor))
 
     if controls := config.get(CONF_CONTROLS):
         cg.add_define("SVP_CONTROLS")

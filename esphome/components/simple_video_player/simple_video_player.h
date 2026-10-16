@@ -51,6 +51,14 @@
 #ifdef SVP_KEYBOARD
 #include "esphome/components/hid/hid_input.h"
 #endif
+#ifdef SVP_KEYBOARD_ENTITIES
+#ifdef USE_SELECT
+#include "esphome/components/select/select.h"
+#endif
+#ifdef USE_TEXT_SENSOR
+#include "esphome/components/text_sensor/text_sensor.h"
+#endif
+#endif
 #ifdef SVP_MEDIA_PLAYER
 #include "esphome/components/api/custom_api_device.h"
 #include "esphome/components/media_player/media_player.h"
@@ -133,6 +141,19 @@ enum class VideoFormat : uint8_t {
 class SimpleVideoPlayer;
 #ifdef SVP_SPICE_USB
 class SpiceUsbSlot;
+#endif
+
+#if defined(SVP_KEYBOARD_ENTITIES) && defined(USE_SELECT)
+/// Home Assistant's keyboard device select (keyboard_layouts: device_select): the keyboards' standards
+/// and their devices; the one picked is what the layout sensor shows.
+class KeyboardDeviceSelect : public select::Select {
+ public:
+  void set_parent(SimpleVideoPlayer *parent) { this->parent_ = parent; }
+
+ protected:
+  void control(size_t index) override;
+  SimpleVideoPlayer *parent_{nullptr};
+};
 #endif
 
 #ifdef USE_AUDIO
@@ -583,6 +604,16 @@ class SimpleVideoPlayer : public Component
   /// A layout asked for that could not be had (neither in the directory nor from svp_relay).
   bool keyboard_failed(const std::string &name) const;
   void add_on_keyboard_callback(std::function<void()> &&callback) { this->kbd_callbacks_.add(std::move(callback)); }
+#ifdef SVP_KEYBOARD_ENTITIES
+#ifdef USE_SELECT
+  void set_keyboard_select(select::Select *select) { this->kbd_select_ = select; }
+#endif
+#ifdef USE_TEXT_SENSOR
+  void set_keyboard_layout_sensor(text_sensor::TextSensor *sensor) { this->kbd_layout_sensor_ = sensor; }
+#endif
+  /// The device select's option `index` picked: the sensor shows its layout.
+  void keyboard_entity_pick(size_t index);
+#endif
 #endif
 
   //========================================================================
@@ -2146,6 +2177,22 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> kbd_list_done_{false}, kbd_get_done_{false};
   bool kbd_list_ok_{false}, kbd_get_ok_{false};
   size_t kbd_list_len_{0}, kbd_get_len_{0};
+#ifdef SVP_KEYBOARD_ENTITIES
+  // The device select's options (labels, the devices' keys) in the pool, the one picked.
+  static constexpr size_t KBD_ENTITY_MAX = KBD_ASSIGN_MAX + 8;
+  static constexpr size_t KBD_ENTITY_LABEL = 48;
+  void keyboard_entities_();
+#ifdef USE_SELECT
+  select::Select *kbd_select_{nullptr};
+#endif
+#ifdef USE_TEXT_SENSOR
+  text_sensor::TextSensor *kbd_layout_sensor_{nullptr};
+#endif
+  char (*kbd_entity_labels_)[KBD_ENTITY_LABEL]{nullptr};
+  char (*kbd_entity_keys_)[sizeof(KbdAssign::key)]{nullptr};
+  size_t kbd_entity_count_{0};
+  char kbd_entity_pick_[sizeof(KbdAssign::key)]{};
+#endif
 #endif
 
 #ifdef SVP_CHANNEL_LIST
