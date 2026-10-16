@@ -753,7 +753,9 @@ void SimpleVideoPlayer::resume() {
 
 void SimpleVideoPlayer::stop() {
 #ifdef SVP_AUDIO_FILES
-  if (this->is_audio_session()) {
+  // A track asked for while the last session still ends does not start after the stop either.
+  const bool audio_pending = this->audio_start_pending_.exchange(false, std::memory_order_acq_rel);
+  if (this->is_audio_session() || audio_pending) {
     this->audio_halted_ = true;
     this->audio_changed_.store(true, std::memory_order_release);
   }
