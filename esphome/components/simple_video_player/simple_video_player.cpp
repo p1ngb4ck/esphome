@@ -535,6 +535,11 @@ void SimpleVideoPlayer::run_pending_start_() {
     return;
   if (xSemaphoreTake(this->session_lock_, 0) != pdTRUE)
     return;  // the network task is starting a stream: next loop
+  // A desktop session that took the panel meanwhile cleared start_pending_ (desktop_take_panel_()).
+  if (!audio && !this->start_pending_.load(std::memory_order_acquire)) {
+    xSemaphoreGive(this->session_lock_);
+    return;
+  }
   if (this->session_busy_() || this->state_.load(std::memory_order_acquire) == PlayerState::PLAYING ||
       this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED) {
     xSemaphoreGive(this->session_lock_);

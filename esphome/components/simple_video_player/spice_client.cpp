@@ -1479,10 +1479,17 @@ void SimpleVideoPlayer::desktop_output_(bool &direct, uint32_t &w, uint32_t &h) 
 // A playing video ends, a stream sender is let go, and both are refused from then on
 // (spice_refuses_(), the network task).
 bool SimpleVideoPlayer::desktop_take_panel_(bool direct, bool &wifi_held) {
+  // Under session_lock_: a video run_pending_start_() is starting either runs already (ended here)
+  // or does not start (start_pending_ cleared; it looks again under the lock).
+  if (xSemaphoreTake(this->session_lock_, pdMS_TO_TICKS(TAKEOVER_WAIT_MS)) != pdTRUE) {
+    ESP_LOGE(TAG, "A starting session did not let go of the panel");
+    return false;
+  }
   this->spice_on_.store(true, std::memory_order_release);
   this->start_pending_.store(false, std::memory_order_release);
   if (this->picture_session_busy_())
     this->end_session_();
+  xSemaphoreGive(this->session_lock_);
   this->stream_drop_sender_.store(true, std::memory_order_release);
   this->stream_wake_();
   for (const uint32_t start = millis();

@@ -478,6 +478,10 @@ void SimpleVideoPlayer::stream_net_loop_() {
             // A track asked for meanwhile is about to start too (run_pending_start_() would end this).
             pending = pending || this->audio_start_pending_.load(std::memory_order_acquire);
 #endif
+#ifdef SVP_SPICE
+            // A desktop session took the panel (set under this lock, desktop_take_panel_()).
+            pending = pending || this->spice_on_.load(std::memory_order_acquire);
+#endif
             if (this->session_busy_() || pending || st == PlayerState::PLAYING || st == PlayerState::PAUSED) {
               xSemaphoreGive(this->session_lock_);
               break;
