@@ -284,6 +284,8 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
     set_last_connection(addr);
     return reconnect();
   }
+  /// ESPHome: makes this paired device the stored one (kept in NVS) without connecting.
+  void store_device(esp_bd_addr_t addr) { set_last_connection(addr); }
   /// ESPHome: the device connected now becomes the stored one, reconnected to later.
   void keep_peer() {
     set_last_connection(peer_bd_addr);

@@ -732,6 +732,10 @@ void BluetoothA2DPSource::process_user_state_callbacks(uint16_t event,
 
       // callback on state change
       connection_state = a2d->conn_stat.state;
+      // ESPHome: the device connected, whichever way (paged or connecting on its own), before the
+      // callback tells anyone.
+      if (connection_state == ESP_A2D_CONNECTION_STATE_CONNECTED)
+        memcpy(peer_bd_addr, a2d->conn_stat.remote_bda, ESP_BD_ADDR_LEN);
       if (connection_state_callback != nullptr) {
         connection_state_callback(a2d->conn_stat.state, connection_state_obj);
       }

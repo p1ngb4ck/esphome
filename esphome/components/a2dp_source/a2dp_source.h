@@ -131,7 +131,7 @@ class A2DPSource : public Component
   /// Several audio devices stay paired; one is connected at a time.
   bool holds_many() const override { return true; }
   const uint8_t *connected_address() const override {
-    return this->connected_.load() ? this->connected_addr_ : nullptr;
+    return this->connected_.load() || this->reporting_disconnect_ ? this->connected_addr_ : nullptr;
   }
   bool is_address_connected(const uint8_t *address) const override {
     return this->connected_.load() && memcmp(this->connected_addr_, address, ESP_BD_ADDR_LEN) == 0;
@@ -141,6 +141,7 @@ class A2DPSource : public Component
   void cancel_device_pairing() override {
     this->picked_valid_ = false;
     this->stop_pairing();
+    this->restore_stored_();
   }
 #endif
   /// @brief Devices seen since the pairing window opened.
@@ -200,6 +201,11 @@ class A2DPSource : public Component
   uint8_t switch_addr_[ESP_BD_ADDR_LEN]{};  // connected to once the one connected now is gone
   bool switch_pending_{false};
   bool rejected_{false};  // a device not paired was sent away: its disconnect is not reported
+  uint8_t restore_addr_[ESP_BD_ADDR_LEN]{};  // connected before a pairing; back to it if that fails
+  bool restore_valid_{false};
+  bool reporting_disconnect_{false};  // connected_address() still names the device that went
+  void restore_stored_();
+  void check_pick_failed_(uint8_t conn_state);
 #endif
   uint8_t connected_addr_[ESP_BD_ADDR_LEN]{};  // main loop
   RingbufHandle_t ring_{nullptr};

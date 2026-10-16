@@ -173,8 +173,18 @@ void A2DPSource::setup() {
         return;
       if (this->is_address_connected(record.address))
         this->source_.disconnect();
-      if (memcmp(record.address, *this->source_.get_last_peer_address(), ESP_BD_ADDR_LEN) == 0)
-        this->forget_device();
+      if (memcmp(record.address, *this->source_.get_last_peer_address(), ESP_BD_ADDR_LEN) != 0)
+        return;
+      // Another paired device takes its place, else none is stored.
+      for (const auto &other : this->pairing_->records()) {
+        if (other.slot == this->slot_) {
+          esp_bd_addr_t addr;
+          memcpy(addr, other.address, ESP_BD_ADDR_LEN);
+          this->source_.store_device(addr);
+          return;
+        }
+      }
+      this->forget_device();
     });
   }
 #endif
@@ -278,8 +288,12 @@ bool A2DPSource::pair_device(const bt_pairing::ScannedDevice &device) {
   this->picked_valid_ = true;
   this->pairing_mode_.store(true);
   this->switch_pending_ = false;
+  this->restore_valid_ = false;
   if (this->connected_.load()) {
-    // The one connected goes first; the search resumes once it has (loop()).
+    // The one connected goes first; the search resumes once it has (loop()). It comes back if the
+    // pairing does not succeed.
+    memcpy(this->restore_addr_, this->connected_addr_, ESP_BD_ADDR_LEN);
+    this->restore_valid_ = true;
     ESP_LOGI(TAG, "Disconnecting %s to pair another device", this->source_.to_str(this->connected_addr_));
     this->source_.disconnect();
     return true;
@@ -309,6 +323,28 @@ void A2DPSource::connect_address(const uint8_t *address) {
 void A2DPSource::disconnect_address(const uint8_t *address) {
   if (this->is_address_connected(address))
     this->source_.disconnect();
+}
+
+// The device picked was found but did not connect: the pairing ends, the one before comes back.
+void A2DPSource::check_pick_failed_(uint8_t conn_state) {
+  if (conn_state != ESP_A2D_CONNECTION_STATE_DISCONNECTED || !this->picked_valid_ || this->pairing_mode_.load() ||
+      this->connected_.load())
+    return;
+  ESP_LOGW(TAG, "Pairing with %s failed", this->picked_.name.c_str());
+  this->picked_valid_ = false;
+  this->restore_stored_();
+}
+
+void A2DPSource::restore_stored_() {
+  if (!this->restore_valid_)
+    return;
+  this->restore_valid_ = false;
+  if (this->connected_.load() || !this->started_.load())
+    return;
+  esp_bd_addr_t addr;
+  memcpy(addr, this->restore_addr_, ESP_BD_ADDR_LEN);
+  ESP_LOGI(TAG, "Pairing did not succeed, back to %s", this->source_.to_str(addr));
+  this->source_.connect_to_device(addr);
 }
 #endif
 
@@ -343,6 +379,10 @@ void A2DPSource::stop_pairing() {
   this->chosen_valid_ = false;
   this->best_valid_ = false;
   ESP_LOGI(TAG, "Pairing window closed");
+#ifdef USE_BT_PAIRING
+  if (!this->picked_valid_)
+    this->restore_stored_();
+#endif
 }
 
 // The connected device's delay: a preference per device address.
@@ -584,6 +624,9 @@ void A2DPSource::loop() {
   if (conn_state != 0xFF) {
     ESP_LOGD(TAG, "Connection state: %s", this->source_.to_str((esp_a2d_connection_state_t) conn_state));
   }
+#ifdef USE_BT_PAIRING
+  this->check_pick_failed_(conn_state);
+#endif
   uint8_t audio_state = this->pending_audio_state_.exchange(0xFF);
   if (audio_state != 0xFF) {
     ESP_LOGD(TAG, "Audio state: %s", this->source_.to_str((esp_a2d_audio_state_t) audio_state));
@@ -596,6 +639,9 @@ void A2DPSource::loop() {
   if (conn_state != 0xFF) {
     ESP_LOGD(TAG, "Connection state: %s", this->source_.to_str((esp_a2d_connection_state_t) conn_state));
   }
+#ifdef USE_BT_PAIRING
+  this->check_pick_failed_(conn_state);
+#endif
   audio_state = this->pending_audio_state_.exchange(0xFF);
   if (audio_state != 0xFF) {
     ESP_LOGD(TAG, "Audio state: %s", this->source_.to_str((esp_a2d_audio_state_t) audio_state));
@@ -610,15 +656,22 @@ void A2DPSource::loop() {
   if (this->connect_pending_.exchange(false)) {
     memcpy(this->connected_addr_, *this->source_.get_peer_address(), ESP_BD_ADDR_LEN);
 #ifdef USE_BT_PAIRING
-    // A device that connects on its own is taken only when paired (or picked in a pairing window).
-    if (this->pairing_ != nullptr && this->pairing_->is_loaded() && !this->pairing_mode_.load() &&
-        !this->picked_valid_ && this->pairing_->find_address(this->connected_addr_) == nullptr &&
-        memcmp(this->connected_addr_, *this->source_.get_last_peer_address(), ESP_BD_ADDR_LEN) != 0) {
+    const bool was_stored =
+        memcmp(this->connected_addr_, *this->source_.get_last_peer_address(), ESP_BD_ADDR_LEN) == 0;
+    const bool is_picked =
+        this->picked_valid_ && memcmp(this->connected_addr_, this->picked_.address, ESP_BD_ADDR_LEN) == 0;
+    const bt_pairing::PairingRecord *known =
+        this->pairing_ != nullptr ? this->pairing_->find_address(this->connected_addr_) : nullptr;
+    // A device that connects on its own is taken only when paired here (or picked in a pairing window).
+    if (this->pairing_ != nullptr && this->pairing_->is_loaded() && !this->pairing_mode_.load() && !is_picked &&
+        !was_stored && (known == nullptr || known->slot != this->slot_)) {
       ESP_LOGW(TAG, "%s is not paired, disconnecting", this->source_.to_str(this->connected_addr_));
       this->rejected_ = true;
-      esp_a2d_disconnect(this->connected_addr_);
+      esp_a2d_source_disconnect(this->connected_addr_);
     } else {
       this->source_.keep_peer();
+      if (is_picked)
+        this->restore_valid_ = false;
 #endif
     ESP_LOGI(TAG, "Connected to %s", this->source_.to_str(this->connected_addr_));
     this->load_output_delay_();
@@ -628,7 +681,7 @@ void A2DPSource::loop() {
 #ifdef USE_BT_PAIRING
     if (this->pairing_ != nullptr) {
       // The device picked in the pairing scan is kept once it has connected.
-      if (this->picked_valid_) {
+      if (is_picked) {
         this->picked_valid_ = false;
         bt_pairing::PairingRecord record{};
         memcpy(record.address, this->picked_.address, sizeof(record.address));
@@ -640,9 +693,8 @@ void A2DPSource::loop() {
       } else {
         // The stored device, known to Bluedroid and kept here, but missing from the pairing
         // database (stored before it held it): kept there too, under the name it reports.
-        uint8_t *peer = *this->source_.get_peer_address();
-        if (memcmp(peer, *this->source_.get_last_peer_address(), ESP_BD_ADDR_LEN) == 0 &&
-            this->pairing_->find_address(peer) == nullptr && !this->name_wanted_.load()) {
+        uint8_t *peer = this->connected_addr_;
+        if (was_stored && known == nullptr && !this->name_wanted_.load()) {
           // Kept at once (named as the scan saw it, if it did), renamed once it answers.
           memcpy(this->name_addr_, peer, ESP_BD_ADDR_LEN);
           this->name_buf_[0] = '\0';
@@ -693,8 +745,11 @@ void A2DPSource::loop() {
       trigger->trigger();
     }
 #ifdef USE_BT_PAIRING
-    if (this->pairing_ != nullptr)
+    if (this->pairing_ != nullptr) {
+      this->reporting_disconnect_ = true;
       this->pairing_->on_connection(this, false);
+      this->reporting_disconnect_ = false;
+    }
     }
     if (this->switch_pending_) {
       this->switch_pending_ = false;

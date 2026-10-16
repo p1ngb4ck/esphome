@@ -848,6 +848,10 @@ void BTHIDDevice::end_pairing(bool success, const char *reason) {
     if (this->has_address() && !same_device)
       esp_bt_gap_remove_bond_device(this->bda_);
     this->set_bda_(has_previous ? previous : nullptr);
+    // The window took it off: it is paged once again.
+    this->page_pending_ = has_previous;
+    this->retry_ms_ = 0;
+    this->next_connect_ms_ = millis();
     return;
   }
   ESP_LOGI(TAG, "[%s] Paired with '%s'", mac, this->candidate_name_.c_str());
