@@ -2103,9 +2103,17 @@ class SimpleVideoPlayer : public Component
   // Home Assistant media (channel_lock_ for what the task and the main loop share).
   PsramVector<std::pair<PsramString, PsramString>> ha_reqs_;  // type, id: listings asked for, in turn
   PsramString ha_play_id_;
-  PsramVector<HaItem> ha_src_items_, ha_new_src_items_;
-  PsramString ha_src_type_, ha_new_src_type_;
-  bool ha_src_ok_{false}, ha_new_src_ok_{false}, ha_last_sources_{false};
+  PsramVector<HaItem> ha_src_items_;
+  PsramString ha_src_type_;
+  bool ha_src_ok_{false}, ha_last_sources_{false};
+  // The sources of each type listed by the task since the main loop last took them, in turn: one a
+  // type was asked for right after another's must not take its place.
+  struct HaSources {
+    PsramString type;
+    PsramVector<HaItem> items;
+    bool ok;
+  };
+  PsramVector<HaSources> ha_new_srcs_;
   std::atomic<bool> ha_new_src_{false};
   PsramVector<HaItem> ha_items_, ha_new_items_;
   PsramString ha_type_, ha_id_, ha_title_, ha_path_, ha_parent_;

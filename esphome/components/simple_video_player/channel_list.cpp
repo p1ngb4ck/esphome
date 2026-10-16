@@ -214,13 +214,17 @@ void SimpleVideoPlayer::channel_loop_() {
 
 void SimpleVideoPlayer::ha_loop_() {
   if (this->ha_new_src_.exchange(false, std::memory_order_acq_rel)) {
+    PsramVector<HaSources> listed;
     xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
-    this->ha_src_items_.swap(this->ha_new_src_items_);
-    this->ha_src_type_.swap(this->ha_new_src_type_);
-    this->ha_src_ok_ = this->ha_new_src_ok_;
+    listed.swap(this->ha_new_srcs_);
     xSemaphoreGive(this->channel_lock_);
-    this->ha_last_sources_ = true;
-    this->ha_callbacks_.call();
+    for (auto &sources : listed) {
+      this->ha_src_items_ = std::move(sources.items);
+      this->ha_src_type_ = std::move(sources.type);
+      this->ha_src_ok_ = sources.ok;
+      this->ha_last_sources_ = true;
+      this->ha_callbacks_.call();
+    }
   }
   if (this->ha_new_.exchange(false, std::memory_order_acq_rel)) {
     xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
@@ -380,9 +384,7 @@ void SimpleVideoPlayer::ha_browse_task_() {
   }
   xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
   if (id.empty()) {
-    this->ha_new_src_items_ = std::move(items);
-    this->ha_new_src_type_.assign(type.c_str());
-    this->ha_new_src_ok_ = ok;
+    this->ha_new_srcs_.push_back(HaSources{PsramString(type.c_str()), std::move(items), ok});
   } else {
     this->ha_new_items_ = std::move(items);
     this->ha_new_type_.assign(type.c_str());
