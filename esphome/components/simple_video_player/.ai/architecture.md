@@ -11,7 +11,7 @@ Line numbers drift: search the symbol when a line doesn't match.
 | File | Job |
 |---|---|
 | simple_video_player.cpp/.h | Component, main loop, sessions, playback task, reader, audio task, pool plan + media buffers, DSI/canvas output |
-| psram_pool.cpp/.h | `PsramPool`: one block (`jpeg_alloc_decoder_mem`, zeroed), first-fit, 128-aligned pieces, merge on free, own mutex (PP:7-66). `pieces_` vector on the internal heap (reserves 32) |
+| psram_pool.cpp/.h | `PsramPool`: one block (`jpeg_alloc_decoder_mem`, zeroed), 128-aligned pieces, merge on free, own mutex. `alloc` first fit (buffers), `alloc_top` last fit from the end (svp's objects). Piece table (128) at the block's start |
 | buffered_file_reader.* | Read-ahead ring over the storage interface; push mode for network AVI |
 | avi_parser.* | AVI/MJPEG parsing, index |
 | stream_receiver.cpp | TCP stream port: AVI from relay, udisp stills/PCM/input, draw task, 'V'/'A'/... reports |
@@ -190,7 +190,8 @@ Reclaim/handover (as coded):
   then `release_desktop_`. Called by `picture_alloc_` P:494 and `cover_alloc_` C:59.
 - `desktop_buffers_take_` (SP:1528): pictures/cover reclaim + `media_release_req_`, then cursors.
 
-Objects of svp's own, a pool piece each, counted in `plan_pool_()` (`psram_make`, `PoolAllocator`):
+Objects of svp's own, a pool piece each from the pool's end (`alloc_top`: they never split the media
+buffers' stretch), counted in `plan_pool_()` (`psram_make`, `PoolAllocator`):
 file readers, AVI parser, PNG/BMP decoder, the sound ring's object (with its shared_ptr block), the
 audio decoder with its source, transfer buffer (and its data) and codec objects (`audio::AudioHeap`).
 Not yet in the pool: the `PsramVector`/`PsramString` lists (PSRAM heap), the codec libraries' own

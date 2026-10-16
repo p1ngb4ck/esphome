@@ -57,6 +57,33 @@ uint8_t *PsramPool::alloc(size_t size) {
   return result;
 }
 
+uint8_t *PsramPool::alloc_top(size_t size) {
+  if (this->base_ == nullptr || size == 0)
+    return nullptr;
+  size = (size + ALIGN - 1) & ~(ALIGN - 1);
+  uint8_t *result = nullptr;
+  xSemaphoreTake(this->lock_, portMAX_DELAY);
+  for (size_t i = this->count_; i > 0; i--) {
+    Piece &piece = this->pieces_[i - 1];
+    if (piece.used || piece.size < size)
+      continue;
+    if (piece.size > size && this->count_ < MAX_PIECES) {
+      for (size_t j = this->count_; j > i; j--)
+        this->pieces_[j] = this->pieces_[j - 1];
+      this->pieces_[i] = {piece.offset + piece.size - size, size, true};
+      this->count_++;
+      piece.size -= size;
+      result = this->base_ + this->pieces_[i].offset;
+    } else {
+      piece.used = true;
+      result = this->base_ + piece.offset;
+    }
+    break;
+  }
+  xSemaphoreGive(this->lock_);
+  return result;
+}
+
 void PsramPool::free(uint8_t *ptr) {
   if (ptr == nullptr || this->base_ == nullptr)
     return;

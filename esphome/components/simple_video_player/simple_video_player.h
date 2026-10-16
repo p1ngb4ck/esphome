@@ -272,11 +272,11 @@ template<class T, class U> bool operator!=(const PsramAllocator<T> & /*a*/, cons
 }
 using PsramString = std::basic_string<char, std::char_traits<char>, PsramAllocator<char>>;
 template<class T> using PsramVector = std::vector<T, PsramAllocator<T>>;
-/// An object of the player's in a piece of its pool (counted in plan_pool_()); empty when the pool
-/// has no room for it.
+/// An object of the player's in a piece at its pool's end (counted in plan_pool_()); empty when the
+/// pool has no room for it.
 inline void *pool_object_alloc(size_t size) {
   PsramPool *pool = PsramPool::instance();
-  return pool != nullptr ? pool->alloc(size) : nullptr;
+  return pool != nullptr ? pool->alloc_top(size) : nullptr;
 }
 inline void pool_object_free(void *ptr) {
   PsramPool *pool = PsramPool::instance();

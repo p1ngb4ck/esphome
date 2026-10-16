@@ -22,6 +22,9 @@ class PsramPool {
 
   /// nullptr when no free piece is large enough.
   uint8_t *alloc(size_t size);
+  /// The same from the pool's end (last fit): the player's small objects, so they never split the
+  /// stretch the media buffers take and give back.
+  uint8_t *alloc_top(size_t size);
   void free(uint8_t *ptr);
 
   size_t size() const { return this->size_; }
