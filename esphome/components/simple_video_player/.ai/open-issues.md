@@ -60,14 +60,14 @@ Remove an entry only when Olli confirms the fix on the device.
 | D4 | `dev_lock_` held across blocking socket sends while the main loop waits portMAX on it (U:592-609, 1190-1205 vs 307, 331) | CODE |
 | D5 | `stream_play_audio_` reachable from net task and spice task without a lock | PLAUSIBLE |
 | D6 | Plain fields shared across tasks without atomics: `audio_enabled_`, `loop_`, `repeat_`, `pic_read_` fields | CODE |
-| D7 | `start_req_` not reset when the playback ends early: loop may still prerender, pause LVGL, fire on_started | PLAUSIBLE |
+| D7 | `start_req_` not reset when the playback ends early: loop may still prerender, pause LVGL, fire on_started | CODE (2026-10-16): the playback task sets 1 and waits for 2 while `playing()`, at most 2 s; a stop in that window, or a main loop blocked over 2 s (A2), leaves 1, and the next loop pass prerenders, pauses LVGL (DSI direct) and fires on_started for a session already stopped; the DSI block below gives LVGL back once the task is gone. Only `start_playback_` resets it. Not changed |
 | D8 | spice/net tasks prio 4 without affinity can preempt playback and loopTask (prio 1) on core 1 | CODE |
 
 ## E. Functional gaps / inconsistencies
 
 | # | Issue | Status |
 |---|---|---|
-| E1 | `audio_session_` is only reset by `start_playback_` (S:667): stays true after a track/queue ends | CODE |
+| E1 | `audio_session_` is only reset by `start_playback_` (S:667): stays true after a track/queue ends | CODE. Analysed 2026-10-16, not changed: between tracks it must stay true (`audio_advance_` keeps the file speaker open). After the queue's end (state STOPPED, `audio_current_` false) the stale flag only makes `stop()` set `audio_halted_`, `spice_sound_take_()` / a relay AVI call `end_session_()` on a stopped player (log "Audio file stopped" without one playing), `release_media_`/`picture_session_busy_` skip checks that a stopped player passes anyway. No functional fault found; a reset would belong at the queue's end in `audio_advance_` after the speaker finish, untested, so left |
 | E2 | Audio duration/seek is dead: `duration_frames_` always 0 for audio files (S:3118); audio bar time/seek never shown | CODE |
 | E3 | A local video start sets `audio_remote_ = NONE` without stopping the media player's HA track | CODE |
 | E4 | Media and desktop don't fully exclude: pictures/cover can retake buffers during a desktop session (state STOPPED) | CODE |
