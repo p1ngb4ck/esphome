@@ -15,6 +15,7 @@ Remove an entry only when Olli confirms the fix on the device.
 | A5 | Cover art of local audio files via an art-db | Own topic |
 | A7 | **HA audio in the queue starts with a long delay**; the same media started from HA the usual way on the device starts at once. Olli's proposal: the queue only remembers the track and triggers each one through the usual HA/ESPHome way, no own path. REPORTED | Design change; scope with Olli first |
 | A8 | (changed: lead max fixed at 1600 ms instead of ring x 100 ms/MiB ~740 ms; YAML applies the BT delay only on the Bluetooth output; awaiting Olli's test. The lead is read once per session start: output switch during playback is a later special feature, after everything more important works (Olli)) **BT audio delay (`audio_latency`) is wrong**: a) doesn't work correctly, b) makes USB speakers worse, where it must not apply at all. REPORTED | Device YAML lambda uses `bt_out` delay; C++ clamps to `max_audio_latency_ms_` (S:680). Scope with Olli first |
+| A9 | **Rename the svp components** (svp and its sub-projects, now far more than the video player). TODO, deliberately later: together with the review/refactor phase once the functionality is there (Olli) | Not before then |
 | A6 | TV regression 2026-10-15 fixed by 6a5877bba8 (cover on demand + reclaim before a video's buffers). Which of the two fixed it is not proven; likely the reclaim (no holes for the ring) | Keep in mind for B3 |
 
 ## B. Rule violations (memory / buffers)
