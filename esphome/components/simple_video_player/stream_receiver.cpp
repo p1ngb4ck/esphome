@@ -473,8 +473,12 @@ void SimpleVideoPlayer::stream_net_loop_() {
             if (xSemaphoreTake(this->session_lock_, pdMS_TO_TICKS(SESSION_END_WAIT_MS)) != pdTRUE)
               break;
             const PlayerState st = this->state_.load(std::memory_order_acquire);
-            if (this->session_busy_() || this->start_pending_.load(std::memory_order_acquire) ||
-                st == PlayerState::PLAYING || st == PlayerState::PAUSED) {
+            bool pending = this->start_pending_.load(std::memory_order_acquire);
+#ifdef SVP_AUDIO_FILES
+            // A track asked for meanwhile is about to start too (run_pending_start_() would end this).
+            pending = pending || this->audio_start_pending_.load(std::memory_order_acquire);
+#endif
+            if (this->session_busy_() || pending || st == PlayerState::PLAYING || st == PlayerState::PAUSED) {
               xSemaphoreGive(this->session_lock_);
               break;
             }
