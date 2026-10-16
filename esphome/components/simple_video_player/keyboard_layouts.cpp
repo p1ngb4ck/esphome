@@ -587,7 +587,8 @@ void SimpleVideoPlayer::keyboard_resolve_() {
 
 // The read set up (keyboard_resolve_()), else the next download, from the file first.
 void SimpleVideoPlayer::keyboard_next_() {
-  if (!this->kbd_ready_ || this->kbd_step_ != KBD_IDLE)
+  // One stream at a time: not while the table is read or written.
+  if (!this->kbd_ready_ || this->kbd_step_ != KBD_IDLE || this->kbd_table_busy_)
     return;
   if (this->kbd_loading_ < 0 || this->kbd_slots_[this->kbd_loading_].state != KBD_LOADING) {
     // A download: into a free slot, kept in the directory only.
@@ -780,6 +781,11 @@ void SimpleVideoPlayer::keyboard_done_(bool ok) {
   }
   this->kbd_step_ = KBD_IDLE;
   this->kbd_loading_ = -1;
+  if (!this->kbd_table_loaded_) {
+    this->keyboard_table_load_();
+  } else if (this->kbd_table_dirty_ && !this->kbd_table_busy_) {
+    this->keyboard_table_write_();
+  }
   this->keyboard_resolve_();
   this->kbd_callbacks_.call();
 }
@@ -796,12 +802,13 @@ void SimpleVideoPlayer::keyboard_table_failed_(const char *what, StorageError er
   ESP_LOGW(TAG, "%s %s%s failed: %s", what, this->kbd_dir_default_.c_str(), KBD_TABLE_FILE,
            storage::error_to_string(err));
   this->kbd_table_busy_ = false;
+  this->keyboard_resolve_();
 }
 
 // Once a storage holds the directory (else again when one is registered).
 void SimpleVideoPlayer::keyboard_table_load_() {
-  if (this->kbd_table_loaded_ || this->kbd_table_busy_ || storage::global_storage_registry == nullptr ||
-      storage::global_storage_worker == nullptr)
+  if (this->kbd_table_loaded_ || this->kbd_table_busy_ || this->kbd_step_ != KBD_IDLE ||
+      storage::global_storage_registry == nullptr || storage::global_storage_worker == nullptr)
     return;
   const std::string path = this->kbd_dir_default_ + KBD_TABLE_FILE;
   const char *rel = nullptr;
@@ -883,8 +890,8 @@ void SimpleVideoPlayer::keyboard_table_loaded_() {
 
 void SimpleVideoPlayer::keyboard_table_write_() {
   storage::StorageWorker *worker = storage::global_storage_worker;
-  if (worker == nullptr || this->kbd_table_storage_ == nullptr)
-    return;
+  if (worker == nullptr || this->kbd_table_storage_ == nullptr || this->kbd_step_ != KBD_IDLE)
+    return;  // still dirty: written once the layout's stream is done (keyboard_done_())
   // The directory made if need be (as a layout kept there), not while the worker's task is in it.
   const char *dir_rel = nullptr;
   storage::PathStorage *dir = storage::global_storage_registry->resolve_path(this->kbd_dir_default_.c_str(), &dir_rel);
@@ -920,8 +927,11 @@ void SimpleVideoPlayer::keyboard_table_write_() {
                         return;
                       }
                       this->kbd_table_busy_ = false;
-                      if (this->kbd_table_dirty_)
+                      if (this->kbd_table_dirty_) {
                         this->keyboard_table_write_();  // changed meanwhile
+                      } else {
+                        this->keyboard_resolve_();
+                      }
                     },
                     nullptr, true);
                 if (moved != StorageError::STORAGE_ERROR_OK) {
