@@ -137,21 +137,28 @@ reports the media player's state instead while `state_` is STOPPED and `audio_re
 | Router | `add_on_output_callback` S:50 -> `on_audio_output_changed_` MS:170 | new wanted rate/channels, resend 'A/L/N/F' to the sender |
 | Router format | players only `set_audio_stream_info` | `audio_router` starts its output with the first sound, and starts it again (stop, wait until stopped, start) when a player's stream format differs from the one it was started for (audio_router.cpp `play()`); the player never starts/stops |
 
-A/V sync: `audio_latency` (BT delay; device YAML: only while the media output is Bluetooth) clamped
-to `max_audio_latency_ms_` = `MAX_AUDIO_LEAD_MS` 1600 ms (S:680); the sound buffers are sized for it; sound released when the cursor leads by `audio_lead_frames_`; picture clock anchored that
-much later (S:1199-1211, S:1332-1336).
+A/V sync: `audio_latency` (BT delay; device YAML: only while the media output is Bluetooth), read at
+each start, clamped to `max_audio_latency_ms_`: what the pool's ring room leaves beside the prebuffer
+(`latency_limit_ms_()`, recomputed by `set_prebuffer()`; the device YAML gives it to
+`bt_out.set_max_output_delay_ms()`, the BT delay slider's and number's most). The session's ring and
+sound block are sized for this lead; sound released when the cursor leads by `audio_lead_frames_`
+(the cursor peeks the ring that far ahead); picture clock anchored that much later.
 
 ## 9. PSRAM pool and buffers (today)
 
 Pool: `psram_pool_size` (default 12 MiB, 6-28; device 13 MB = 13,000,000). Plan in `plan_pool_()`
-S:2080-2148: everything listed as "fixed" is reserved; the **read-ahead ring gets all the rest**
-(whole 256 KiB chunks); the audio rings are sized for `MAX_AUDIO_LEAD_MS` (1600 ms).
+`plan_pool_()`: everything listed as "fixed" is reserved; the rest (`ring_room_`) is the read-ahead
+ring's and the sound block's. A video takes the ring for `prebuffer` + its lead at `MAX_MEDIA_RATE`
+(4 MiB/s, whole 256 KiB chunks, at least two) and the sound block for its lead; both are kept and taken
+anew only when a session needs another size (`acquire_session_buffers_()`, `sound_block_for_()`). The
+start fills the whole ring (`prefill_cache()`), so its size is also the start's wait. `prebuffer`
+(YAML, default 500 ms, min 100 ms; device: number "Video prebuffer", Settings > Outputs) is kept within
+what the room leaves (`max_prebuffer()`).
 
 | Buffer | Size | Taken / returned | Content | In plan |
 |---|---|---|---|---|
 | `cache_buffer_` | 64 KiB | setup, never | raw reads, index/audio scratch | yes |
-| audio input ring | rate·ch·2·(lat+250 ms), >=32 KiB | setup, never | compressed audio | yes |
-| audio decoded ring | rate·ch·2·max(lat+250, 500 ms) | setup, never | PCM (only PCM tracks) | yes |
+| sound block (one ring over it: input or decoded) | max of the configured kinds: input rate·ch·2·(lead+250 ms) >=32 KiB, decoded rate·ch·2·max(lead+250, 500 ms) | setup for no lead; a video with another size takes it anew | compressed audio / PCM | yes (ring room) |
 | `audio_temp_buffer_` | max(BPS/10, 8 KiB) | setup, never | PCM drain / file read | yes |
 | audio-file ring | 128 KiB | setup, never | compressed audio file | yes |
 | `stream_recv_buf_` | 32 KiB | setup, never | TCP bytes | yes |
@@ -163,7 +170,7 @@ S:2080-2148: everything listed as "fixed" is reserved; the **read-ahead ring get
 | `thumb_buffer_` | stride·th·count (~216 KiB default) | setup, never | decoded thumbnails | yes |
 | `frame_slots_[1]` | frame_bytes_ = clamp(pool/24, 256 KiB, 1 MiB) | first session, kept | compressed frame | yes |
 | `index_buf_` | clamp(pool/32, 128 KiB, 1 MiB) | first session, kept | AVI index (also allocated for streams) | yes |
-| `ring_buf_` | rest of pool (~7-8 MB on the device) | first session, kept | compressed AVI/MJPEG | = rest |
+| `ring_buf_` | 4 MiB/s · (prebuffer + lead) (device: 2 MiB without BT delay) | first session, kept; taken anew when a session needs another size | compressed AVI/MJPEG | yes (ring room) |
 | `decode_target_` + `ctl_mem_` | panel w·h·bpp (2.05 MB) + 3 × bar snapshot + 4 KiB | first direct output, kept | decoded frame, controls | yes (max of direct/canvas) |
 | `output_buffers_[2]` | 2 × A16(cw)·A16(ch)·3 | first canvas output, kept | decoded RGB888 | yes (max of direct/canvas) |
 | `pic_pages_[2]` | 2 × stride565(max(disp, canvas)) · h | first picture, reclaim | the shown picture and the next one (no decode ahead; neighbours only read undecoded) | **no** |

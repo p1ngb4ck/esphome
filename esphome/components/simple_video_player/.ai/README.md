@@ -132,6 +132,6 @@ round without Olli's go.
 Historic and partly superseded. Still true per code: video task prio 1 on core 1, wall-clock pacing,
 no frame dropping, one compressed frame slot (`FRAME_SLOT_COUNT = 1`), the 25 fps / 40 ms budget.
 Superseded: "two decoded frame buffers" (DSI direct uses one `decode_target_`; canvas output uses an
-RGB888 pair), "4 MB ring" (the ring now takes the pool's rest), the speaker being started/stopped by
+RGB888 pair), "4 MB ring" (the ring is now prebuffer + the sound's lead at 4 MiB/s), the speaker being started/stopped by
 the player (removed, f0b518d). The PCM decoded-ring rationale there conflicts with the
 undecoded-buffering rule: see open-issues.

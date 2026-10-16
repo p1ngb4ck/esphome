@@ -321,12 +321,20 @@ class SimpleVideoPlayer : public Component
   }
 #endif
   void set_psram_pool_size(uint32_t size) { this->psram_pool_size_ = size; }
+  /// What the read-ahead ring holds ahead besides the sound's lead (ms, at MAX_MEDIA_RATE); from
+  /// the next video on. Kept within MIN_PREBUFFER_MS .. max_prebuffer().
+  void set_prebuffer(uint32_t ms);
+  uint32_t get_prebuffer() const { return this->prebuffer_ms_.load(std::memory_order_relaxed); }
+  uint32_t max_prebuffer() const;
+  static constexpr uint32_t MIN_PREBUFFER_MS = 100;
   void set_target_fps(float fps) { this->target_fps_ = fps; }
 
 #ifdef USE_SPEAKER
   void set_speaker(speaker::Speaker *speaker) { this->speaker_ = speaker; }
   /// How long the audio output takes to be heard (ms): the sound starts this much before the picture.
   template<typename V> void set_audio_latency(V latency) { this->audio_latency_ = latency; }
+  /// The most the sound may lead with the prebuffer set (ms): ring and sound fit in their share.
+  uint32_t max_audio_latency() const { return this->max_audio_latency_ms_; }
   void set_speaker_channel_mode(SpeakerChannelMode mode) { this->speaker_channel_mode_ = mode; }
 #endif
 #ifdef SVP_AUDIO_ROUTER
@@ -1243,15 +1251,17 @@ class SimpleVideoPlayer : public Component
 
   // The PSRAM pool (psram_pool_size) holds every buffer of the player. setup() shares it out once
   // (plan_pool_()): the stream frames, sound buffers and thumbnails stay at its start for good; a
-  // video session takes its frame slot, outputs, controls and index, and the read-ahead ring gets
-  // the rest. Session ("media") buffers are kept after a video; the pictures' are kept after a
-  // picture. Only when one side's request does not fit are the other side's idle buffers handed back.
+  // video session takes its frame slot, outputs, controls and index, and the read-ahead ring as much
+  // as the prebuffer and the sound's lead need. Session ("media") buffers are kept after a video; the
+  // pictures' are kept after a picture. Only when one side's request does not fit are the other
+  // side's idle buffers handed back.
   bool plan_pool_();
   /// From any task but the main loop: a piece for the media side; asks the main loop for the
   /// pictures' if needed.
   uint8_t *media_alloc_(size_t size);
-  /// Playback task: the read-ahead ring and the compressed-frame slot of a session (the index is
-  /// taken in open_file_(), only for a file's AVI).
+  /// Playback task: the read-ahead ring, the sound block and the compressed-frame slot of a session
+  /// (the index is taken in open_file_(), only for a file's AVI). Ring and sound block are taken
+  /// anew only when the size this session needs differs from the kept one's.
   bool acquire_session_buffers_();
   /// The display's decode buffer (and the controls) / the canvas output pair, kept once taken. Only
   /// when it does not fit beside the other output, the main loop gives that back first.
@@ -1295,15 +1305,25 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> output_release_stream_{false};  // the stream's draw task asked for it
 #endif
   // The shares of the pool (plan_pool_()).
-  size_t ring_size_{0};         // read-ahead ring: what is left
+  size_t ring_room_{0};         // what is left for the read-ahead ring and the sound block together
+  size_t ring_size_{0};         // the read-ahead ring taken: prebuffer + the session's lead
   size_t frame_bytes_{0};       // compressed-frame slot: the largest frame that plays
   size_t output_reserve_{0};    // the larger of the display's decode buffer and the canvas pair
   size_t controls_reserve_{0};  // both controls pictures
   size_t index_reserve_{0};     // a file's index
-  // The most the sound runs ahead of the picture (audio_latency, e.g. a Bluetooth device's delay):
-  // the sound buffers are sized for it.
-  static constexpr uint32_t MAX_AUDIO_LEAD_MS = 1600;
+  // The most a video brings per second (picture and sound) that the ring is sized for: MJPEG at
+  // the panel's size and 25 fps with ~150 KiB frames, plus PCM.
+  static constexpr size_t MAX_MEDIA_RATE = 4 * 1024 * 1024;
+  static constexpr uint32_t LATENCY_STEP_MS = 10;
+  std::atomic<uint32_t> prebuffer_ms_{500};
+  // The most the sound runs ahead of the picture (audio_latency, e.g. a Bluetooth device's delay)
+  // with this prebuffer: from the room (latency_limit_ms_()).
   uint32_t max_audio_latency_ms_{0};
+  /// The read-ahead ring for this much ahead (whole fill chunks, at least two).
+  static size_t ring_bytes_(uint32_t ms);
+  /// The sound block for this lead (the larger ring kind the configuration uses); 0 without sound.
+  size_t sound_bytes_(uint32_t lead_ms) const;
+  uint32_t latency_limit_ms_(uint32_t prebuffer_ms) const;
   // From the pool (PSRAM): raw MJPEG reads, index and audio-chunk scratch.
   static constexpr size_t CACHE_BUFFER_SIZE = 64 * 1024;
   float target_fps_{30.0f};  // Target frame rate
@@ -1353,7 +1373,7 @@ class SimpleVideoPlayer : public Component
   static constexpr size_t AUDIO_BYTES_PER_FRAME =
       static_cast<size_t>(AUDIO_SOURCE_CHANNELS) * (AUDIO_BITS_PER_SAMPLE / 8);
   static constexpr size_t AUDIO_BYTES_PER_SEC = static_cast<size_t>(AUDIO_SAMPLE_RATE) * AUDIO_BYTES_PER_FRAME;
-  // Both sound rings hold the most the sound can run ahead of the picture plus room (plan_pool_()).
+  // Both sound rings hold what the sound runs ahead of the picture plus room (sound_block_for_()).
   static size_t audio_input_bytes(uint32_t latency_ms) {
     return std::max<size_t>(AUDIO_BYTES_PER_SEC * (latency_ms + 250) / 1000, 32 * 1024);
   }
@@ -1397,11 +1417,15 @@ class SimpleVideoPlayer : public Component
   std::shared_ptr<ring_buffer::RingBuffer>
       audio_decoded_ring_buffer_;                 // Ring buffer for decoded audio (in PSRAM, before conversion)
   uint8_t *audio_temp_buffer_{nullptr};           // Temporary buffer for audio processing (pool)
-  // One block for the sound ring (pool, setup()), as large as the larger kind the configuration uses.
+  // One block for the sound ring (pool), as large as the larger kind the configuration uses for the
+  // lead it was taken for (setup(): none; a video: its lead, taken anew only when that size changes).
   // The ring over it is the kind the file needs: the input ring (compressed) or the decoded ring
-  // (PCM), the other one is null. Made anew over the same block only when the kind changes.
+  // (PCM), the other one is null. Made anew over the block when the kind or the block changes.
   uint8_t *sound_block_{nullptr};
   size_t sound_block_len_{0};
+  uint32_t sound_lead_ms_{0};  // the lead the block and its ring are sized for
+  size_t sound_ring_len_{0};   // the ring made over it
+  bool sound_block_for_(uint32_t lead_ms);
   bool sound_ring_for_(bool compressed);
   uint8_t source_audio_channels_{0};              // Fixed source channel count (mirrors AUDIO_SOURCE_CHANNELS)
   uint8_t speaker_audio_channels_{1};             // Number of channels speaker expects

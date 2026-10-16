@@ -368,6 +368,7 @@ PICTURE_ONLY_KEYS = (
     CONF_ON_THUMBNAIL_CLICK,
 )
 CONF_PSRAM_POOL_SIZE = "psram_pool_size"
+CONF_PREBUFFER = "prebuffer"
 DEFAULT_PSRAM_POOL_SIZE = 12 * 1024 * 1024
 MIN_PSRAM_POOL_SIZE = 6 * 1024 * 1024
 MAX_PSRAM_POOL_SIZE = 28 * 1024 * 1024
@@ -765,14 +766,21 @@ CONFIG_SCHEMA = cv.All(
                 cv.positive_time_period_milliseconds
             ),
             # The player's PSRAM, one block taken at boot: every buffer it uses is cut from it
-            # (read-ahead ring -- the rest once the others have their share --, compressed-frame
-            # slot, output and decode buffers, sound, index, controls, pictures and thumbnails).
-            # The read-ahead ring also bounds audio_latency: 100 ms per MiB.
+            # (read-ahead ring, compressed-frame slot, output and decode buffers, sound, index,
+            # controls, pictures and thumbnails). What is left once the others have their share
+            # bounds the prebuffer and audio_latency together.
             cv.Optional(
                 CONF_PSRAM_POOL_SIZE, default=DEFAULT_PSRAM_POOL_SIZE
             ): cv.All(
                 cv.validate_bytes,
                 cv.Range(min=MIN_PSRAM_POOL_SIZE, max=MAX_PSRAM_POOL_SIZE),
+            ),
+            # What the read-ahead ring holds ahead of the picture besides the sound's lead, at the
+            # most a video brings per second (4 MiB/s): bridges storage and network gaps during
+            # playback; the start waits until it is filled. Settable at runtime (set_prebuffer).
+            cv.Optional(CONF_PREBUFFER, default="500ms"): cv.All(
+                cv.positive_time_period_milliseconds,
+                cv.Range(min=cv.TimePeriod(milliseconds=100)),
             ),
             # Automation triggers
             cv.Optional(CONF_ON_PLAYBACK_STARTED): automation.validate_automation(
@@ -1253,6 +1261,7 @@ async def to_code(config):
         cg.add_define("SVP_MEDIA_PLAYER")
 
     cg.add(var.set_psram_pool_size(config[CONF_PSRAM_POOL_SIZE]))
+    cg.add(var.set_prebuffer(config[CONF_PREBUFFER]))
 
     # Set target FPS
     cg.add(var.set_target_fps(config[CONF_TARGET_FPS]))

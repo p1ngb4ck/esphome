@@ -123,16 +123,17 @@ void SimpleVideoPlayer::setup() {
   }
 
 #ifdef USE_AUDIO
-  // Sound rings + temp buffer: once, at the start of the pool, sized for the most the sound can run
-  // ahead (plan_pool_()). init_audio_decoder_() only checks each file against this fixed format.
+  // Sound ring + temp buffer at the start of the pool, the ring for no lead (a video with one takes
+  // its block anew, sound_block_for_()). init_audio_decoder_() only checks each file against this
+  // fixed format.
   if (this->speaker_ != nullptr) {
     this->source_audio_channels_ = AUDIO_SOURCE_CHANNELS;
     this->audio_sample_rate_ = AUDIO_SAMPLE_RATE;
     this->audio_bits_per_sample_ = AUDIO_BITS_PER_SAMPLE;
     this->audio_frame_bytes_ = AUDIO_BYTES_PER_FRAME;
 
-    this->sound_block_len_ = std::max(AUDIO_INPUT_RING ? audio_input_bytes(this->max_audio_latency_ms_) : 0,
-                                      AUDIO_DECODED_RING ? audio_decoded_bytes(this->max_audio_latency_ms_) : 0);
+    this->sound_block_len_ = this->sound_bytes_(0);
+    this->sound_lead_ms_ = 0;
     if (this->sound_block_len_ != 0) {
       this->sound_block_ = this->pool_.alloc(this->sound_block_len_);
       if (this->sound_block_ != nullptr)
@@ -214,8 +215,9 @@ void SimpleVideoPlayer::setup() {
 #ifdef SVP_AUDIO_COVER
     share += this->cover_reserve_;
 #endif
-    const size_t room = this->ring_size_ + this->frame_bytes_ * FRAME_SLOT_COUNT + this->output_reserve_ +
-                        this->controls_reserve_ + this->index_reserve_;
+    const size_t room = this->ring_room_ - this->sound_bytes_(this->max_audio_latency_ms_) +
+                        this->frame_bytes_ * FRAME_SLOT_COUNT + this->output_reserve_ + this->controls_reserve_ +
+                        this->index_reserve_;
     if (share > room)
       ESP_LOGE(TAG, "psram_pool_size too small: pictures and cover art take %u bytes, the media room is %u",
                static_cast<unsigned>(share), static_cast<unsigned>(room));
@@ -230,9 +232,11 @@ void SimpleVideoPlayer::setup() {
                 static_cast<unsigned>(this->pool_.size()),
                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
-  ESP_LOGCONFIG(TAG, "  Read-ahead ring: %u bytes (audio latency up to %" PRIu32 " ms), frame slot %u bytes",
-                static_cast<unsigned>(this->ring_size_), this->max_audio_latency_ms_,
-                static_cast<unsigned>(this->frame_bytes_));
+  ESP_LOGCONFIG(TAG,
+                "  Read-ahead ring and sound: up to %u bytes (prebuffer %" PRIu32 " ms, up to %" PRIu32
+                " ms; audio latency up to %" PRIu32 " ms), frame slot %u bytes",
+                static_cast<unsigned>(this->ring_room_), this->get_prebuffer(), this->max_prebuffer(),
+                this->max_audio_latency_ms_, static_cast<unsigned>(this->frame_bytes_));
   ESP_LOGCONFIG(TAG, "  Target FPS: %.1f", this->target_fps_);
 #ifdef USE_AUDIO
   if (this->speaker_ != nullptr) {
@@ -474,7 +478,8 @@ void SimpleVideoPlayer::dump_config() {
   ESP_LOGCONFIG(TAG, "Simple Video Player:");
   ESP_LOGCONFIG(TAG, "  PSRAM pool: %u bytes, %u in use", static_cast<unsigned>(this->pool_.size()),
                 static_cast<unsigned>(this->pool_.used()));
-  ESP_LOGCONFIG(TAG, "  Read-ahead ring: %u bytes, frame slot %u bytes", static_cast<unsigned>(this->ring_size_),
+  ESP_LOGCONFIG(TAG, "  Read-ahead ring: %u bytes (prebuffer %" PRIu32 " ms), frame slot %u bytes",
+                static_cast<unsigned>(this->ring_size_), this->get_prebuffer(),
                 static_cast<unsigned>(this->frame_bytes_));
   ESP_LOGCONFIG(TAG, "  Target FPS: %.1f", this->target_fps_);
 
@@ -2185,26 +2190,64 @@ bool SimpleVideoPlayer::plan_pool_() {
   this->index_reserve_ = pool_round(std::clamp<size_t>(pool / 32, 128 * 1024, MIB));
   fixed += this->index_reserve_ + pool_round(CACHE_BUFFER_SIZE) + 32 * PsramPool::ALIGN;  // pieces end on whole cache lines
 
-  const size_t chunk = BufferedFileReader::FILL_CHUNK;
-  auto ring_for = [pool, chunk](size_t taken) -> size_t { return taken + 2 * chunk <= pool ? (pool - taken) / chunk * chunk : 0; };
-  size_t ring = ring_for(fixed);
 #ifdef USE_AUDIO
-  if (this->speaker_ != nullptr && ring != 0) {
-    // The sound buffers hold the most the sound may run ahead of the picture (MAX_AUDIO_LEAD_MS).
-    ring = ring_for(fixed +
-                    pool_round(std::max(AUDIO_INPUT_RING ? audio_input_bytes(MAX_AUDIO_LEAD_MS) : 0,
-                                        AUDIO_DECODED_RING ? audio_decoded_bytes(MAX_AUDIO_LEAD_MS) : 0)) +
-                    (AUDIO_TEMP_BUFFER ? pool_round(AUDIO_TEMP_BUFFER_SIZE) : 0));
-  }
+  if (this->speaker_ != nullptr && AUDIO_TEMP_BUFFER)
+    fixed += pool_round(AUDIO_TEMP_BUFFER_SIZE);
 #endif
-  if (ring == 0) {
-    ESP_LOGE(TAG, "psram_pool_size %u is too small: %u bytes go to frame slot, outputs, sound, controls and index",
+  // The rest is the read-ahead ring's and the sound block's: as large as the prebuffer and the
+  // session's lead need, so their limits come from it.
+  this->ring_room_ = fixed < pool ? pool - fixed : 0;
+  if (ring_bytes_(MIN_PREBUFFER_MS) + this->sound_bytes_(0) > this->ring_room_) {
+    ESP_LOGE(TAG, "psram_pool_size %u is too small: %u bytes go to frame slot, outputs, controls and index",
              static_cast<unsigned>(pool), static_cast<unsigned>(fixed));
+    this->ring_room_ = 0;
     return false;
   }
-  this->ring_size_ = ring;
-  this->max_audio_latency_ms_ = MAX_AUDIO_LEAD_MS;
+  const uint32_t prebuffer =
+      std::clamp(this->prebuffer_ms_.load(std::memory_order_relaxed), MIN_PREBUFFER_MS, this->max_prebuffer());
+  this->prebuffer_ms_.store(prebuffer, std::memory_order_relaxed);
+  this->max_audio_latency_ms_ = this->latency_limit_ms_(prebuffer);
   return true;
+}
+
+size_t SimpleVideoPlayer::ring_bytes_(uint32_t ms) {
+  const size_t chunk = BufferedFileReader::FILL_CHUNK;
+  const size_t bytes = static_cast<size_t>(static_cast<uint64_t>(MAX_MEDIA_RATE) * ms / 1000);
+  return std::max<size_t>((bytes + chunk - 1) / chunk, 2) * chunk;
+}
+
+size_t SimpleVideoPlayer::sound_bytes_(uint32_t lead_ms) const {
+#ifdef USE_AUDIO
+  if (this->speaker_ != nullptr)
+    return pool_round(std::max(AUDIO_INPUT_RING ? audio_input_bytes(lead_ms) : 0,
+                               AUDIO_DECODED_RING ? audio_decoded_bytes(lead_ms) : 0));
+#endif
+  return 0;
+}
+
+uint32_t SimpleVideoPlayer::latency_limit_ms_(uint32_t prebuffer_ms) const {
+  uint32_t lead = 0;
+  while (ring_bytes_(prebuffer_ms + lead + LATENCY_STEP_MS) + this->sound_bytes_(lead + LATENCY_STEP_MS) <=
+         this->ring_room_)
+    lead += LATENCY_STEP_MS;
+  return lead;
+}
+
+uint32_t SimpleVideoPlayer::max_prebuffer() const {
+  uint32_t ms = MIN_PREBUFFER_MS;
+  while (ring_bytes_(ms + LATENCY_STEP_MS) + this->sound_bytes_(0) <= this->ring_room_)
+    ms += LATENCY_STEP_MS;
+  return ms;
+}
+
+void SimpleVideoPlayer::set_prebuffer(uint32_t ms) {
+  if (this->ring_room_ == 0) {
+    this->prebuffer_ms_.store(ms, std::memory_order_relaxed);  // before setup: plan_pool_() keeps it in bounds
+    return;
+  }
+  ms = std::clamp(ms, MIN_PREBUFFER_MS, this->max_prebuffer());
+  this->prebuffer_ms_.store(ms, std::memory_order_relaxed);
+  this->max_audio_latency_ms_ = this->latency_limit_ms_(ms);
 }
 
 void SimpleVideoPlayer::reclaim_pictures_() {
@@ -2232,13 +2275,36 @@ uint8_t *SimpleVideoPlayer::media_alloc_(size_t size) {
 }
 
 bool SimpleVideoPlayer::acquire_session_buffers_() {
+  // This session's sizes: the ring holds the prebuffer and the sound's lead, the sound block the lead.
+  uint32_t lead_ms = 0;
+#ifdef USE_AUDIO
+  lead_ms = this->audio_lead_us_ / 1000;
+#endif
+  const size_t ring_len = ring_bytes_(this->prebuffer_ms_.load(std::memory_order_relaxed) + lead_ms);
 #ifdef SVP_PICTURES
   // Pictures and cover art give their buffers back first: the video's come from one free stretch.
-  bool missing = this->ring_buf_ == nullptr;
+  bool missing = this->ring_buf_ == nullptr || this->ring_size_ != ring_len;
   for (auto &slot : this->frame_slots_)
     missing = missing || slot.data == nullptr;
+#ifdef USE_AUDIO
+  missing = missing || this->sound_block_len_ != this->sound_bytes_(lead_ms);
+#endif
   if (missing && this->pic_ready_)
     this->reclaim_pictures_();
+#endif
+  if (this->ring_buf_ != nullptr && this->ring_size_ != ring_len) {
+    // Another size than the kept ring's: given back before the new one is taken (no file is open).
+    xSemaphoreTake(this->media_lock_, portMAX_DELAY);
+    if (this->file_reader_)
+      this->file_reader_->set_ring(nullptr, 0);
+    this->pool_.free(this->ring_buf_);
+    this->ring_buf_ = nullptr;
+    this->ring_size_ = 0;
+    xSemaphoreGive(this->media_lock_);
+  }
+#ifdef USE_AUDIO
+  if (!this->sound_block_for_(lead_ms))
+    return false;
 #endif
   // Taken without media_lock_ (media_alloc_() may wait for the main loop, which needs the lock to
   // give an output back), set under it. Nothing else sets these while this session starts.
@@ -2247,7 +2313,7 @@ bool SimpleVideoPlayer::acquire_session_buffers_() {
     if (this->frame_slots_[i].data == nullptr)
       slots[i] = this->media_alloc_(this->frame_bytes_);
   }
-  uint8_t *ring = this->ring_buf_ == nullptr ? this->media_alloc_(this->ring_size_) : nullptr;
+  uint8_t *ring = this->ring_buf_ == nullptr ? this->media_alloc_(ring_len) : nullptr;
   xSemaphoreTake(this->media_lock_, portMAX_DELAY);
   for (size_t i = 0; i < FRAME_SLOT_COUNT; i++) {
     if (slots[i] != nullptr) {
@@ -2255,8 +2321,10 @@ bool SimpleVideoPlayer::acquire_session_buffers_() {
       this->frame_slots_[i].capacity = this->frame_bytes_;
     }
   }
-  if (ring != nullptr)
+  if (ring != nullptr) {
     this->ring_buf_ = ring;
+    this->ring_size_ = ring_len;
+  }
   bool ok = this->ring_buf_ != nullptr;
   for (auto &slot : this->frame_slots_)
     ok = ok && slot.data != nullptr;
@@ -2509,6 +2577,7 @@ bool SimpleVideoPlayer::release_media_() {
         this->file_reader_->set_ring(nullptr, 0);
       this->pool_.free(this->ring_buf_);
       this->ring_buf_ = nullptr;
+      this->ring_size_ = 0;
       released = true;
     }
     for (auto &slot : this->frame_slots_) {
@@ -2724,17 +2793,52 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   return true;
 }
 
-// Session start, no sound task running: the ring of the kind the file needs. The block stays; only
-// when the kind changes is the other ring dropped and this one made over it (no pool allocation).
-bool SimpleVideoPlayer::sound_ring_for_(bool compressed) {
-  if (compressed ? this->audio_input_ring_buffer_ != nullptr : this->audio_decoded_ring_buffer_ != nullptr)
+// Playback task, video session start, no sound task running: the sound block for this lead. Kept when
+// its size is the same; else the rings over it and the decoder's hold on them go first, then the
+// block is taken anew.
+bool SimpleVideoPlayer::sound_block_for_(uint32_t lead_ms) {
+  const size_t len = this->sound_bytes_(lead_ms);
+  if (len == 0 || (this->sound_block_ != nullptr && this->sound_block_len_ == len)) {
+    this->sound_lead_ms_ = lead_ms;
     return true;
-  if (this->sound_block_ == nullptr || (compressed ? !AUDIO_INPUT_RING : !AUDIO_DECODED_RING))
+  }
+  this->audio_input_ring_buffer_.reset();
+  this->audio_decoded_ring_buffer_.reset();
+#if defined(SVP_AUDIO_SUPPORT_MP3) || defined(SVP_AUDIO_SUPPORT_FLAC) || defined(SVP_AUDIO_FILES)
+  if (this->audio_decoder_)
+    this->audio_decoder_->add_source(nullptr, 0);  // its source gives back what it holds of the old ring
+#endif
+  this->pool_.free(this->sound_block_);
+  this->sound_block_ = nullptr;
+  this->sound_block_len_ = 0;
+  uint8_t *block = this->media_alloc_(len);
+  if (block == nullptr) {
+    ESP_LOGE(TAG, "No room in the PSRAM pool for the sound of a %" PRIu32 " ms lead", lead_ms);
+    return false;
+  }
+  this->sound_block_ = block;
+  this->sound_block_len_ = len;
+  this->sound_lead_ms_ = lead_ms;
+  return true;
+}
+
+// Session start, no sound task running: the ring of the kind the file needs, over the block for the
+// lead it was taken for. Made anew only when the kind or the block changed (no pool allocation).
+bool SimpleVideoPlayer::sound_ring_for_(bool compressed) {
+  const size_t len = compressed ? audio_input_bytes(this->sound_lead_ms_) : audio_decoded_bytes(this->sound_lead_ms_);
+  const auto &current = compressed ? this->audio_input_ring_buffer_ : this->audio_decoded_ring_buffer_;
+  if (current != nullptr && this->sound_ring_len_ == len)
+    return true;
+  if (this->sound_block_ == nullptr || (compressed ? !AUDIO_INPUT_RING : !AUDIO_DECODED_RING) ||
+      len > this->sound_block_len_)
     return false;
   this->audio_input_ring_buffer_.reset();
   this->audio_decoded_ring_buffer_.reset();
-  const size_t len = compressed ? audio_input_bytes(this->max_audio_latency_ms_)
-                                : audio_decoded_bytes(this->max_audio_latency_ms_);
+#if defined(SVP_AUDIO_SUPPORT_MP3) || defined(SVP_AUDIO_SUPPORT_FLAC) || defined(SVP_AUDIO_FILES)
+  if (this->audio_decoder_)
+    this->audio_decoder_->add_source(nullptr, 0);  // its source gives back what it holds of the old ring
+#endif
+  this->sound_ring_len_ = len;
   std::shared_ptr<ring_buffer::RingBuffer> ring = PoolRingBuffer::create(this->sound_block_, len);
   if (compressed) {
     this->audio_input_ring_buffer_ = std::move(ring);
