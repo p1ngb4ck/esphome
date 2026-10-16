@@ -93,7 +93,12 @@ void SimpleVideoPlayer::setup() {
   }
 
   // Before loop() runs (which serves its storage calls); its ring comes with the session buffers.
-  this->file_reader_ = std::make_unique<BufferedFileReader>();
+  this->file_reader_ = psram_make<BufferedFileReader>();
+  if (!this->file_reader_) {
+    ESP_LOGE(TAG, "No PSRAM for the file reader");
+    this->mark_failed();
+    return;
+  }
 
   this->cache_buffer_ = this->pool_.alloc(CACHE_BUFFER_SIZE);
   if (this->cache_buffer_ == nullptr) {
@@ -161,7 +166,12 @@ void SimpleVideoPlayer::setup() {
     // those again on this persistent instance instead of recreating the whole object, avoiding a
     // fresh output_transfer_buffer_ allocation every single play().
     this->audio_decoder_ =
-        std::make_unique<audio::AudioDecoder>(AUDIO_DECODER_INPUT_BUFFER_SIZE, AUDIO_DECODER_OUTPUT_BUFFER_SIZE);
+        psram_make<audio::AudioDecoder>(AUDIO_DECODER_INPUT_BUFFER_SIZE, AUDIO_DECODER_OUTPUT_BUFFER_SIZE);
+    if (!this->audio_decoder_) {
+      ESP_LOGE(TAG, "No PSRAM for the audio decoder");
+      this->mark_failed();
+      return;
+    }
 #endif
 #ifdef SVP_AUDIO_FILES
     if (this->file_speaker_ != nullptr) {
@@ -171,7 +181,12 @@ void SimpleVideoPlayer::setup() {
         this->mark_failed();
         return;
       }
-      this->audio_file_reader_ = std::make_unique<BufferedFileReader>();
+      this->audio_file_reader_ = psram_make<BufferedFileReader>();
+      if (!this->audio_file_reader_) {
+        ESP_LOGE(TAG, "No PSRAM for the audio file reader");
+        this->mark_failed();
+        return;
+      }
       this->audio_file_reader_->set_ring(ring, AUDIO_FILE_RING_SIZE);
     }
 #endif
@@ -1845,7 +1860,12 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
   // across every play() instead of destroying and reallocating it each time.
   if (this->video_format_ == VideoFormat::AVI_MJPEG) {
     if (!this->avi_parser_) {
-      this->avi_parser_ = std::make_unique<AVIParser>();
+      this->avi_parser_ = psram_make<AVIParser>();
+      if (!this->avi_parser_) {
+        ESP_LOGE(TAG, "No PSRAM for the AVI parser");
+        this->close_file_();
+        return false;
+      }
     }
     this->avi_parser_->set_index_memory(this->index_buf_, this->index_reserve_);
 
@@ -1922,7 +1942,12 @@ bool SimpleVideoPlayer::open_stream_source_() {
   this->file_size_ = 0;
   this->video_format_ = VideoFormat::AVI_MJPEG;
   if (!this->avi_parser_) {
-    this->avi_parser_ = std::make_unique<AVIParser>();
+    this->avi_parser_ = psram_make<AVIParser>();
+    if (!this->avi_parser_) {
+      ESP_LOGE(TAG, "No PSRAM for the AVI parser");
+      this->close_file_();
+      return false;
+    }
   }
   this->avi_parser_->set_index_memory(this->index_buf_, this->index_reserve_);
   if (!this->avi_parser_->open(this->file_reader_.get())) {
@@ -2332,7 +2357,9 @@ bool SimpleVideoPlayer::acquire_session_buffers_() {
   if (!ok)
     return false;
   if (!this->file_reader_)
-    this->file_reader_ = std::make_unique<BufferedFileReader>();
+    this->file_reader_ = psram_make<BufferedFileReader>();
+  if (!this->file_reader_)
+    return false;
   if (!this->file_reader_->has_ring())
     this->file_reader_->set_ring(this->ring_buf_, this->ring_size_);
   return true;
@@ -2791,6 +2818,17 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   this->session_audio_ = true;
   ESP_LOGI(TAG, "Audio processing initialized successfully (%s mode)", use_decoder ? "decoder" : "direct PCM");
   return true;
+}
+
+std::shared_ptr<ring_buffer::RingBuffer> PoolRingBuffer::create(uint8_t *storage, size_t len) {
+  if (storage == nullptr || heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) < 256)
+    return nullptr;
+  // The object and the shared_ptr's control block in one PSRAM piece.
+  auto rb = std::allocate_shared<PoolRingBuffer>(PsramAllocator<PoolRingBuffer>());
+  if (xRingbufferCreateStatic(len, RINGBUF_TYPE_BYTEBUF, storage, &rb->structure_) != rb->handle_())
+    return nullptr;
+  rb->created_ = true;
+  return rb;
 }
 
 // Playback task, video session start, no sound task running: the sound block for this lead. Kept when

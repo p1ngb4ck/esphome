@@ -388,8 +388,8 @@ std::string SimpleVideoPlayer::keyboard_standard_(size_t input) const {
   return entry != nullptr ? std::string(entry->layout) : this->kbd_inputs_[input].layout;
 }
 
-std::vector<SimpleVideoPlayer::KeyboardDevice> SimpleVideoPlayer::keyboard_devices() const {
-  std::vector<KeyboardDevice> out;
+PsramVector<SimpleVideoPlayer::KeyboardDevice> SimpleVideoPlayer::keyboard_devices() const {
+  PsramVector<KeyboardDevice> out;
   for (size_t i = 0; i < this->kbd_inputs_.size(); i++) {
     const KbdInput &input = this->kbd_inputs_[i];
     const KbdAssign *standard = this->keyboard_assigned_("@" + input.name);

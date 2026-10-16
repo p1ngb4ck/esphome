@@ -165,18 +165,7 @@ class PoolRingBuffer : public ring_buffer::RingBuffer {
     if (this->created_)
       vRingbufferDelete(this->handle_());
   }
-  static std::shared_ptr<ring_buffer::RingBuffer> create(uint8_t *storage, size_t len) {
-    if (storage == nullptr)
-      return nullptr;
-    RAMUniquePtr<PoolRingBuffer> rb =
-        RAMAllocator<PoolRingBuffer>(RAMAllocator<PoolRingBuffer>::ALLOC_EXTERNAL).make_unique();
-    if (!rb)
-      return nullptr;
-    if (xRingbufferCreateStatic(len, RINGBUF_TYPE_BYTEBUF, storage, &rb->structure_) != rb->handle_())
-      return nullptr;
-    rb->created_ = true;
-    return std::shared_ptr<ring_buffer::RingBuffer>(rb.release(), RAMDeleter<PoolRingBuffer>());
-  }
+  static std::shared_ptr<ring_buffer::RingBuffer> create(uint8_t *storage, size_t len);
 
  protected:
   bool created_{false};
@@ -282,6 +271,11 @@ template<class T, class U> bool operator!=(const PsramAllocator<T> & /*a*/, cons
 }
 using PsramString = std::basic_string<char, std::char_traits<char>, PsramAllocator<char>>;
 template<class T> using PsramVector = std::vector<T, PsramAllocator<T>>;
+/// An object of the player's in PSRAM only; empty when PSRAM has no room for it.
+template<class T> using PsramPtr = RAMUniquePtr<T>;
+template<class T, class... Args> PsramPtr<T> psram_make(Args &&...args) {
+  return RAMAllocator<T>(RAMAllocator<T>::ALLOC_EXTERNAL).make_unique(std::forward<Args>(args)...);
+}
 
 struct ImageEntry {
   PsramString path;
@@ -601,7 +595,7 @@ class SimpleVideoPlayer : public Component
   const std::string &keyboard_input_name(size_t index) const { return this->kbd_inputs_[index].name; }
   /// Each keyboard's standard (key "@name") and every device of theirs: those behind them now, and
   /// the USB ones seen before.
-  std::vector<KeyboardDevice> keyboard_devices() const;
+  PsramVector<KeyboardDevice> keyboard_devices() const;
   /// The layout given a device or a keyboard's standard (key as KeyboardDevice's), "" none: kept,
   /// then put on it once read. False: no such device, or no room to keep it.
   bool keyboard_assign(const std::string &key, const std::string &layout);
@@ -708,7 +702,7 @@ class SimpleVideoPlayer : public Component
     this->ctl_user_focus_style_ = focus;
   }
   void set_video_controls(std::vector<uint8_t> buttons, bool title, bool time, bool seek_bar) {
-    this->ctl_video_.buttons = std::move(buttons);
+    this->ctl_video_.buttons.assign(buttons.begin(), buttons.end());
     this->ctl_video_.title = title;
     this->ctl_video_.time = time;
     this->ctl_video_.seek_bar = seek_bar;
@@ -717,7 +711,7 @@ class SimpleVideoPlayer : public Component
 #ifdef SVP_PICTURES
   /// Over a picture in full screen (LVGL shows them): time is the picture's number in the folder.
   void set_picture_controls(std::vector<uint8_t> buttons, bool title, bool counter) {
-    this->ctl_picture_.buttons = std::move(buttons);
+    this->ctl_picture_.buttons.assign(buttons.begin(), buttons.end());
     this->ctl_picture_.title = title;
     this->ctl_picture_.time = counter;
     this->ctl_picture_.seek_bar = false;
@@ -731,7 +725,7 @@ class SimpleVideoPlayer : public Component
   /// Over the audio queue's cover art in full screen (LVGL shows them, as over a picture): time and
   /// seek bar while the track's length is known.
   void set_audio_controls(std::vector<uint8_t> buttons, bool title, bool time) {
-    this->ctl_audio_.buttons = std::move(buttons);
+    this->ctl_audio_.buttons.assign(buttons.begin(), buttons.end());
     this->ctl_audio_.title = title;
     this->ctl_audio_.time = time;
     this->ctl_audio_.seek_bar = time;
@@ -757,7 +751,7 @@ class SimpleVideoPlayer : public Component
   // overlay, swipe navigation and a thumbnail strip. Main loop only; files are read through the
   // storage worker and decoded by runtime_image. Held while a video plays.
   void set_picture_canvas(lv_obj_t *canvas) { this->pic_canvas_ = canvas; }
-  void add_picture_directory(const std::string &path) { this->pic_dirs_.push_back(path); }
+  void add_picture_directory(const std::string &path) { this->pic_dirs_.emplace_back(path.c_str()); }
   void set_slideshow_interval(uint32_t ms) { this->slideshow_interval_ms_ = ms; }
   uint32_t get_slideshow_interval() const { return this->slideshow_interval_ms_; }
   /// The picture durations offered (the Media page, the controls' slide_time), and the one nearest ms.
@@ -1350,12 +1344,12 @@ class SimpleVideoPlayer : public Component
 
   // File reader (backed by storage::StorageWorker -- handles local/network storage
   // transparently, see buffered_file_reader.h)
-  std::unique_ptr<BufferedFileReader> file_reader_;
+  PsramPtr<BufferedFileReader> file_reader_;
   uint64_t file_size_{0};
 
   // Video format and container parser
   VideoFormat video_format_{VideoFormat::UNKNOWN};
-  std::unique_ptr<AVIParser> avi_parser_;  // AVI container parser (if AVI format)
+  PsramPtr<AVIParser> avi_parser_;  // AVI container parser (if AVI format)
 
 #ifdef USE_AUDIO
   // This player commits to ONE fixed audio format for every video. sample_rate/channels/
@@ -1416,7 +1410,7 @@ class SimpleVideoPlayer : public Component
   // Verified against the real audio component source: AudioDecoder::start() already resets its
   // own per-file state (potentially_failed_count_, end_of_file_, a fresh per-codec sub-decoder)
   // on every call, so calling it again on a persistent instance is exactly what it's for.
-  std::unique_ptr<audio::AudioDecoder> audio_decoder_;                // Audio decoder (MP3/FLAC/PCM)
+  PsramPtr<audio::AudioDecoder> audio_decoder_;                       // Audio decoder (MP3/FLAC/PCM)
   std::shared_ptr<ring_buffer::RingBuffer> audio_input_ring_buffer_;  // Ring buffer for encoded audio (in PSRAM)
   std::shared_ptr<ring_buffer::RingBuffer>
       audio_decoded_ring_buffer_;                 // Ring buffer for decoded audio (in PSRAM, before conversion)
@@ -1459,7 +1453,7 @@ class SimpleVideoPlayer : public Component
 #ifdef SVP_AUDIO_FILES
   speaker::Speaker *file_speaker_{nullptr};
   // Its own reader and ring (setup()), apart from the video's whose memory the pictures may take.
-  std::unique_ptr<BufferedFileReader> audio_file_reader_;
+  PsramPtr<BufferedFileReader> audio_file_reader_;
   static constexpr size_t AUDIO_FILE_RING_SIZE = 128 * 1024;
   // Main loop only. audio_order_ is the queue's order of play (shuffled or as added), audio_pos_
   // the place in it of the track that plays or played last.
@@ -1582,7 +1576,7 @@ class SimpleVideoPlayer : public Component
     bool enabled{false};
     bool picture{false};
     bool audio{false};
-    std::vector<uint8_t> buttons;
+    PsramVector<uint8_t> buttons;
     bool title{true}, time{true}, seek_bar{true};
     Trigger<> exit_trigger;
     ControlsTarget target[CTL_BUTTON_COUNT]{};
@@ -1765,7 +1759,7 @@ class SimpleVideoPlayer : public Component
 
   bool pic_ready_{false};
   lv_obj_t *pic_canvas_{nullptr};
-  std::vector<std::string> pic_dirs_;
+  PsramVector<PsramString> pic_dirs_;
   std::string pic_dir_;                  // folder whose images_ are listed
   size_t pic_dir_index_{SIZE_MAX};       // in pic_dirs_, SIZE_MAX for another folder
   std::string pic_select_;               // shown once the folder is listed
@@ -1780,7 +1774,7 @@ class SimpleVideoPlayer : public Component
   int pic_direction_{1};        // of the last step: the next picture read ahead
   uint8_t pic_preload_tries_{0};  // neighbours of the shown picture tried (each once)
   // PNG and BMP: no hardware for them; decoded by runtime_image, scaled, and let go.
-  std::unique_ptr<runtime_image::RuntimeImage> pic_image_;
+  PsramPtr<runtime_image::RuntimeImage> pic_image_;
   // Decoding runs on the picture task; the job's file and target are its until pic_decoded_.
   TaskHandle_t pic_task_{nullptr};
   PictureJob pic_job_;
@@ -1844,11 +1838,11 @@ class SimpleVideoPlayer : public Component
   uint32_t thumb_auto_hide_ms_{10000};
   bool thumbs_visible_{false};
   uint32_t thumb_touched_ms_{0};
-  std::vector<ThumbSlot> thumb_slots_;
+  PsramVector<ThumbSlot> thumb_slots_;
   uint8_t *thumb_buffer_{nullptr};  // PSRAM, all slots
   uint32_t thumb_stride_{0};
   size_t thumb_window_{0};               // image shown by slot 0
-  std::vector<size_t> thumb_queue_;      // slots to load, first first
+  PsramVector<size_t> thumb_queue_;      // slots to load, first first
   int32_t thumb_scroll_pos_{0};
   uint32_t thumb_scroll_ms_{0};
   float thumb_scroll_velocity_{0.0f};

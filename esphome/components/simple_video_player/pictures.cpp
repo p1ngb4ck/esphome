@@ -88,8 +88,10 @@ void SimpleVideoPlayer::pictures_setup_() {
   this->pic_remote_h_ = dh;
 #endif
 #if defined(USE_RUNTIME_IMAGE_PNG) || defined(USE_RUNTIME_IMAGE_BMP)
-  this->pic_image_ = std::make_unique<runtime_image::RuntimeImage>(runtime_image::AUTO, image::IMAGE_TYPE_RGB565,
-                                                                   image::TRANSPARENCY_OPAQUE);
+  this->pic_image_ = psram_make<runtime_image::RuntimeImage>(runtime_image::AUTO, image::IMAGE_TYPE_RGB565,
+                                                             image::TRANSPARENCY_OPAQUE);
+  if (!this->pic_image_)
+    ESP_LOGE(TAG, "No PSRAM for the PNG/BMP decoder");
 #endif
   if (this->thumbs_enabled_ && this->thumb_container_ != nullptr && this->thumb_count_ > 0)
     this->setup_thumbnails_();
@@ -121,7 +123,7 @@ void SimpleVideoPlayer::pictures_setup_() {
 
   if (!this->pic_dirs_.empty()) {
     this->pic_dir_index_ = 0;
-    this->pic_dir_ = this->pic_dirs_[0];
+    this->pic_dir_ = this->pic_dirs_[0].c_str();
     this->pic_list_pending_ = true;
   }
   this->pic_ready_ = true;
@@ -258,7 +260,7 @@ bool SimpleVideoPlayer::open_directory(const std::string &path) {
   this->pic_dir_ = dir;
   this->pic_dir_index_ = SIZE_MAX;
   for (size_t i = 0; i < this->pic_dirs_.size(); i++) {
-    std::string configured = this->pic_dirs_[i];
+    std::string configured = this->pic_dirs_[i].c_str();
     while (configured.size() > 1 && configured.back() == '/')
       configured.pop_back();
     if (configured == dir)
@@ -274,7 +276,7 @@ bool SimpleVideoPlayer::set_current_directory(size_t index) {
     ESP_LOGW(TAG, "No picture directory %u", static_cast<unsigned>(index));
     return false;
   }
-  return this->open_directory(this->pic_dirs_[index]);
+  return this->open_directory(this->pic_dirs_[index].c_str());
 }
 
 void SimpleVideoPlayer::refresh_images() {

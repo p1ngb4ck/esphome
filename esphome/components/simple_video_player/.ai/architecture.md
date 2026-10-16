@@ -190,6 +190,9 @@ Reclaim/handover (as coded):
   then `release_desktop_`. Called by `picture_alloc_` P:494 and `cover_alloc_` C:59.
 - `desktop_buffers_take_` (SP:1528): pictures/cover reclaim + `media_release_req_`, then cursors.
 
+Objects of svp's own in PSRAM only (`psram_make`): file readers, AVI parser, audio decoder, PNG/BMP
+decoder, the sound rings' objects (with their shared_ptr block); lists in `PsramVector` (controls
+buttons, picture folders, thumbnail slots/queue, keyboard devices).
 Outside the pool (svp): `spice_scratch_` 20 KiB internal; per USB slot 4 KiB internal `stage_` +
 bookkeeping; task stacks 48 KiB PSRAM; PsramVector/PsramString lists (playlist, images, queue,
 HA items); `channel_http_` response buffer PSRAM 16-256 KiB per request; AudioDecoder internals;
