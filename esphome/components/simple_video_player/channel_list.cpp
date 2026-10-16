@@ -27,6 +27,8 @@ static constexpr size_t CHANNEL_MAX = 300;
 static constexpr size_t HA_ITEMS_MAX = 500;  // as the relay sends at most
 static constexpr size_t CHANNEL_RESPONSE_MAX = 256 * 1024;
 static constexpr uint32_t RELAY_SLOW_TIMEOUT_MS = 15000;  // /desktop: once the desktop is up; /image: once fitted
+// /options keyboard_install: answered once svp_relay has downloaded and made the keyboard layouts.
+static constexpr uint32_t RELAY_INSTALL_TIMEOUT_MS = 180000;
 
 bool SimpleVideoPlayer::setup_channel_list_() {
   this->channel_q_ = xQueueCreate(8, sizeof(ChannelCmd));
@@ -498,14 +500,21 @@ void SimpleVideoPlayer::options_set_task_() {
   xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
   sets.swap(this->opt_sets_);
   xSemaphoreGive(this->channel_lock_);
+  bool installed = false;
   for (const auto &set : sets) {
     const std::string payload = json::build_json([&](JsonObject root) {
       root["port"] = this->stream_port_;
       root["key"] = set.first.c_str();
       root["value"] = set.second.c_str();
     });
-    this->channel_http_("/options", payload.c_str(), nullptr, nullptr);
+    const bool install = set.first == "keyboard_install";
+    this->channel_http_("/options", payload.c_str(), nullptr, nullptr, nullptr, 0,
+                        install ? RELAY_INSTALL_TIMEOUT_MS : 0);
+    installed |= install;
   }
+  // What the installation came to (keyboard_status), shown once it is done.
+  if (installed)
+    this->options_get_task_();
 }
 
 #ifdef SVP_SPICE

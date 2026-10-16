@@ -57,7 +57,7 @@ u32 = frame_id (low 10 bits) | payload size (high 22 bits).
 | GET `/browse?type=audio\|video\|image[&id=]` | – | `{title, path, parent, items:[{title,id,dir}] (<=500), total}` |
 | GET `/image?id&w&h&max` | w,h = display/picture size, max = file capacity | baseline JPEG, downscaled only |
 | GET `/cover?port&w&h&max` | canvas size, max 512 KiB | JPEG fitted up or down; empty = none |
-| GET/POST `/options?port` | `{port, key, value}` | panel's relay options |
+| GET/POST `/options?port` | `{port, key, value}` | panel's relay options; also the relay's keyboard layout sources `keyboard_source`, `keyboard_keysyms` and `keyboard_status`; POST `keyboard_install` answers once the relay has installed them (panel: 180 s timeout, then the options again) |
 | POST `/desktop` | `{port, action:start, kind, host, server_port, password, connection_id}` / `{action:stop}` | answered once the desktop is up |
 | GET `/api/svp_relay/audio/<key>.<fmt>` | (media player, URL via `svp_play_audio`) | ffmpeg audio stream |
 | GET `/keyboard[?layout=<name>]` | – / an XKB name (`de(nodeadkeys)`) | `name\tdescription` lines (<=32 KiB) / the layout's `.kbl` (hid::parse_layout, <=8 KiB); files from ESPHome's `script/export_hid_layouts.py` in the relay's `keyboard/` |
