@@ -892,6 +892,11 @@ class SimpleVideoPlayer : public Component
   struct StreamFrame;
   /// Draw task: a frame's picture into target as the output takes it (JPEG decoded, bitmap converted).
   bool stream_render_(StreamFrame *frame, jpeg_decode_cfg_t *cfg, uint8_t *target, size_t target_len);
+#ifdef SVP_DSI_OUTPUT
+  /// Draw task: a whole frame for the display goes into the scanout buffer not shown, flipped to at
+  /// VSYNC; nullptr: into the shown one (no second buffer, part of a frame, the last flip pending).
+  uint8_t *stream_flip_target_(const StreamFrame *frame, size_t *len);
+#endif
   /// Wi-Fi roaming scans and power saving held off (want) or allowed again; counted, each released once.
   static void hold_wifi_(bool &held, bool want);
   void stream_send_pending_(int client);

@@ -197,6 +197,13 @@ void LvglComponent::dump_config() {
 void LvglComponent::set_paused(bool paused, bool show_snow) {
   this->paused_ = paused;
   this->show_snow_ = show_snow;
+#ifdef USE_ESP32
+  // Whoever drew meanwhile may have flipped the scanout buffers: the one shown now is the front.
+  if (!paused && this->scanout_[0] != nullptr) {
+    display::ColorBitness bitness{};
+    this->scanout_back_ = this->displays_[0]->get_draw_buffer(&bitness) == this->scanout_[0] ? 1 : 0;
+  }
+#endif
   if (!paused && lv_screen_active() != nullptr) {
     lv_display_trigger_activity(this->disp_);  // resets the inactivity time
     lv_obj_invalidate(lv_screen_active());

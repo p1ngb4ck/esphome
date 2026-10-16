@@ -1056,10 +1056,15 @@ void SimpleVideoPlayer::stream_draw_loop_() {
     // A playing file holds output_lock_ for its whole session: its picture wins.
     if (output_ok && xSemaphoreTake(this->output_lock_, 0) == pdTRUE) {
       // Read under the lock: an output given back to the pool goes under it too.
+      [[maybe_unused]] uint8_t *flip_to = nullptr;
 #ifdef SVP_DSI_OUTPUT
       if (frame->direct) {
-        target = this->decode_target_;
-        target_len = this->decode_target_len_;
+        flip_to = this->stream_flip_target_(frame, &target_len);
+        target = flip_to;
+        if (flip_to == nullptr) {
+          target = this->decode_target_;
+          target_len = this->decode_target_len_;
+        }
       }
 #endif
 #ifdef SVP_CANVAS_OUTPUT
@@ -1076,15 +1081,26 @@ void SimpleVideoPlayer::stream_draw_loop_() {
         const uint16_t padded_w = (frame->w + 15) & ~15;
 #ifdef SVP_SPICE
         // The desktop's cursor off what is drawn over it first, and on again after.
+        // A flipped frame has no cursor yet: it goes onto it after the flip.
         const bool spice = this->spice_on_.load(std::memory_order_acquire);
-        const bool cursor_off = spice && this->spice_cursor_over_(frame->x, frame->y, frame->w, frame->h);
-        if (cursor_off)
-          this->spice_cursor_hide_();
+        const bool cursor_off =
+            spice && (flip_to != nullptr ? this->spice_cursor_drawn_
+                                         : this->spice_cursor_over_(frame->x, frame->y, frame->w, frame->h));
+        if (cursor_off) {
+          if (flip_to != nullptr) {
+            this->spice_cursor_drawn_ = false;
+          } else {
+            this->spice_cursor_hide_();
+          }
+        }
 #endif
 #ifdef SVP_DSI_OUTPUT
-        if (frame->direct)
+        if (flip_to != nullptr) {
+          this->dsi_->present_scanout_buffer(flip_to);
+        } else if (frame->direct) {
           this->dsi_->draw_pixels_at(frame->x, frame->y, frame->w, frame->h, target, display::COLOR_ORDER_RGB, bitness,
                                      false, 0, 0, padded_w - frame->w);
+        }
 #endif
 #ifdef SVP_CANVAS_OUTPUT
         if (!frame->direct)
@@ -1107,6 +1123,24 @@ void SimpleVideoPlayer::stream_draw_loop_() {
     xQueueSend(this->stream_empty_q_, &frame, 0);
   }
 }
+
+#ifdef SVP_DSI_OUTPUT
+uint8_t *SimpleVideoPlayer::stream_flip_target_(const StreamFrame *frame, size_t *len) {
+  // The decoder writes rows padded to whole MCUs: only a frame of whole MCUs lands as the panel's rows.
+  if (frame->x != 0 || frame->y != 0 || frame->w != this->dsi_out_w_ || frame->h != this->dsi_out_h_ ||
+      frame->w % 16 != 0 || frame->h % 16 != 0)
+    return nullptr;
+  void *fbs[2]{};
+  display::ColorBitness bitness{};
+  if (this->dsi_->get_scanout_buffers(fbs, 2, &bitness) != 2 ||
+      bitness != (this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565) ||
+      !this->dsi_->scanout_flipped())
+    return nullptr;
+  const uint8_t *shown = this->dsi_->get_draw_buffer(&bitness);
+  *len = static_cast<size_t>(frame->w) * frame->h * this->dsi_fb_bpp_;
+  return static_cast<uint8_t *>(fbs[0] == shown ? fbs[1] : fbs[0]);
+}
+#endif
 
 bool SimpleVideoPlayer::stream_render_(StreamFrame *frame, jpeg_decode_cfg_t *cfg, uint8_t *target, size_t target_len) {
   uint32_t out_size = 0;
