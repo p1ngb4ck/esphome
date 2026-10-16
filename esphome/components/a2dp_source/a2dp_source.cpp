@@ -82,7 +82,22 @@ bool A2DPSource::gap_fallback_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_
 }
 
 bool A2DPSource::gap_handler_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void *arg) {
-  return static_cast<A2DPSource *>(arg)->source_.handle_gap_event(event, param);
+  auto *self = static_cast<A2DPSource *>(arg);
+#ifdef USE_BT_PAIRING
+  if (event == ESP_BT_GAP_READ_REMOTE_NAME_EVT && self->name_wanted_.load() &&
+      memcmp(param->read_rmt_name.bda, self->name_addr_, ESP_BD_ADDR_LEN) == 0) {
+    self->name_buf_[0] = '\0';
+    if (param->read_rmt_name.stat == ESP_BT_STATUS_SUCCESS) {
+      strncpy(self->name_buf_, reinterpret_cast<const char *>(param->read_rmt_name.rmt_name),
+              sizeof(self->name_buf_) - 1);
+      self->name_buf_[sizeof(self->name_buf_) - 1] = '\0';
+    }
+    self->name_wanted_.store(false);
+    self->name_ready_.store(true);
+    return false;
+  }
+#endif
+  return self->source_.handle_gap_event(event, param);
 }
 
 void A2DPSource::authentication_complete_(esp_bt_status_t status) {
@@ -569,11 +584,39 @@ void A2DPSource::loop() {
         record.device_class = this->picked_.device_class;
         strncpy(record.name, this->picked_.name.c_str(), sizeof(record.name) - 1);
         this->pairing_->store(record);
+      } else {
+        // The stored device, known to Bluedroid and kept here, but missing from the pairing
+        // database (stored before it held it): kept there too, under the name it reports.
+        uint8_t *peer = *this->source_.get_peer_address();
+        if (memcmp(peer, *this->source_.get_last_peer_address(), ESP_BD_ADDR_LEN) == 0 &&
+            this->pairing_->find_address(peer) == nullptr && !this->name_wanted_.load()) {
+          memcpy(this->name_addr_, peer, ESP_BD_ADDR_LEN);
+          this->name_wanted_.store(true);
+          if (esp_bt_gap_read_remote_name(this->name_addr_) != ESP_OK) {
+            this->name_buf_[0] = '\0';
+            this->name_wanted_.store(false);
+            this->name_ready_.store(true);
+          }
+        }
       }
       this->pairing_->on_connection(this, true);
     }
 #endif
   }
+#ifdef USE_BT_PAIRING
+  if (this->pairing_ != nullptr && this->name_ready_.exchange(false)) {
+    bt_pairing::PairingRecord record{};
+    memcpy(record.address, this->name_addr_, sizeof(record.address));
+    record.transport = static_cast<uint8_t>(bt_pairing::Transport::CLASSIC);
+    record.slot = this->slot_;
+    memcpy(record.name, this->name_buf_, sizeof(record.name));
+    record.name[sizeof(record.name) - 1] = '\0';
+    if (this->pairing_->store(record)) {
+      ESP_LOGI(TAG, "Kept %s '%s' in the paired devices", this->source_.to_str(this->name_addr_), record.name);
+      this->pairing_->on_connection(this, this->connected_.load());
+    }
+  }
+#endif
   if (this->disconnect_pending_.exchange(false)) {
     ESP_LOGI(TAG, "Disconnected");
     for (auto *trigger : this->disconnected_triggers_) {
