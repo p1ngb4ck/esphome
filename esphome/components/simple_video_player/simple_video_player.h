@@ -2161,7 +2161,21 @@ class SimpleVideoPlayer : public Component
   bool kbd_list_busy_{false};
   KbdSlot kbd_slots_[KBD_SLOTS]{};
   KbdAssignTable *kbd_assign_{nullptr};
-  ESPPreferenceObject kbd_pref_;
+  ESPPreferenceObject kbd_pref_;  // the table's place before keyboards.bin, taken over from there once
+  // The table kept in the configured directory (keyboards.bin) through the storage worker: read
+  // once, written anew (a .tmp moved over it, from its copy in the pool) after each change.
+  static constexpr const char *KBD_TABLE_FILE = "/keyboards.bin";
+  void keyboard_table_load_();
+  void keyboard_table_read_();
+  void keyboard_table_loaded_();
+  void keyboard_table_write_();
+  void keyboard_table_failed_(const char *what, storage::StorageError err);
+  KbdAssignTable *kbd_assign_copy_{nullptr};
+  storage::StreamHandle kbd_table_handle_{};
+  storage::PathStorage *kbd_table_storage_{nullptr};
+  std::string kbd_table_rel_, kbd_table_tmp_;
+  size_t kbd_table_len_{0}, kbd_table_got_{0};
+  bool kbd_table_loaded_{false}, kbd_table_busy_{false}, kbd_table_dirty_{false};
   PsramVector<PsramString> kbd_downloads_;
   int8_t kbd_loading_{-1};      // the slot being read into
   bool kbd_downloading_{false};  // ... for a download (kept, not put on a keyboard)
