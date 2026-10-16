@@ -157,21 +157,25 @@ class KeyboardDeviceSelect : public select::Select {
 #endif
 
 #ifdef USE_AUDIO
-/// ring_buffer::RingBuffer in the player's pool memory (create() allocates its own).
+/// ring_buffer::RingBuffer in the player's pool memory (create() allocates its own); the object with
+/// its ring structure in PSRAM only.
 class PoolRingBuffer : public ring_buffer::RingBuffer {
  public:
   ~PoolRingBuffer() {
     if (this->created_)
       vRingbufferDelete(this->handle_());
   }
-  static std::unique_ptr<PoolRingBuffer> create(uint8_t *storage, size_t len) {
+  static std::shared_ptr<ring_buffer::RingBuffer> create(uint8_t *storage, size_t len) {
     if (storage == nullptr)
       return nullptr;
-    auto rb = std::make_unique<PoolRingBuffer>();
+    RAMUniquePtr<PoolRingBuffer> rb =
+        RAMAllocator<PoolRingBuffer>(RAMAllocator<PoolRingBuffer>::ALLOC_EXTERNAL).make_unique();
+    if (!rb)
+      return nullptr;
     if (xRingbufferCreateStatic(len, RINGBUF_TYPE_BYTEBUF, storage, &rb->structure_) != rb->handle_())
       return nullptr;
     rb->created_ = true;
-    return rb;
+    return std::shared_ptr<ring_buffer::RingBuffer>(rb.release(), RAMDeleter<PoolRingBuffer>());
   }
 
  protected:
