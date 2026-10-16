@@ -115,7 +115,10 @@ void BtPersistence::start_open_() {
           this->fail_("the file cannot be read");
         }
       });
-  if (err != StorageError::STORAGE_ERROR_OK) {
+  if (err == StorageError::STORAGE_ERROR_NOT_READY) {
+    // Every stream in use (others read at boot too): tried again from loop().
+    this->state_.store(State::WAITING, std::memory_order_release);
+  } else if (err != StorageError::STORAGE_ERROR_OK) {
     ESP_LOGE(TAG, "Opening %s: %s", this->path_.c_str(), storage::error_to_string(err));
     this->fail_("the storage worker refused the read");
   }
@@ -226,8 +229,11 @@ void BtPersistence::create_() {
           this->set_ready_();
         });
       });
-  if (err != StorageError::STORAGE_ERROR_OK)
+  if (err == StorageError::STORAGE_ERROR_NOT_READY) {
+    this->state_.store(State::WAITING, std::memory_order_release);
+  } else if (err != StorageError::STORAGE_ERROR_OK) {
     this->fail_("the storage worker refused the write");
+  }
 }
 
 void BtPersistence::set_ready_() {
