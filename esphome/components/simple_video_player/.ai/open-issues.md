@@ -41,7 +41,7 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 | B8 | `index_buf_` is allocated for network AVI and raw MJPEG, which use no index | CODE |
 | B9 | Controls: 3 × bar snapshot reserved (CT:331-342); check need | CODE |
 | B10 | Allocations past the pool: `channel_http_` response buffer (PSRAM realloc up to 256 KiB per request, CL:578); PNG/BMP decode via RAMAllocator; `PsramPool::pieces_` grows on the internal heap past 32 pieces | CODE |
-| B11 | `wait_alloc_answer_` expiry: after the 2 s timeout `pool_reclaim_req_`/`output_release_req_` stay set; the main loop frees later for nobody (H:2110-2117) | CODE |
+| B11 | (partly changed 2026-10-16: an output request and the desktop's media request are taken back after the wait, the main loop clears only the output request it served; the pictures' reclaim request is not, two tasks may share it) `wait_alloc_answer_` expiry: after the 2 s timeout `pool_reclaim_req_`/`output_release_req_` stay set; the main loop frees later for nobody (H:2110-2117) | CODE |
 
 ## C. Rule violations (speakers, LVGL, hot path)
 
@@ -58,9 +58,9 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 
 | # | Issue | Status |
 |---|---|---|
-| D1 | `alloc_waiter_` is one slot: two requesters (playback, draw, spice) overwrite each other; one waits the full 2 s | CODE |
+| D1 | (changed 2026-10-16: one waiter slot per task (`alloc_waiters_`), all woken; awaiting Olli's test) `alloc_waiter_` is one slot: two requesters (playback, draw, spice) overwrite each other; one waits the full 2 s | CODE |
 | D2 | Reclaim waits (2 s) are shorter than an HA picture fetch (15 s); a video start during one can fail with BUFFER_ALLOCATION_FAILED | CODE |
-| D3 | `media_lock_` held during the 2 s waits (up to 3 allocations = 6 s) | CODE |
+| D3 | (changed 2026-10-16: `acquire_session_buffers_`/`output_alloc_` take pieces without `media_lock_` and set them under it; awaiting Olli's test) `media_lock_` held during the 2 s waits (up to 3 allocations = 6 s) | CODE |
 | D4 | `dev_lock_` held across blocking socket sends while the main loop waits portMAX on it (U:592-609, 1190-1205 vs 307, 331) | CODE |
 | D5 | `stream_play_audio_` reachable from net task and spice task without a lock | PLAUSIBLE. Analysed 2026-10-16: not concurrent as things are: `desktop_take_panel_()` waits until a stream sender has let go before the session's channels open, and during a desktop session only svp_relay's caster gets in (stream_net_task_), which sends pictures, no sound (relay `desktop/caster.py`); the SPICE sound comes on the playback channel only. The exclusion rests on the relay's behaviour, not on a lock. Not changed |
 | D6 | (changed 2026-10-16: `audio_enabled_` and `loop_` are `std::atomic<bool>`; `repeat_` (enum, main loop + controls) and `pic_read_` left) Plain fields shared across tasks without atomics: `audio_enabled_`, `loop_`, `repeat_`, `pic_read_` fields | CODE |

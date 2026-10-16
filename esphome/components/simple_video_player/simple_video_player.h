@@ -1288,6 +1288,8 @@ class SimpleVideoPlayer : public Component
   uint8_t *ring_buf_{nullptr};                 // the read-ahead ring (pool)
   uint32_t *index_buf_{nullptr};               // a file's index (pool), kept with the ring
   std::atomic<bool> pool_reclaim_req_{false};  // media side waits for the pictures' buffers
+  /// Any task but the main loop: the pictures' buffers back to the pool, waited for at most 2 s.
+  void reclaim_pictures_();
   enum : uint8_t { RELEASE_CANVAS = 1, RELEASE_DIRECT = 2 };
   std::atomic<uint8_t> output_release_req_{0};  // an output waits for the other one's memory
 #ifdef SVP_STREAM
@@ -2364,21 +2366,34 @@ class SimpleVideoPlayer : public Component
   }
   Waiter reader_wait_;
   Waiter audio_wait_;
-  // A task waiting in media_alloc_()/output_alloc_() for the main loop to free pool memory.
-  std::atomic<TaskHandle_t> alloc_waiter_{nullptr};
+  // The tasks waiting in media_alloc_()/output_alloc_()/desktop_buffers_take_() for the main loop to
+  // free pool memory (playback, stream draw, spice): each one is woken.
+  static constexpr size_t ALLOC_WAITERS = 4;
+  std::atomic<TaskHandle_t> alloc_waiters_[ALLOC_WAITERS]{};
   /// The requesting task blocks until the main loop has answered (done() true), at most 2 s.
   template<typename F> void wait_alloc_answer_(F done) {
-    this->alloc_waiter_.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
+    const TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    std::atomic<TaskHandle_t> *slot = nullptr;
+    for (auto &waiter : this->alloc_waiters_) {
+      TaskHandle_t none = nullptr;
+      if (waiter.compare_exchange_strong(none, self, std::memory_order_acq_rel)) {
+        slot = &waiter;
+        break;
+      }
+    }
     App.wake_loop_threadsafe();
     const uint32_t start = millis();
-    while (!done() && millis() - start < 2000)
-      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000));
-    this->alloc_waiter_.store(nullptr, std::memory_order_release);
+    for (uint32_t waited = 0; !done() && waited < 2000; waited = millis() - start)
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000 - waited));
+    if (slot != nullptr)
+      slot->store(nullptr, std::memory_order_release);
   }
   /// Main loop: a pool request answered.
   void answer_alloc_() {
-    if (TaskHandle_t task = this->alloc_waiter_.load(std::memory_order_acquire))
-      xTaskNotifyGive(task);
+    for (auto &waiter : this->alloc_waiters_) {
+      if (TaskHandle_t task = waiter.load(std::memory_order_acquire))
+        xTaskNotifyGive(task);
+    }
   }
 
   // Frame pacing -- wall clock is the master timeline. Each frame's target instant is

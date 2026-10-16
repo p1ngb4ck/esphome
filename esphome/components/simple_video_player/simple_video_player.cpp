@@ -2176,13 +2176,17 @@ bool SimpleVideoPlayer::plan_pool_() {
   return true;
 }
 
+void SimpleVideoPlayer::reclaim_pictures_() {
+  this->pool_reclaim_req_.store(true, std::memory_order_release);
+  this->wait_alloc_answer_([this]() { return !this->pool_reclaim_req_.load(std::memory_order_acquire); });
+}
+
 uint8_t *SimpleVideoPlayer::media_alloc_(size_t size) {
   uint8_t *piece = this->pool_.alloc(size);
 #ifdef SVP_PICTURES
   if (piece == nullptr && this->pic_ready_) {
     // The pictures' buffers, handed back by the main loop once nothing of theirs is in flight.
-    this->pool_reclaim_req_.store(true, std::memory_order_release);
-    this->wait_alloc_answer_([this]() { return !this->pool_reclaim_req_.load(std::memory_order_acquire); });
+    this->reclaim_pictures_();
     piece = this->pool_.alloc(size);
   }
 #endif
@@ -2202,22 +2206,29 @@ bool SimpleVideoPlayer::acquire_session_buffers_() {
   bool missing = this->ring_buf_ == nullptr || this->index_buf_ == nullptr;
   for (auto &slot : this->frame_slots_)
     missing = missing || slot.data == nullptr;
-  if (missing && this->pic_ready_) {
-    this->pool_reclaim_req_.store(true, std::memory_order_release);
-    this->wait_alloc_answer_([this]() { return !this->pool_reclaim_req_.load(std::memory_order_acquire); });
-  }
+  if (missing && this->pic_ready_)
+    this->reclaim_pictures_();
 #endif
+  // Taken without media_lock_ (media_alloc_() may wait for the main loop, which needs the lock to
+  // give an output back), set under it. Nothing else sets these while this session starts.
+  uint8_t *slots[FRAME_SLOT_COUNT]{};
+  for (size_t i = 0; i < FRAME_SLOT_COUNT; i++) {
+    if (this->frame_slots_[i].data == nullptr)
+      slots[i] = this->media_alloc_(this->frame_bytes_);
+  }
+  uint8_t *index = this->index_buf_ == nullptr ? this->media_alloc_(this->index_reserve_) : nullptr;
+  uint8_t *ring = this->ring_buf_ == nullptr ? this->media_alloc_(this->ring_size_) : nullptr;
   xSemaphoreTake(this->media_lock_, portMAX_DELAY);
-  for (auto &slot : this->frame_slots_) {
-    if (slot.data == nullptr) {
-      slot.data = this->media_alloc_(this->frame_bytes_);
-      slot.capacity = slot.data != nullptr ? this->frame_bytes_ : 0;
+  for (size_t i = 0; i < FRAME_SLOT_COUNT; i++) {
+    if (slots[i] != nullptr) {
+      this->frame_slots_[i].data = slots[i];
+      this->frame_slots_[i].capacity = this->frame_bytes_;
     }
   }
-  if (this->index_buf_ == nullptr)
-    this->index_buf_ = reinterpret_cast<uint32_t *>(this->media_alloc_(this->index_reserve_));
-  if (this->ring_buf_ == nullptr)
-    this->ring_buf_ = this->media_alloc_(this->ring_size_);
+  if (index != nullptr)
+    this->index_buf_ = reinterpret_cast<uint32_t *>(index);
+  if (ring != nullptr)
+    this->ring_buf_ = ring;
   bool ok = this->ring_buf_ != nullptr && this->index_buf_ != nullptr;
   for (auto &slot : this->frame_slots_)
     ok = ok && slot.data != nullptr;
@@ -2245,10 +2256,10 @@ uint8_t *SimpleVideoPlayer::output_alloc_(size_t size, uint8_t other) {
 #endif
   this->output_release_req_.store(other, std::memory_order_release);
   this->wait_alloc_answer_([this]() { return this->output_release_req_.load(std::memory_order_acquire) == 0; });
-  xSemaphoreTake(this->media_lock_, portMAX_DELAY);
-  piece = this->media_alloc_(size);
-  xSemaphoreGive(this->media_lock_);
-  return piece;
+  // Not answered in time: the request is taken back (the main loop frees nothing for nobody).
+  uint8_t asked = other;
+  this->output_release_req_.compare_exchange_strong(asked, 0, std::memory_order_acq_rel);
+  return this->media_alloc_(size);  // without media_lock_: it may wait for the main loop
 }
 
 #ifdef SVP_DSI_OUTPUT
@@ -2319,7 +2330,7 @@ bool SimpleVideoPlayer::ensure_canvas_outputs_() {
 
 // Main loop. Only when nothing draws into the output given back: the stream draws under output_lock_.
 void SimpleVideoPlayer::handle_output_release_() {
-  const uint8_t which = this->output_release_req_.load(std::memory_order_acquire);
+  uint8_t which = this->output_release_req_.load(std::memory_order_acquire);
   if (which == 0)
     return;
 #ifdef SVP_STREAM
@@ -2327,7 +2338,7 @@ void SimpleVideoPlayer::handle_output_release_() {
   // without (its alloc fails, the frame is dropped).
   if (this->output_release_stream_.load(std::memory_order_relaxed) &&
       (this->picture_session_busy_() || this->start_pending_.load(std::memory_order_acquire))) {
-    this->output_release_req_.store(0, std::memory_order_release);
+    this->output_release_req_.compare_exchange_strong(which, 0, std::memory_order_acq_rel);  // a newer one stays
     this->answer_alloc_();
     return;
   }
@@ -2361,7 +2372,7 @@ void SimpleVideoPlayer::handle_output_release_() {
     }
 #endif
     xSemaphoreGive(this->media_lock_);
-    this->output_release_req_.store(0, std::memory_order_release);
+    this->output_release_req_.compare_exchange_strong(which, 0, std::memory_order_acq_rel);  // a newer one stays
     this->answer_alloc_();
   }
 #ifdef SVP_STREAM

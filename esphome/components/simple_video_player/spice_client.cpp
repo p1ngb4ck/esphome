@@ -1555,13 +1555,12 @@ bool SimpleVideoPlayer::desktop_buffers_take_() {
   // Media and the desktop exclude each other: what pictures and a video keep goes back to the pool
   // first (main loop), for the session's cursors now and its USB transfers later.
 #ifdef SVP_PICTURES
-  if (this->pic_ready_) {
-    this->pool_reclaim_req_.store(true, std::memory_order_release);
-    this->wait_alloc_answer_([this]() { return !this->pool_reclaim_req_.load(std::memory_order_acquire); });
-  }
+  if (this->pic_ready_)
+    this->reclaim_pictures_();
 #endif
   this->media_release_req_.store(true, std::memory_order_release);
   this->wait_alloc_answer_([this]() { return !this->media_release_req_.load(std::memory_order_acquire); });
+  this->media_release_req_.store(false, std::memory_order_release);  // not answered in time: taken back
   xSemaphoreTake(this->desktop_lock_, portMAX_DELAY);
   if (this->spice_cursor_ == nullptr)
     this->spice_cursor_ = reinterpret_cast<SpiceCursor *>(this->desktop_alloc(sizeof(SpiceCursor)));
