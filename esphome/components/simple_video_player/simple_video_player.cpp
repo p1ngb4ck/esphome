@@ -190,9 +190,8 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // Canvas buffer was already attached and blanked earlier in this same setup() -- see that
-  // block's comment for why setup() itself is a safe, always-built point to do it (verified
-  // against ESPHome's own codegen), not something that needs to wait for play().
+  // The canvas' buffers are not made here: they come from the pool when a session or a stream
+  // needs them (ensure_canvas_outputs_()).
 
 #ifdef SVP_STREAM
   if (this->stream_port_ != 0 && !this->setup_stream_())
@@ -1071,7 +1070,7 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #endif
 
-  // Allocate output (decoded RGB888) buffers based on video size
+  // The output taken above (canvas pair or the display's decode target): does this video fit it?
   if (!this->allocate_buffers_(width, height)) {
     ESP_LOGE(TAG, "Failed to allocate buffers");
     this->set_error_(PlaybackError::BUFFER_ALLOCATION_FAILED);
@@ -1381,7 +1380,7 @@ void SimpleVideoPlayer::playback_loop_() {
     }
 
     // decode_frame_() consumes slot->data (compressed) into the decode target. Once it returns, the
-    // compressed bytes are no longer needed -- the async PPA rotate reads the decoded buffer, not
+    // compressed bytes are no longer needed -- what is shown is drawn from the decoded buffer, not
     // slot->data -- so the slot is returned to the reader right after.
 #ifdef SVP_STREAM_STATS
     const int64_t decode_start = esp_timer_get_time();
@@ -1435,8 +1434,9 @@ void SimpleVideoPlayer::playback_loop_() {
 
   // Release any in-flight BufferedFileReader wait before close_file_() tears the reader down.
   this->close_file_();
-  // Note: Buffers are NOT freed here - they persist for reuse in next playback
-  // Buffers are only freed in destructor when component is destroyed
+  // The session's buffers are not freed here: they stay for the next playback, until a reclaim
+  // (release_media_()) gives them back to the pool; an output also when the other one needs its
+  // room (handle_output_release_()).
 
 #ifdef USE_AUDIO
   this->end_session_audio_();
@@ -2009,7 +2009,7 @@ bool SimpleVideoPlayer::allocate_buffers_(uint32_t video_width, uint32_t video_h
     return true;
   }
 #endif
-  // output_buffers_ are allocated once in setup() at the max resolution. Just verify this file fits.
+  // output_buffers_ are the canvas' size (ensure_canvas_outputs_(), before this). Just verify this file fits.
   uint32_t aligned_width = ALIGN_UP(video_width, 16);
   uint32_t aligned_height = ALIGN_UP(video_height, 16);
   size_t required = static_cast<size_t>(aligned_width) * aligned_height * 3;  // RGB888
@@ -2572,7 +2572,7 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   // audio_decoder_ itself is persistent now too (allocated once in setup(), see there) --
   // add_source()/add_sink()/start() are all safe to call again on the same instance for a new
   // file (verified against the real audio component source: start() resets its own per-file
-  // state every call). Only compressed formats (MP3/FLAC) use it at all; PCM mode leaves it null.
+  // state every call). Only compressed formats (MP3/FLAC) use it at all; PCM mode leaves it unused.
   if (use_decoder) {
     // Add source ring buffer
     std::weak_ptr<ring_buffer::RingBuffer> source_weak = this->audio_input_ring_buffer_;

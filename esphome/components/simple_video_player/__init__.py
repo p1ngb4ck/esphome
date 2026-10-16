@@ -509,7 +509,8 @@ def _picture_schema():
         # and an optional thumbnail strip in thumbnail_container_id.
         cv.Optional(CONF_PICTURE_CANVAS_ID): cv.use_id(lv_canvas_t),
         # The cover art of the sound svp_relay plays (the audio queue's Home Assistant tracks) in these
-        # canvases (external_buffer: true), each fitted into its size; PSRAM of their size, kept.
+        # canvases (external_buffer: true), each fitted into its size; their buffers (and the fetched
+        # file's) from the PSRAM pool once cover art shows, until a video or the desktop reclaims the pool.
         cv.Optional(CONF_AUDIO_COVER): cv.All(cv.ensure_list(cv.use_id(lv_canvas_t)), cv.Length(min=1, max=3)),
         cv.Optional(CONF_PICTURE_DIRECTORIES): cv.ensure_list(cv.string),
         cv.Optional(CONF_SLIDESHOW_INTERVAL, default="5s"): cv.positive_time_period_milliseconds,

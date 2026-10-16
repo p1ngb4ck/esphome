@@ -1303,7 +1303,7 @@ class SimpleVideoPlayer : public Component
   // the sound buffers are sized for it.
   static constexpr uint32_t MAX_AUDIO_LEAD_MS = 1600;
   uint32_t max_audio_latency_ms_{0};
-  // Internal RAM: raw MJPEG reads, index and audio-chunk scratch.
+  // From the pool (PSRAM): raw MJPEG reads, index and audio-chunk scratch.
   static constexpr size_t CACHE_BUFFER_SIZE = 64 * 1024;
   float target_fps_{30.0f};  // Target frame rate
 

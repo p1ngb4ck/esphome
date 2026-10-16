@@ -84,6 +84,9 @@ Remove an entry only when Olli confirms the fix on the device.
 
 - Stale comments: S:193-195, S:1378 (PPA), S:1432, S:2006, S:2564, S:2596; H:862, H:1182
   (cache buffer "internal"), H:1338, H:1050-1052, H:2006; `__init__.py`:449 (cover "kept").
+  2026-10-16 corrected (checked against the code): setup canvas buffers, the `allocate_buffers_`
+  call and its "allocated once in setup()", PPA rotate, "buffers only freed in destructor", PCM
+  decoder "null", cache buffer "internal", cover "kept". Left: the other H refs (not located).
 - Duplicates: canvas/direct release code (`release_media_` vs `handle_output_release_`), dirty-rect
   copy (R:1139 vs SP:2090), `decoded_size` (C:24) vs `jpeg_decoded_size` (P:837), bar focus logic.
 - Actions registered unconditionally in `__init__.py` while their C++ exists only under `SVP_*`.
