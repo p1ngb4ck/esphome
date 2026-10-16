@@ -85,8 +85,8 @@ static constexpr uint16_t NO_HANDLE = 0xFFFF;
 
 enum class Route : uint8_t { BR, LE, BOTH, LOCAL };
 
-// One address for both radios: Bluedroid has one, and pairing on either radio uses it. The
-// co-processor's is read and, where the dongle can take another (Broadcom), written to it.
+// One address for Bluedroid: the co-processor's (LE pairing is computed by the host with it). It is
+// read and, where the dongle can take another (Broadcom), written to the dongle as well.
 enum class AddrStage : uint8_t { NONE, READ_LE, WRITE_BR, READ_BR };
 
 struct Pending {
@@ -498,9 +498,13 @@ static void send_command(uint8_t *data, size_t len) {
     if (opcode == OP_RESET)
       clear_links();
     s_pending.addr_stage = AddrStage::NONE;
-    if (opcode == OP_READ_BD_ADDR && br != nullptr && br->manufacturer() == MANUFACTURER_BROADCOM) {
+    if (opcode == OP_READ_BD_ADDR && br != nullptr) {
+      // Bluedroid's address is the co-processor's: LE pairing (computed by the host) has to use the
+      // address the LE radio sends with. A Broadcom dongle is given it too; any other keeps its own,
+      // which only its BR/EDR pairing (computed by the dongle) uses.
       route = Route::LE;
-      s_pending.addr_stage = AddrStage::READ_LE;
+      if (br->manufacturer() == MANUFACTURER_BROADCOM)
+        s_pending.addr_stage = AddrStage::READ_LE;
     }
     s_pending.buffer_from_le = buffer_from_le;
     s_pending.opcode = buffer_from_le ? OP_LE_READ_BUFFER_SIZE : opcode;
@@ -645,12 +649,13 @@ static bool address_step(uint16_t opcode, const uint8_t *ev, size_t len, uint8_t
       s_pending.opcode = 0;
       return true;
     }
-    ESP_LOGW(TAG, "The dongle keeps its own address: LE pairing with the public address will fail");
-    s_pending.addr_stage = AddrStage::READ_BR;
-    s_pending.opcode = OP_READ_BD_ADDR;
-    s_pending.waiting = SIDE_BR;
-    own_len = own_command(OP_READ_BD_ADDR, nullptr, 0);
-    out_len = 0;
+    ESP_LOGW(TAG, "The dongle keeps its own address");
+    out_len = s_pending.addr_answer_len;
+    memcpy(out, s_pending.addr_answer, out_len);
+    out[3] = 1;
+    s_pending.addr_stage = AddrStage::NONE;
+    s_pending.waiting = 0;
+    s_pending.opcode = 0;
     return true;
   }
   return false;
