@@ -48,7 +48,7 @@ Main loop: `loopTask`, prio 1, core 1 (`CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1`, `Ap
 | Lock | Taken by |
 |---|---|
 | `media_lock_` (S:62) | playback/draw tasks blocking; main loop try-0 only |
-| `session_lock_` (S:63) | main loop try-0 (`run_pending_start_`); net task 10 s |
+| `session_lock_` (S:63) | main loop try-0 (`run_pending_start_`, re-checks `start_pending_` under it); net task 10 s (RIFF start, refused while `start_pending_`/`audio_start_pending_`/`spice_on_`); spice task 3 s (`desktop_take_panel_`: `spice_on_`, `start_pending_`, ending a session) |
 | `output_lock_` (R:104) | playback task for the whole session (S:1186-1414); draw task try-0; main loop try-0; `release_desktop_` blocking |
 | `desktop_lock_` (R:194) | `desktop_buffers_take_`, `release_desktop_` |
 | `spice_lock_`, `spice_cursor_lock_` (R:192-193) | main loop / spice / net / draw tasks |
@@ -109,7 +109,9 @@ reports the media player's state instead while `state_` is STOPPED and `audio_re
 
 - **DSI direct**: only when the video equals the panel's native size (S:997-1016). Decoded by HW JPEG
   into `decode_target_` (display depth), composited controls, then `dsi_->draw_pixels_at()` copies it
-  into the panel framebuffer every frame (S:1395-1403). LVGL paused by `loop()` only (S:297-331).
+  into the panel framebuffer every frame (S:1395-1403). LVGL paused by `loop()` only (S:297-331);
+  given back once the playback task is gone and the state is STOPPED/ERROR or an audio-file session
+  runs (it takes no picture), not while a direct sender streams or a playlist advances.
   No PPA in svp.
 - **Canvas**: RGB888 pair `output_buffers_[2]` at canvas size; decode into the back buffer, loop swaps
   the canvas draw buffer (S:419-441, S:1612-1625).
