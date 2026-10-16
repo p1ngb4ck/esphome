@@ -212,6 +212,13 @@ bool SimpleVideoPlayer::build_controls_bar_(ControlsBar &bar) {
     for (uint8_t id : bar.buttons) {
       if (id >= CTL_BUTTON_COUNT || bar.button[id] != nullptr)
         continue;
+#ifdef SVP_PICTURES
+      if (id == CTL_SLIDE_TIME) {
+        if (bar.picture)
+          this->build_slide_time_(bar, row);
+        continue;
+      }
+#endif
       lv_obj_t *button = lv_button_create(row);
       lv_obj_remove_style_all(button);
       lv_obj_add_style(button, &this->ctl_button_style_, LV_PART_MAIN);
@@ -251,6 +258,52 @@ bool SimpleVideoPlayer::build_controls_bar_(ControlsBar &bar) {
   }
   return true;
 }
+
+#ifdef SVP_PICTURES
+// Over a picture: the slideshow's picture duration, a dropdown opening upwards, styled as the buttons.
+void SimpleVideoPlayer::build_slide_time_(ControlsBar &bar, lv_obj_t *row) {
+  lv_obj_t *dropdown = lv_dropdown_create(row);
+  lv_obj_remove_style_all(dropdown);
+  lv_obj_add_style(dropdown, &this->ctl_button_style_, LV_PART_MAIN);
+  if (this->ctl_user_button_style_ != nullptr)
+    lv_obj_add_style(dropdown, this->ctl_user_button_style_, LV_PART_MAIN);
+  lv_obj_add_style(dropdown, &this->ctl_focus_style_, LV_STATE_FOCUS_KEY);
+  if (this->ctl_user_focus_style_ != nullptr)
+    lv_obj_add_style(dropdown, this->ctl_user_focus_style_, LV_STATE_FOCUS_KEY);
+  lv_dropdown_set_options(dropdown, slideshow_step_options().c_str());
+  lv_dropdown_set_dir(dropdown, LV_DIR_TOP);
+  lv_dropdown_set_symbol(dropdown, LV_SYMBOL_UP);
+  lv_obj_t *list = lv_dropdown_get_list(dropdown);
+  lv_obj_add_style(list, &this->ctl_button_style_, LV_PART_MAIN);
+  if (this->ctl_user_button_style_ != nullptr)
+    lv_obj_add_style(list, this->ctl_user_button_style_, LV_PART_MAIN);
+  const auto selected = static_cast<lv_style_selector_t>(LV_PART_SELECTED) | LV_STATE_CHECKED;
+  lv_obj_add_style(list, &this->ctl_accent_style_, selected);
+  if (this->ctl_user_accent_style_ != nullptr)
+    lv_obj_add_style(list, this->ctl_user_accent_style_, selected);
+  bar.button[CTL_SLIDE_TIME] = dropdown;
+  bar.target[CTL_SLIDE_TIME] = ControlsTarget{this, &bar, CTL_SLIDE_TIME};
+  lv_obj_add_event_cb(
+      dropdown,
+      [](lv_event_t *event) {
+        const auto *target = static_cast<ControlsTarget *>(lv_event_get_user_data(event));
+        SimpleVideoPlayer *self = target->player;
+        self->picture_controls_touched_();
+        const uint32_t index = lv_dropdown_get_selected(lv_event_get_current_target_obj(event));
+        if (index >= SLIDESHOW_STEP_COUNT)
+          return;
+        const uint32_t ms = SLIDESHOW_STEPS_S[index] * 1000u;
+        self->set_slideshow_interval(ms);
+        self->update_picture_controls_(false);
+        self->slideshow_interval_callbacks_.call(ms);
+      },
+      LV_EVENT_VALUE_CHANGED, &bar.target[CTL_SLIDE_TIME]);
+  lv_obj_add_event_cb(
+      dropdown,
+      [](lv_event_t *event) { static_cast<ControlsBar *>(lv_event_get_user_data(event))->shown_ms = millis(); },
+      LV_EVENT_FOCUSED, &bar);
+}
+#endif
 
 void SimpleVideoPlayer::controls_button_event_(lv_event_t *event) {
   const auto *target = static_cast<ControlsTarget *>(lv_event_get_user_data(event));
@@ -858,6 +911,9 @@ void SimpleVideoPlayer::show_picture_controls_() {
 }
 
 void SimpleVideoPlayer::hide_picture_controls_() {
+  lv_obj_t *slide_time = this->ctl_picture_.button[CTL_SLIDE_TIME];
+  if (slide_time != nullptr && lv_dropdown_is_open(slide_time))
+    lv_dropdown_close(slide_time);
   if (this->ctl_picture_.bar != nullptr)
     lv_obj_set_hidden(this->ctl_picture_.bar, true);
 }
@@ -897,12 +953,23 @@ void SimpleVideoPlayer::update_picture_controls_(bool force) {
     lv_label_set_text(bar.button_label[CTL_PLAY_PAUSE], playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
     bar.shown_playing = playing;
   }
+  lv_obj_t *slide_time = bar.button[CTL_SLIDE_TIME];
+  if (slide_time != nullptr && (force || bar.shown_slide != this->slideshow_interval_ms_)) {
+    snprintf(bar.slide_text, sizeof(bar.slide_text), "%u s",
+             static_cast<unsigned>((this->slideshow_interval_ms_ + 500) / 1000));
+    lv_dropdown_set_text(slide_time, bar.slide_text);
+    lv_dropdown_set_selected(slide_time, slideshow_step_index(this->slideshow_interval_ms_));
+    bar.shown_slide = this->slideshow_interval_ms_;
+  }
 }
 
 void SimpleVideoPlayer::picture_controls_loop_() {
   ControlsBar &bar = this->ctl_picture_;
   if (bar.bar == nullptr || lv_obj_is_hidden(bar.bar))
     return;
+  // Its slide_time open: the bar stays.
+  if (bar.button[CTL_SLIDE_TIME] != nullptr && lv_dropdown_is_open(bar.button[CTL_SLIDE_TIME]))
+    bar.shown_ms = millis();
   if (!this->fullscreen_ || this->pictures_held_() || millis() - bar.shown_ms > this->ctl_hide_after_ms_) {
     this->hide_picture_controls_();
     return;

@@ -251,6 +251,7 @@ CONTROL_BUTTONS = {
     "volume_down": 7,
     "volume_up": 8,
     "exit": 9,
+    "slide_time": 10,
 }
 CONF_PICTURE = "picture"
 CONF_AUDIO_CONTROLS = "audio"
@@ -260,8 +261,18 @@ CONF_AUDIO_COVER = "audio_cover"
 CONF_COUNTER = "counter"
 CONF_ON_EXIT = "on_exit"
 PICTURE_CONTROL_BUTTONS = ["previous", "play_pause", "next", "exit"]
-# Over a picture: previous/next picture, play_pause and stop the slideshow, exit (on_exit).
-PICTURE_BUTTON_CHOICES = ["previous", "play_pause", "next", "stop", "exit", "volume_down", "volume_up"]
+# Over a picture: previous/next picture, play_pause and stop the slideshow, exit (on_exit),
+# slide_time the slideshow's picture duration.
+PICTURE_BUTTON_CHOICES = [
+    "previous",
+    "play_pause",
+    "next",
+    "stop",
+    "exit",
+    "volume_down",
+    "volume_up",
+    "slide_time",
+]
 VIDEO_CONTROL_BUTTONS = [
     "previous",
     "rewind",

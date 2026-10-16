@@ -619,6 +619,7 @@ class SimpleVideoPlayer : public Component
     CTL_VOLUME_DOWN,
     CTL_VOLUME_UP,
     CTL_EXIT,
+    CTL_SLIDE_TIME,  // over a picture: the slideshow's picture duration (a dropdown)
     CTL_BUTTON_COUNT,
   };
   void set_controls_touchscreen(touchscreen::Touchscreen *touchscreen) { this->ctl_touchscreen_ = touchscreen; }
@@ -685,6 +686,18 @@ class SimpleVideoPlayer : public Component
   void set_picture_canvas(lv_obj_t *canvas) { this->pic_canvas_ = canvas; }
   void add_picture_directory(const std::string &path) { this->pic_dirs_.push_back(path); }
   void set_slideshow_interval(uint32_t ms) { this->slideshow_interval_ms_ = ms; }
+  uint32_t get_slideshow_interval() const { return this->slideshow_interval_ms_; }
+  /// The picture durations offered (the Media page, the controls' slide_time), and the one nearest ms.
+  static constexpr uint16_t SLIDESHOW_STEPS_S[] = {3, 5, 8, 10, 15, 20, 30, 60};
+  static constexpr size_t SLIDESHOW_STEP_COUNT = sizeof(SLIDESHOW_STEPS_S) / sizeof(SLIDESHOW_STEPS_S[0]);
+  static size_t slideshow_step_index(uint32_t ms);
+  /// "3 s", "5 s", ...: a step as shown (static); all of them as an LVGL dropdown's options.
+  static const char *slideshow_step_text(size_t index);
+  static std::string slideshow_step_options();
+  /// Main loop: a duration picked on the controls over a picture (slide_time), in ms.
+  void add_on_slideshow_interval_callback(std::function<void(uint32_t)> &&callback) {
+    this->slideshow_interval_callbacks_.add(std::move(callback));
+  }
   void set_fit_mode(ImageFitMode mode) { this->fit_mode_ = mode; }
   void set_overlay_icon_size(int size) { this->overlay_icon_size_ = size; }
   void set_overlay_icon_color(uint32_t color) { this->overlay_icon_color_ = color; }
@@ -1462,6 +1475,8 @@ class SimpleVideoPlayer : public Component
     int shown_image{-2};
     int shown_count{-1};
     int shown_playing{-1};
+    uint32_t shown_slide{0};  // the slideshow interval its slide_time shows
+    char slide_text[12]{};     // its text (LVGL keeps the pointer)
     int shown_position{-1};
     uint32_t shown_gen{UINT32_MAX};
     bool visible{false};  // LVGL shows it (main loop's own note: nothing read of LVGL while paused)
@@ -1542,6 +1557,9 @@ class SimpleVideoPlayer : public Component
   bool controls_active_() const;
   void controls_setup_();
   bool build_controls_bar_(ControlsBar &bar);
+#ifdef SVP_PICTURES
+  void build_slide_time_(ControlsBar &bar, lv_obj_t *row);
+#endif
   /// Setup: pool bytes a direct session needs for them (0: none).
   size_t controls_bytes_();
   /// Main loop, before a direct session starts: everything the playback task copies.
@@ -1668,6 +1686,7 @@ class SimpleVideoPlayer : public Component
   bool pic_shown_fullscreen_{false};      // the canvas has the full screen size
 
   uint32_t slideshow_interval_ms_{5000};
+  CallbackManager<void(uint32_t)> slideshow_interval_callbacks_;
   SlideshowMode slideshow_mode_{SlideshowMode::STOPPED};
   uint32_t last_slide_ms_{0};
   ImageFitMode fit_mode_{ImageFitMode::SCALE_TO_FIT};

@@ -424,6 +424,35 @@ bool SimpleVideoPlayer::previous_image() {
   return this->show_image(static_cast<size_t>(base <= 0 ? count - 1 : base - 1));
 }
 
+size_t SimpleVideoPlayer::slideshow_step_index(uint32_t ms) {
+  size_t best = 0;
+  for (size_t i = 1; i < SLIDESHOW_STEP_COUNT; i++) {
+    const auto diff = [ms](size_t index) {
+      const int64_t d = static_cast<int64_t>(SLIDESHOW_STEPS_S[index]) * 1000 - ms;
+      return d < 0 ? -d : d;
+    };
+    if (diff(i) < diff(best))
+      best = i;
+  }
+  return best;
+}
+
+const char *SimpleVideoPlayer::slideshow_step_text(size_t index) {
+  static const char *const TEXTS[] = {"3 s", "5 s", "8 s", "10 s", "15 s", "20 s", "30 s", "60 s"};
+  static_assert(sizeof(TEXTS) / sizeof(TEXTS[0]) == SLIDESHOW_STEP_COUNT, "a text per step");
+  return index < SLIDESHOW_STEP_COUNT ? TEXTS[index] : "";
+}
+
+std::string SimpleVideoPlayer::slideshow_step_options() {
+  std::string options;
+  for (size_t i = 0; i < SLIDESHOW_STEP_COUNT; i++) {
+    if (i != 0)
+      options += '\n';
+    options += slideshow_step_text(i);
+  }
+  return options;
+}
+
 void SimpleVideoPlayer::start_slideshow() {
   if (this->images_.empty()) {
     ESP_LOGW(TAG, "No pictures for a slideshow");
