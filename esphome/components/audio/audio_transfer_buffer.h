@@ -3,6 +3,7 @@
 #ifdef USE_ESP32
 #include "esphome/components/ring_buffer/ring_buffer.h"
 #include "esphome/core/defines.h"
+#include "esphome/core/helpers.h"
 
 #ifdef USE_SPEAKER
 #include "esphome/components/speaker/speaker.h"
@@ -12,7 +13,21 @@
 
 #include <freertos/FreeRTOS.h>
 
+#include <memory>
+#include <new>
+
 namespace esphome::audio {
+
+/// @brief A heap object as make_unique makes it, or (psram) in PSRAM only; nullptr when that has no
+///        room. delete frees it either way (free() takes any heap).
+template<typename T, typename... Args> std::unique_ptr<T> make_unique_in(bool psram, Args &&...args) {
+  if (!psram)
+    return make_unique<T>(std::forward<Args>(args)...);
+  void *mem = RAMAllocator<T>(RAMAllocator<T>::ALLOC_EXTERNAL).allocate(1);
+  if (mem == nullptr)
+    return nullptr;
+  return std::unique_ptr<T>(::new (mem) T(std::forward<Args>(args)...));
+}
 
 /// @brief Abstract interface for writing decoded audio data to a sink.
 class AudioSinkCallback {
@@ -94,7 +109,7 @@ class AudioSinkTransferBuffer : public AudioTransferBuffer {
   /// @brief Creates a new sink transfer buffer.
   /// @param buffer_size Size of the transfer buffer in bytes.
   /// @return unique_ptr if successfully allocated, nullptr otherwise
-  static std::unique_ptr<AudioSinkTransferBuffer> create(size_t buffer_size);
+  static std::unique_ptr<AudioSinkTransferBuffer> create(size_t buffer_size, bool psram_object = false);
 
   /// @brief Writes any available data in the transfer buffer to the sink.
   /// @param ticks_to_wait FreeRTOS ticks to block while waiting for the sink to have enough space
@@ -235,9 +250,11 @@ class RingBufferAudioSource : public AudioReadableBuffer {
   /// @param alignment_bytes Minimum exposed-region alignment in bytes (defaults to 1, i.e. byte-aligned).
   ///        Pass bytes_per_frame to make every exposed region a whole number of frames. Must be in
   ///        [1, MAX_ALIGNMENT_BYTES].
+  /// @param psram_object The source object itself in PSRAM only.
   /// @return unique_ptr if parameters are valid, nullptr otherwise
   static std::unique_ptr<RingBufferAudioSource> create(std::shared_ptr<ring_buffer::RingBuffer> ring_buffer,
-                                                       size_t max_fill_bytes, uint8_t alignment_bytes = 1);
+                                                       size_t max_fill_bytes, uint8_t alignment_bytes = 1,
+                                                       bool psram_object = false);
 
   ~RingBufferAudioSource() override;
 

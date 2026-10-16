@@ -24,15 +24,16 @@ static const uint32_t MAX_POTENTIALLY_FAILED_COUNT = 10;
 static const uint8_t MAX_DECODED_CHANNELS = AUDIO_MAX_CHANNELS;
 #endif
 
-AudioDecoder::AudioDecoder(size_t input_buffer_size, size_t output_buffer_size)
-    : input_buffer_size_(input_buffer_size) {
-  this->output_transfer_buffer_ = AudioSinkTransferBuffer::create(output_buffer_size);
+AudioDecoder::AudioDecoder(size_t input_buffer_size, size_t output_buffer_size, bool psram_objects)
+    : input_buffer_size_(input_buffer_size), psram_objects_(psram_objects) {
+  this->output_transfer_buffer_ = AudioSinkTransferBuffer::create(output_buffer_size, psram_objects);
 }
 
 esp_err_t AudioDecoder::add_source(std::weak_ptr<ring_buffer::RingBuffer> &input_ring_buffer) {
   // Zero-copy source reading directly from the ring buffer's internal storage. Raw file data is byte
   // aligned, so no frame alignment is required.
-  auto source = RingBufferAudioSource::create(input_ring_buffer.lock(), this->input_buffer_size_);
+  auto source = RingBufferAudioSource::create(input_ring_buffer.lock(), this->input_buffer_size_, 1,
+                                              this->psram_objects_);
   if (source == nullptr) {
     // create() only returns nullptr for invalid arguments (expired ring buffer or zero buffer size)
     return ESP_ERR_INVALID_ARG;
@@ -42,7 +43,10 @@ esp_err_t AudioDecoder::add_source(std::weak_ptr<ring_buffer::RingBuffer> &input
 }
 
 esp_err_t AudioDecoder::add_source(const uint8_t *data_pointer, size_t length) {
-  auto source = make_unique<ConstAudioSourceBuffer>();
+  auto source = make_unique_in<ConstAudioSourceBuffer>(this->psram_objects_);
+  if (source == nullptr) {
+    return ESP_ERR_NO_MEM;
+  }
   source->set_data(data_pointer, length);
   this->input_buffer_ = std::move(source);
   return ESP_OK;
@@ -87,7 +91,10 @@ esp_err_t AudioDecoder::start(AudioFileType audio_file_type) {
   switch (this->audio_file_type_) {
 #ifdef USE_AUDIO_AAC_SUPPORT
     case AudioFileType::AAC:
-      this->aac_decoder_ = make_unique<esp_audio_codec_adapter::AACDecoder>();
+      this->aac_decoder_ = make_unique_in<esp_audio_codec_adapter::AACDecoder>(this->psram_objects_);
+      if (this->aac_decoder_ == nullptr) {
+        return ESP_ERR_NO_MEM;
+      }
 
       // AAC typically has 1024 samples per frame
       this->free_buffer_required_ =
@@ -99,28 +106,40 @@ esp_err_t AudioDecoder::start(AudioFileType audio_file_type) {
 #endif
 #ifdef USE_AUDIO_FLAC_SUPPORT
     case AudioFileType::FLAC:
-      this->flac_decoder_ = make_unique<micro_flac::FLACDecoder>();
+      this->flac_decoder_ = make_unique_in<micro_flac::FLACDecoder>(this->psram_objects_);
+      if (this->flac_decoder_ == nullptr) {
+        return ESP_ERR_NO_MEM;
+      }
       this->free_buffer_required_ =
           this->output_transfer_buffer_->capacity();  // Adjusted and reallocated after reading the header
       break;
 #endif
 #ifdef USE_AUDIO_MP3_SUPPORT
     case AudioFileType::MP3:
-      this->mp3_decoder_ = make_unique<micro_mp3::Mp3Decoder>();
+      this->mp3_decoder_ = make_unique_in<micro_mp3::Mp3Decoder>(this->psram_objects_);
+      if (this->mp3_decoder_ == nullptr) {
+        return ESP_ERR_NO_MEM;
+      }
       this->free_buffer_required_ =
           this->output_transfer_buffer_->capacity();  // Adjusted and reallocated after reading the header
       break;
 #endif
 #ifdef USE_AUDIO_OPUS_SUPPORT
     case AudioFileType::OPUS:
-      this->opus_decoder_ = make_unique<micro_opus::OggOpusDecoder>();
+      this->opus_decoder_ = make_unique_in<micro_opus::OggOpusDecoder>(this->psram_objects_);
+      if (this->opus_decoder_ == nullptr) {
+        return ESP_ERR_NO_MEM;
+      }
       this->free_buffer_required_ =
           this->output_transfer_buffer_->capacity();  // Adjusted and reallocated after reading the header
       break;
 #endif
 #ifdef USE_AUDIO_WAV_SUPPORT
     case AudioFileType::WAV:
-      this->wav_decoder_ = make_unique<micro_wav::WAVDecoder>();
+      this->wav_decoder_ = make_unique_in<micro_wav::WAVDecoder>(this->psram_objects_);
+      if (this->wav_decoder_ == nullptr) {
+        return ESP_ERR_NO_MEM;
+      }
       // 1 KiB suffices to always make progress while avoiding excessive CPU spinning for decoding
       this->free_buffer_required_ = 1024;
       if (this->output_transfer_buffer_->capacity() < this->free_buffer_required_) {

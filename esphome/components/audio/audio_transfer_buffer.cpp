@@ -10,10 +10,10 @@ namespace esphome::audio {
 
 AudioTransferBuffer::~AudioTransferBuffer() { this->deallocate_buffer_(); };
 
-std::unique_ptr<AudioSinkTransferBuffer> AudioSinkTransferBuffer::create(size_t buffer_size) {
-  std::unique_ptr<AudioSinkTransferBuffer> sink_buffer = make_unique<AudioSinkTransferBuffer>();
+std::unique_ptr<AudioSinkTransferBuffer> AudioSinkTransferBuffer::create(size_t buffer_size, bool psram_object) {
+  std::unique_ptr<AudioSinkTransferBuffer> sink_buffer = make_unique_in<AudioSinkTransferBuffer>(psram_object);
 
-  if (!sink_buffer->allocate_buffer_(buffer_size)) {
+  if (sink_buffer == nullptr || !sink_buffer->allocate_buffer_(buffer_size)) {
     return nullptr;
   }
 
@@ -208,12 +208,21 @@ void ConstAudioSourceBuffer::consume(size_t bytes) {
 }
 
 std::unique_ptr<RingBufferAudioSource> RingBufferAudioSource::create(
-    std::shared_ptr<ring_buffer::RingBuffer> ring_buffer, size_t max_fill_bytes, uint8_t alignment_bytes) {
+    std::shared_ptr<ring_buffer::RingBuffer> ring_buffer, size_t max_fill_bytes, uint8_t alignment_bytes,
+    bool psram_object) {
   if (ring_buffer == nullptr || max_fill_bytes == 0 || alignment_bytes == 0 || alignment_bytes > MAX_ALIGNMENT_BYTES) {
     return nullptr;
   }
+  if (!psram_object) {
+    return std::unique_ptr<RingBufferAudioSource>(
+        new RingBufferAudioSource(std::move(ring_buffer), max_fill_bytes, alignment_bytes));
+  }
+  void *mem = RAMAllocator<RingBufferAudioSource>(RAMAllocator<RingBufferAudioSource>::ALLOC_EXTERNAL).allocate(1);
+  if (mem == nullptr) {
+    return nullptr;
+  }
   return std::unique_ptr<RingBufferAudioSource>(
-      new RingBufferAudioSource(std::move(ring_buffer), max_fill_bytes, alignment_bytes));
+      ::new (mem) RingBufferAudioSource(std::move(ring_buffer), max_fill_bytes, alignment_bytes));
 }
 
 RingBufferAudioSource::~RingBufferAudioSource() {

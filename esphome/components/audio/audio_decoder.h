@@ -69,7 +69,8 @@ class AudioDecoder {
   /// @brief Allocates the output transfer buffer and stores the input buffer size for later use by add_source()
   /// @param input_buffer_size Soft cap on the bytes a ring buffer source exposes per fill, in bytes.
   /// @param output_buffer_size Size of the output transfer buffer in bytes.
-  AudioDecoder(size_t input_buffer_size, size_t output_buffer_size);
+  /// @param psram_objects Its objects (sources, transfer buffer, codec decoders) in PSRAM only.
+  AudioDecoder(size_t input_buffer_size, size_t output_buffer_size, bool psram_objects = false);
 
   ~AudioDecoder() = default;
 
@@ -162,6 +163,7 @@ class AudioDecoder {
 
   size_t input_buffer_size_{0};
   size_t free_buffer_required_{0};
+  bool psram_objects_{false};
 
   uint32_t potentially_failed_count_{0};
   uint32_t accumulated_frames_written_{0};
