@@ -129,8 +129,8 @@ HID_INPUT_SCHEMA = cv.Schema(
 )
 
 
-def _c32(char: str) -> str:
-    return f"0x{ord(char):04X}" if char else "0"
+def _c32(code: int) -> str:
+    return f"0x{code:04X}" if code else "0"
 
 
 def _emit_key_names() -> None:
@@ -171,30 +171,15 @@ def _emit_layout(config) -> str:
         return emitted[key]
     name = f"HID_LAYOUT_{len(emitted)}"
     emitted[key] = name
-    rows = []
-    for usage, levels in sorted(keys.items()):
-        chars, dead = [], 0
-        for level, symbol in enumerate(levels[: layouts.LEVELS]):
-            mark = layouts.combining(symbol)
-            if mark is not None:
-                dead |= 1 << level
-                chars.append(_c32(mark))
-            else:
-                chars.append(_c32(symbol if len(symbol) == 1 else ""))
-        lower, upper = levels[0], levels[1] if len(levels) > 1 else ""
-        alphabetic = (
-            len(lower) == 1
-            and lower.isalpha()
-            and lower != upper
-            and lower.upper() == upper
-        )
-        rows.append(
-            f"  {{0x{usage:02X}, 0x{dead:X}, {'true' if alphabetic else 'false'}, "
-            f"{{{', '.join(chars)}}}}}"
-        )
+    keys_table, compose_table = layouts.table(keys)
+    rows = [
+        f"  {{0x{usage:02X}, 0x{dead:X}, {'true' if alphabetic else 'false'}, "
+        f"{{{', '.join(_c32(c) for c in chars)}}}}}"
+        for usage, dead, alphabetic, chars in keys_table
+    ]
     compose = [
         f"  {{{_c32(mark)}, {_c32(base)}, {_c32(result)}}}"
-        for mark, base, result in layouts.compose_table(keys)
+        for mark, base, result in compose_table
     ]
     compose_body = ",\n".join(compose) if compose else "  {0, 0, 0}"
     cg.add_global(

@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib
 import pkgutil
 import re
+import struct
 import unicodedata
 
 LEVELS = 4
@@ -128,3 +129,59 @@ def compose_table(keys: dict[int, tuple[str, ...]]) -> list[tuple[str, str, str]
             if len(composed) == 1 and composed != base:
                 out.append((mark, base, composed))
     return out
+
+
+def names() -> list[tuple[str, str]]:
+    """(name, description) of every layout."""
+    out = []
+    for file, module in sorted(_load().items()):
+        for variant, (description, _) in module.LAYOUTS.items():
+            name = file if variant == module.DEFAULT else f"{file}({variant})"
+            out.append((name, description))
+    return out
+
+
+def table(
+    keys: dict[int, tuple[str, ...]],
+) -> tuple[list[tuple[int, int, bool, tuple[int, ...]]], list[tuple[int, int, int]]]:
+    """The keys (usage, dead key bit per level, alphabetic, character per level) and the
+    compositions (mark, base, result) of a layout, as hid_input.h's KeyboardLayout holds them."""
+    rows = []
+    for usage, levels in sorted(keys.items()):
+        chars, dead = [], 0
+        for level, symbol in enumerate(levels[:LEVELS]):
+            mark = combining(symbol)
+            if mark is not None:
+                dead |= 1 << level
+                chars.append(ord(mark))
+            else:
+                chars.append(ord(symbol) if len(symbol) == 1 else 0)
+        chars += [0] * (LEVELS - len(chars))
+        lower, upper = levels[0], levels[1] if len(levels) > 1 else ""
+        alphabetic = (
+            len(lower) == 1
+            and lower.isalpha()
+            and lower != upper
+            and lower.upper() == upper
+        )
+        rows.append((usage, dead, alphabetic, tuple(chars)))
+    compose = [
+        (ord(mark), ord(base), ord(result))
+        for mark, base, result in compose_table(keys)
+    ]
+    return rows, compose
+
+
+# A layout as a file (hid::parse_layout()): "KBL1", key count and composition count (uint16),
+# then the keys as LayoutKey and the compositions as LayoutCompose, little-endian.
+KBL_MAGIC = b"KBL1"
+
+
+def kbl(keys: dict[int, tuple[str, ...]]) -> bytes:
+    rows, compose = table(keys)
+    out = bytearray(KBL_MAGIC + struct.pack("<HH", len(rows), len(compose)))
+    for usage, dead, alphabetic, chars in rows:
+        out += struct.pack("<BBBx4I", usage, dead, int(alphabetic), *chars)
+    for entry in compose:
+        out += struct.pack("<3I", *entry)
+    return bytes(out)

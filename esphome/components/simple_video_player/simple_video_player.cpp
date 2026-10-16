@@ -205,6 +205,9 @@ void SimpleVideoPlayer::setup() {
 #ifdef SVP_PICTURES
   this->pictures_setup_();
 #endif
+#ifdef SVP_KEYBOARD
+  this->keyboard_setup_();
+#endif
 
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
   ESP_LOGCONFIG(TAG, "  PSRAM pool: %u bytes (PSRAM left: %u bytes, largest block %u)",
@@ -268,6 +271,9 @@ void SimpleVideoPlayer::loop() {
 #ifdef SVP_CHANNEL_LIST
   this->channel_loop_();
   this->ha_loop_();
+#endif
+#ifdef SVP_KEYBOARD
+  this->keyboard_loop_();
 #endif
 #ifdef SVP_PICTURES
   this->pictures_loop_();
@@ -2121,6 +2127,9 @@ bool SimpleVideoPlayer::plan_pool_() {
 #ifdef SVP_AUDIO_FILES
   if (this->file_speaker_ != nullptr)
     fixed += pool_round(AUDIO_FILE_RING_SIZE);
+#endif
+#ifdef SVP_KEYBOARD
+  fixed += pool_round(KBD_LIST_BYTES) + pool_round(KBD_MAX * sizeof(KbdEntry)) + 2 * pool_round(KBD_LAYOUT_BYTES);
 #endif
   this->index_reserve_ = pool_round(std::clamp<size_t>(pool / 32, 128 * 1024, MIB));
   fixed += this->index_reserve_ + pool_round(CACHE_BUFFER_SIZE) + 32 * PsramPool::ALIGN;  // pieces end on whole cache lines

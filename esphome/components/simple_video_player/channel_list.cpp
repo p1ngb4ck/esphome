@@ -331,6 +331,12 @@ void SimpleVideoPlayer::channel_task_loop_() {
     } else if (request.cmd == CHANNEL_CMD_COVER) {
       this->cover_task_();
 #endif
+#ifdef SVP_KEYBOARD
+    } else if (request.cmd == CHANNEL_CMD_KEYBOARD_LIST) {
+      this->keyboard_list_task_();
+    } else if (request.cmd == CHANNEL_CMD_KEYBOARD_GET) {
+      this->keyboard_get_task_();
+#endif
     }
   }
 }
@@ -411,6 +417,31 @@ void SimpleVideoPlayer::image_task_() {
   read.failed = !ok || len == 0 || len >= read.limit;
   std::atomic_thread_fence(std::memory_order_release);
   read.done = true;
+}
+#endif
+
+#ifdef SVP_KEYBOARD
+// Channel task: the keyboard layouts, "name\tdescription\n" lines, into kbd_list_ (the main loop leaves
+// it be till done).
+void SimpleVideoPlayer::keyboard_list_task_() {
+  size_t len = 0;
+  const bool ok =
+      this->channel_http_("/keyboard", nullptr, nullptr, &len, reinterpret_cast<uint8_t *>(this->kbd_list_),
+                          KBD_LIST_BYTES - 1);
+  this->kbd_list_len_ = ok ? len : 0;
+  this->kbd_list_ok_ = ok;
+  this->kbd_list_done_.store(true, std::memory_order_release);
+}
+
+// Channel task: the layout kbd_loading_name_ into its slot (the main loop leaves both be till done).
+void SimpleVideoPlayer::keyboard_get_task_() {
+  const std::string path = "/keyboard?layout=" + url_encoded(this->kbd_loading_name_.c_str());
+  size_t len = 0;
+  const bool ok = this->channel_http_(path.c_str(), nullptr, nullptr, &len, this->kbd_slot_[this->kbd_loading_],
+                                      KBD_LAYOUT_BYTES);
+  this->kbd_get_len_ = ok ? len : 0;
+  this->kbd_get_ok_ = ok;
+  this->kbd_get_done_.store(true, std::memory_order_release);
 }
 #endif
 

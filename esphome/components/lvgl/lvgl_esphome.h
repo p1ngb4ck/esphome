@@ -277,8 +277,11 @@ class LvglComponent final : public PollingComponent {
   /// reports it. Each returns whether it was taken: navigation keys taken run no action here.
   class PausedInput {
    public:
-    /// action: the key's KeyBindings action, -1 for none.
-    virtual bool paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action) = 0;
+    /// action: the key's KeyBindings action, -1 for none. codepoint: what the keyboard's layout puts on
+    /// the key at its level now (hid::HIDInput::layout_char(): bit 31 a dead key), 0 for none; level3:
+    /// Right Alt is the layout's AltGr.
+    virtual bool paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action,
+                            uint32_t codepoint, bool level3) = 0;
     virtual bool paused_text(uint32_t codepoint) = 0;
     virtual bool paused_pointer(int16_t dx, int16_t dy, int16_t wheel, uint8_t buttons) = 0;
   };
@@ -587,9 +590,11 @@ class LVHIDKeypadListener final : public Parented<LvglComponent> {
  protected:
   enum EventKind : uint8_t { KEY_PRESS, KEY_RELEASE, TEXT };
   struct Event {
-    uint32_t code;  // page << 16 | usage, or a character
+    uint32_t code;         // page << 16 | usage, or a character
+    uint32_t layout_char;  // a key's: hid::HIDInput::layout_char()
     uint8_t mods;
     EventKind kind;
+    bool level3;
   };
   struct Held {
     uint32_t code;
@@ -598,7 +603,7 @@ class LVHIDKeypadListener final : public Parented<LvglComponent> {
   static constexpr uint8_t QUEUE_SIZE = 32;
   static constexpr uint8_t HELD_SIZE = 4;
 
-  void push_(uint32_t code, uint8_t mods, EventKind kind);
+  void push_(uint32_t code, uint8_t mods, EventKind kind, uint32_t layout_char = 0, bool level3 = false);
   void read_(lv_indev_data_t *data);
   /// The LVGL key a key press becomes, 0 when it is done here (or nothing).
   uint32_t press_(uint16_t page, uint16_t usage, uint8_t mods);

@@ -41,7 +41,8 @@ u32 = frame_id (low 10 bits) | payload size (high 22 bits).
 | 'A' / 'L' / 'N' / 'F' | rate / min-max rate / channels / codec mask (1 PCM, 2 MP3, 4 FLAC) | sound format of the selected output (resent on router switch) |
 | 'S' | 0/1 | shown (0 while a file plays or the panel sleeps) |
 | 'T' | n × (id, x, y) | touches |
-| 'K' / 'X' / 'P' | key / codepoint / mouse | input (after 0x21) |
+| 'K' | action page:2 usage:2 mods pressed codepoint:4 level3 | a key (after 0x21); codepoint: what the keyboard's layout puts on it now (`HIDInput::layout_char()`, bit 31 a dead key's combining mark, 0 none), level3 1: Right Alt is the layout's AltGr. VNC keysyms from it (relay desktop/keys.py), SPICE scancodes ignore it |
+| 'X' / 'P' | codepoint / mouse | input (after 0x21) |
 | 'M' | n × u32 | statistics |
 | 'R' | seq | echo answer |
 | 'E' | 1/0 | AVI playback ended |
@@ -59,6 +60,7 @@ u32 = frame_id (low 10 bits) | payload size (high 22 bits).
 | GET/POST `/options?port` | `{port, key, value}` | panel's relay options |
 | POST `/desktop` | `{port, action:start, kind, host, server_port, password, connection_id}` / `{action:stop}` | answered once the desktop is up |
 | GET `/api/svp_relay/audio/<key>.<fmt>` | (media player, URL via `svp_play_audio`) | ffmpeg audio stream |
+| GET `/keyboard[?layout=<name>]` | – / an XKB name (`de(nodeadkeys)`) | `name\tdescription` lines (<=32 KiB) / the layout's `.kbl` (hid::parse_layout, <=8 KiB); files from ESPHome's `script/export_hid_layouts.py` in the relay's `keyboard/` |
 
 ## 3. ESPHome services, relay -> panel
 

@@ -17,7 +17,8 @@ Line numbers drift: search the symbol when a line doesn't match.
 | stream_receiver.cpp | TCP stream port: AVI from relay, udisp stills/PCM/input, draw task, 'V'/'A'/... reports |
 | pictures.cpp | Picture viewer, thumbnails, picture task (HW JPEG, PNG/BMP sw) |
 | audio_cover.cpp | Cover art of the audio queue's HA track in up to 3 canvases |
-| channel_list.cpp | Channel task: all HTTP to svp_relay (channels, play/stop, browse, image, options, cover, desktop) |
+| channel_list.cpp | Channel task: all HTTP to svp_relay (channels, play/stop, browse, image, options, cover, desktop, keyboard) |
+| keyboard_layouts.cpp | `keyboard_layouts:`: layouts (hid `.kbl`) from the relay's `/keyboard`, kept in the directory via the storage worker, put on the keyboards (`HIDInput::set_layout`), main loop |
 | media_services.cpp | Volume, status JSON, HA services (`svp_*`), media player link, audio router callback |
 | controls.cpp | On-screen controls: video bar (pre-rendered, composited in DSI direct), picture bar and audio bar (LVGL) |
 | spice_client.cpp | SPICE and VNC (via relay) remote desktop, cursor, desktop panel takeover |
@@ -149,6 +150,7 @@ S:2080-2148: everything listed as "fixed" is reserved; the **read-ahead ring get
 | `stream_audio_block_` | 10 ms PCM | setup, never | PCM | yes |
 | stream input queue | 384 B | setup, never | input messages | no |
 | SPICE state/saved/file | ~8 KB | setup, never | config | yes |
+| keyboard list + entries + 2 layouts | 32 KiB + 6 KiB + 2 × 8 KiB | setup, never | relay's layout list (cut in place), the layout on the keyboards and the next one | yes |
 | `thumb_buffer_` | stride·th·count (~216 KiB default) | setup, never | decoded thumbnails | yes |
 | `frame_slots_[1]` | frame_bytes_ = clamp(pool/24, 256 KiB, 1 MiB) | first session, kept | compressed frame | yes |
 | `index_buf_` | clamp(pool/32, 128 KiB, 1 MiB) | first session, kept | AVI index (also allocated for streams) | yes |
@@ -184,5 +186,5 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
 - Status text sensor JSON (MS:41-71): `svp`, `port`, `state` (media player's), `volume`, `muted`,
   `playlist`, `pause`, `formats`.
 - Panel -> relay HTTP on the channel task: `/channels`, `/play`, `/stop`, `/browse`, `/image`,
-  `/cover`, `/options`, `/desktop`.
+  `/cover`, `/options`, `/desktop`, `/keyboard`.
 - Stream port: AVI ('RIFF') or udisp (16-byte header); panel reports 'C','V','A','L','N','F','S'.

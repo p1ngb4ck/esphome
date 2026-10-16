@@ -53,6 +53,11 @@ struct KeyboardLayout {
   const LayoutCompose *compose;
   uint16_t compose_count;
 };
+static_assert(sizeof(LayoutKey) == 20 && sizeof(LayoutCompose) == 12, "the .kbl file holds them as they are");
+
+/// A layout file as hid/layouts' kbl() writes it: "KBL1", the key and composition counts (uint16),
+/// the keys, the compositions. `out` points into `data` (4-byte aligned), which must outlive it.
+bool parse_layout(const uint8_t *data, size_t len, KeyboardLayout *out);
 
 // Key names, emitted by hid/__init__.py from its table.
 struct KeyName {
@@ -78,6 +83,14 @@ bool build_led_report(const HIDReportMap &map, uint8_t leds, uint8_t &report_id,
 class HIDInput : public key_provider::KeyProvider {
  public:
   void set_layout(const KeyboardLayout *layout) { this->layout_ = layout; }
+  const KeyboardLayout *get_layout() const { return this->layout_; }
+  /// What the layout puts on a keyboard key (page 7) with the modifiers and Caps Lock as they are now,
+  /// regardless of Ctrl, Alt and GUI: for a dead key LAYOUT_DEAD | its combining mark; 0 for a key it
+  /// has nothing on.
+  static constexpr char32_t LAYOUT_DEAD = 0x80000000;
+  char32_t layout_char(uint16_t usage) const;
+  /// Whether the layout puts anything on AltGr (Right Alt): then it is a level, not Alt.
+  bool layout_has_level3() const;
   void set_num_lock(bool on) { this->leds_ = on ? (this->leds_ | LED_NUM_LOCK) : (this->leds_ & ~LED_NUM_LOCK); }
   /// The device's id, for the key log.
   void set_log_name(const char *name) { this->log_name_ = name; }
@@ -110,6 +123,9 @@ class HIDInput : public key_provider::KeyProvider {
 
   void key_(uint16_t page, uint16_t usage, bool pressed);
   void type_key_(uint16_t usage);
+  const LayoutKey *layout_key_(uint16_t usage) const;
+  /// The level of the key (plain, Shift, AltGr, Shift+AltGr) with the modifiers and Caps Lock now.
+  uint8_t level_(const LayoutKey &key) const;
   void type_(char32_t c);
   char32_t compose_(char32_t mark, char32_t base) const;
 

@@ -48,6 +48,9 @@
 #ifdef SVP_CHANNEL_LIST
 #include "esphome/components/http_request/http_request.h"
 #endif
+#ifdef SVP_KEYBOARD
+#include "esphome/components/hid/hid_input.h"
+#endif
 #ifdef SVP_MEDIA_PLAYER
 #include "esphome/components/api/custom_api_device.h"
 #include "esphome/components/media_player/media_player.h"
@@ -197,7 +200,8 @@ class ControlsTouchListener : public touchscreen::TouchListener {
 class StreamInputTaker : public lvgl::LvglComponent::PausedInput {
  public:
   explicit StreamInputTaker(SimpleVideoPlayer *parent) : parent_(parent) {}
-  bool paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action) override;
+  bool paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action, uint32_t codepoint,
+                  bool level3) override;
   bool paused_text(uint32_t codepoint) override;
   bool paused_pointer(int16_t dx, int16_t dy, int16_t wheel, uint8_t buttons) override;
 
@@ -521,6 +525,34 @@ class SimpleVideoPlayer : public Component
   void add_on_relay_options_callback(std::function<void()> &&callback) {
     this->opt_callbacks_.add(std::move(callback));
   }
+#endif
+
+#ifdef SVP_KEYBOARD
+  // Keyboard layouts (keyboard_layouts:) on the keyboards instead of their own: svp_relay's (GET
+  // /keyboard), each kept in the directory once used and read from there after. Main loop.
+  void set_keyboard_directory(const std::string &dir) { this->kbd_dir_ = dir; }
+  void add_keyboard(hid::HIDInput *input) { this->kbd_inputs_.push_back(input); }
+  /// The list: svp_relay's, else the directory's (names only); the callback once it is there.
+  void keyboard_list_fetch();
+  bool keyboard_listed() const { return this->kbd_listed_; }  // false: on its way, or none
+  bool keyboard_list_remote() const { return this->kbd_list_remote_; }  // svp_relay's
+  size_t keyboard_count() const { return this->kbd_count_; }
+  const char *keyboard_name(size_t index) const;
+  const char *keyboard_description(size_t index) const;  // "" for none
+  bool keyboard_kept(size_t index) const;                // its file is in the directory
+  int keyboard_index(const std::string &name) const;      // -1: not in the list
+  /// Up to max indexes of the layouts whose name or description holds query (any case), for an empty
+  /// query those kept; returns how many there are in all.
+  size_t keyboard_find(const std::string &query, int *out, size_t max) const;
+  /// That layout on every keyboard, "" their own again: from its file, else from svp_relay (then kept
+  /// in the directory). The callback once it is on them, or could not be had.
+  void keyboard_select(const std::string &name);
+  const PsramString &keyboard_selected() const { return this->kbd_selected_; }  // "": their own
+  const PsramString &keyboard_wanted() const { return this->kbd_wanted_; }      // asked for last
+  const std::string &keyboard_directory() const { return this->kbd_dir_; }
+  bool keyboard_loading() const { return this->kbd_step_ != KBD_IDLE || this->kbd_pending_; }
+  bool keyboard_failed() const { return this->kbd_failed_; }  // the last one asked for
+  void add_on_keyboard_callback(std::function<void()> &&callback) { this->kbd_callbacks_.add(std::move(callback)); }
 #endif
 
   //========================================================================
@@ -987,6 +1019,8 @@ class SimpleVideoPlayer : public Component
     CHANNEL_CMD_OPTIONS_GET,
     CHANNEL_CMD_OPTIONS_SET,
     CHANNEL_CMD_COVER,
+    CHANNEL_CMD_KEYBOARD_LIST,
+    CHANNEL_CMD_KEYBOARD_GET,
   };
   struct ChannelCmd {
     uint8_t cmd;
@@ -1003,6 +1037,10 @@ class SimpleVideoPlayer : public Component
                      uint8_t *into = nullptr, size_t into_cap = 0, uint32_t timeout_ms = 0);
   void ha_browse_task_();
   void ha_play_request_(const std::string &id);
+#ifdef SVP_KEYBOARD
+  void keyboard_list_task_();
+  void keyboard_get_task_();
+#endif
 #if defined(SVP_AUDIO_FILES) && defined(SVP_MEDIA_PLAYER)
   // The media player's state: the queue's Home Assistant track started, or ended (the queue goes on).
   void audio_remote_player_(media_player::MediaPlayerState state);
@@ -1944,7 +1982,7 @@ class SimpleVideoPlayer : public Component
   bool stream_last_touch_valid_{false};
 #endif
 #ifdef SVP_STREAM_INPUT
-  static constexpr uint8_t STREAM_INPUT_MAX = 8;
+  static constexpr uint8_t STREAM_INPUT_MAX = 13;
   static constexpr uint8_t STREAM_INPUT_QUEUE = 32;
   struct StreamInput {
     uint8_t length;
@@ -1971,6 +2009,62 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> stream_audio_on_{false};
   std::atomic<uint32_t> stream_last_audio_ms_{0};
 #endif
+#endif
+
+#ifdef SVP_KEYBOARD
+  // The list (svp_relay's "name\tdescription\n" lines, cut into strings in place), the entries into
+  // it, and two layouts: the one on the keyboards and the next one read into the other (pool).
+  static constexpr size_t KBD_LIST_BYTES = 32 * 1024;
+  static constexpr size_t KBD_MAX = 1024;
+  static constexpr size_t KBD_LAYOUT_BYTES = 8 * 1024;
+  struct KbdEntry {
+    uint16_t name;  // offsets into kbd_list_
+    uint16_t description;
+    bool kept;
+  };
+  enum KbdStep : uint8_t { KBD_IDLE, KBD_READING, KBD_FETCHING, KBD_WRITING };
+  void keyboard_setup_();
+  void keyboard_loop_();
+  /// The directory's layouts: the list of them (build), else which of the list's are there.
+  void keyboard_list_local_(bool build);
+  void keyboard_listed_();
+  /// The layout asked for last, when nothing is under way.
+  void keyboard_next_();
+  void keyboard_read_();
+  void keyboard_read_end_(bool ok);
+  void keyboard_fetch_();
+  /// The layout read into slot on the keyboards, if it is one.
+  bool keyboard_apply_(size_t len);
+  void keyboard_keep_(size_t len);
+  void keyboard_write_();
+  void keyboard_done_(bool ok);
+  std::string kbd_dir_;
+  PsramVector<hid::HIDInput *> kbd_inputs_;
+  PsramVector<const hid::KeyboardLayout *> kbd_own_;  // the keyboards' own layouts
+  char *kbd_list_{nullptr};
+  KbdEntry *kbd_entries_{nullptr};
+  size_t kbd_count_{0};
+  bool kbd_listed_{false};
+  bool kbd_list_remote_{false};
+  bool kbd_list_busy_{false};
+  uint8_t *kbd_slot_[2]{};
+  hid::KeyboardLayout kbd_layout_[2]{};
+  int8_t kbd_active_{-1};  // the slot on the keyboards, -1 none (their own)
+  uint8_t kbd_loading_{0};  // the slot being read into
+  KbdStep kbd_step_{KBD_IDLE};
+  bool kbd_ready_{false};
+  bool kbd_pending_{false};  // kbd_wanted_ not yet started
+  bool kbd_failed_{false};
+  bool kbd_kept_{false};  // its file written so far
+  PsramString kbd_wanted_, kbd_selected_, kbd_loading_name_;
+  size_t kbd_len_{0};
+  size_t kbd_got_{0};
+  storage::StreamHandle kbd_handle_{};
+  CallbackManager<void()> kbd_callbacks_;
+  // From the channel task: the list (its length) / the layout into kbd_slot_[kbd_loading_].
+  std::atomic<bool> kbd_list_done_{false}, kbd_get_done_{false};
+  bool kbd_list_ok_{false}, kbd_get_ok_{false};
+  size_t kbd_list_len_{0}, kbd_get_len_{0};
 #endif
 
 #ifdef SVP_CHANNEL_LIST

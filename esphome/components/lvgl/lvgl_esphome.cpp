@@ -983,8 +983,10 @@ LVHIDKeypadListener::LVHIDKeypadListener(hid::HIDInput *input, KeyBindings *bind
     static_cast<LVHIDKeypadListener *>(lv_indev_get_user_data(d))->read_(data);
   });
   input->add_on_key_event_callback([this, input](uint16_t page, uint16_t usage, bool pressed) {
+    const bool keyboard = page == hid::PAGE_KEYBOARD;
     this->push_(static_cast<uint32_t>(page) << 16 | usage, KeyBindings::modifiers_of(input->get_modifiers()),
-                pressed ? KEY_PRESS : KEY_RELEASE);
+                pressed ? KEY_PRESS : KEY_RELEASE, keyboard ? input->layout_char(usage) : 0,
+                keyboard && usage == 0xE6 && input->layout_has_level3());
   });
   // Typed characters; Enter and Tab are keys.
   input->add_on_text_callback([this](const std::string &text) {
@@ -1003,7 +1005,7 @@ LVHIDKeypadListener::LVHIDKeypadListener(hid::HIDInput *input, KeyBindings *bind
 }
 
 // From the HID transport's task; read_() takes them on the LVGL thread.
-void LVHIDKeypadListener::push_(uint32_t code, uint8_t mods, EventKind kind) {
+void LVHIDKeypadListener::push_(uint32_t code, uint8_t mods, EventKind kind, uint32_t layout_char, bool level3) {
   if (this->parent_->is_paused()) {
     if (kind == KEY_RELEASE)
       this->parent_->maybe_wakeup();
@@ -1013,7 +1015,7 @@ void LVHIDKeypadListener::push_(uint32_t code, uint8_t mods, EventKind kind) {
   const uint8_t tail = this->tail_.load(std::memory_order_relaxed);
   if (static_cast<uint8_t>(tail - this->head_.load(std::memory_order_acquire)) == QUEUE_SIZE)
     return;
-  this->queue_[tail % QUEUE_SIZE] = {code, mods, kind};
+  this->queue_[tail % QUEUE_SIZE] = {code, layout_char, mods, kind, level3};
   this->tail_.store(tail + 1, std::memory_order_release);
 }
 
@@ -1090,7 +1092,8 @@ void LVHIDKeypadListener::run_paused() {
         }
       }
       if (taker != nullptr)
-        taker->paused_key(page, usage, event.mods, false, this->bindings_->resolve(page, usage, event.mods));
+        taker->paused_key(page, usage, event.mods, false, this->bindings_->resolve(page, usage, event.mods),
+                          event.layout_char, event.level3);
       continue;
     }
     if (event.kind != KEY_PRESS)
@@ -1098,7 +1101,7 @@ void LVHIDKeypadListener::run_paused() {
     if (this->bindings_->take_learned(page, usage, event.mods))
       continue;
     const int action = this->bindings_->resolve(page, usage, event.mods);
-    if (taker != nullptr && taker->paused_key(page, usage, event.mods, true, action) &&
+    if (taker != nullptr && taker->paused_key(page, usage, event.mods, true, action, event.layout_char, event.level3) &&
         action < KeyBindings::BUILTIN_COUNT)
       continue;
     this->bindings_->fire(action);

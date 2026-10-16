@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 namespace esphome::hid {
 
@@ -66,6 +67,22 @@ bool build_led_report(const HIDReportMap &map, uint8_t leds, uint8_t &report_id,
   }
   payload.clear();
   return false;
+}
+
+bool parse_layout(const uint8_t *data, size_t len, KeyboardLayout *out) {
+  static constexpr size_t HEADER = 8;
+  if (data == nullptr || len < HEADER || (reinterpret_cast<uintptr_t>(data) & 3) != 0 ||
+      std::memcmp(data, "KBL1", 4) != 0)
+    return false;
+  const uint16_t keys = data[4] | data[5] << 8;
+  const uint16_t compose = data[6] | data[7] << 8;
+  if (len != HEADER + keys * sizeof(LayoutKey) + compose * sizeof(LayoutCompose))
+    return false;
+  out->keys = reinterpret_cast<const LayoutKey *>(data + HEADER);
+  out->key_count = keys;
+  out->compose = reinterpret_cast<const LayoutCompose *>(data + HEADER + keys * sizeof(LayoutKey));
+  out->compose_count = compose;
+  return true;
 }
 
 void append_utf8(std::string &out, char32_t c) {
@@ -217,21 +234,10 @@ void HIDInput::type_key_(uint16_t usage) {
       this->type_(KEYPAD[usage - 0x54]);
     return;
   }
-  if (this->layout_ == nullptr)
-    return;
-  const LayoutKey *key = nullptr;
-  for (uint16_t i = 0; i < this->layout_->key_count; i++) {
-    if (this->layout_->keys[i].usage == usage) {
-      key = &this->layout_->keys[i];
-      break;
-    }
-  }
+  const LayoutKey *key = this->layout_key_(usage);
   if (key == nullptr)
     return;
-  bool shift = (this->modifiers_ & (MOD_LEFT_SHIFT | MOD_RIGHT_SHIFT)) != 0;
-  if (key->alphabetic && (this->leds_ & LED_CAPS_LOCK) != 0)
-    shift = !shift;
-  const uint8_t level = ((this->modifiers_ & MOD_RIGHT_ALT) != 0 ? 2 : 0) + (shift ? 1 : 0);
+  const uint8_t level = this->level_(*key);
   const char32_t c = key->chars[level];
   if (c == 0)
     return;
@@ -255,6 +261,42 @@ void HIDInput::type_key_(uint16_t usage) {
     return;
   }
   this->type_(c);
+}
+
+const LayoutKey *HIDInput::layout_key_(uint16_t usage) const {
+  if (this->layout_ == nullptr)
+    return nullptr;
+  for (uint16_t i = 0; i < this->layout_->key_count; i++) {
+    if (this->layout_->keys[i].usage == usage)
+      return &this->layout_->keys[i];
+  }
+  return nullptr;
+}
+
+uint8_t HIDInput::level_(const LayoutKey &key) const {
+  bool shift = (this->modifiers_ & (MOD_LEFT_SHIFT | MOD_RIGHT_SHIFT)) != 0;
+  if (key.alphabetic && (this->leds_ & LED_CAPS_LOCK) != 0)
+    shift = !shift;
+  return ((this->modifiers_ & MOD_RIGHT_ALT) != 0 ? 2 : 0) + (shift ? 1 : 0);
+}
+
+char32_t HIDInput::layout_char(uint16_t usage) const {
+  const LayoutKey *key = this->layout_key_(usage);
+  if (key == nullptr)
+    return 0;
+  const uint8_t level = this->level_(*key);
+  const char32_t c = key->chars[level];
+  return c != 0 && (key->dead & (1u << level)) != 0 ? (LAYOUT_DEAD | c) : c;
+}
+
+bool HIDInput::layout_has_level3() const {
+  if (this->layout_ == nullptr)
+    return false;
+  for (uint16_t i = 0; i < this->layout_->key_count; i++) {
+    if (this->layout_->keys[i].chars[2] != 0 || this->layout_->keys[i].chars[3] != 0)
+      return true;
+  }
+  return false;
 }
 
 char32_t HIDInput::compose_(char32_t mark, char32_t base) const {

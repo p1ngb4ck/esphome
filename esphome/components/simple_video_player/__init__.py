@@ -78,6 +78,7 @@ simple_video_player_ns = cg.esphome_ns.namespace("simple_video_player")
 SimpleVideoPlayer = simple_video_player_ns.class_("SimpleVideoPlayer", cg.Component)
 http_request_ns = cg.esphome_ns.namespace("http_request")
 HttpRequestComponent = http_request_ns.class_("HttpRequestComponent", cg.Component)
+HIDInput = cg.esphome_ns.namespace("hid").class_("HIDInput")
 
 # Enums for speaker channel configuration -- is_class=True: the C++ side is a scoped `enum class`,
 # so codegen must emit `SpeakerChannelMode::SPEAKER_CHANNEL_*`, not a bare `SPEAKER_CHANNEL_*`.
@@ -185,6 +186,18 @@ def _storage_path(value):
     value = cv.string_strict(value)
     if not value.startswith("/") or value.endswith("/"):
         raise cv.Invalid("a file's storage path, as /sd/desktops.txt")
+    return value
+
+
+CONF_KEYBOARD_LAYOUTS = "keyboard_layouts"
+CONF_KEYBOARDS = "keyboards"
+CONF_DIRECTORY = "directory"
+
+
+def _storage_dir(value):
+    value = cv.string_strict(value)
+    if not value.startswith("/") or value.endswith("/"):
+        raise cv.Invalid("a directory's storage path, as /sd/keyboard")
     return value
 
 
@@ -580,6 +593,14 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_STREAM_STATISTICS): cv.boolean,
             # SPICE client: spice.connect shows a SPICE server's desktop on the stream's output.
             cv.Optional(CONF_SPICE): _spice,
+            # Keyboard layouts on these keyboards instead of their own (keyboard_select()): from
+            # svp_relay (with channel_list), each kept in the directory once used.
+            cv.Optional(CONF_KEYBOARD_LAYOUTS): cv.Schema(
+                {
+                    cv.Required(CONF_KEYBOARDS): cv.ensure_list(cv.use_id(HIDInput)),
+                    cv.Required(CONF_DIRECTORY): _storage_dir,
+                }
+            ),
             # Touches go back to the stream sender, which replays them into its page.
             cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
             # Channel list from the svp_relay Home Assistant integration, shown in an LVGL dropdown;
@@ -1052,6 +1073,12 @@ async def to_code(config):
                 widget = await cg.get_variable(channels[CONF_WIDGET_ID])
                 cg.add(var.set_channel_widget(widget))
             cg.add_define("SVP_CHANNEL_LIST")
+
+    if layouts := config.get(CONF_KEYBOARD_LAYOUTS):
+        cg.add_define("SVP_KEYBOARD")
+        cg.add(var.set_keyboard_directory(layouts[CONF_DIRECTORY]))
+        for keyboard in layouts[CONF_KEYBOARDS]:
+            cg.add(var.add_keyboard(await cg.get_variable(keyboard)))
 
     if controls := config.get(CONF_CONTROLS):
         cg.add_define("SVP_CONTROLS")

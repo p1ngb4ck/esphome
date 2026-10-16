@@ -914,18 +914,26 @@ bool SimpleVideoPlayer::stream_on_input(const uint8_t *message, uint8_t length) 
   return true;
 }
 
-// 'K' action page:2 usage:2 mods pressed -- action: the built-in KeyBindings action, 0xFE one of the
-// configuration's own, 0xFF none.
-bool StreamInputTaker::paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action) {
+// 'K' action page:2 usage:2 mods pressed codepoint:4 level3 -- action: the built-in KeyBindings action,
+// 0xFE one of the configuration's own, 0xFF none; codepoint: what the keyboard's layout puts on the key
+// now (bit 31: a dead key, the combining mark it puts on the next; 0: nothing); level3 1: Right Alt is
+// the layout's AltGr.
+bool StreamInputTaker::paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action,
+                                  uint32_t codepoint, bool level3) {
   const uint8_t kind = action < 0 ? 0xFF : action < lvgl::KeyBindings::BUILTIN_COUNT ? action : 0xFE;
-  const uint8_t message[8] = {'K',
-                              kind,
-                              static_cast<uint8_t>(page & 0xFF),
-                              static_cast<uint8_t>(page >> 8),
-                              static_cast<uint8_t>(usage & 0xFF),
-                              static_cast<uint8_t>(usage >> 8),
-                              mods,
-                              static_cast<uint8_t>(pressed ? 1 : 0)};
+  const uint8_t message[13] = {'K',
+                               kind,
+                               static_cast<uint8_t>(page & 0xFF),
+                               static_cast<uint8_t>(page >> 8),
+                               static_cast<uint8_t>(usage & 0xFF),
+                               static_cast<uint8_t>(usage >> 8),
+                               mods,
+                               static_cast<uint8_t>(pressed ? 1 : 0),
+                               static_cast<uint8_t>(codepoint & 0xFF),
+                               static_cast<uint8_t>(codepoint >> 8),
+                               static_cast<uint8_t>(codepoint >> 16),
+                               static_cast<uint8_t>(codepoint >> 24),
+                               static_cast<uint8_t>(level3 ? 1 : 0)};
   return this->parent_->stream_on_input(message, sizeof(message));
 }
 
