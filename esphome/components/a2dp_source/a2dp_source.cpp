@@ -511,6 +511,9 @@ void A2DPSource::loop() {
     ESP_LOGI(TAG, "Bluetooth Classic is down, stopping");
     this->source_.stack_down(esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED);
     this->started_.store(false);
+    // Gone with the stack, no event says so: the connection (and stream) ends here.
+    A2DPSource::audio_state_(ESP_A2D_AUDIO_STATE_SUSPEND, this);
+    A2DPSource::connection_state_(ESP_A2D_CONNECTION_STATE_DISCONNECTED, this);
   }
   if (!this->started_.load()) {
     if (!classic_up)
