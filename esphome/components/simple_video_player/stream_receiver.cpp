@@ -462,8 +462,13 @@ void SimpleVideoPlayer::stream_net_loop_() {
             // about to; a session that still ends is waited for here (this task may wait, the main
             // loop may not). A track of the audio queue ends for it.
 #ifdef SVP_AUDIO_FILES
-            if (this->audio_session_.load(std::memory_order_acquire))
-              this->end_session_();
+            // Under session_lock_: not in the middle of start_audio_session_() (main loop).
+            if (this->audio_session_.load(std::memory_order_acquire) &&
+                xSemaphoreTake(this->session_lock_, pdMS_TO_TICKS(SESSION_END_WAIT_MS)) == pdTRUE) {
+              if (this->audio_session_.load(std::memory_order_acquire))
+                this->end_session_();
+              xSemaphoreGive(this->session_lock_);
+            }
 #endif
             if (this->state_.load(std::memory_order_acquire) == PlayerState::PLAYING ||
                 this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED)
