@@ -80,6 +80,7 @@ class BtPersistence : public Component {
   uint32_t last_try_{0};
   uint32_t storage_timeout_{20000};
   bool recovered_{false};
+  const char *fail_reason_{""};
 
   storage::StreamHandle handle_{};
   uint8_t *in_buf_{nullptr};

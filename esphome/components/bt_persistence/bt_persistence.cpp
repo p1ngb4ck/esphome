@@ -39,12 +39,17 @@ void BtPersistence::setup() {
 }
 
 void BtPersistence::dump_config() {
+  static const char *const STATES[] = {"waiting for the storage", "loading", "ready", "failed"};
+  const State state = this->state_.load(std::memory_order_acquire);
   ESP_LOGCONFIG(TAG,
                 "Bluetooth persistence:\n"
                 "  File: %s\n"
                 "  Write delay: %" PRIu32 " ms\n"
-                "  Storage timeout: %" PRIu32 " ms",
-                this->path_.c_str(), this->write_delay_, this->storage_timeout_);
+                "  Storage timeout: %" PRIu32 " ms\n"
+                "  State: %s%s%s",
+                this->path_.c_str(), this->write_delay_, this->storage_timeout_,
+                STATES[static_cast<uint8_t>(state)], state == State::FAILED ? ": " : "",
+                state == State::FAILED ? this->fail_reason_ : "");
 }
 
 bool BtPersistence::resolve_() {
@@ -249,6 +254,7 @@ void BtPersistence::set_ready_() {
 
 void BtPersistence::fail_(const char *why) {
   ESP_LOGE(TAG, "Bluetooth stays off: %s (%s)", why, this->path_.c_str());
+  this->fail_reason_ = why;
   this->state_.store(State::FAILED, std::memory_order_release);
   heap_caps_free(this->in_buf_);
   this->in_buf_ = nullptr;
