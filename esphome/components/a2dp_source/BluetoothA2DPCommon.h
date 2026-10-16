@@ -327,6 +327,8 @@ class BluetoothA2DPCommon {
 
   /// Provides the address of the last device
   virtual esp_bd_addr_t *get_last_peer_address() { return &last_connection; }
+  /// ESPHome: the device connected (or being connected) now.
+  esp_bd_addr_t *get_peer_address() { return &peer_bd_addr; }
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 0, 0)
   /// Bluetooth discoverability

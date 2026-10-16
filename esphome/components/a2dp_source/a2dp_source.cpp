@@ -241,7 +241,8 @@ bool A2DPSource::pair_device(const bt_pairing::ScannedDevice &device) {
     return false;
   }
   if (this->connected_.load()) {
-    ESP_LOGW(TAG, "Connected to another device; forget it and switch it off first");
+    ESP_LOGW(TAG, "Connected to %s; forget it and switch it off first",
+             this->source_.to_str(*this->source_.get_peer_address()));
     return false;
   }
   memcpy(this->chosen_addr_, device.address, ESP_BD_ADDR_LEN);
@@ -551,7 +552,7 @@ void A2DPSource::loop() {
     }
   }
   if (this->connect_pending_.exchange(false)) {
-    ESP_LOGI(TAG, "Connected");
+    ESP_LOGI(TAG, "Connected to %s", this->source_.to_str(*this->source_.get_peer_address()));
     this->load_output_delay_();
     for (auto *trigger : this->connected_triggers_) {
       trigger->trigger();
