@@ -1839,7 +1839,15 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
     }
 
     ESP_LOGI(TAG, "AVI parser initialized successfully");
-    // The index now: seeking, and damage passed over to the next intact frame.
+    // The index now: seeking, and damage passed over to the next intact frame. Its memory only for a
+    // file's AVI (a network AVI and raw MJPEG have none), kept with the ring once taken.
+    if (this->index_buf_ == nullptr) {
+      uint8_t *index = this->media_alloc_(this->index_reserve_);
+      xSemaphoreTake(this->media_lock_, portMAX_DELAY);
+      this->index_buf_ = reinterpret_cast<uint32_t *>(index);
+      xSemaphoreGive(this->media_lock_);
+      this->avi_parser_->set_index_memory(this->index_buf_, this->index_reserve_);
+    }
     this->avi_parser_->load_index(this->cache_buffer_, CACHE_BUFFER_SIZE);
   } else {
     // Raw MJPEG - seek back to start for frame reading
@@ -2203,7 +2211,7 @@ uint8_t *SimpleVideoPlayer::media_alloc_(size_t size) {
 bool SimpleVideoPlayer::acquire_session_buffers_() {
 #ifdef SVP_PICTURES
   // Pictures and cover art give their buffers back first: the video's come from one free stretch.
-  bool missing = this->ring_buf_ == nullptr || this->index_buf_ == nullptr;
+  bool missing = this->ring_buf_ == nullptr;
   for (auto &slot : this->frame_slots_)
     missing = missing || slot.data == nullptr;
   if (missing && this->pic_ready_)
@@ -2216,7 +2224,6 @@ bool SimpleVideoPlayer::acquire_session_buffers_() {
     if (this->frame_slots_[i].data == nullptr)
       slots[i] = this->media_alloc_(this->frame_bytes_);
   }
-  uint8_t *index = this->index_buf_ == nullptr ? this->media_alloc_(this->index_reserve_) : nullptr;
   uint8_t *ring = this->ring_buf_ == nullptr ? this->media_alloc_(this->ring_size_) : nullptr;
   xSemaphoreTake(this->media_lock_, portMAX_DELAY);
   for (size_t i = 0; i < FRAME_SLOT_COUNT; i++) {
@@ -2225,11 +2232,9 @@ bool SimpleVideoPlayer::acquire_session_buffers_() {
       this->frame_slots_[i].capacity = this->frame_bytes_;
     }
   }
-  if (index != nullptr)
-    this->index_buf_ = reinterpret_cast<uint32_t *>(index);
   if (ring != nullptr)
     this->ring_buf_ = ring;
-  bool ok = this->ring_buf_ != nullptr && this->index_buf_ != nullptr;
+  bool ok = this->ring_buf_ != nullptr;
   for (auto &slot : this->frame_slots_)
     ok = ok && slot.data != nullptr;
   xSemaphoreGive(this->media_lock_);

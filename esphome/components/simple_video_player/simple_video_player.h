@@ -1252,7 +1252,8 @@ class SimpleVideoPlayer : public Component
   /// From any task but the main loop: a piece for the media side; asks the main loop for the
   /// pictures' if needed.
   uint8_t *media_alloc_(size_t size);
-  /// Playback task: the read-ahead ring, the compressed-frame slot and the index of a session.
+  /// Playback task: the read-ahead ring and the compressed-frame slot of a session (the index is
+  /// taken in open_file_(), only for a file's AVI).
   bool acquire_session_buffers_();
   /// The display's decode buffer (and the controls) / the canvas output pair, kept once taken. Only
   /// when it does not fit beside the other output, the main loop gives that back first.
