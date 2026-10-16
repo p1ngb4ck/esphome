@@ -3242,8 +3242,11 @@ void SimpleVideoPlayer::audio_file_loop_() {
         this->file_speaker_->set_pause_state(false);
       this->audio_advance_req_.store(true, std::memory_order_release);
       this->note_state_();
+      return;
     }
-  } else if (this->file_speaker_open_) {
+    // Stopped (or failed) meanwhile: the speaker as after a stop.
+  }
+  if (this->file_speaker_open_) {
     this->file_speaker_->set_pause_state(false);
     this->file_speaker_->stop();
     this->file_speaker_open_ = false;
