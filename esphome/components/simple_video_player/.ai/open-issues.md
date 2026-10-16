@@ -40,7 +40,7 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 | B7 | After a session the canvas RGB888 pair and `decode_target_` stay allocated (decoded, not shown) until a reclaim | CODE |
 | B8 | `index_buf_` is allocated for network AVI and raw MJPEG, which use no index | CODE |
 | B9 | Controls: 3 × bar snapshot reserved (CT:331-342); check need | CODE |
-| B10 | Allocations past the pool: `channel_http_` response buffer (PSRAM realloc up to 256 KiB per request, CL:578); PNG/BMP decode via RAMAllocator; `PsramPool::pieces_` grows on the internal heap past 32 pieces | CODE |
+| B10 | (partly changed 2026-10-16: `PsramPool`'s piece table is a fixed table of 128 at the pool block's start, no internal heap growth; a full table hands a free piece out whole) Allocations past the pool: `channel_http_` response buffer (PSRAM realloc up to 256 KiB per request, CL:578); PNG/BMP decode via RAMAllocator; `PsramPool::pieces_` grows on the internal heap past 32 pieces | CODE |
 | B11 | (partly changed 2026-10-16: an output request and the desktop's media request are taken back after the wait, the main loop clears only the output request it served; the pictures' reclaim request is not, two tasks may share it) `wait_alloc_answer_` expiry: after the 2 s timeout `pool_reclaim_req_`/`output_release_req_` stay set; the main loop frees later for nobody (H:2110-2117) | CODE |
 
 ## C. Rule violations (speakers, LVGL, hot path)

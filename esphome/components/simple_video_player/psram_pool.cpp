@@ -15,9 +15,14 @@ bool PsramPool::init(size_t size) {
   this->base_ = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(size, &cfg, &got));
   if (this->base_ == nullptr)
     return false;
-  this->size_ = got & ~(ALIGN - 1);
-  this->pieces_.reserve(32);
-  this->pieces_.push_back({0, this->size_, false});
+  const size_t table = (MAX_PIECES * sizeof(Piece) + ALIGN - 1) & ~(ALIGN - 1);
+  const size_t total = got & ~(ALIGN - 1);
+  if (total <= table)
+    return false;
+  this->pieces_ = reinterpret_cast<Piece *>(this->base_);
+  this->size_ = total - table;
+  this->pieces_[0] = {table, this->size_, false};
+  this->count_ = 1;
   return true;
 }
 
@@ -27,16 +32,19 @@ uint8_t *PsramPool::alloc(size_t size) {
   size = (size + ALIGN - 1) & ~(ALIGN - 1);
   uint8_t *result = nullptr;
   xSemaphoreTake(this->lock_, portMAX_DELAY);
-  for (size_t i = 0; i < this->pieces_.size(); i++) {
+  for (size_t i = 0; i < this->count_; i++) {
     Piece &piece = this->pieces_[i];
     if (piece.used || piece.size < size)
       continue;
-    if (piece.size > size)
-      this->pieces_.insert(this->pieces_.begin() + i + 1, {piece.offset + size, piece.size - size, false});
-    Piece &taken = this->pieces_[i];
-    taken.size = size;
-    taken.used = true;
-    result = this->base_ + taken.offset;
+    if (piece.size > size && this->count_ < MAX_PIECES) {
+      for (size_t j = this->count_; j > i + 1; j--)
+        this->pieces_[j] = this->pieces_[j - 1];
+      this->pieces_[i + 1] = {piece.offset + size, piece.size - size, false};
+      this->count_++;
+      piece.size = size;
+    }
+    piece.used = true;
+    result = this->base_ + piece.offset;
     break;
   }
   xSemaphoreGive(this->lock_);
@@ -48,17 +56,17 @@ void PsramPool::free(uint8_t *ptr) {
     return;
   const size_t offset = static_cast<size_t>(ptr - this->base_);
   xSemaphoreTake(this->lock_, portMAX_DELAY);
-  for (size_t i = 0; i < this->pieces_.size(); i++) {
+  for (size_t i = 0; i < this->count_; i++) {
     if (this->pieces_[i].offset != offset || !this->pieces_[i].used)
       continue;
     this->pieces_[i].used = false;
-    if (i + 1 < this->pieces_.size() && !this->pieces_[i + 1].used) {
+    if (i + 1 < this->count_ && !this->pieces_[i + 1].used) {
       this->pieces_[i].size += this->pieces_[i + 1].size;
-      this->pieces_.erase(this->pieces_.begin() + i + 1);
+      this->erase_(i + 1);
     }
     if (i > 0 && !this->pieces_[i - 1].used) {
       this->pieces_[i - 1].size += this->pieces_[i].size;
-      this->pieces_.erase(this->pieces_.begin() + i);
+      this->erase_(i);
     }
     break;
   }
@@ -70,9 +78,9 @@ size_t PsramPool::used() const {
   if (this->base_ == nullptr)
     return 0;
   xSemaphoreTake(this->lock_, portMAX_DELAY);
-  for (const Piece &piece : this->pieces_) {
-    if (piece.used)
-      total += piece.size;
+  for (size_t i = 0; i < this->count_; i++) {
+    if (this->pieces_[i].used)
+      total += this->pieces_[i].size;
   }
   xSemaphoreGive(this->lock_);
   return total;
@@ -83,12 +91,18 @@ size_t PsramPool::largest_free() const {
   if (this->base_ == nullptr)
     return 0;
   xSemaphoreTake(this->lock_, portMAX_DELAY);
-  for (const Piece &piece : this->pieces_) {
-    if (!piece.used && piece.size > largest)
-      largest = piece.size;
+  for (size_t i = 0; i < this->count_; i++) {
+    if (!this->pieces_[i].used && this->pieces_[i].size > largest)
+      largest = this->pieces_[i].size;
   }
   xSemaphoreGive(this->lock_);
   return largest;
+}
+
+void PsramPool::erase_(size_t index) {
+  for (size_t j = index; j + 1 < this->count_; j++)
+    this->pieces_[j] = this->pieces_[j + 1];
+  this->count_--;
 }
 
 }  // namespace esphome::simple_video_player

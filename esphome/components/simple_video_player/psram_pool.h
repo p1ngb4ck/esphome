@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <vector>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -11,10 +10,12 @@ namespace esphome::simple_video_player {
 
 /// One PSRAM block for everything the player buffers, taken at boot. Pieces are handed out first
 /// fit, 128-byte aligned (whole cache lines, as the JPEG unit and DMA need), and given back
-/// whole; neighbouring free pieces merge. Thread-safe.
+/// whole; neighbouring free pieces merge. Thread-safe. Its piece table lives at the block's start
+/// (no internal heap); with the table full a free piece is handed out whole instead of split.
 class PsramPool {
  public:
   static constexpr size_t ALIGN = 128;
+  static constexpr size_t MAX_PIECES = 128;
 
   bool init(size_t size);
   bool ready() const { return this->base_ != nullptr; }
@@ -33,9 +34,11 @@ class PsramPool {
     size_t size;
     bool used;
   };
+  void erase_(size_t index);  // lock held
   uint8_t *base_{nullptr};
-  size_t size_{0};
-  std::vector<Piece> pieces_;  // in address order
+  size_t size_{0};             // usable bytes, after the piece table
+  Piece *pieces_{nullptr};     // in address order, at base_
+  size_t count_{0};
   SemaphoreHandle_t lock_{nullptr};
 };
 
