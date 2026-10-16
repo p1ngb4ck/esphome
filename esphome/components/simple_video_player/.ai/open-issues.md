@@ -59,7 +59,7 @@ Remove an entry only when Olli confirms the fix on the device.
 | D3 | `media_lock_` held during the 2 s waits (up to 3 allocations = 6 s) | CODE |
 | D4 | `dev_lock_` held across blocking socket sends while the main loop waits portMAX on it (U:592-609, 1190-1205 vs 307, 331) | CODE |
 | D5 | `stream_play_audio_` reachable from net task and spice task without a lock | PLAUSIBLE |
-| D6 | Plain fields shared across tasks without atomics: `audio_enabled_`, `loop_`, `repeat_`, `pic_read_` fields | CODE |
+| D6 | (changed 2026-10-16: `audio_enabled_` and `loop_` are `std::atomic<bool>`; `repeat_` (enum, main loop + controls) and `pic_read_` left) Plain fields shared across tasks without atomics: `audio_enabled_`, `loop_`, `repeat_`, `pic_read_` fields | CODE |
 | D7 | `start_req_` not reset when the playback ends early: loop may still prerender, pause LVGL, fire on_started | CODE (2026-10-16): the playback task sets 1 and waits for 2 while `playing()`, at most 2 s; a stop in that window, or a main loop blocked over 2 s (A2), leaves 1, and the next loop pass prerenders, pauses LVGL (DSI direct) and fires on_started for a session already stopped; the DSI block below gives LVGL back once the task is gone. Only `start_playback_` resets it. Not changed |
 | D8 | spice/net tasks prio 4 without affinity can preempt playback and loopTask (prio 1) on core 1 | CODE |
 

@@ -1320,7 +1320,7 @@ class SimpleVideoPlayer : public Component
   // Atomic for the same cross-core reason; written just before state_ becomes ERROR so a reader
   // that sees ERROR also sees the reason.
   std::atomic<PlaybackError> last_error_{PlaybackError::NONE};
-  bool loop_{false};
+  std::atomic<bool> loop_{false};  // main loop writes (set_repeat), playback task reads
   std::string video_path_;  // written in play() before the task starts, then read only by the task
 
   // File reader (backed by storage::StorageWorker -- handles local/network storage
@@ -1395,7 +1395,7 @@ class SimpleVideoPlayer : public Component
   audio_router::AudioRouter *audio_router_{nullptr};
   void on_audio_output_changed_();
 #endif
-  bool audio_enabled_{false};                     // Audio stream available and enabled
+  std::atomic<bool> audio_enabled_{false};        // Audio stream available and enabled (playback, reader, audio tasks)
   // Whether THIS file's audio track actually uses audio_decoder_ (compressed: MP3/FLAC) vs direct
   // PCM. In a multi-codec build audio_decoder_ exists regardless, so the object pointer can no
   // longer signal the per-file mode -- this flag does. Set in init_audio_decoder_() per play().
