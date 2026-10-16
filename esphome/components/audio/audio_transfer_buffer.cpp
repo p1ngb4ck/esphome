@@ -10,13 +10,25 @@ namespace esphome::audio {
 
 AudioTransferBuffer::~AudioTransferBuffer() { this->deallocate_buffer_(); };
 
-std::unique_ptr<AudioSinkTransferBuffer> AudioSinkTransferBuffer::create(size_t buffer_size, bool psram_object) {
-  std::unique_ptr<AudioSinkTransferBuffer> sink_buffer = make_unique_in<AudioSinkTransferBuffer>(psram_object);
+std::unique_ptr<AudioSinkTransferBuffer> AudioSinkTransferBuffer::create(size_t buffer_size) {
+  std::unique_ptr<AudioSinkTransferBuffer> sink_buffer = make_unique<AudioSinkTransferBuffer>();
 
-  if (sink_buffer == nullptr || !sink_buffer->allocate_buffer_(buffer_size)) {
+  if (!sink_buffer->allocate_buffer_(buffer_size)) {
     return nullptr;
   }
 
+  return sink_buffer;
+}
+
+AudioObjectPtr<AudioSinkTransferBuffer> AudioSinkTransferBuffer::create(size_t buffer_size, const AudioHeap &heap) {
+  AudioObjectPtr<AudioSinkTransferBuffer> sink_buffer = make_audio_object<AudioSinkTransferBuffer>(heap);
+  if (sink_buffer == nullptr) {
+    return nullptr;
+  }
+  sink_buffer->heap_ = heap;
+  if (!sink_buffer->allocate_buffer_(buffer_size)) {
+    return nullptr;
+  }
   return sink_buffer;
 }
 
@@ -91,8 +103,17 @@ bool AudioTransferBuffer::reallocate(size_t new_buffer_size) {
     this->data_start_ = this->buffer_;
   }
 
-  RAMAllocator<uint8_t> allocator;
-  uint8_t *new_buffer = allocator.reallocate(this->buffer_, new_buffer_size);
+  uint8_t *new_buffer = nullptr;
+  if (this->heap_.is_set()) {
+    new_buffer = static_cast<uint8_t *>(this->heap_.alloc(new_buffer_size));
+    if (new_buffer != nullptr) {
+      std::memcpy(new_buffer, this->buffer_, this->buffer_length_);
+      this->heap_.release(this->buffer_);
+    }
+  } else {
+    RAMAllocator<uint8_t> allocator;
+    new_buffer = allocator.reallocate(this->buffer_, new_buffer_size);
+  }
   if (new_buffer == nullptr) {
     // Reallocation failed, but the original buffer is still valid
     return false;
@@ -107,9 +128,12 @@ bool AudioTransferBuffer::reallocate(size_t new_buffer_size) {
 bool AudioTransferBuffer::allocate_buffer_(size_t buffer_size) {
   this->buffer_size_ = buffer_size;
 
-  RAMAllocator<uint8_t> allocator;
-
-  this->buffer_ = allocator.allocate(this->buffer_size_);
+  if (this->heap_.is_set()) {
+    this->buffer_ = static_cast<uint8_t *>(this->heap_.alloc(this->buffer_size_));
+  } else {
+    RAMAllocator<uint8_t> allocator;
+    this->buffer_ = allocator.allocate(this->buffer_size_);
+  }
   if (this->buffer_ == nullptr) {
     return false;
   }
@@ -122,8 +146,12 @@ bool AudioTransferBuffer::allocate_buffer_(size_t buffer_size) {
 
 void AudioTransferBuffer::deallocate_buffer_() {
   if (this->buffer_ != nullptr) {
-    RAMAllocator<uint8_t> allocator;
-    allocator.deallocate(this->buffer_, this->buffer_size_);
+    if (this->heap_.is_set()) {
+      this->heap_.release(this->buffer_);
+    } else {
+      RAMAllocator<uint8_t> allocator;
+      allocator.deallocate(this->buffer_, this->buffer_size_);
+    }
     this->buffer_ = nullptr;
     this->data_start_ = nullptr;
   }
@@ -208,21 +236,31 @@ void ConstAudioSourceBuffer::consume(size_t bytes) {
 }
 
 std::unique_ptr<RingBufferAudioSource> RingBufferAudioSource::create(
-    std::shared_ptr<ring_buffer::RingBuffer> ring_buffer, size_t max_fill_bytes, uint8_t alignment_bytes,
-    bool psram_object) {
+    std::shared_ptr<ring_buffer::RingBuffer> ring_buffer, size_t max_fill_bytes, uint8_t alignment_bytes) {
   if (ring_buffer == nullptr || max_fill_bytes == 0 || alignment_bytes == 0 || alignment_bytes > MAX_ALIGNMENT_BYTES) {
     return nullptr;
   }
-  if (!psram_object) {
-    return std::unique_ptr<RingBufferAudioSource>(
+  return std::unique_ptr<RingBufferAudioSource>(
+      new RingBufferAudioSource(std::move(ring_buffer), max_fill_bytes, alignment_bytes));
+}
+
+AudioObjectPtr<RingBufferAudioSource> RingBufferAudioSource::create(std::shared_ptr<ring_buffer::RingBuffer> ring_buffer,
+                                                                    size_t max_fill_bytes, uint8_t alignment_bytes,
+                                                                    const AudioHeap &heap) {
+  if (ring_buffer == nullptr || max_fill_bytes == 0 || alignment_bytes == 0 || alignment_bytes > MAX_ALIGNMENT_BYTES) {
+    return nullptr;
+  }
+  if (!heap.is_set()) {
+    return AudioObjectPtr<RingBufferAudioSource>(
         new RingBufferAudioSource(std::move(ring_buffer), max_fill_bytes, alignment_bytes));
   }
-  void *mem = RAMAllocator<RingBufferAudioSource>(RAMAllocator<RingBufferAudioSource>::ALLOC_EXTERNAL).allocate(1);
+  void *mem = heap.alloc(sizeof(RingBufferAudioSource));
   if (mem == nullptr) {
     return nullptr;
   }
-  return std::unique_ptr<RingBufferAudioSource>(
-      ::new (mem) RingBufferAudioSource(std::move(ring_buffer), max_fill_bytes, alignment_bytes));
+  return AudioObjectPtr<RingBufferAudioSource>(
+      ::new (mem) RingBufferAudioSource(std::move(ring_buffer), max_fill_bytes, alignment_bytes),
+      AudioObjectDeleter{heap.release});
 }
 
 RingBufferAudioSource::~RingBufferAudioSource() {

@@ -18,15 +18,37 @@
 
 namespace esphome::audio {
 
-/// @brief A heap object as make_unique makes it, or (psram) in PSRAM only; nullptr when that has no
-///        room. delete frees it either way (free() takes any heap).
-template<typename T, typename... Args> std::unique_ptr<T> make_unique_in(bool psram, Args &&...args) {
-  if (!psram)
-    return make_unique<T>(std::forward<Args>(args)...);
-  void *mem = RAMAllocator<T>(RAMAllocator<T>::ALLOC_EXTERNAL).allocate(1);
+/// @brief A heap of its owner's for the audio objects it makes (e.g. a component's pool): alloc gives
+///        nullptr when it has no room, release takes back what alloc gave. Unset: new/delete and
+///        RAMAllocator, as everywhere else.
+struct AudioHeap {
+  void *(*alloc)(size_t){nullptr};
+  void (*release)(void *){nullptr};
+  bool is_set() const { return this->alloc != nullptr && this->release != nullptr; }
+};
+
+/// @brief Gives an object made by make_audio_object() back: to its heap, else delete.
+struct AudioObjectDeleter {
+  void (*release)(void *){nullptr};
+  template<class T> void operator()(T *p) const {
+    if (this->release == nullptr) {
+      delete p;
+      return;
+    }
+    p->~T();
+    this->release(p);
+  }
+};
+template<class T> using AudioObjectPtr = std::unique_ptr<T, AudioObjectDeleter>;
+
+/// @brief An object in the heap given (nullptr when it has no room), else made with new.
+template<typename T, typename... Args> AudioObjectPtr<T> make_audio_object(const AudioHeap &heap, Args &&...args) {
+  if (!heap.is_set())
+    return AudioObjectPtr<T>(new T(std::forward<Args>(args)...));
+  void *mem = heap.alloc(sizeof(T));
   if (mem == nullptr)
-    return nullptr;
-  return std::unique_ptr<T>(::new (mem) T(std::forward<Args>(args)...));
+    return AudioObjectPtr<T>();
+  return AudioObjectPtr<T>(::new (mem) T(std::forward<Args>(args)...), AudioObjectDeleter{heap.release});
 }
 
 /// @brief Abstract interface for writing decoded audio data to a sink.
@@ -95,6 +117,7 @@ class AudioTransferBuffer {
 
   uint8_t *buffer_{nullptr};
   uint8_t *data_start_{nullptr};
+  AudioHeap heap_{};  // where buffer_ comes from; unset: RAMAllocator
 
   size_t buffer_size_{0};
   size_t buffer_length_{0};
@@ -109,7 +132,9 @@ class AudioSinkTransferBuffer : public AudioTransferBuffer {
   /// @brief Creates a new sink transfer buffer.
   /// @param buffer_size Size of the transfer buffer in bytes.
   /// @return unique_ptr if successfully allocated, nullptr otherwise
-  static std::unique_ptr<AudioSinkTransferBuffer> create(size_t buffer_size, bool psram_object = false);
+  static std::unique_ptr<AudioSinkTransferBuffer> create(size_t buffer_size);
+  /// @brief The same with the object and its buffer in the heap given.
+  static AudioObjectPtr<AudioSinkTransferBuffer> create(size_t buffer_size, const AudioHeap &heap);
 
   /// @brief Writes any available data in the transfer buffer to the sink.
   /// @param ticks_to_wait FreeRTOS ticks to block while waiting for the sink to have enough space
@@ -250,11 +275,13 @@ class RingBufferAudioSource : public AudioReadableBuffer {
   /// @param alignment_bytes Minimum exposed-region alignment in bytes (defaults to 1, i.e. byte-aligned).
   ///        Pass bytes_per_frame to make every exposed region a whole number of frames. Must be in
   ///        [1, MAX_ALIGNMENT_BYTES].
-  /// @param psram_object The source object itself in PSRAM only.
   /// @return unique_ptr if parameters are valid, nullptr otherwise
   static std::unique_ptr<RingBufferAudioSource> create(std::shared_ptr<ring_buffer::RingBuffer> ring_buffer,
-                                                       size_t max_fill_bytes, uint8_t alignment_bytes = 1,
-                                                       bool psram_object = false);
+                                                       size_t max_fill_bytes, uint8_t alignment_bytes = 1);
+  /// @brief The same with the object in the heap given (nullptr also when it has no room).
+  static AudioObjectPtr<RingBufferAudioSource> create(std::shared_ptr<ring_buffer::RingBuffer> ring_buffer,
+                                                      size_t max_fill_bytes, uint8_t alignment_bytes,
+                                                      const AudioHeap &heap);
 
   ~RingBufferAudioSource() override;
 
