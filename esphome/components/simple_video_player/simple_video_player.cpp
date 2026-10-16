@@ -166,7 +166,7 @@ void SimpleVideoPlayer::setup() {
     // those again on this persistent instance instead of recreating the whole object, avoiding a
     // fresh output_transfer_buffer_ allocation every single play().
     this->audio_decoder_ =
-        psram_make<audio::AudioDecoder>(AUDIO_DECODER_INPUT_BUFFER_SIZE, AUDIO_DECODER_OUTPUT_BUFFER_SIZE);
+        psram_make<audio::AudioDecoder>(AUDIO_DECODER_INPUT_BUFFER_SIZE, AUDIO_DECODER_OUTPUT_BUFFER_SIZE, true);
     if (!this->audio_decoder_) {
       ESP_LOGE(TAG, "No PSRAM for the audio decoder");
       this->mark_failed();
