@@ -1448,6 +1448,8 @@ class SimpleVideoPlayer : public Component
   void audio_file_loop_();  // audio task
 #endif
   bool session_audio_{false};  // this session started the audio task and the speaker
+  // PCM bytes of incomplete audio frames dropped (reader side), logged once at the session's end.
+  std::atomic<uint32_t> audio_dropped_bytes_{0};
   volatile bool audio_task_stop_{false};          // Signal to stop audio task
 #endif
 

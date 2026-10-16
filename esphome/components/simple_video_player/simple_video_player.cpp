@@ -2631,9 +2631,10 @@ void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_
   size_t complete_frames = size / bytes_per_frame;
   size_t bytes_to_write = complete_frames * bytes_per_frame;
 
-  // Log warning if we're dropping incomplete frames (shouldn't happen with well-formed AVI)
+  // Incomplete frames are dropped (shouldn't happen with well-formed AVI); counted here, logged at
+  // the session's end (end_session_audio_()): no log on the reader's path.
   if (size != bytes_to_write) {
-    ESP_LOGW(TAG, "Dropped %zu bytes of incomplete audio frame", size - bytes_to_write);
+    this->audio_dropped_bytes_.fetch_add(static_cast<uint32_t>(size - bytes_to_write), std::memory_order_relaxed);
   }
   if (bytes_to_write == 0) {
     return;
@@ -2881,6 +2882,9 @@ void SimpleVideoPlayer::end_session_audio_() {
   this->stop_audio_task_();
   this->audio_enabled_ = false;
   this->session_audio_ = false;
+  const uint32_t dropped = this->audio_dropped_bytes_.exchange(0, std::memory_order_relaxed);
+  if (dropped != 0)
+    ESP_LOGW(TAG, "Dropped %" PRIu32 " bytes of incomplete audio frames", dropped);
   if (had_audio)
     ESP_LOGI(TAG, "Audio processing stopped");
 }
