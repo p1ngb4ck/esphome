@@ -36,7 +36,6 @@ void BtPersistence::setup() {
     saved.path[sizeof(saved.path) - 1] = '\0';
     this->path_ = saved.path;
   }
-  this->wait_start_ = millis();
 }
 
 void BtPersistence::dump_config() {
@@ -71,15 +70,19 @@ void BtPersistence::loop() {
   }
 
   if (state == State::WAITING) {
-    if (now - this->last_try_ < 250)
+    // The first loop() runs only once every component's setup() is done: the wait counts from
+    // there, and a storage that is there is taken however long the boot took.
+    if (this->last_try_ == 0)
+      this->wait_start_ = now;
+    else if (now - this->last_try_ < 250)
       return;
     this->last_try_ = now;
-    if (now - this->wait_start_ > this->storage_timeout_) {
-      this->fail_("the storage holding the file is not available");
-    } else if (this->resolve_()) {
+    if (this->resolve_()) {
       this->state_.store(State::LOADING, std::memory_order_release);
       this->recovered_ = false;
       this->start_open_();
+    } else if (now - this->wait_start_ > this->storage_timeout_) {
+      this->fail_("the storage holding the file is not available");
     }
     return;
   }
