@@ -247,6 +247,7 @@ enum class ImageFitMode : uint8_t {
 };
 enum class ThumbnailLayout : uint8_t { HORIZONTAL, VERTICAL, GRID };
 enum class ThumbnailSlideEdge : uint8_t { LEFT, RIGHT, TOP, BOTTOM };
+#endif
 
 /// Names and paths of the lists (pictures, playlist, channels) in PSRAM: plain new/malloc only takes
 /// internal RAM here (CONFIG_SPIRAM_USE_CAPS_ALLOC). Internal RAM only if PSRAM is out.
@@ -271,12 +272,51 @@ template<class T, class U> bool operator!=(const PsramAllocator<T> & /*a*/, cons
 }
 using PsramString = std::basic_string<char, std::char_traits<char>, PsramAllocator<char>>;
 template<class T> using PsramVector = std::vector<T, PsramAllocator<T>>;
-/// An object of the player's in PSRAM only; empty when PSRAM has no room for it.
-template<class T> using PsramPtr = RAMUniquePtr<T>;
+/// An object of the player's in a piece of its pool (counted in plan_pool_()); empty when the pool
+/// has no room for it.
+inline void *pool_object_alloc(size_t size) {
+  PsramPool *pool = PsramPool::instance();
+  return pool != nullptr ? pool->alloc(size) : nullptr;
+}
+inline void pool_object_free(void *ptr) {
+  PsramPool *pool = PsramPool::instance();
+  if (pool != nullptr)
+    pool->free(static_cast<uint8_t *>(ptr));
+}
+template<class T> struct PoolDeleter {
+  void operator()(T *p) const {
+    p->~T();
+    pool_object_free(p);
+  }
+};
+template<class T> using PsramPtr = std::unique_ptr<T, PoolDeleter<T>>;
 template<class T, class... Args> PsramPtr<T> psram_make(Args &&...args) {
-  return RAMAllocator<T>(RAMAllocator<T>::ALLOC_EXTERNAL).make_unique(std::forward<Args>(args)...);
+  void *mem = pool_object_alloc(sizeof(T));
+  if (mem == nullptr)
+    return PsramPtr<T>();
+  return PsramPtr<T>(::new (mem) T(std::forward<Args>(args)...));
+}
+/// For a shared_ptr's control block with its object in one pool piece (allocate_shared).
+template<class T> struct PoolAllocator {
+  using value_type = T;
+  PoolAllocator() = default;
+  template<class U> constexpr PoolAllocator(const PoolAllocator<U> & /*other*/) noexcept {}
+  T *allocate(size_t n) {
+    auto *p = static_cast<T *>(pool_object_alloc(n * sizeof(T)));
+    if (p == nullptr)
+      abort();
+    return p;
+  }
+  void deallocate(T *p, size_t /*n*/) { pool_object_free(p); }
+};
+template<class T, class U> bool operator==(const PoolAllocator<T> & /*a*/, const PoolAllocator<U> & /*b*/) {
+  return true;
+}
+template<class T, class U> bool operator!=(const PoolAllocator<T> & /*a*/, const PoolAllocator<U> & /*b*/) {
+  return false;
 }
 
+#ifdef SVP_PICTURES
 struct ImageEntry {
   PsramString path;
   PsramString filename;

@@ -4,6 +4,10 @@
 
 namespace esphome::simple_video_player {
 
+static PsramPool *s_instance = nullptr;
+
+PsramPool *PsramPool::instance() { return s_instance; }
+
 bool PsramPool::init(size_t size) {
   this->lock_ = xSemaphoreCreateMutex();
   if (this->lock_ == nullptr)
@@ -23,6 +27,8 @@ bool PsramPool::init(size_t size) {
   this->size_ = total - table;
   this->pieces_[0] = {table, this->size_, false};
   this->count_ = 1;
+  if (s_instance == nullptr)
+    s_instance = this;
   return true;
 }
 

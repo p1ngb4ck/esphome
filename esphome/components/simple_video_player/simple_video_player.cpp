@@ -166,7 +166,8 @@ void SimpleVideoPlayer::setup() {
     // those again on this persistent instance instead of recreating the whole object, avoiding a
     // fresh output_transfer_buffer_ allocation every single play().
     this->audio_decoder_ =
-        psram_make<audio::AudioDecoder>(AUDIO_DECODER_INPUT_BUFFER_SIZE, AUDIO_DECODER_OUTPUT_BUFFER_SIZE, true);
+        psram_make<audio::AudioDecoder>(AUDIO_DECODER_INPUT_BUFFER_SIZE, AUDIO_DECODER_OUTPUT_BUFFER_SIZE,
+                                        audio::AudioHeap{pool_object_alloc, pool_object_free});
     if (!this->audio_decoder_) {
       ESP_LOGE(TAG, "No PSRAM for the audio decoder");
       this->mark_failed();
@@ -2212,6 +2213,35 @@ bool SimpleVideoPlayer::plan_pool_() {
   fixed += pool_round(KBD_LIST_BYTES) + pool_round(KBD_MAX * sizeof(KbdEntry)) + KBD_SLOTS * pool_round(KBD_LAYOUT_BYTES) +
            pool_round(sizeof(KbdAssignTable));
 #endif
+  // The player's objects, a piece each (psram_make(), the sound ring's, the audio decoder's own).
+  fixed += 2 * pool_round(sizeof(BufferedFileReader)) + pool_round(sizeof(AVIParser));
+#ifdef USE_AUDIO
+  if (this->speaker_ != nullptr) {
+    fixed += pool_round(sizeof(PoolRingBuffer) + 64);
+#if defined(SVP_AUDIO_SUPPORT_MP3) || defined(SVP_AUDIO_SUPPORT_FLAC) || defined(SVP_AUDIO_FILES)
+    fixed += pool_round(sizeof(audio::AudioDecoder)) + pool_round(sizeof(audio::AudioSinkTransferBuffer)) +
+             pool_round(AUDIO_DECODER_OUTPUT_BUFFER_SIZE) + pool_round(sizeof(audio::RingBufferAudioSource));
+#ifdef USE_AUDIO_FLAC_SUPPORT
+    fixed += pool_round(sizeof(micro_flac::FLACDecoder));
+#endif
+#ifdef USE_AUDIO_MP3_SUPPORT
+    fixed += pool_round(sizeof(micro_mp3::Mp3Decoder));
+#endif
+#ifdef USE_AUDIO_OPUS_SUPPORT
+    fixed += pool_round(sizeof(micro_opus::OggOpusDecoder));
+#endif
+#ifdef USE_AUDIO_WAV_SUPPORT
+    fixed += pool_round(sizeof(micro_wav::WAVDecoder));
+#endif
+#ifdef USE_AUDIO_AAC_SUPPORT
+    fixed += pool_round(sizeof(esp_audio_codec_adapter::AACDecoder));
+#endif
+#endif
+  }
+#endif
+#if defined(SVP_PICTURES) && (defined(USE_RUNTIME_IMAGE_PNG) || defined(USE_RUNTIME_IMAGE_BMP))
+  fixed += pool_round(sizeof(runtime_image::RuntimeImage));
+#endif
   this->index_reserve_ = pool_round(std::clamp<size_t>(pool / 32, 128 * 1024, MIB));
   fixed += this->index_reserve_ + pool_round(CACHE_BUFFER_SIZE) + 32 * PsramPool::ALIGN;  // pieces end on whole cache lines
 
@@ -2821,10 +2851,11 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
 }
 
 std::shared_ptr<ring_buffer::RingBuffer> PoolRingBuffer::create(uint8_t *storage, size_t len) {
-  if (storage == nullptr || heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) < 256)
+  PsramPool *pool = PsramPool::instance();
+  if (storage == nullptr || pool == nullptr || pool->largest_free() < sizeof(PoolRingBuffer) + 64)
     return nullptr;
-  // The object and the shared_ptr's control block in one PSRAM piece.
-  auto rb = std::allocate_shared<PoolRingBuffer>(PsramAllocator<PoolRingBuffer>());
+  // The object and the shared_ptr's control block in one piece of the pool.
+  auto rb = std::allocate_shared<PoolRingBuffer>(PoolAllocator<PoolRingBuffer>());
   if (xRingbufferCreateStatic(len, RINGBUF_TYPE_BYTEBUF, storage, &rb->structure_) != rb->handle_())
     return nullptr;
   rb->created_ = true;

@@ -28,6 +28,9 @@ class PsramPool {
   size_t used() const;
   size_t largest_free() const;
 
+  /// The pool the player's objects come from (the first one made ready).
+  static PsramPool *instance();
+
  protected:
   struct Piece {
     size_t offset;
