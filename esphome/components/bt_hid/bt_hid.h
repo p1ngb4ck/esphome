@@ -99,6 +99,16 @@ class BTHIDDevice : public Component,
   void pair(uint32_t duration_ms);
   /// Look for discoverable Bluetooth Classic HID devices and log them; shared by all devices.
   static void scan(uint32_t duration_ms);
+  /// All devices: false, a paired device that is not connected is only paged once after boot,
+  /// on connect() and while pairing, else it connects on its own; true (the default), it is
+  /// paged until it connects.
+  static void set_paging(bool paging);
+  /// All devices: seconds between pages while paging; 0 (the default): 5 s, doubling up to 60 s.
+  static void set_paging_interval(uint32_t seconds);
+  /// All devices: no paging while paused, other than connect() and pairing.
+  static void set_reconnect_paused(bool paused);
+  /// Main loop: the shared host may page it now (before its next_connect_ms()).
+  bool wants_page() const;
   bool get_auto_connect() const { return this->auto_connect_; }
 
   bool is_connected() const { return this->connected_; }
@@ -159,6 +169,7 @@ class BTHIDDevice : public Component,
   bool auto_connect_{true};
   bool fixed_address_{false};
   bool restored_{false};
+  bool page_once_{true};  // paged once whether paging is on or not: boot, connect()
 };
 
 class PasskeyTrigger : public Trigger<uint32_t> {

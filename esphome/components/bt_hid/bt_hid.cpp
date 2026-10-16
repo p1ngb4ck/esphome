@@ -35,6 +35,7 @@ struct HostEvent {
   enum Type : uint8_t { INIT, OPEN, CLOSE, DESCRIPTOR, DATA, PIN, PASSKEY, ADOPTED, LISTED, AUTH, FOUND, SCAN_STATE };
   Type type{INIT};
   uint8_t handle{0xFF};
+  uint8_t conn{0};  // OPEN: esp_hidh_connection_state_t
   esp_bd_addr_t bda{};
   int status{0};
   uint32_t value{0};
@@ -57,6 +58,11 @@ struct Host {
   bool connecting{false};
   bool discovering{false};
   bool scan_requested{false};  // bt_hid.scan: its finds are logged
+  // Off: a paired device is only paged once after boot, on connect() and while pairing; it
+  // connects on its own. Paused: not paged either (the radio is busy with something else).
+  bool paging{true};
+  bool paging_paused{false};
+  uint32_t paging_interval_ms{0};  // 0: RETRY_MIN_MS doubling up to RETRY_MAX_MS
   uint32_t connecting_since{0};
 };
 
@@ -267,6 +273,7 @@ void hh_cb(esp_hidh_cb_event_t event, esp_hidh_cb_param_t *param) {
     case ESP_HIDH_OPEN_EVT:
       e.type = HostEvent::OPEN;
       e.status = param->open.status;
+      e.conn = param->open.conn_status;
       e.handle = param->open.handle;
       memcpy(e.bda, param->open.bd_addr, ESP_BD_ADDR_LEN);
       break;
@@ -340,18 +347,23 @@ void handle_event(HostEvent &e) {
       ESP_LOGI(TAG, "HID host ready");
       break;
     case HostEvent::OPEN: {
+      // esp_bt_hid_host_connect() answers at once with OK and CONNECTING, without a handle
+      // (btc_hh_connect); the connection's own OPEN follows.
+      if (e.status == ESP_HIDH_OK && e.conn == ESP_HIDH_CONN_STATE_CONNECTING)
+        break;
       h.connecting = false;
-      BTHIDDevice *dev = e.status == ESP_HIDH_OK ? find_or_adopt(e.bda) : find_by_address(e.bda);
-      if (dev != nullptr && e.status == ESP_HIDH_OK && !dev->get_auto_connect()) {
+      const bool opened = e.status == ESP_HIDH_OK && e.conn == ESP_HIDH_CONN_STATE_CONNECTED && e.handle != 0xFF;
+      BTHIDDevice *dev = opened ? find_or_adopt(e.bda) : find_by_address(e.bda);
+      if (dev != nullptr && opened && !dev->get_auto_connect()) {
         format_mac_addr_upper(e.bda, mac);
         ESP_LOGI(TAG, "[%s] Disconnected by request, refusing", mac);
         esp_bt_hid_host_disconnect(e.bda);
       } else if (dev != nullptr) {
-        dev->on_open(e.handle, e.status == ESP_HIDH_OK, e.status);
+        dev->on_open(e.handle, opened, e.status);
         // A failed attempt is retried until the window closes: the PIN may still be typed.
-        if (dev == h.pairing && e.status == ESP_HIDH_OK)
+        if (dev == h.pairing && opened)
           dev->end_pairing(true, nullptr);
-      } else if (e.status == ESP_HIDH_OK) {
+      } else if (opened) {
         format_mac_addr_upper(e.bda, mac);
         ESP_LOGW(TAG, "[%s] Not configured, disconnecting", mac);
         esp_bt_hid_host_disconnect(e.bda);
@@ -483,7 +495,7 @@ void host_loop() {
   if (!h.ready || h.connecting || h.discovering)
     return;
   for (auto *dev : h.devices) {
-    if (dev->is_connected() || !dev->has_address() || !dev->get_auto_connect() ||
+    if (dev->is_connected() || !dev->has_address() || !dev->get_auto_connect() || !dev->wants_page() ||
         static_cast<int32_t>(now - dev->next_connect_ms()) < 0)
       continue;
     if (esp_bt_hid_host_connect(const_cast<uint8_t *>(dev->address())) == ESP_OK) {
@@ -572,6 +584,7 @@ void BTHIDDevice::restore_paired() {
   this->restored_ = true;
   if ((from_global || this->stored_address_(bda)) && !this->has_address()) {
     this->set_bda_(bda);
+    this->page_once_ = true;
     char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
     format_mac_addr_upper(bda, mac);
     ESP_LOGI(TAG, "[%s] Paired device", mac);
@@ -600,9 +613,21 @@ void BTHIDDevice::dump_config() {
 
 void BTHIDDevice::connect() {
   this->auto_connect_ = true;
+  this->page_once_ = true;
   this->retry_ms_ = 0;
   this->next_connect_ms_ = millis();
 }
+
+bool BTHIDDevice::wants_page() const {
+  const Host &h = host();
+  return this->page_once_ || h.pairing == this || (h.paging && !h.paging_paused);
+}
+
+void BTHIDDevice::set_paging(bool paging) { host().paging = paging; }
+
+void BTHIDDevice::set_paging_interval(uint32_t seconds) { host().paging_interval_ms = seconds * 1000; }
+
+void BTHIDDevice::set_reconnect_paused(bool paused) { host().paging_paused = paused; }
 
 void BTHIDDevice::disconnect() {
   this->auto_connect_ = false;
@@ -873,7 +898,13 @@ void BTHIDDevice::scan(uint32_t duration_ms) {
 }
 
 void BTHIDDevice::connect_attempted(uint32_t now) {
-  this->retry_ms_ = this->retry_ms_ == 0 ? RETRY_MIN_MS : std::min(this->retry_ms_ * 2, RETRY_MAX_MS);
+  this->page_once_ = false;
+  const uint32_t interval = host().paging_interval_ms;
+  if (interval != 0 && host().pairing != this) {
+    this->retry_ms_ = interval;
+  } else {
+    this->retry_ms_ = this->retry_ms_ == 0 ? RETRY_MIN_MS : std::min(this->retry_ms_ * 2, RETRY_MAX_MS);
+  }
   this->next_connect_ms_ = now + this->retry_ms_;
 }
 

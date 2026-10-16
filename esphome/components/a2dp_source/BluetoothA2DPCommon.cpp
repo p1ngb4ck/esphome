@@ -114,7 +114,9 @@ bool BluetoothA2DPCommon::reconnect() {
 
 bool BluetoothA2DPCommon::connect_to(esp_bd_addr_t peer) {
   ESP_LOGW(BT_AV_TAG, "connect_to to %s", to_str(peer));
+#ifndef A2DP_EXTERNAL_HOST  // ESPHome: other devices (HID) still connect on their own
   set_scan_mode_connectable_default();
+#endif
   esp_err_t err = esp_a2d_connect(peer);
   if (err != ESP_OK) {
     ESP_LOGE(BT_AV_TAG, "esp_a2d_source_connect:%d", err);
