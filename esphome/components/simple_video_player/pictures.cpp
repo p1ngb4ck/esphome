@@ -138,7 +138,13 @@ void SimpleVideoPlayer::pictures_loop_() {
   const uint32_t now = millis();
   if (this->overlay_visible_ && now - this->overlay_shown_ms_ >= this->overlay_duration_ms_)
     this->hide_overlay_icon_();
-  if (this->thumb_auto_hide_ms_ > 0 && this->thumbs_visible_ && this->thumb_slide_enabled_ &&
+  // The strip's hide changes LVGL objects: not while LVGL is paused (a video or a sender has the
+  // panel); it follows once LVGL runs again.
+  bool lvgl_runs = true;
+#ifdef SVP_USE_LVGL
+  lvgl_runs = this->lvgl_component_ == nullptr || !this->lvgl_component_->is_paused();
+#endif
+  if (lvgl_runs && this->thumb_auto_hide_ms_ > 0 && this->thumbs_visible_ && this->thumb_slide_enabled_ &&
       now - this->thumb_touched_ms_ >= this->thumb_auto_hide_ms_)
     this->slide_thumbnails_(false);
 
