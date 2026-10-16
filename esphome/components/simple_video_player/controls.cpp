@@ -113,11 +113,10 @@ void SimpleVideoPlayer::controls_setup_() {
   lv_style_set_bg_color(&this->ctl_accent_style_, lv_color_hex(0x2F81F7));
   lv_style_set_min_width(&this->ctl_accent_style_, 120);
 
+  // Key focus by colour only (no frame): the element tinted.
   lv_style_init(&this->ctl_focus_style_);
-  lv_style_set_outline_width(&this->ctl_focus_style_, 4);
-  lv_style_set_outline_pad(&this->ctl_focus_style_, 3);
-  lv_style_set_outline_color(&this->ctl_focus_style_, lv_color_hex(0xFFFFFF));
-  lv_style_set_outline_opa(&this->ctl_focus_style_, LV_OPA_COVER);
+  lv_style_set_recolor(&this->ctl_focus_style_, lv_color_hex(0xFFFFFF));
+  lv_style_set_recolor_opa(&this->ctl_focus_style_, LV_OPA_30);
 
   lv_style_init(&this->ctl_seek_style_);
   lv_style_set_width(&this->ctl_seek_style_, lv_pct(100));
