@@ -461,6 +461,7 @@ void host_loop() {
       for (auto *dev : h.devices) {
         if (dev->is_connected())
           dev->on_close();
+        dev->page_again();
       }
     }
     return;
@@ -886,6 +887,12 @@ void BTHIDDevice::scan(uint32_t duration_ms) {
     return;
   }
   host().scan_requested = true;
+}
+
+void BTHIDDevice::page_again() {
+  this->page_pending_ = true;
+  this->retry_ms_ = 0;
+  this->next_connect_ms_ = millis();
 }
 
 void BTHIDDevice::connect_attempted(uint32_t now) {
