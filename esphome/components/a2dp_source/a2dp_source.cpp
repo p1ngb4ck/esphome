@@ -412,10 +412,19 @@ void A2DPSource::set_output_delay_ms(uint32_t ms) {
     this->publish_output_delay_();
     return;
   }
-  ms = std::min(ms, MAX_OUTPUT_DELAY_MS);
+  ms = std::min(ms, this->max_delay_ms_.load(std::memory_order_relaxed));
   this->delay_ms_.store(ms, std::memory_order_relaxed);
   this->delay_pref_.save(&ms);
   this->publish_output_delay_();
+}
+
+void A2DPSource::set_max_output_delay_ms(uint32_t ms) {
+  ms = std::min(ms, MAX_OUTPUT_DELAY_MS);
+  this->max_delay_ms_.store(ms, std::memory_order_relaxed);
+#ifdef USE_A2DP_SOURCE_NUMBER
+  if (this->delay_number_ != nullptr)
+    this->delay_number_->traits.set_max_value(static_cast<float>(ms));
+#endif
 }
 
 void A2DPSource::publish_output_delay_() {

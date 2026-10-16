@@ -93,6 +93,10 @@ class A2DPSource : public Component
   /// @brief Sets and keeps the delay of the connected device.
   void set_output_delay_ms(uint32_t ms);
   static constexpr uint32_t MAX_OUTPUT_DELAY_MS = 1600;
+  /// @brief The most a delay may be set to (what its user has room for, e.g. a video player's sound
+  ///        lead), at most MAX_OUTPUT_DELAY_MS. A larger kept delay stays kept; its user clamps it.
+  void set_max_output_delay_ms(uint32_t ms);
+  uint32_t max_output_delay_ms() const { return this->max_delay_ms_.load(std::memory_order_relaxed); }
 
   void add_on_paired_trigger(Trigger<std::string> *trigger) { this->paired_triggers_.push_back(trigger); }
   void add_on_streaming_start_trigger(Trigger<> *trigger) { this->streaming_start_triggers_.push_back(trigger); }
@@ -228,6 +232,7 @@ class A2DPSource : public Component
   std::atomic<bool> pairing_mode_{false};
   std::atomic<bool> connected_{false};
   std::atomic<uint32_t> delay_ms_{0};
+  std::atomic<uint32_t> max_delay_ms_{MAX_OUTPUT_DELAY_MS};
   ESPPreferenceObject delay_pref_;
   bool delay_pref_valid_{false};
 #ifdef USE_A2DP_SOURCE_NUMBER
