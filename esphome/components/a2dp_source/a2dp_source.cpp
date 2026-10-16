@@ -256,6 +256,20 @@ bool A2DPSource::pair_device(const bt_pairing::ScannedDevice &device) {
     return false;
   }
   if (this->connected_.load()) {
+    if (memcmp(device.address, *this->source_.get_peer_address(), ESP_BD_ADDR_LEN) == 0) {
+      // The device picked is the one connected (paired before the database held it): kept as it is.
+      bt_pairing::PairingRecord record{};
+      memcpy(record.address, device.address, sizeof(record.address));
+      record.transport = static_cast<uint8_t>(bt_pairing::Transport::CLASSIC);
+      record.slot = this->slot_;
+      record.device_class = device.device_class;
+      strncpy(record.name, device.name.c_str(), sizeof(record.name) - 1);
+      if (!this->pairing_->store(record))
+        return false;
+      this->keep_pending_ = false;
+      this->defer([this]() { this->pairing_->on_connection(this, true); });
+      return true;
+    }
     ESP_LOGW(TAG, "Connected to %s; forget it and switch it off first",
              this->source_.to_str(*this->source_.get_peer_address()));
     return false;
