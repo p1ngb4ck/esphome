@@ -196,11 +196,13 @@ void SimpleVideoPlayer::channel_loop_() {
   if (this->channel_widget_ != nullptr && this->lvgl_component_ != nullptr && this->lvgl_component_->is_paused())
     return;
 #endif
-  if (!this->channel_new_.exchange(false, std::memory_order_acq_rel))
+  if (!this->channel_new_.load(std::memory_order_acquire))
     return;
   // LVGL keeps pointers into channel_names_: swap the lists and set the options in one go, here on
-  // the LVGL thread.
+  // the LVGL thread. The flag is cleared under the lock, where the channel task sets it: a list
+  // written meanwhile is not swapped twice (which would bring back the one before).
   xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
+  this->channel_new_.store(false, std::memory_order_relaxed);
   this->channel_names_.swap(this->channel_new_names_);
   this->channel_refs_.swap(this->channel_new_refs_);
   if (this->channel_widget_ != nullptr) {
@@ -220,9 +222,11 @@ void SimpleVideoPlayer::channel_loop_() {
 }
 
 void SimpleVideoPlayer::ha_loop_() {
-  if (this->ha_new_src_.exchange(false, std::memory_order_acq_rel)) {
+  // Each flag is cleared under channel_lock_, where the channel task sets it (see channel_loop_()).
+  if (this->ha_new_src_.load(std::memory_order_acquire)) {
     PsramVector<HaSources> listed;
     xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
+    this->ha_new_src_.store(false, std::memory_order_relaxed);
     listed.swap(this->ha_new_srcs_);
     xSemaphoreGive(this->channel_lock_);
     for (auto &sources : listed) {
@@ -233,8 +237,9 @@ void SimpleVideoPlayer::ha_loop_() {
       this->ha_callbacks_.call();
     }
   }
-  if (this->ha_new_.exchange(false, std::memory_order_acq_rel)) {
+  if (this->ha_new_.load(std::memory_order_acquire)) {
     xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
+    this->ha_new_.store(false, std::memory_order_relaxed);
     this->ha_items_.swap(this->ha_new_items_);
     this->ha_type_.swap(this->ha_new_type_);
     this->ha_id_.swap(this->ha_new_id_);
@@ -246,8 +251,9 @@ void SimpleVideoPlayer::ha_loop_() {
     this->ha_last_sources_ = false;
     this->ha_callbacks_.call();
   }
-  if (this->opt_new_.exchange(false, std::memory_order_acq_rel)) {
+  if (this->opt_new_.load(std::memory_order_acquire)) {
     xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
+    this->opt_new_.store(false, std::memory_order_relaxed);
     if (this->opt_new_ok_) {  // else what was read before stays shown
       this->opt_values_.swap(this->opt_new_values_);
       this->opt_choices_.swap(this->opt_new_choices_);
@@ -295,8 +301,8 @@ void SimpleVideoPlayer::channel_task_loop_() {
       xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
       this->channel_new_names_ = std::move(names);
       this->channel_new_refs_ = std::move(refs);
+      this->channel_new_.store(true, std::memory_order_release);  // under the lock: see channel_loop_()
       xSemaphoreGive(this->channel_lock_);
-      this->channel_new_.store(true, std::memory_order_release);
       continue;
     }
 
@@ -401,8 +407,8 @@ void SimpleVideoPlayer::ha_browse_task_() {
     this->ha_new_parent_ = std::move(parent);
     this->ha_new_ok_ = ok;
   }
+  (id.empty() ? this->ha_new_src_ : this->ha_new_).store(true, std::memory_order_release);  // under the lock
   xSemaphoreGive(this->channel_lock_);
-  (id.empty() ? this->ha_new_src_ : this->ha_new_).store(true, std::memory_order_release);
 }
 
 #ifdef SVP_PICTURES
@@ -497,8 +503,8 @@ void SimpleVideoPlayer::options_get_task_() {
   this->opt_new_values_ = std::move(values);
   this->opt_new_choices_ = std::move(choices);
   this->opt_new_ok_ = ok;
+  this->opt_new_.store(true, std::memory_order_release);  // under the lock
   xSemaphoreGive(this->channel_lock_);
-  this->opt_new_.store(true, std::memory_order_release);
 }
 
 // Channel task: the settings changed on the panel, to the relay.
