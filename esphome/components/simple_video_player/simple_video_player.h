@@ -532,11 +532,15 @@ class SimpleVideoPlayer : public Component
   // with the layout given it, else with its keyboard's (input's) standard one, else with the
   // input's own. Layouts are read from the directory, else had from svp_relay (GET /keyboard) and
   // then kept there. What is given each is kept in preferences. Main loop.
-  void set_keyboard_directory(const std::string &dir) { this->kbd_dir_ = dir; }
+  void set_keyboard_directory(const std::string &dir) {
+    this->kbd_dir_ = dir;
+    this->kbd_dir_default_ = dir;
+  }
   /// A keyboard (input): its name, and its standard layout from the configuration ("" its own).
   void add_keyboard(hid::HIDInput *input, const std::string &name, const std::string &layout);
-  /// The directory changed (the "Keyboard layout folder"): its layouts from now on.
+  /// The directory changed (the "Keyboard layout folder"; "" the configuration's): its layouts from now on.
   void keyboard_set_directory(const std::string &dir);
+  const std::string &keyboard_default_directory() const { return this->kbd_dir_default_; }
   const std::string &keyboard_directory() const { return this->kbd_dir_; }
   /// The list: svp_relay's, else the directory's (names only); the callback once it is there.
   void keyboard_list_fetch();
@@ -2116,7 +2120,7 @@ class SimpleVideoPlayer : public Component
   void keyboard_write_();
   void keyboard_done_(bool ok);
   void keyboard_save_();
-  std::string kbd_dir_;
+  std::string kbd_dir_, kbd_dir_default_;
   PsramVector<KbdInput> kbd_inputs_;
   char *kbd_list_{nullptr};
   KbdEntry *kbd_entries_{nullptr};

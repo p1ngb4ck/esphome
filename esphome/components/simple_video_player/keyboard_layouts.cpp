@@ -141,8 +141,9 @@ void SimpleVideoPlayer::keyboard_loop_() {
 #endif
 }
 
-void SimpleVideoPlayer::keyboard_set_directory(const std::string &dir) {
-  if (dir.empty() || dir == this->kbd_dir_)
+void SimpleVideoPlayer::keyboard_set_directory(const std::string &path) {
+  const std::string &dir = path.empty() ? this->kbd_dir_default_ : path;
+  if (dir == this->kbd_dir_)
     return;
   this->kbd_dir_ = dir;
   ESP_LOGI(TAG, "Layouts in %s", dir.c_str());
