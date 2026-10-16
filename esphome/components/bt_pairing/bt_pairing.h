@@ -80,6 +80,14 @@ class PairingTarget {
   virtual void disconnect_device() = 0;
   /// Stop a pairing it is running; the device paired before stays.
   virtual void cancel_device_pairing() {}
+  /// Its slot keeps several devices (one connected at a time); else a new one replaces the old.
+  virtual bool holds_many() const { return false; }
+  /// The device of its slot connected now (holds_many), else nullptr.
+  virtual const uint8_t *connected_address() const { return nullptr; }
+  /// One of its devices: connected, connect to it (the one connected first goes), disconnect it.
+  virtual bool is_address_connected(const uint8_t *address) const { return this->is_device_connected(); }
+  virtual void connect_address(const uint8_t *address) { this->connect_device(); }
+  virtual void disconnect_address(const uint8_t *address) { this->disconnect_device(); }
 };
 
 class BTPairingSelect;
@@ -193,6 +201,7 @@ class BTPairing : public Component
   void publish_scanned_();
   PairingTarget *target_for_(const ScannedDevice &device, const char **reason) const;
   PairingTarget *target_of_(const uint8_t *address) const;
+  bool slot_holds_many_(uint32_t slot) const;
   void dispatch_(const ScannedDevice &device, PairingTarget *target);
   void scan_loop_();
 #ifdef USE_BT_CLASSIC

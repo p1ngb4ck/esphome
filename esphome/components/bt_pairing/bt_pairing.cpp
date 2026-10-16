@@ -168,10 +168,11 @@ bool BTPairing::store(const PairingRecord &record) {
   }
   PairingRecord copy = record;
   copy.name[sizeof(copy.name) - 1] = '\0';
+  const bool many = this->slot_holds_many_(copy.slot);
   bool replaced = false;
   for (size_t i = 0; i < this->records_.size();) {
     auto &existing = this->records_[i];
-    const bool same_slot = existing.slot == copy.slot;
+    const bool same_slot = !many && existing.slot == copy.slot;
     const bool same_address = memcmp(existing.address, copy.address, sizeof(copy.address)) == 0;
     if (!same_slot && !same_address) {
       i++;
@@ -308,9 +309,9 @@ void BTPairing::log_records() const {
     const PairingTarget *target = this->target_of_(record.address);
     ESP_LOGI(TAG, "  %s %s '%s', class 0x%06" PRIX32 ", %s", transport_str(record.transport), mac, record.name,
              record.device_class,
-             target == nullptr               ? "no slot"
-             : target->is_device_connected() ? "connected"
-                                             : "disconnected");
+             target == nullptr                               ? "no slot"
+             : target->is_address_connected(record.address) ? "connected"
+                                                             : "disconnected");
   }
   if (this->scanned_.empty())
     return;
@@ -586,6 +587,14 @@ bool BTPairing::slot_in_use(uint32_t slot) const {
   return false;
 }
 
+bool BTPairing::slot_holds_many_(uint32_t slot) const {
+  for (auto *target : this->targets_) {
+    if (target->pairing_slot() == slot)
+      return target->holds_many();
+  }
+  return false;
+}
+
 PairingTarget *BTPairing::target_of_(const uint8_t *address) const {
   const PairingRecord *record = this->find_address(address);
   if (record == nullptr || record->slot == 0)
@@ -673,7 +682,14 @@ std::string BTPairing::device_label(const PairingTarget *target) const {
     format_mac_addr_upper(this->dispatched_.address, mac);
     return mac;
   }
-  const PairingRecord *record = target->pairing_slot() != 0 ? this->find_slot(target->pairing_slot()) : nullptr;
+  const uint8_t *connected = target->connected_address();
+  const PairingRecord *record = connected != nullptr ? this->find_address(connected)
+                                : target->pairing_slot() != 0 ? this->find_slot(target->pairing_slot())
+                                                              : nullptr;
+  if (record == nullptr && connected != nullptr) {
+    format_mac_addr_upper(connected, mac);
+    return mac;
+  }
   if (record == nullptr)
     return "";
   if (record->name[0] != '\0')
@@ -809,7 +825,7 @@ bool BTPairing::connect(const std::string &address) {
     this->status_(address + " is not paired");
     return false;
   }
-  target->connect_device();
+  target->connect_address(bda);
   return true;
 }
 
@@ -820,7 +836,7 @@ bool BTPairing::disconnect(const std::string &address) {
     this->status_(address + " is not paired");
     return false;
   }
-  target->disconnect_device();
+  target->disconnect_address(bda);
   return true;
 }
 
@@ -832,7 +848,7 @@ bool BTPairing::unpair(const std::string &address) {
 bool BTPairing::is_connected(const std::string &address) const {
   uint8_t bda[6];
   const PairingTarget *target = parse_address(address, bda) ? this->target_of_(bda) : nullptr;
-  return target != nullptr && target->is_device_connected();
+  return target != nullptr && target->is_address_connected(bda);
 }
 
 std::vector<uint8_t> BTPairing::encode_(bool fixed_size) const {

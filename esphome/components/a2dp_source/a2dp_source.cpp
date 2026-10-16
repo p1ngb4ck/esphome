@@ -171,9 +171,10 @@ void A2DPSource::setup() {
     this->pairing_->add_on_forget_callback([this](const bt_pairing::PairingRecord &record) {
       if (record.slot != this->slot_)
         return;
-      if (this->connected_.load())
+      if (this->is_address_connected(record.address))
         this->source_.disconnect();
-      this->forget_device();
+      if (memcmp(record.address, *this->source_.get_last_peer_address(), ESP_BD_ADDR_LEN) == 0)
+        this->forget_device();
     });
   }
 #endif
@@ -270,18 +271,44 @@ bool A2DPSource::pair_device(const bt_pairing::ScannedDevice &device) {
       this->defer([this]() { this->pairing_->on_connection(this, true); });
       return true;
     }
-    ESP_LOGW(TAG, "Connected to %s; forget it and switch it off first",
-             this->source_.to_str(*this->source_.get_peer_address()));
-    return false;
   }
   memcpy(this->chosen_addr_, device.address, ESP_BD_ADDR_LEN);
   this->chosen_valid_ = true;
   this->picked_ = device;
   this->picked_valid_ = true;
   this->pairing_mode_.store(true);
+  this->switch_pending_ = false;
+  if (this->connected_.load()) {
+    // The one connected goes first; the search resumes once it has (loop()).
+    ESP_LOGI(TAG, "Disconnecting %s to pair another device", this->source_.to_str(this->connected_addr_));
+    this->source_.disconnect();
+    return true;
+  }
   this->source_.resume_discovery();
   ESP_LOGI(TAG, "Pairing with %s on its next sighting", device.name.c_str());
   return true;
+}
+
+void A2DPSource::connect_address(const uint8_t *address) {
+  if (!this->started_.load())
+    return;
+  if (this->connected_.load()) {
+    if (memcmp(this->connected_addr_, address, ESP_BD_ADDR_LEN) == 0)
+      return;
+    // One device at a time: the one connected goes, then the one asked for is connected (loop()).
+    memcpy(this->switch_addr_, address, ESP_BD_ADDR_LEN);
+    this->switch_pending_ = true;
+    this->source_.disconnect();
+    return;
+  }
+  esp_bd_addr_t addr;
+  memcpy(addr, address, ESP_BD_ADDR_LEN);
+  this->source_.connect_to_device(addr);
+}
+
+void A2DPSource::disconnect_address(const uint8_t *address) {
+  if (this->is_address_connected(address))
+    this->source_.disconnect();
 }
 #endif
 
@@ -581,7 +608,19 @@ void A2DPSource::loop() {
     }
   }
   if (this->connect_pending_.exchange(false)) {
-    ESP_LOGI(TAG, "Connected to %s", this->source_.to_str(*this->source_.get_peer_address()));
+    memcpy(this->connected_addr_, *this->source_.get_peer_address(), ESP_BD_ADDR_LEN);
+#ifdef USE_BT_PAIRING
+    // A device that connects on its own is taken only when paired (or picked in a pairing window).
+    if (this->pairing_ != nullptr && this->pairing_->is_loaded() && !this->pairing_mode_.load() &&
+        !this->picked_valid_ && this->pairing_->find_address(this->connected_addr_) == nullptr &&
+        memcmp(this->connected_addr_, *this->source_.get_last_peer_address(), ESP_BD_ADDR_LEN) != 0) {
+      ESP_LOGW(TAG, "%s is not paired, disconnecting", this->source_.to_str(this->connected_addr_));
+      this->rejected_ = true;
+      esp_a2d_disconnect(this->connected_addr_);
+    } else {
+      this->source_.keep_peer();
+#endif
+    ESP_LOGI(TAG, "Connected to %s", this->source_.to_str(this->connected_addr_));
     this->load_output_delay_();
     for (auto *trigger : this->connected_triggers_) {
       trigger->trigger();
@@ -619,6 +658,7 @@ void A2DPSource::loop() {
       }
       this->pairing_->on_connection(this, true);
     }
+    }
 #endif
   }
 #ifdef USE_BT_PAIRING
@@ -643,6 +683,11 @@ void A2DPSource::loop() {
   }
 #endif
   if (this->disconnect_pending_.exchange(false)) {
+#ifdef USE_BT_PAIRING
+    if (this->rejected_) {
+      this->rejected_ = false;
+    } else {
+#endif
     ESP_LOGI(TAG, "Disconnected");
     for (auto *trigger : this->disconnected_triggers_) {
       trigger->trigger();
@@ -650,6 +695,15 @@ void A2DPSource::loop() {
 #ifdef USE_BT_PAIRING
     if (this->pairing_ != nullptr)
       this->pairing_->on_connection(this, false);
+    }
+    if (this->switch_pending_) {
+      this->switch_pending_ = false;
+      esp_bd_addr_t addr;
+      memcpy(addr, this->switch_addr_, ESP_BD_ADDR_LEN);
+      this->source_.connect_to_device(addr);
+    } else if (this->pairing_mode_.load() && this->chosen_valid_) {
+      this->source_.resume_discovery();
+    }
 #endif
   }
   if (this->streaming_start_pending_.exchange(false)) {

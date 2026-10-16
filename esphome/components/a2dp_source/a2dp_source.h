@@ -22,6 +22,7 @@
 #include <freertos/ringbuf.h>
 
 #include <atomic>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -127,6 +128,16 @@ class A2DPSource : public Component
   bool is_device_connected() const override { return this->connected_.load(); }
   void connect_device() override { this->source_.reconnect(); }
   void disconnect_device() override { this->source_.disconnect(); }
+  /// Several audio devices stay paired; one is connected at a time.
+  bool holds_many() const override { return true; }
+  const uint8_t *connected_address() const override {
+    return this->connected_.load() ? this->connected_addr_ : nullptr;
+  }
+  bool is_address_connected(const uint8_t *address) const override {
+    return this->connected_.load() && memcmp(this->connected_addr_, address, ESP_BD_ADDR_LEN) == 0;
+  }
+  void connect_address(const uint8_t *address) override;
+  void disconnect_address(const uint8_t *address) override;
   void cancel_device_pairing() override {
     this->picked_valid_ = false;
     this->stop_pairing();
@@ -186,7 +197,11 @@ class A2DPSource : public Component
   std::atomic<bool> name_wanted_{false};
   std::atomic<bool> name_ready_{false};
   bool keep_pending_{false};  // stored once bt_pairing has its database
+  uint8_t switch_addr_[ESP_BD_ADDR_LEN]{};  // connected to once the one connected now is gone
+  bool switch_pending_{false};
+  bool rejected_{false};  // a device not paired was sent away: its disconnect is not reported
 #endif
+  uint8_t connected_addr_[ESP_BD_ADDR_LEN]{};  // main loop
   RingbufHandle_t ring_{nullptr};
   size_t ring_bytes_{0};
   std::atomic<bool> speaker_active_{false};

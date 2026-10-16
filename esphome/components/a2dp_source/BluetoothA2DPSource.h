@@ -279,6 +279,16 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   /// ESPHome: Bluetooth Classic went away. The timer goes, and the profiles with deinit (only
   /// while Bluedroid still runs); start() brings everything back.
   void stack_down(bool deinit);
+  /// ESPHome: makes this paired device the stored one (kept in NVS) and connects to it.
+  bool connect_to_device(esp_bd_addr_t addr) {
+    set_last_connection(addr);
+    return reconnect();
+  }
+  /// ESPHome: the device connected now becomes the stored one, reconnected to later.
+  void keep_peer() {
+    set_last_connection(peer_bd_addr);
+    is_autoreconnect_allowed = true;
+  }
 
   /// Gets the time of the last heart beat
   unsigned long get_last_heart_beat() { return last_heart_beat; }
