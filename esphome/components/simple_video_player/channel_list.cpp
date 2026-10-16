@@ -437,11 +437,11 @@ void SimpleVideoPlayer::keyboard_list_task_() {
   this->kbd_list_done_.store(true, std::memory_order_release);
 }
 
-// Channel task: the layout kbd_loading_name_ into its slot (the main loop leaves both be till done).
+// Channel task: the layout kbd_loading_name_ into the slot being read (the main loop leaves both be till done).
 void SimpleVideoPlayer::keyboard_get_task_() {
   const std::string path = "/keyboard?layout=" + url_encoded(this->kbd_loading_name_.c_str());
   size_t len = 0;
-  const bool ok = this->channel_http_(path.c_str(), nullptr, nullptr, &len, this->kbd_slot_[this->kbd_loading_],
+  const bool ok = this->channel_http_(path.c_str(), nullptr, nullptr, &len, this->kbd_slots_[this->kbd_loading_].data,
                                       KBD_LAYOUT_BYTES);
   this->kbd_get_len_ = ok ? len : 0;
   this->kbd_get_ok_ = ok;

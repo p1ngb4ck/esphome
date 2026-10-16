@@ -10,6 +10,7 @@ from esphome.components.esp32 import (
     require_vfs_select,
 )
 from esphome.components.esp32.const import VARIANT_ESP32P4
+from esphome.components.hid import layouts as hid_layouts
 from esphome.components.storage import request_storage_worker
 import esphome.config_validation as cv
 from esphome.const import (
@@ -190,8 +191,34 @@ def _storage_path(value):
 
 
 CONF_KEYBOARD_LAYOUTS = "keyboard_layouts"
+CONF_LAYOUT = "layout"
 CONF_KEYBOARDS = "keyboards"
 CONF_DIRECTORY = "directory"
+
+
+def _layout_name(value):
+    value = cv.string_strict(value)
+    if value:
+        try:
+            hid_layouts.resolve(value)
+        except KeyError as err:
+            raise cv.Invalid(
+                f"{value} is not a keyboard layout (an XKB name as de or de(nodeadkeys))"
+            ) from err
+    return value
+
+
+def _keyboard(value):
+    """A keyboard: its id, or {id, name, layout} -- its name on the panel, its standard layout."""
+    if not isinstance(value, dict):
+        value = {CONF_ID: value}
+    return cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(HIDInput),
+            cv.Optional(CONF_NAME): cv.string_strict,
+            cv.Optional(CONF_LAYOUT, default=""): _layout_name,
+        }
+    )(value)
 
 
 def _storage_dir(value):
@@ -608,7 +635,7 @@ CONFIG_SCHEMA = cv.All(
             # svp_relay (with channel_list), each kept in the directory once used.
             cv.Optional(CONF_KEYBOARD_LAYOUTS): cv.Schema(
                 {
-                    cv.Required(CONF_KEYBOARDS): cv.ensure_list(cv.use_id(HIDInput)),
+                    cv.Required(CONF_KEYBOARDS): cv.ensure_list(_keyboard),
                     cv.Required(CONF_DIRECTORY): _storage_dir,
                 }
             ),
@@ -1089,7 +1116,9 @@ async def to_code(config):
         cg.add_define("SVP_KEYBOARD")
         cg.add(var.set_keyboard_directory(layouts[CONF_DIRECTORY]))
         for keyboard in layouts[CONF_KEYBOARDS]:
-            cg.add(var.add_keyboard(await cg.get_variable(keyboard)))
+            input_var = await cg.get_variable(keyboard[CONF_ID])
+            name = keyboard.get(CONF_NAME, str(keyboard[CONF_ID]))
+            cg.add(var.add_keyboard(input_var, name, keyboard[CONF_LAYOUT]))
 
     if controls := config.get(CONF_CONTROLS):
         cg.add_define("SVP_CONTROLS")

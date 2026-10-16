@@ -528,10 +528,16 @@ class SimpleVideoPlayer : public Component
 #endif
 
 #ifdef SVP_KEYBOARD
-  // Keyboard layouts (keyboard_layouts:) on the keyboards instead of their own: svp_relay's (GET
-  // /keyboard), each kept in the directory once used and read from there after. Main loop.
+  // Keyboard layouts (keyboard_layouts:): each device behind the keyboards (hid::InputDevice) types
+  // with the layout given it, else with its keyboard's (input's) standard one, else with the
+  // input's own. Layouts are read from the directory, else had from svp_relay (GET /keyboard) and
+  // then kept there. What is given each is kept in preferences. Main loop.
   void set_keyboard_directory(const std::string &dir) { this->kbd_dir_ = dir; }
-  void add_keyboard(hid::HIDInput *input) { this->kbd_inputs_.push_back(input); }
+  /// A keyboard (input): its name, and its standard layout from the configuration ("" its own).
+  void add_keyboard(hid::HIDInput *input, const std::string &name, const std::string &layout);
+  /// The directory changed (the "Keyboard layout folder"): its layouts from now on.
+  void keyboard_set_directory(const std::string &dir);
+  const std::string &keyboard_directory() const { return this->kbd_dir_; }
   /// The list: svp_relay's, else the directory's (names only); the callback once it is there.
   void keyboard_list_fetch();
   bool keyboard_listed() const { return this->kbd_listed_; }  // false: on its way, or none
@@ -541,17 +547,37 @@ class SimpleVideoPlayer : public Component
   const char *keyboard_description(size_t index) const;  // "" for none
   bool keyboard_kept(size_t index) const;                // its file is in the directory
   int keyboard_index(const std::string &name) const;      // -1: not in the list
+  /// A layout's description where the list has one, else its name; "" stays "".
+  std::string keyboard_label(const std::string &name) const;
   /// Up to max indexes of the layouts whose name or description holds query (any case), for an empty
   /// query those kept; returns how many there are in all.
   size_t keyboard_find(const std::string &query, int *out, size_t max) const;
-  /// That layout on every keyboard, "" their own again: from its file, else from svp_relay (then kept
-  /// in the directory). The callback once it is on them, or could not be had.
-  void keyboard_select(const std::string &name);
-  const PsramString &keyboard_selected() const { return this->kbd_selected_; }  // "": their own
-  const PsramString &keyboard_wanted() const { return this->kbd_wanted_; }      // asked for last
-  const std::string &keyboard_directory() const { return this->kbd_dir_; }
-  bool keyboard_loading() const { return this->kbd_step_ != KBD_IDLE || this->kbd_pending_; }
-  bool keyboard_failed() const { return this->kbd_failed_; }  // the last one asked for
+
+  struct KeyboardDevice {
+    std::string key;   // hid::InputDevice's; "@" and the keyboard's name for a keyboard's standard
+    std::string name;
+    uint8_t input;     // which keyboard
+    bool connected;
+    std::string layout;  // given it: "" none (the keyboard's standard / for a standard: its own)
+  };
+  size_t keyboard_input_count() const { return this->kbd_inputs_.size(); }
+  const std::string &keyboard_input_name(size_t index) const { return this->kbd_inputs_[index].name; }
+  /// Each keyboard's standard (key "@name") and every device of theirs: those behind them now, and
+  /// the USB ones seen before.
+  std::vector<KeyboardDevice> keyboard_devices() const;
+  /// The layout given a device or a keyboard's standard (key as KeyboardDevice's), "" none: kept,
+  /// then put on it once read. False: no such device, or no room to keep it.
+  bool keyboard_assign(const std::string &key, const std::string &layout);
+  /// The same by a device's key or name, or a keyboard's name (Home Assistant).
+  bool keyboard_assign_named(const std::string &device, const std::string &layout);
+  /// "name: layout" of each, one per line (a text sensor).
+  std::string keyboard_summary() const;
+  /// The layouts to have in the directory, from svp_relay, one after another.
+  void keyboard_download(const std::vector<std::string> &names);
+  size_t keyboard_downloads_left() const { return this->kbd_downloads_.size(); }
+  bool keyboard_loading() const { return this->kbd_step_ != KBD_IDLE; }
+  /// A layout asked for that could not be had (neither in the directory nor from svp_relay).
+  bool keyboard_failed(const std::string &name) const;
   void add_on_keyboard_callback(std::function<void()> &&callback) { this->kbd_callbacks_.add(std::move(callback)); }
 #endif
 
@@ -2032,61 +2058,87 @@ class SimpleVideoPlayer : public Component
 
 #ifdef SVP_KEYBOARD
   // The list (svp_relay's "name\tdescription\n" lines, cut into strings in place), the entries into
-  // it, and two layouts: the one on the keyboards and the next one read into the other (pool).
+  // it, the layouts read (a cache of KBD_SLOTS, a layout each) and what is given whom (pool).
   static constexpr size_t KBD_LIST_BYTES = 32 * 1024;
   static constexpr size_t KBD_MAX = 1024;
   static constexpr size_t KBD_LAYOUT_BYTES = 8 * 1024;
+  static constexpr size_t KBD_SLOTS = 6;
+  static constexpr size_t KBD_ASSIGN_MAX = 24;
   struct KbdEntry {
     uint16_t name;  // offsets into kbd_list_
     uint16_t description;
     bool kept;
   };
   enum KbdStep : uint8_t { KBD_IDLE, KBD_READING, KBD_FETCHING, KBD_WRITING };
+  enum KbdSlotState : uint8_t { KBD_EMPTY, KBD_LOADING, KBD_READY, KBD_FAILED };
+  struct KbdSlot {
+    char name[32];
+    KbdSlotState state;
+    size_t len;
+    uint8_t *data;
+    hid::KeyboardLayout layout;
+  };
+  // Kept in preferences: a device's key (truncated) or "@" and a keyboard's name, the layout given
+  // it ("" none: a USB device remembered), the device's name.
+  struct KbdAssign {
+    char key[48];
+    char layout[32];
+    char name[32];
+    uint8_t input;  // the keyboard it was seen behind
+  };
+  struct KbdAssignTable {
+    KbdAssign entries[KBD_ASSIGN_MAX];
+  };
+  struct KbdInput {
+    hid::HIDInput *input;
+    std::string name;
+    std::string layout;  // the configuration's standard
+    const hid::KeyboardLayout *own;
+  };
   void keyboard_setup_();
   void keyboard_loop_();
   /// The directory's layouts: the list of them (build), else which of the list's are there.
   void keyboard_list_local_(bool build);
   void keyboard_listed_();
-  /// The layout asked for last, when nothing is under way.
+  /// The layouts wanted read (or failed), then put where they are wanted; the next read started.
+  void keyboard_resolve_();
+  /// The layout a keyboard's standard / a device has: given it, else ... ("" its own).
+  std::string keyboard_standard_(size_t input) const;
+  const KbdAssign *keyboard_assigned_(const std::string &key) const;
+  KbdSlot *keyboard_slot_(const std::string &name);
   void keyboard_next_();
   void keyboard_read_();
   void keyboard_read_end_(bool ok);
   void keyboard_fetch_();
-  /// The layout read into slot on the keyboards, if it is one.
-  bool keyboard_apply_(size_t len);
+  /// The read slot's layout, if it is one (a download: kept only).
+  bool keyboard_loaded_(size_t len);
   void keyboard_keep_(size_t len);
   void keyboard_write_();
   void keyboard_done_(bool ok);
+  void keyboard_save_();
   std::string kbd_dir_;
-  PsramVector<hid::HIDInput *> kbd_inputs_;
-  PsramVector<const hid::KeyboardLayout *> kbd_own_;  // the keyboards' own layouts
+  PsramVector<KbdInput> kbd_inputs_;
   char *kbd_list_{nullptr};
   KbdEntry *kbd_entries_{nullptr};
   size_t kbd_count_{0};
   bool kbd_listed_{false};
   bool kbd_list_remote_{false};
   bool kbd_list_busy_{false};
-  uint8_t *kbd_slot_[2]{};
-  hid::KeyboardLayout kbd_layout_[2]{};
-  int8_t kbd_active_{-1};  // the slot on the keyboards, -1 none (their own)
-  uint8_t kbd_loading_{0};  // the slot being read into
+  KbdSlot kbd_slots_[KBD_SLOTS]{};
+  KbdAssignTable *kbd_assign_{nullptr};
+  ESPPreferenceObject kbd_pref_;
+  PsramVector<PsramString> kbd_downloads_;
+  int8_t kbd_loading_{-1};      // the slot being read into
+  bool kbd_downloading_{false};  // ... for a download (kept, not put on a keyboard)
   KbdStep kbd_step_{KBD_IDLE};
   bool kbd_ready_{false};
-  bool kbd_pending_{false};  // kbd_wanted_ not yet started
-  bool kbd_failed_{false};
   bool kbd_kept_{false};  // its file written so far
-  PsramString kbd_wanted_, kbd_selected_, kbd_loading_name_;
+  PsramString kbd_loading_name_;
   size_t kbd_len_{0};
   size_t kbd_got_{0};
   storage::StreamHandle kbd_handle_{};
-  // The layout on the keyboards, saved at once (preferences, synced): the one put on them at boot.
-  struct KbdSaved {
-    char name[40];
-  };
-  ESPPreferenceObject kbd_pref_;
-  void keyboard_save_();
   CallbackManager<void()> kbd_callbacks_;
-  // From the channel task: the list (its length) / the layout into kbd_slot_[kbd_loading_].
+  // From the channel task: the list (its length) / the layout into the slot being read.
   std::atomic<bool> kbd_list_done_{false}, kbd_get_done_{false};
   bool kbd_list_ok_{false}, kbd_get_ok_{false};
   size_t kbd_list_len_{0}, kbd_get_len_{0};

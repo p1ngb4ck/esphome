@@ -1,7 +1,8 @@
 // Keyboard layouts on the keyboards (keyboard_layouts:): svp_relay lists them and hands out each one's
-// table (hid::parse_layout()); a layout used is kept in the directory and read from there after. Main
-// loop, the files through the storage worker (each step after the last one's completion, the next one
-// deferred to the loop), svp_relay through the channel task.
+// table (hid::parse_layout()); a layout used is kept in the directory and read from there after. Each
+// device behind a keyboard (hid::InputDevice) types with the layout given it, else with its keyboard's
+// standard one. Main loop, the files through the storage worker (each step after the last one's
+// completion, the next one deferred to the loop), svp_relay through the channel task.
 
 #include "simple_video_player.h"
 
@@ -21,39 +22,80 @@ static const char *const TAG = "simple_video_player.keyboard";
 
 static constexpr const char *KBD_SUFFIX = ".kbl";
 
+// Into a fixed field: what does not fit is cut.
+static void copy_field(char *out, size_t size, const std::string &text) {
+  std::snprintf(out, size, "%s", text.c_str());
+}
+
+void SimpleVideoPlayer::add_keyboard(hid::HIDInput *input, const std::string &name, const std::string &layout) {
+  this->kbd_inputs_.push_back(KbdInput{input, name, layout, nullptr});
+}
+
 void SimpleVideoPlayer::keyboard_setup_() {
   this->kbd_list_ = reinterpret_cast<char *>(this->pool_.alloc(KBD_LIST_BYTES));
   this->kbd_entries_ = reinterpret_cast<KbdEntry *>(this->pool_.alloc(KBD_MAX * sizeof(KbdEntry)));
-  this->kbd_slot_[0] = this->pool_.alloc(KBD_LAYOUT_BYTES);
-  this->kbd_slot_[1] = this->pool_.alloc(KBD_LAYOUT_BYTES);
-  if (this->kbd_list_ == nullptr || this->kbd_entries_ == nullptr || this->kbd_slot_[0] == nullptr ||
-      this->kbd_slot_[1] == nullptr) {
+  this->kbd_assign_ = reinterpret_cast<KbdAssignTable *>(this->pool_.alloc(sizeof(KbdAssignTable)));
+  bool ok = this->kbd_list_ != nullptr && this->kbd_entries_ != nullptr && this->kbd_assign_ != nullptr;
+  for (KbdSlot &slot : this->kbd_slots_) {
+    slot = KbdSlot{};
+    slot.data = this->pool_.alloc(KBD_LAYOUT_BYTES);
+    ok = ok && slot.data != nullptr;
+  }
+  if (!ok) {
     ESP_LOGE(TAG, "Keyboard layouts disabled: no room in the PSRAM pool");
     return;
   }
-  for (hid::HIDInput *input : this->kbd_inputs_)
-    this->kbd_own_.push_back(input->get_layout());
-  // The one saved, unless one was asked for already.
-  this->kbd_pref_ = global_preferences->make_preference<KbdSaved>(fnv1_hash("simple_video_player.keyboard"));
-  KbdSaved saved{};
-  if (!this->kbd_pending_ && this->kbd_pref_.load(&saved)) {
-    saved.name[sizeof(saved.name) - 1] = '\0';
-    if (saved.name[0] != '\0') {
-      this->kbd_wanted_.assign(saved.name);
-      this->kbd_pending_ = true;
+  std::memset(this->kbd_assign_, 0, sizeof(KbdAssignTable));
+  this->kbd_pref_ = global_preferences->make_preference<KbdAssignTable>(fnv1_hash("simple_video_player.keyboards"));
+  if (this->kbd_pref_.load(this->kbd_assign_)) {
+    for (KbdAssign &entry : this->kbd_assign_->entries) {
+      entry.key[sizeof(entry.key) - 1] = '\0';
+      entry.layout[sizeof(entry.layout) - 1] = '\0';
+      entry.name[sizeof(entry.name) - 1] = '\0';
     }
+  } else {
+    std::memset(this->kbd_assign_, 0, sizeof(KbdAssignTable));
+  }
+  for (KbdInput &input : this->kbd_inputs_) {
+    input.own = input.input->get_layout();
+    // A device came or went: it gets its layout; a USB one is remembered.
+    const auto index = static_cast<uint8_t>(&input - this->kbd_inputs_.data());
+    input.input->add_on_devices_callback([this, index]() {
+      std::vector<hid::InputDevice> devices;
+      this->kbd_inputs_[index].input->list_devices(devices);
+      bool added = false;
+      for (const auto &device : devices) {
+        if (device.key.rfind("usb:", 0) != 0 || this->keyboard_assigned_(device.key) != nullptr)
+          continue;
+        for (KbdAssign &entry : this->kbd_assign_->entries) {
+          if (entry.key[0] == '\0') {
+            copy_field(entry.key, sizeof(entry.key), device.key);
+            copy_field(entry.name, sizeof(entry.name), device.name);
+            entry.layout[0] = '\0';
+            entry.input = index;
+            added = true;
+            break;
+          }
+        }
+      }
+      if (added)
+        this->keyboard_save_();
+      this->keyboard_resolve_();
+      this->kbd_callbacks_.call();
+    });
   }
   if (storage::global_storage_registry != nullptr) {
-    // Its storage may come later (a card put in): a layout that could not be had is tried again.
+    // Its storage may come later (a card put in): the layouts that could not be had are tried again.
     storage::global_storage_registry->add_on_registered_callback([this](storage::Storage *) {
-      if (this->kbd_failed_ && this->kbd_wanted_ != this->kbd_selected_) {
-        this->kbd_pending_ = true;
-        this->keyboard_next_();
+      for (KbdSlot &slot : this->kbd_slots_) {
+        if (slot.state == KBD_FAILED)
+          slot.state = KBD_EMPTY;
       }
+      this->keyboard_resolve_();
     });
   }
   this->kbd_ready_ = true;
-  this->keyboard_next_();
+  this->keyboard_resolve_();
 }
 
 void SimpleVideoPlayer::keyboard_loop_() {
@@ -89,7 +131,7 @@ void SimpleVideoPlayer::keyboard_loop_() {
     }
   }
   if (this->kbd_get_done_.exchange(false, std::memory_order_acquire) && this->kbd_step_ == KBD_FETCHING) {
-    if (this->kbd_get_ok_ && this->keyboard_apply_(this->kbd_get_len_)) {
+    if (this->kbd_get_ok_ && this->keyboard_loaded_(this->kbd_get_len_)) {
       this->keyboard_keep_(this->kbd_get_len_);
     } else {
       ESP_LOGW(TAG, "Layout %s not had from svp_relay", this->kbd_loading_name_.c_str());
@@ -97,6 +139,25 @@ void SimpleVideoPlayer::keyboard_loop_() {
     }
   }
 #endif
+}
+
+void SimpleVideoPlayer::keyboard_set_directory(const std::string &dir) {
+  if (dir.empty() || dir == this->kbd_dir_)
+    return;
+  this->kbd_dir_ = dir;
+  ESP_LOGI(TAG, "Layouts in %s", dir.c_str());
+  if (!this->kbd_ready_)
+    return;
+  for (KbdSlot &slot : this->kbd_slots_) {
+    if (slot.state == KBD_FAILED)
+      slot.state = KBD_EMPTY;
+  }
+  if (this->kbd_listed_) {
+    for (size_t i = 0; i < this->kbd_count_; i++)
+      this->kbd_entries_[i].kept = false;
+    this->keyboard_list_local_(!this->kbd_list_remote_);
+  }
+  this->keyboard_resolve_();
 }
 
 void SimpleVideoPlayer::keyboard_list_fetch() {
@@ -223,35 +284,247 @@ size_t SimpleVideoPlayer::keyboard_find(const std::string &query, int *out, size
   return total;
 }
 
-void SimpleVideoPlayer::keyboard_select(const std::string &name) {
-  this->kbd_wanted_.assign(name.c_str());
-  this->kbd_pending_ = true;
+std::string SimpleVideoPlayer::keyboard_label(const std::string &name) const {
+  if (name.empty())
+    return name;
+  const int index = this->keyboard_index(name);
+  const char *description = index >= 0 ? this->keyboard_description(index) : "";
+  return description[0] != '\0' ? std::string(description) : name;
+}
+
+const SimpleVideoPlayer::KbdAssign *SimpleVideoPlayer::keyboard_assigned_(const std::string &key) const {
+  if (this->kbd_assign_ == nullptr || key.empty())
+    return nullptr;
+  char cut[sizeof(KbdAssign::key)];
+  copy_field(cut, sizeof(cut), key);
+  for (const KbdAssign &entry : this->kbd_assign_->entries) {
+    if (entry.key[0] != '\0' && std::strcmp(entry.key, cut) == 0)
+      return &entry;
+  }
+  return nullptr;
+}
+
+std::string SimpleVideoPlayer::keyboard_standard_(size_t input) const {
+  const KbdAssign *entry = this->keyboard_assigned_("@" + this->kbd_inputs_[input].name);
+  return entry != nullptr ? std::string(entry->layout) : this->kbd_inputs_[input].layout;
+}
+
+std::vector<SimpleVideoPlayer::KeyboardDevice> SimpleVideoPlayer::keyboard_devices() const {
+  std::vector<KeyboardDevice> out;
+  for (size_t i = 0; i < this->kbd_inputs_.size(); i++) {
+    const KbdInput &input = this->kbd_inputs_[i];
+    const KbdAssign *standard = this->keyboard_assigned_("@" + input.name);
+    out.push_back(KeyboardDevice{"@" + input.name, input.name, static_cast<uint8_t>(i), true,
+                                 standard != nullptr ? std::string(standard->layout) : input.layout});
+    std::vector<hid::InputDevice> devices;
+    input.input->list_devices(devices);
+    for (const auto &device : devices) {
+      const KbdAssign *entry = this->keyboard_assigned_(device.key);
+      out.push_back(KeyboardDevice{device.key, device.name, static_cast<uint8_t>(i), device.connected,
+                                   entry != nullptr ? std::string(entry->layout) : std::string()});
+    }
+  }
+  // The USB devices seen before and not there now: under the keyboard they were seen behind.
+  if (this->kbd_assign_ != nullptr) {
+    for (const KbdAssign &entry : this->kbd_assign_->entries) {
+      if (std::strncmp(entry.key, "usb:", 4) != 0 || entry.input >= this->kbd_inputs_.size())
+        continue;
+      bool listed = false;
+      for (const auto &device : out)
+        listed = listed || device.key.compare(0, sizeof(entry.key) - 1, entry.key) == 0;
+      if (!listed)
+        out.push_back(KeyboardDevice{entry.key, entry.name, entry.input, false, entry.layout});
+    }
+  }
+  return out;
+}
+
+bool SimpleVideoPlayer::keyboard_assign(const std::string &key, const std::string &layout) {
+  if (this->kbd_assign_ == nullptr || key.empty())
+    return false;
+  KbdAssign *entry = const_cast<KbdAssign *>(this->keyboard_assigned_(key));
+  std::string name;
+  if (entry == nullptr) {
+    if (key[0] == '@') {
+      name = key.substr(1);
+      bool known = false;
+      for (const KbdInput &input : this->kbd_inputs_)
+        known = known || input.name == name;
+      if (!known)
+        return false;
+    } else {
+      std::vector<hid::InputDevice> devices;
+      for (const KbdInput &input : this->kbd_inputs_)
+        input.input->list_devices(devices);
+      bool known = false;
+      for (const auto &device : devices) {
+        if (device.key == key) {
+          known = true;
+          name = device.name;
+        }
+      }
+      if (!known)
+        return false;
+    }
+    for (KbdAssign &free : this->kbd_assign_->entries) {
+      if (free.key[0] == '\0') {
+        entry = &free;
+        break;
+      }
+    }
+    if (entry == nullptr) {
+      ESP_LOGW(TAG, "No room to keep the layout of %s", key.c_str());
+      return false;
+    }
+    copy_field(entry->key, sizeof(entry->key), key);
+    copy_field(entry->name, sizeof(entry->name), name);
+  }
+  copy_field(entry->layout, sizeof(entry->layout), layout);
+  // Nothing left to keep of a Bluetooth device or a standard given none.
+  if (layout.empty() && std::strncmp(entry->key, "usb:", 4) != 0)
+    std::memset(entry, 0, sizeof(KbdAssign));
+  ESP_LOGI(TAG, "%s: layout %s", key.c_str(), layout.empty() ? "(standard)" : layout.c_str());
+  for (KbdSlot &slot : this->kbd_slots_) {
+    if (slot.state == KBD_FAILED && layout == slot.name)
+      slot.state = KBD_EMPTY;  // asked for again: tried again
+  }
+  this->keyboard_save_();
+  this->keyboard_resolve_();
+  this->kbd_callbacks_.call();
+  return true;
+}
+
+bool SimpleVideoPlayer::keyboard_assign_named(const std::string &device, const std::string &layout) {
+  for (const auto &known : this->keyboard_devices()) {
+    if (known.key == device || known.name == device || (known.key[0] == '@' && known.key.substr(1) == device))
+      return this->keyboard_assign(known.key, layout);
+  }
+  ESP_LOGW(TAG, "No keyboard or device %s", device.c_str());
+  return false;
+}
+
+std::string SimpleVideoPlayer::keyboard_summary() const {
+  std::string out;
+  for (const auto &device : this->keyboard_devices()) {
+    if (!out.empty())
+      out += '\n';
+    std::string layout = device.layout;
+    if (layout.empty())
+      layout = device.key[0] == '@' ? "own" : "standard";
+    out += (device.key[0] == '@' ? "Standard " : "") + device.name + ": " + layout;
+  }
+  return out;
+}
+
+void SimpleVideoPlayer::keyboard_download(const std::vector<std::string> &names) {
+  for (const auto &name : names) {
+    if (!name.empty())
+      this->kbd_downloads_.emplace_back(name.c_str());
+  }
+  this->keyboard_next_();
+  this->kbd_callbacks_.call();
+}
+
+bool SimpleVideoPlayer::keyboard_failed(const std::string &name) const {
+  for (const KbdSlot &slot : this->kbd_slots_) {
+    if (slot.state == KBD_FAILED && name == slot.name)
+      return true;
+  }
+  return false;
+}
+
+SimpleVideoPlayer::KbdSlot *SimpleVideoPlayer::keyboard_slot_(const std::string &name) {
+  for (KbdSlot &slot : this->kbd_slots_) {
+    if (slot.state != KBD_EMPTY && name == slot.name)
+      return &slot;
+  }
+  return nullptr;
+}
+
+// What every keyboard and device types with: the layouts there are put on them now, the first one
+// missing is read next (into a slot no one wants).
+void SimpleVideoPlayer::keyboard_resolve_() {
+  if (!this->kbd_ready_)
+    return;
+  std::vector<std::string> wanted;
+  auto want = [&wanted](const std::string &name) {
+    if (!name.empty() && std::find(wanted.begin(), wanted.end(), name) == wanted.end())
+      wanted.push_back(name);
+  };
+  for (size_t i = 0; i < this->kbd_inputs_.size(); i++) {
+    const KbdInput &input = this->kbd_inputs_[i];
+    const std::string standard = this->keyboard_standard_(i);
+    want(standard);
+    KbdSlot *slot = standard.empty() ? nullptr : this->keyboard_slot_(standard);
+    input.input->set_layout(slot != nullptr && slot->state == KBD_READY ? &slot->layout : input.own);
+    std::vector<hid::InputDevice> devices;
+    input.input->list_devices(devices);
+    for (const auto &device : devices) {
+      const KbdAssign *entry = this->keyboard_assigned_(device.key);
+      const std::string layout = entry != nullptr ? std::string(entry->layout) : std::string();
+      want(layout);
+      KbdSlot *own = layout.empty() ? nullptr : this->keyboard_slot_(layout);
+      input.input->set_device_layout(device.key, own != nullptr && own->state == KBD_READY ? &own->layout : nullptr);
+    }
+  }
+  // Slots no one wants are free (not one being read into).
+  for (size_t i = 0; i < KBD_SLOTS; i++) {
+    KbdSlot &slot = this->kbd_slots_[i];
+    if (static_cast<int8_t>(i) == this->kbd_loading_ && this->kbd_step_ != KBD_IDLE)
+      continue;
+    if (slot.state == KBD_READY && std::find(wanted.begin(), wanted.end(), std::string(slot.name)) == wanted.end())
+      slot.state = KBD_EMPTY;
+  }
+  if (this->kbd_step_ != KBD_IDLE)
+    return;
+  for (const auto &name : wanted) {
+    if (this->keyboard_slot_(name) != nullptr)
+      continue;  // read, being read, or failed
+    for (size_t i = 0; i < KBD_SLOTS; i++) {
+      KbdSlot &slot = this->kbd_slots_[i];
+      if (slot.state != KBD_EMPTY)
+        continue;
+      copy_field(slot.name, sizeof(slot.name), name);
+      slot.state = KBD_LOADING;
+      this->kbd_loading_ = static_cast<int8_t>(i);
+      this->kbd_downloading_ = false;
+      this->kbd_loading_name_.assign(name.c_str());
+      this->keyboard_next_();
+      return;
+    }
+    ESP_LOGW(TAG, "More than %u layouts in use: %s waits", static_cast<unsigned>(KBD_SLOTS), name.c_str());
+    break;
+  }
   this->keyboard_next_();
 }
 
+// The read set up (keyboard_resolve_()), else the next download, from the file first.
 void SimpleVideoPlayer::keyboard_next_() {
-  if (!this->kbd_ready_ || this->kbd_step_ != KBD_IDLE || !this->kbd_pending_)
+  if (!this->kbd_ready_ || this->kbd_step_ != KBD_IDLE)
     return;
-  this->kbd_pending_ = false;
-  if (this->kbd_wanted_ == this->kbd_selected_) {
-    this->kbd_failed_ = false;
-    this->kbd_callbacks_.call();
+  if (this->kbd_loading_ < 0 || this->kbd_slots_[this->kbd_loading_].state != KBD_LOADING) {
+    // A download: into a free slot, kept in the directory only.
+    if (this->kbd_downloads_.empty())
+      return;
+    int8_t free = -1;
+    for (size_t i = 0; i < KBD_SLOTS && free < 0; i++) {
+      if (this->kbd_slots_[i].state == KBD_EMPTY)
+        free = static_cast<int8_t>(i);
+    }
+    if (free < 0)
+      return;
+    this->kbd_loading_ = free;
+    this->kbd_downloading_ = true;
+    this->kbd_loading_name_ = this->kbd_downloads_.front();
+    this->kbd_downloads_.erase(this->kbd_downloads_.begin());
+    KbdSlot &slot = this->kbd_slots_[free];
+    copy_field(slot.name, sizeof(slot.name), this->kbd_loading_name_.c_str());
+    slot.state = KBD_LOADING;
+    this->kbd_len_ = 0;
+    this->keyboard_fetch_();
     return;
   }
-  if (this->kbd_wanted_.empty()) {
-    for (size_t i = 0; i < this->kbd_inputs_.size(); i++)
-      this->kbd_inputs_[i]->set_layout(this->kbd_own_[i]);
-    this->kbd_active_ = -1;
-    this->kbd_selected_.clear();
-    ESP_LOGI(TAG, "The keyboards' own layouts");
-    this->keyboard_save_();
-    this->keyboard_done_(true);
-    return;
-  }
-  this->kbd_loading_name_ = this->kbd_wanted_;
-  this->kbd_loading_ = this->kbd_active_ == 0 ? 1 : 0;
   this->kbd_len_ = 0;
-  // Its file first.
   const std::string path = this->kbd_dir_ + "/" + this->kbd_loading_name_.c_str() + KBD_SUFFIX;
   const char *rel = nullptr;
   storage::StorageWorker *worker = storage::global_storage_worker;
@@ -280,7 +553,7 @@ void SimpleVideoPlayer::keyboard_read_() {
     return;
   }
   const storage::StorageError err = storage::global_storage_worker->read_chunk(
-      this->kbd_handle_, this->kbd_slot_[this->kbd_loading_] + this->kbd_len_, room, &this->kbd_got_,
+      this->kbd_handle_, this->kbd_slots_[this->kbd_loading_].data + this->kbd_len_, room, &this->kbd_got_,
       [this](storage::StorageError e) {
         if (e != storage::StorageError::STORAGE_ERROR_OK) {
           this->defer([this]() { this->keyboard_read_end_(false); });
@@ -302,7 +575,7 @@ void SimpleVideoPlayer::keyboard_read_end_(bool ok) {
   const storage::StorageError closed =
       storage::global_storage_worker->end_read(this->kbd_handle_, [this, ok](storage::StorageError) {
         this->defer([this, ok]() {
-          if (ok && this->keyboard_apply_(this->kbd_len_)) {
+          if (ok && this->keyboard_loaded_(this->kbd_len_)) {
             this->keyboard_done_(true);
           } else {
             ESP_LOGW(TAG, "%s/%s%s is not a layout", this->kbd_dir_.c_str(), this->kbd_loading_name_.c_str(),
@@ -325,28 +598,16 @@ void SimpleVideoPlayer::keyboard_fetch_() {
   this->keyboard_done_(false);
 }
 
-bool SimpleVideoPlayer::keyboard_apply_(size_t len) {
-  const uint8_t slot = this->kbd_loading_;
-  if (!hid::parse_layout(this->kbd_slot_[slot], len, &this->kbd_layout_[slot]))
+bool SimpleVideoPlayer::keyboard_loaded_(size_t len) {
+  KbdSlot &slot = this->kbd_slots_[this->kbd_loading_];
+  if (!hid::parse_layout(slot.data, len, &slot.layout))
     return false;
-  for (hid::HIDInput *input : this->kbd_inputs_)
-    input->set_layout(&this->kbd_layout_[slot]);
-  this->kbd_active_ = static_cast<int8_t>(slot);
-  this->kbd_selected_ = this->kbd_loading_name_;
-  ESP_LOGI(TAG, "Layout %s", this->kbd_selected_.c_str());
-  this->keyboard_save_();
+  slot.len = len;
   return true;
 }
 
-void SimpleVideoPlayer::keyboard_save_() {
-  KbdSaved saved{};
-  std::snprintf(saved.name, sizeof(saved.name), "%s", this->kbd_selected_.c_str());
-  if (!this->kbd_pref_.save(&saved) || !global_preferences->sync())
-    ESP_LOGW(TAG, "Layout %s not saved for the next boot", saved.name);
-}
-
-// The layout had from svp_relay into its file (the directory made if need be); it is on the keyboards
-// meanwhile, its slot not written to till the next one.
+// The layout had from svp_relay into its file (the directory made if need be); its slot is not
+// written to till that is done.
 void SimpleVideoPlayer::keyboard_keep_(size_t len) {
   storage::StorageWorker *worker = storage::global_storage_worker;
   const char *dir_rel = nullptr;
@@ -359,7 +620,7 @@ void SimpleVideoPlayer::keyboard_keep_(size_t len) {
   }
   if (dir_rel != nullptr && dir_rel[0] != '\0')
     dir->mkdir(dir_rel);  // already there: an error, and nothing to do
-  const std::string path = this->kbd_dir_ + "/" + this->kbd_selected_.c_str() + KBD_SUFFIX;
+  const std::string path = this->kbd_dir_ + "/" + this->kbd_loading_name_.c_str() + KBD_SUFFIX;
   const char *rel = nullptr;
   storage::PathStorage *ps = storage::global_storage_registry->resolve_path(path.c_str(), &rel);
   if (ps == nullptr) {
@@ -371,7 +632,7 @@ void SimpleVideoPlayer::keyboard_keep_(size_t len) {
   this->kbd_kept_ = true;
   const storage::StorageError err = worker->begin_write(ps, rel, &this->kbd_handle_, [this](storage::StorageError e) {
     if (e != storage::StorageError::STORAGE_ERROR_OK) {
-      ESP_LOGW(TAG, "Layout %s not kept: %s", this->kbd_selected_.c_str(), storage::error_to_string(e));
+      ESP_LOGW(TAG, "Layout %s not kept: %s", this->kbd_loading_name_.c_str(), storage::error_to_string(e));
       this->defer([this]() { this->keyboard_done_(true); });
       return;
     }
@@ -388,11 +649,11 @@ void SimpleVideoPlayer::keyboard_write_() {
           const bool kept = this->kbd_kept_ && e == storage::StorageError::STORAGE_ERROR_OK;
           this->defer([this, kept]() {
             if (kept) {
-              const int index = this->keyboard_index(this->kbd_selected_.c_str());
+              const int index = this->keyboard_index(this->kbd_loading_name_.c_str());
               if (index >= 0)
                 this->kbd_entries_[index].kept = true;
             } else {
-              ESP_LOGW(TAG, "Layout %s not kept", this->kbd_selected_.c_str());
+              ESP_LOGW(TAG, "Layout %s not kept", this->kbd_loading_name_.c_str());
             }
             this->keyboard_done_(true);
           });
@@ -405,7 +666,7 @@ void SimpleVideoPlayer::keyboard_write_() {
     return;
   }
   const storage::StorageError err = storage::global_storage_worker->write_chunk(
-      this->kbd_handle_, this->kbd_slot_[this->kbd_active_], this->kbd_len_, [this](storage::StorageError e) {
+      this->kbd_handle_, this->kbd_slots_[this->kbd_loading_].data, this->kbd_len_, [this](storage::StorageError e) {
         if (e != storage::StorageError::STORAGE_ERROR_OK)
           this->kbd_kept_ = false;
         this->kbd_len_ = 0;  // written: what is left is to close it
@@ -420,10 +681,25 @@ void SimpleVideoPlayer::keyboard_write_() {
 }
 
 void SimpleVideoPlayer::keyboard_done_(bool ok) {
+  KbdSlot &slot = this->kbd_slots_[this->kbd_loading_];
+  if (this->kbd_downloading_) {
+    slot.state = KBD_EMPTY;  // kept only
+    if (!ok)
+      ESP_LOGW(TAG, "Layout %s not downloaded", this->kbd_loading_name_.c_str());
+  } else {
+    slot.state = ok ? KBD_READY : KBD_FAILED;
+    if (ok)
+      ESP_LOGI(TAG, "Layout %s", slot.name);
+  }
   this->kbd_step_ = KBD_IDLE;
-  this->kbd_failed_ = !ok;
+  this->kbd_loading_ = -1;
+  this->keyboard_resolve_();
   this->kbd_callbacks_.call();
-  this->keyboard_next_();
+}
+
+void SimpleVideoPlayer::keyboard_save_() {
+  if (!this->kbd_pref_.save(this->kbd_assign_) || !global_preferences->sync())
+    ESP_LOGW(TAG, "The keyboards' layouts not saved for the next boot");
 }
 
 }  // namespace esphome::simple_video_player

@@ -185,6 +185,15 @@ void BTPairing::forget_index_(size_t index) {
   format_mac_addr_upper(record.address, mac);
   ESP_LOGI(TAG, "Forgetting %s %s '%s'", transport_str(record.transport), mac, record.name);
   this->forget_callbacks_.call(record);
+#ifdef USE_BT_PAIRING_HID
+  // A device paired again later starts without the layout it had.
+  for (auto it = this->device_layouts_.begin(); it != this->device_layouts_.end(); ++it) {
+    if (memcmp(it->address, record.address, sizeof(record.address)) == 0) {
+      this->device_layouts_.erase(it);
+      break;
+    }
+  }
+#endif
   delete_bond(record.address, static_cast<Transport>(record.transport));
   this->dirty_ = true;
   this->next_attempt_ms_ = millis();
