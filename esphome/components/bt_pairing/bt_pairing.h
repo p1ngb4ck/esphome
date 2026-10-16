@@ -11,7 +11,6 @@
 
 #ifdef USE_BT_PAIRING_STORAGE
 #include "esphome/components/storage/storage.h"
-#include "esphome/components/storage/storage_worker.h"
 #endif
 #ifdef USE_BT_PAIRING_LE
 #include "esphome/components/esp32_ble_tracker/esp32_ble_tracker.h"
@@ -203,14 +202,6 @@ class BTPairing : public Component
   void forget_index_(size_t index);
 #ifdef USE_BT_PAIRING_STORAGE
   storage::PathStorage *resolve_file_(const char **rel);
-  // The file, through the storage worker (the main loop never waits for it): read once, written
-  // anew (a .tmp moved over it) after each change.
-  void file_load_();
-  void file_read_next_();
-  void file_loaded_(LoadResult result);
-  void file_save_();
-  void file_failed_(const char *what, storage::StorageError err);
-  size_t encode_into_(uint8_t *out) const;
 #endif
 
   std::vector<PairingRecord> records_;
@@ -252,16 +243,6 @@ class BTPairing : public Component
   uint32_t next_attempt_ms_{0};
 #ifdef USE_BT_PAIRING_STORAGE
   const char *file_{nullptr};
-  uint8_t *io_buf_{nullptr};  // PSRAM, a whole database
-  size_t io_len_{0};
-  size_t io_got_{0};
-  storage::PathStorage *io_storage_{nullptr};
-  const char *io_rel_{nullptr};
-  std::string io_tmp_;
-  storage::StreamHandle io_handle_{};
-  bool io_busy_{false};
-  uint32_t change_gen_{0};  // counts the changes; the one a write took
-  uint32_t save_gen_{0};
 #endif
   uint8_t max_devices_{8};
   bool loaded_{false};

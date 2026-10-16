@@ -68,17 +68,6 @@ static const char *kind_str(const ScannedDevice &device) {
 void BTPairing::setup() {
   this->pref_ = global_preferences->make_preference(sizeof(Header) + PREFERENCE_RECORDS * sizeof(PairingRecord),
                                                     this->preference_key_);
-#ifdef USE_BT_PAIRING_STORAGE
-  if (this->file_ != nullptr) {
-    this->io_buf_ = RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::ALLOC_EXTERNAL)
-                        .allocate(sizeof(Header) + PREFERENCE_RECORDS * sizeof(PairingRecord));
-    if (this->io_buf_ == nullptr) {
-      ESP_LOGE(TAG, "No PSRAM for the pairing database");
-      this->mark_failed();
-      return;
-    }
-  }
-#endif
 #ifdef USE_BT_CLASSIC
   bt_classic::add_gap_handler(BTPairing::gap_handler_, this);
 #endif
@@ -89,21 +78,6 @@ void BTPairing::loop() {
   const uint32_t now = millis();
   if (static_cast<int32_t>(now - this->next_attempt_ms_) < 0)
     return;
-#ifdef USE_BT_PAIRING_STORAGE
-  if (this->file_ != nullptr) {
-    // A step of the file's under way: its completion enables the loop again.
-    if (this->io_busy_)
-      return;
-    if (!this->loaded_) {
-      this->file_load_();
-    } else if (this->dirty_) {
-      this->file_save_();
-    } else if (!this->scanning_.load() && this->pending_target_ == nullptr) {
-      this->disable_loop();
-    }
-    return;
-  }
-#endif
   if (!this->loaded_) {
     switch (this->load_()) {
       case LoadResult::OK:
@@ -196,9 +170,6 @@ bool BTPairing::store(const PairingRecord &record) {
   format_mac_addr_upper(copy.address, mac);
   ESP_LOGI(TAG, "Stored %s %s '%s'", transport_str(copy.transport), mac, copy.name);
   this->dirty_ = true;
-#ifdef USE_BT_PAIRING_STORAGE
-  this->change_gen_++;
-#endif
   this->next_attempt_ms_ = millis();
   this->enable_loop();
 #ifdef USE_BT_PAIRING_HID
@@ -225,9 +196,6 @@ void BTPairing::forget_index_(size_t index) {
 #endif
   delete_bond(record.address, static_cast<Transport>(record.transport));
   this->dirty_ = true;
-#ifdef USE_BT_PAIRING_STORAGE
-  this->change_gen_++;
-#endif
   this->next_attempt_ms_ = millis();
   this->enable_loop();
 #ifdef USE_BT_PAIRING_HID
@@ -876,156 +844,31 @@ storage::PathStorage *BTPairing::resolve_file_(const char **rel) {
     ESP_LOGD(TAG, "No storage mounted for %s yet", this->file_);
   return storage;
 }
-
-using storage::StorageError;
-
-void BTPairing::file_failed_(const char *what, StorageError err) {
-  ESP_LOGW(TAG, "%s %s failed (%s), trying again", what, this->file_, storage::error_to_string(err));
-  this->io_busy_ = false;
-  this->next_attempt_ms_ = millis() + RETRY_MS;
-  this->enable_loop();
-}
-
-void BTPairing::file_load_() {
-  this->io_storage_ = this->resolve_file_(&this->io_rel_);
-  if (this->io_storage_ == nullptr) {
-    this->next_attempt_ms_ = millis() + RETRY_MS;
-    return;
-  }
-  this->io_len_ = 0;
-  this->io_busy_ = true;
-  const StorageError err = storage::global_storage_worker->begin_read(
-      this->io_storage_, this->io_rel_, &this->io_handle_, [this](StorageError opened) {
-        if (opened == StorageError::STORAGE_ERROR_OK) {
-          this->file_read_next_();
-        } else if (opened == StorageError::STORAGE_ERROR_NOT_FOUND) {
-          this->io_busy_ = false;
-          // None yet: what the preferences hold (an earlier config without file:) is taken over.
-          const size_t size = sizeof(Header) + PREFERENCE_RECORDS * sizeof(PairingRecord);
-          const bool taken = this->pref_.load(this->io_buf_, size) && this->decode_(this->io_buf_, size) &&
-                             !this->records_.empty();
-          if (taken) {
-            ESP_LOGI(TAG, "Pairing database taken over from preferences into %s", this->file_);
-            this->dirty_ = true;
-            this->change_gen_++;
-          }
-          this->file_loaded_(taken ? LoadResult::OK : LoadResult::EMPTY);
-        } else {
-          this->file_failed_("Opening", opened);
-        }
-      });
-  if (err != StorageError::STORAGE_ERROR_OK)
-    this->file_failed_("Opening", err);
-}
-
-void BTPairing::file_read_next_() {
-  const size_t size = sizeof(Header) + PREFERENCE_RECORDS * sizeof(PairingRecord);
-  const StorageError err = storage::global_storage_worker->read_chunk(
-      this->io_handle_, this->io_buf_ + this->io_len_, size - this->io_len_, &this->io_got_,
-      [this, size](StorageError read) {
-        if (read != StorageError::STORAGE_ERROR_OK) {
-          storage::global_storage_worker->end_read(this->io_handle_, [](StorageError) {});
-          this->file_failed_("Reading", read);
-          return;
-        }
-        this->io_len_ += this->io_got_;
-        if (this->io_got_ != 0 && this->io_len_ < size) {
-          this->file_read_next_();
-          return;
-        }
-        storage::global_storage_worker->end_read(this->io_handle_, [this](StorageError) {
-          this->io_busy_ = false;
-          if (this->decode_(this->io_buf_, this->io_len_)) {
-            this->file_loaded_(LoadResult::OK);
-          } else {
-            ESP_LOGW(TAG, "%s is not a pairing database, starting empty", this->file_);
-            this->file_loaded_(LoadResult::EMPTY);
-          }
-        });
-      });
-  if (err != StorageError::STORAGE_ERROR_OK) {
-    storage::global_storage_worker->end_read(this->io_handle_, [](StorageError) {});
-    this->file_failed_("Reading", err);
-  }
-}
-
-void BTPairing::file_loaded_(LoadResult result) {
-  this->loaded_ = true;
-  if (result == LoadResult::OK) {
-    ESP_LOGI(TAG, "%u paired device(s) loaded", static_cast<unsigned>(this->records_.size()));
-    this->log_records();
-#ifdef USE_BT_PAIRING_HID
-    this->devices_changed_();
-#endif
-  } else {
-    ESP_LOGI(TAG, "No paired devices stored");
-  }
-  this->next_attempt_ms_ = millis();
-  this->enable_loop();
-}
-
-size_t BTPairing::encode_into_(uint8_t *out) const {
-  const size_t used = this->records_.size() * sizeof(PairingRecord);
-  if (used != 0)
-    memcpy(out + sizeof(Header), this->records_.data(), used);
-  Header header{MAGIC, VERSION, static_cast<uint8_t>(this->records_.size()), 0};
-  header.crc = crc16(out + sizeof(Header), static_cast<uint16_t>(used));
-  memcpy(out, &header, sizeof(header));
-  return sizeof(Header) + used;
-}
-
-void BTPairing::file_save_() {
-  this->io_storage_ = this->resolve_file_(&this->io_rel_);
-  if (this->io_storage_ == nullptr) {
-    this->next_attempt_ms_ = millis() + RETRY_MS;
-    return;
-  }
-  this->io_len_ = this->encode_into_(this->io_buf_);
-  this->io_tmp_ = std::string(this->io_rel_) + ".tmp";
-  this->save_gen_ = this->change_gen_;
-  this->io_busy_ = true;
-  const StorageError err = storage::global_storage_worker->begin_write(
-      this->io_storage_, this->io_tmp_.c_str(), &this->io_handle_, [this](StorageError opened) {
-        if (opened != StorageError::STORAGE_ERROR_OK) {
-          this->file_failed_("Writing", opened);
-          return;
-        }
-        const StorageError queued = storage::global_storage_worker->write_chunk(
-            this->io_handle_, this->io_buf_, this->io_len_, [this](StorageError written) {
-              storage::global_storage_worker->end_write(this->io_handle_, [this, written](StorageError closed) {
-                if (written != StorageError::STORAGE_ERROR_OK || closed != StorageError::STORAGE_ERROR_OK) {
-                  this->file_failed_("Writing", written != StorageError::STORAGE_ERROR_OK ? written : closed);
-                  return;
-                }
-                const StorageError moved = storage::global_storage_worker->async_move(
-                    this->io_storage_, this->io_tmp_.c_str(), this->io_storage_, this->io_rel_,
-                    [this](StorageError result) {
-                      if (result != StorageError::STORAGE_ERROR_OK) {
-                        this->file_failed_("Replacing", result);
-                        return;
-                      }
-                      this->io_busy_ = false;
-                      if (this->change_gen_ == this->save_gen_)
-                        this->dirty_ = false;
-                      this->next_attempt_ms_ = millis();
-                      this->enable_loop();
-                    },
-                    nullptr, true);
-                if (moved != StorageError::STORAGE_ERROR_OK)
-                  this->file_failed_("Replacing", moved);
-              });
-            });
-        if (queued != StorageError::STORAGE_ERROR_OK) {
-          storage::global_storage_worker->end_write(this->io_handle_, [](StorageError) {});
-          this->file_failed_("Writing", queued);
-        }
-      });
-  if (err != StorageError::STORAGE_ERROR_OK)
-    this->file_failed_("Writing", err);
-}
 #endif
 
 BTPairing::LoadResult BTPairing::load_() {
+#ifdef USE_BT_PAIRING_STORAGE
+  if (this->file_ != nullptr) {
+    const char *rel = nullptr;
+    storage::PathStorage *storage = this->resolve_file_(&rel);
+    if (storage == nullptr)
+      return LoadResult::RETRY;
+    storage::RamBuffer buffer;
+    size_t size = 0;
+    const storage::StorageError err = storage::read_file(storage, rel, buffer, &size);
+    if (err == storage::StorageError::STORAGE_ERROR_NOT_FOUND)
+      return LoadResult::EMPTY;
+    if (err != storage::StorageError::STORAGE_ERROR_OK) {
+      ESP_LOGD(TAG, "%s not readable yet (%u), retrying", this->file_, static_cast<unsigned>(err));
+      return LoadResult::RETRY;
+    }
+    if (!this->decode_(buffer.get(), size)) {
+      ESP_LOGW(TAG, "%s is not a pairing database, starting empty", this->file_);
+      return LoadResult::EMPTY;
+    }
+    return LoadResult::OK;
+  }
+#endif
   std::vector<uint8_t> data(sizeof(Header) + PREFERENCE_RECORDS * sizeof(PairingRecord));
   if (!this->pref_.load(data.data(), data.size()) || !this->decode_(data.data(), data.size()))
     return LoadResult::EMPTY;
@@ -1033,6 +876,22 @@ BTPairing::LoadResult BTPairing::load_() {
 }
 
 bool BTPairing::save_() {
+#ifdef USE_BT_PAIRING_STORAGE
+  if (this->file_ != nullptr) {
+    const char *rel = nullptr;
+    storage::PathStorage *storage = this->resolve_file_(&rel);
+    if (storage == nullptr)
+      return false;
+    const auto data = this->encode_(false);
+    const storage::StorageError err = storage::write_file(storage, rel, data.data(), data.size());
+    if (err != storage::StorageError::STORAGE_ERROR_OK) {
+      ESP_LOGW(TAG, "Writing %s failed (%u), retrying", this->file_, static_cast<unsigned>(err));
+      return false;
+    }
+    this->dirty_ = false;
+    return true;
+  }
+#endif
   const auto data = this->encode_(true);
   if (!this->pref_.save(data.data(), data.size()) || !global_preferences->sync()) {
     ESP_LOGW(TAG, "Saving to preferences failed, retrying");

@@ -11,7 +11,6 @@ import logging
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import esp32_ble, esp32_ble_tracker, hid
-from esphome.components.storage import request_storage_worker
 from esphome.components.globals import GlobalsComponent
 import esphome.config_validation as cv
 from esphome.const import (
@@ -249,7 +248,6 @@ async def to_code(config):
     if CONF_FILE in config:
         cg.add_define("USE_BT_PAIRING_STORAGE")
         cg.add(var.set_file(config[CONF_FILE]))
-        request_storage_worker()
     if esp32_ble_tracker.CONF_ESP32_BLE_ID in config:
         cg.add_define("USE_BT_PAIRING_LE")
         await esp32_ble_tracker.register_ble_device(var, config)
