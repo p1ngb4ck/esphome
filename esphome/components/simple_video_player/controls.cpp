@@ -9,6 +9,8 @@
 #include <cinttypes>
 #include <cstring>
 
+#include <esp_cache.h>
+
 namespace esphome {
 namespace simple_video_player {
 
@@ -1138,16 +1140,21 @@ void SimpleVideoPlayer::ctl_blit_(const ControlsSprite &sprite, int32_t x, int32
   const size_t bpp = this->dsi_fb_bpp_;
   const size_t row = static_cast<size_t>(pw) * bpp;
   const uint8_t *src = sprite.data + (static_cast<size_t>(py - wy) * sprite.pw + (px - wx)) * bpp;
-  uint8_t *dst = this->decode_target_ + (static_cast<size_t>(py) * this->dsi_out_w_ + px) * bpp;
+  uint8_t *const first = this->direct_frame_ + (static_cast<size_t>(py) * this->dsi_out_w_ + px) * bpp;
+  uint8_t *dst = first;
   const size_t dst_stride = static_cast<size_t>(this->dsi_out_w_) * bpp;
   const size_t src_stride = static_cast<size_t>(sprite.pw) * bpp;
   for (int32_t r = 0; r < ph; r++, src += src_stride, dst += dst_stride)
     memcpy(dst, src, row);
+  // One of the display's buffers is scanned out from memory: the rows written back from the cache.
+  if (this->direct_frame_ != this->decode_target_ && ph > 0)
+    esp_cache_msync(first, static_cast<size_t>(ph - 1) * dst_stride + row,
+                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
 }
 
 void SimpleVideoPlayer::composite_controls_() {
   if (!this->ctl_ready_.load(std::memory_order_acquire) || !this->ctl_shown_.load(std::memory_order_acquire) ||
-      this->decode_target_ == nullptr)
+      this->direct_frame_ == nullptr)
     return;
   this->ctl_blit_(this->ctl_static_, this->ctl_static_.area.x1, this->ctl_static_.area.y1);
   const ControlsSprite &play_pause =
@@ -1187,11 +1194,10 @@ void SimpleVideoPlayer::composite_controls_() {
 }
 
 void SimpleVideoPlayer::repaint_paused_() {
+  if (this->direct_frame_ == nullptr)
+    return;
   this->composite_controls_();
-  const display::ColorBitness bitness =
-      this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
-  this->dsi_->draw_pixels_at(0, 0, this->dsi_out_w_, this->dsi_out_h_, this->decode_target_, display::COLOR_ORDER_RGB,
-                             bitness, false, 0, 0, 0);
+  this->direct_show_(this->direct_frame_, 0, 0, this->dsi_out_w_, this->dsi_out_h_, 0);
 }
 
 #else

@@ -85,6 +85,7 @@ class MipiDsi final : public display::Display {
   uint8_t get_scanout_buffers(void **out, uint8_t max, display::ColorBitness *bitness) override;
   void present_scanout_buffer(void *buffer) override;
   bool scanout_flipped() override;
+  bool wait_scanout_flipped(uint32_t timeout_ms) override;
   uint8_t *get_draw_buffer(display::ColorBitness *bitness) override;
 
   void smark_failed(const LogString *message, esp_err_t err);
@@ -144,7 +145,9 @@ class MipiDsi final : public display::Display {
   esp_lcd_panel_io_handle_t io_handle_{};
   SemaphoreHandle_t io_lock_{};
   std::atomic<uint32_t> scan_frames_{0};
-  uint32_t flip_frame_{0};
+  std::atomic<uint32_t> flip_frame_{0};
+  SemaphoreHandle_t flip_sem_{};           // given by the frame interrupt to a wait_scanout_flipped()
+  std::atomic<bool> flip_waiting_{false};
   uint8_t *buffer_{nullptr};
   uint16_t x_low_{1};
   uint16_t y_low_{1};

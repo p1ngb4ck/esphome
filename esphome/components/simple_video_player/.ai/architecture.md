@@ -107,9 +107,13 @@ reports the media player's state instead while `state_` is STOPPED and `audio_re
 
 ## 7. Output paths
 
-- **DSI direct**: only when the video equals the panel's native size (S:997-1016). Decoded by HW JPEG
-  into `decode_target_` (display depth), composited controls, then `dsi_->draw_pixels_at()` copies it
-  into the panel framebuffer every frame (S:1395-1403). LVGL paused by `loop()` only (S:297-331);
+- **DSI direct**: only when the video equals the panel's native size (S:997-1016). One output for
+  every source (video, network AVI, stream, desktop picture): `direct_target_()` / `direct_show_()`.
+  A whole frame is decoded by HW JPEG into the panel's scanout buffer not shown (after the last flip,
+  `wait_scanout_flipped()`, woken by mipi_dsi's frame interrupt, at most `FLIP_WAIT_MS`), the
+  controls drawn into it and written back from the cache, then flipped to. Parts of a frame (udisp
+  rectangles) and displays without a second buffer go into `decode_target_` and are copied in with
+  `draw_pixels_at()`; the video takes `decode_target_` only then. LVGL paused by `loop()` only (S:297-331);
   per item at the start handshake: a direct item pauses it, a canvas item gives it back (only when the
   mode changes); given back once the playback task is gone and the state is STOPPED/ERROR or an
   audio-file session runs (it takes no picture), not while a direct sender streams or a playlist

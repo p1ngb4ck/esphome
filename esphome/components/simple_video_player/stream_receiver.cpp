@@ -1055,9 +1055,7 @@ void SimpleVideoPlayer::stream_draw_loop_() {
     // While a file plays, starts or ends its picture wins: nothing is drawn, nor its outputs taken.
     const bool file_playing = this->picture_session_busy_() || this->start_pending_.load(std::memory_order_acquire);
 #ifdef SVP_DSI_OUTPUT
-    const display::ColorBitness bitness =
-        this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
-    if (frame->direct && !file_playing && this->ensure_direct_target_()) {
+    if (frame->direct && !file_playing && this->ensure_direct_target_(true)) {
       decode_cfg.output_format =
           this->dsi_fb_bpp_ == 3 ? JPEG_DECODE_OUT_FORMAT_RGB888 : JPEG_DECODE_OUT_FORMAT_RGB565;
       // Draw only once loop() has LVGL (if any) paused; released by loop() via notification, also
@@ -1082,12 +1080,11 @@ void SimpleVideoPlayer::stream_draw_loop_() {
       [[maybe_unused]] uint8_t *flip_to = nullptr;
 #ifdef SVP_DSI_OUTPUT
       if (frame->direct) {
-        flip_to = this->stream_flip_target_(frame, &target_len);
-        target = flip_to;
-        if (flip_to == nullptr) {
-          target = this->decode_target_;
-          target_len = this->decode_target_len_;
-        }
+        // The decoder writes rows padded to whole MCUs: only a frame of whole MCUs lands as the panel's rows.
+        const bool whole = frame->x == 0 && frame->y == 0 && frame->w == this->dsi_out_w_ &&
+                           frame->h == this->dsi_out_h_ && frame->w % 16 == 0 && frame->h % 16 == 0;
+        target = this->direct_target_(whole, &target_len);
+        flip_to = target != this->decode_target_ ? target : nullptr;
       }
 #endif
 #ifdef SVP_CANVAS_OUTPUT
@@ -1118,12 +1115,8 @@ void SimpleVideoPlayer::stream_draw_loop_() {
         }
 #endif
 #ifdef SVP_DSI_OUTPUT
-        if (flip_to != nullptr) {
-          this->dsi_->present_scanout_buffer(flip_to);
-        } else if (frame->direct) {
-          this->dsi_->draw_pixels_at(frame->x, frame->y, frame->w, frame->h, target, display::COLOR_ORDER_RGB, bitness,
-                                     false, 0, 0, padded_w - frame->w);
-        }
+        if (frame->direct)
+          this->direct_show_(target, frame->x, frame->y, frame->w, frame->h, padded_w - frame->w);
 #endif
 #ifdef SVP_CANVAS_OUTPUT
         if (!frame->direct)
@@ -1147,23 +1140,6 @@ void SimpleVideoPlayer::stream_draw_loop_() {
   }
 }
 
-#ifdef SVP_DSI_OUTPUT
-uint8_t *SimpleVideoPlayer::stream_flip_target_(const StreamFrame *frame, size_t *len) {
-  // The decoder writes rows padded to whole MCUs: only a frame of whole MCUs lands as the panel's rows.
-  if (frame->x != 0 || frame->y != 0 || frame->w != this->dsi_out_w_ || frame->h != this->dsi_out_h_ ||
-      frame->w % 16 != 0 || frame->h % 16 != 0)
-    return nullptr;
-  void *fbs[2]{};
-  display::ColorBitness bitness{};
-  if (this->dsi_->get_scanout_buffers(fbs, 2, &bitness) != 2 ||
-      bitness != (this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565) ||
-      !this->dsi_->scanout_flipped())
-    return nullptr;
-  const uint8_t *shown = this->dsi_->get_draw_buffer(&bitness);
-  *len = static_cast<size_t>(frame->w) * frame->h * this->dsi_fb_bpp_;
-  return static_cast<uint8_t *>(fbs[0] == shown ? fbs[1] : fbs[0]);
-}
-#endif
 
 bool SimpleVideoPlayer::stream_render_(StreamFrame *frame, jpeg_decode_cfg_t *cfg, uint8_t *target, size_t target_len) {
   uint32_t out_size = 0;

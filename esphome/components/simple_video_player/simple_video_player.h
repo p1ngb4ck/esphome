@@ -998,11 +998,6 @@ class SimpleVideoPlayer : public Component
   struct StreamFrame;
   /// Draw task: a frame's picture into target as the output takes it (JPEG decoded, bitmap converted).
   bool stream_render_(StreamFrame *frame, jpeg_decode_cfg_t *cfg, uint8_t *target, size_t target_len);
-#ifdef SVP_DSI_OUTPUT
-  /// Draw task: a whole frame for the display goes into the scanout buffer not shown, flipped to at
-  /// VSYNC; nullptr: into the shown one (no second buffer, part of a frame, the last flip pending).
-  uint8_t *stream_flip_target_(const StreamFrame *frame, size_t *len);
-#endif
   /// Wi-Fi roaming scans and power saving held off (want) or allowed again; counted, each released once.
   static void hold_wifi_(bool &held, bool want);
   void stream_send_pending_(int client);
@@ -1259,7 +1254,7 @@ class SimpleVideoPlayer : public Component
   bool acquire_session_buffers_();
   /// The display's decode buffer (and the controls) / the canvas output pair, kept once taken. Only
   /// when it does not fit beside the other output, the main loop gives that back first.
-  bool ensure_direct_target_();
+  bool ensure_direct_target_(bool with_target);
   bool ensure_canvas_outputs_();
   uint8_t *output_alloc_(size_t size, uint8_t other);
   /// Main loop: the media side's buffers back to the pool, when nothing plays or streams.
@@ -1639,9 +1634,9 @@ class SimpleVideoPlayer : public Component
   bool ctl_take_(ControlsSprite &sprite, const lv_draw_buf_t *snapshot, const lv_area_t &snap_area, lv_area_t part);
   void ctl_blit_(const ControlsSprite &sprite, int32_t x, int32_t y, int32_t width = -1);
   void ctl_panel_rect_(const lv_area_t &area, int32_t *x, int32_t *y, int32_t *w, int32_t *h) const;
-  /// Playback task: the controls into decode_target_.
+  /// Playback task: the controls into the video's frame (direct_frame_).
   void composite_controls_();
-  /// Playback task, paused: shows decode_target_ (with the controls) again.
+  /// Playback task, paused: shows the video's frame (with the controls) again.
   void repaint_paused_();
 #endif
 #ifdef SVP_PICTURES
@@ -1866,8 +1861,19 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> direct_{false};       // the current session draws onto the display
   uint16_t dsi_out_w_{0}, dsi_out_h_{0};  // panel native resolution; the video must match it
   uint8_t dsi_fb_bpp_{2};                 // display color_depth: 24 -> 3, 16 -> 2 bytes/pixel
-  uint8_t *decode_target_{nullptr};       // own decode buffer (PSRAM pool)
+  uint8_t *decode_target_{nullptr};       // own decode buffer (PSRAM pool): parts of a frame, one-buffer displays
   size_t decode_target_len_{0};
+  // The display output of every source (video, stream, desktop). A whole frame is decoded into the
+  // scanout buffer not shown, once the last flip took effect (woken by the display, at most
+  // FLIP_WAIT_MS), and flipped to; a part of one, or a display without a second buffer in its depth,
+  // goes into decode_target_ and is copied in.
+  static constexpr uint32_t FLIP_WAIT_MS = 50;
+  bool direct_flips_() const;
+  /// Where a frame is decoded to (len: its room); nullptr: none.
+  uint8_t *direct_target_(bool whole, size_t *len);
+  /// The frame decoded into target shows: flipped to, or (decode_target_) copied in.
+  void direct_show_(uint8_t *target, int x, int y, int w, int h, int x_pad);
+  uint8_t *direct_frame_{nullptr};  // playback task: where the video's frame was decoded last (controls, repaint)
 #endif
 
 #ifdef SVP_STREAM

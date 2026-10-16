@@ -19,7 +19,16 @@ bool MipiDsi::notify_refresh_ready_(esp_lcd_panel_handle_t panel, esp_lcd_dpi_pa
 // The scan DMA has just restarted on the current frame buffer.
 bool MipiDsi::notify_frame_started_(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata,
                                     void *user_ctx) {
-  static_cast<MipiDsi *>(user_ctx)->scan_frames_.fetch_add(1, std::memory_order_release);
+  auto *self = static_cast<MipiDsi *>(user_ctx);
+  const uint32_t frames = self->scan_frames_.fetch_add(1, std::memory_order_acq_rel) + 1;
+  // A task waits for the flip (wait_scanout_flipped()): woken at the frame it took effect.
+  if (self->flip_waiting_.load(std::memory_order_acquire) &&
+      static_cast<int32_t>(frames - self->flip_frame_.load(std::memory_order_acquire)) >= 0) {
+    self->flip_waiting_.store(false, std::memory_order_release);
+    BaseType_t need_yield = pdFALSE;
+    xSemaphoreGiveFromISR(self->flip_sem_, &need_yield);
+    return need_yield == pdTRUE;
+  }
   return false;
 }
 
@@ -171,6 +180,7 @@ void MipiDsi::setup() {
     }
   }
   this->io_lock_ = xSemaphoreCreateBinary();
+  this->flip_sem_ = xSemaphoreCreateBinary();
   esp_lcd_dpi_panel_event_callbacks_t cbs = {};
   cbs.on_color_trans_done = notify_refresh_ready_;
   cbs.on_frame_buf_complete = notify_frame_started_;
@@ -231,7 +241,7 @@ void MipiDsi::present_scanout_buffer(void *buffer) {
   this->draw_fb_ = buffer;
   // A restart counted from here may have picked the buffer before the switch; the one after it
   // cannot have.
-  this->flip_frame_ = this->scan_frames_.load(std::memory_order_acquire) + 2;
+  this->flip_frame_.store(this->scan_frames_.load(std::memory_order_acquire) + 2, std::memory_order_release);
 }
 
 uint8_t *MipiDsi::get_draw_buffer(display::ColorBitness *bitness) {
@@ -240,7 +250,19 @@ uint8_t *MipiDsi::get_draw_buffer(display::ColorBitness *bitness) {
 }
 
 bool MipiDsi::scanout_flipped() {
-  return static_cast<int32_t>(this->scan_frames_.load(std::memory_order_acquire) - this->flip_frame_) >= 0;
+  return static_cast<int32_t>(this->scan_frames_.load(std::memory_order_acquire) -
+                              this->flip_frame_.load(std::memory_order_acquire)) >= 0;
+}
+
+bool MipiDsi::wait_scanout_flipped(uint32_t timeout_ms) {
+  if (this->scanout_flipped() || this->flip_sem_ == nullptr)
+    return this->scanout_flipped();
+  xSemaphoreTake(this->flip_sem_, 0);  // a give left from an earlier wait
+  this->flip_waiting_.store(true, std::memory_order_release);
+  if (!this->scanout_flipped())  // the frame may have come before the flag was set
+    xSemaphoreTake(this->flip_sem_, pdMS_TO_TICKS(timeout_ms));
+  this->flip_waiting_.store(false, std::memory_order_release);
+  return this->scanout_flipped();
 }
 
 void MipiDsi::update() {

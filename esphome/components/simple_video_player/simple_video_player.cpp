@@ -1045,8 +1045,10 @@ void SimpleVideoPlayer::playback_loop_() {
 #endif
   bool output_ready = false;
 #ifdef SVP_DSI_OUTPUT
-  if (direct)
-    output_ready = this->ensure_direct_target_();
+  if (direct) {
+    this->direct_frame_ = nullptr;  // nothing of this session decoded yet
+    output_ready = this->ensure_direct_target_(!this->direct_flips_());
+  }
 #endif
 #ifdef SVP_CANVAS_OUTPUT
   if (!direct)
@@ -1418,15 +1420,12 @@ void SimpleVideoPlayer::playback_loop_() {
 
 #ifdef SVP_DSI_OUTPUT
     if (decoded && direct) {
-      // Portall's plain mode: the frame was decoded into our own buffer in the display's depth; the
-      // display copies it in. Panel dims are multiples of 16 (init_dsi_output_), so no x_pad.
+      // The frame is in direct_frame_ (direct_target_()): the controls over it, then shown. Panel
+      // dims are multiples of 16 (init_dsi_output_), so no x_pad.
 #ifdef SVP_CONTROLS
       this->composite_controls_();
 #endif
-      const display::ColorBitness bitness =
-          this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
-      this->dsi_->draw_pixels_at(0, 0, this->dsi_out_w_, this->dsi_out_h_, this->decode_target_,
-                                 display::COLOR_ORDER_RGB, bitness, false, 0, 0, 0);
+      this->direct_show_(this->direct_frame_, 0, 0, this->dsi_out_w_, this->dsi_out_h_, 0);
     }
 #endif
 
@@ -1618,11 +1617,15 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
 #ifdef SVP_DSI_OUTPUT
   const bool direct = this->direct_session_();
   if (direct) {
-    // Direct mode: decode into our own buffer in the display's depth (color_depth from the YAML).
+    // Direct mode: in the display's depth (color_depth from the YAML), where direct_target_() says.
     // BGR element order for BOTH depths: it puts the lowest-addressed byte at blue, which is the
     // little-endian layout esp_lcd's RGB565 and RGB888 framebuffers both read.
-    out_buf = this->decode_target_;
-    out_cap = static_cast<uint32_t>(this->decode_target_len_);
+    size_t len = 0;
+    out_buf = this->direct_target_(true, &len);
+    out_cap = static_cast<uint32_t>(len);
+    if (out_buf == nullptr)
+      return false;
+    this->direct_frame_ = out_buf;
     if (this->dsi_fb_bpp_ == 2) {
       decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
     }
@@ -2091,6 +2094,7 @@ void SimpleVideoPlayer::free_buffers_() {
 
 #ifdef SVP_DSI_OUTPUT
   this->pool_.free(this->decode_target_);
+  this->direct_frame_ = nullptr;
   this->decode_target_ = nullptr;
   this->decode_target_len_ = 0;
 #endif
@@ -2268,9 +2272,19 @@ uint8_t *SimpleVideoPlayer::output_alloc_(size_t size, uint8_t other) {
 }
 
 #ifdef SVP_DSI_OUTPUT
-bool SimpleVideoPlayer::ensure_direct_target_() {
+bool SimpleVideoPlayer::ensure_direct_target_(bool with_target) {
   if (this->decode_target_ != nullptr)
     return true;
+  if (!with_target) {
+    // Whole frames go into the display's own buffers: only the controls drawn over them.
+#ifdef SVP_CONTROLS
+    xSemaphoreTake(this->media_lock_, portMAX_DELAY);
+    if (this->ctl_mem_ == nullptr && this->controls_reserve_ != 0)
+      this->ctl_mem_ = this->pool_.alloc(this->controls_reserve_);
+    xSemaphoreGive(this->media_lock_);
+#endif
+    return true;
+  }
   // Whole cache lines, as the JPEG unit writes it by DMA.
   const size_t size = pool_round(static_cast<size_t>(this->dsi_out_w_) * this->dsi_out_h_ * this->dsi_fb_bpp_);
   uint8_t *target = this->output_alloc_(size, RELEASE_CANVAS);
@@ -2291,6 +2305,42 @@ bool SimpleVideoPlayer::ensure_direct_target_() {
 #endif
   xSemaphoreGive(this->media_lock_);
   return true;
+}
+
+bool SimpleVideoPlayer::direct_flips_() const {
+  void *fbs[2]{};
+  display::ColorBitness bitness{};
+  return this->dsi_->get_scanout_buffers(fbs, 2, &bitness) == 2 &&
+         bitness == (this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565);
+}
+
+uint8_t *SimpleVideoPlayer::direct_target_(bool whole, size_t *len) {
+  if (whole && this->direct_flips_()) {
+    void *fbs[2]{};
+    display::ColorBitness bitness{};
+    this->dsi_->get_scanout_buffers(fbs, 2, &bitness);
+    uint8_t *shown = this->dsi_->get_draw_buffer(&bitness);
+    *len = static_cast<size_t>(this->dsi_out_w_) * this->dsi_out_h_ * this->dsi_fb_bpp_;
+    if (this->dsi_->wait_scanout_flipped(FLIP_WAIT_MS))
+      return static_cast<uint8_t *>(fbs[0] == shown ? fbs[1] : fbs[0]);
+    // The flip did not come: the own buffer if there is one, else the one shown.
+    if (this->decode_target_ == nullptr)
+      return shown;
+  }
+  *len = this->decode_target_len_;
+  return this->decode_target_;
+}
+
+void SimpleVideoPlayer::direct_show_(uint8_t *target, int x, int y, int w, int h, int x_pad) {
+  display::ColorBitness bitness{};
+  if (target != this->decode_target_) {
+    // One of the display's buffers: written back from the cache by what drew over it (controls).
+    if (target != this->dsi_->get_draw_buffer(&bitness))
+      this->dsi_->present_scanout_buffer(target);
+    return;
+  }
+  bitness = this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
+  this->dsi_->draw_pixels_at(x, y, w, h, target, display::COLOR_ORDER_RGB, bitness, false, 0, 0, x_pad);
 }
 #endif
 
@@ -2367,6 +2417,8 @@ void SimpleVideoPlayer::handle_output_release_() {
 #ifdef SVP_DSI_OUTPUT
     if (which == RELEASE_DIRECT && this->decode_target_ != nullptr) {
       this->pool_.free(this->decode_target_);
+      if (this->direct_frame_ == this->decode_target_)
+        this->direct_frame_ = nullptr;
       this->decode_target_ = nullptr;
       this->decode_target_len_ = 0;
 #ifdef SVP_CONTROLS
@@ -2421,6 +2473,8 @@ bool SimpleVideoPlayer::release_media_() {
 #ifdef SVP_DSI_OUTPUT
     if (this->decode_target_ != nullptr) {
       this->pool_.free(this->decode_target_);
+      if (this->direct_frame_ == this->decode_target_)
+        this->direct_frame_ = nullptr;
       this->decode_target_ = nullptr;
       this->decode_target_len_ = 0;
       released = true;

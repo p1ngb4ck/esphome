@@ -109,8 +109,8 @@ round without Olli's go.
    handshakes, controls bar code). If none fits, propose extending it; don't build a second one.
 4. **Implement** only the scope.
 5. **Diff review** line by line against the scope and the rules: everything not asked for goes.
-6. **Independent check**: a fresh agent that did not write the change gets the diff + this folder and
-   reports rule violations and side effects. Fix, then commit.
+6. **No own checks**: no review agents, no config checks, no compiles, no tests. Olli builds and
+   tests, without exception (Olli, 2026-10-16).
 7. **One topic per commit.** If a fact in these files changed, update them in the same commit.
 8. Olli builds and runs the regression checklist below.
 
