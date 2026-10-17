@@ -594,6 +594,7 @@ void USBStorageClient::on_connected() {
     this->disconnect();
     return;
   }
+  this->interface_claimed_ = true;
 
   if (!this->scsi_inquiry_()) {
     ESP_LOGE(TAG, "SCSI INQUIRY failed");
@@ -964,7 +965,7 @@ void USBStorageClient::unmount_filesystem(uint8_t index) {
 void USBStorageClient::on_disconnected() {
   this->connection_++;
   // Transfers still out on the bulk endpoints come back now, so a SCSI command of the storage
-  // worker or the medium check ends at once instead of on its timeouts (free_data_() waits for it).
+  // worker or the medium check ends at once instead of on its timeouts.
   if (this->device_handle_ != nullptr) {
     for (const uint8_t ep : {this->bulk_in_ep_, this->bulk_out_ep_}) {
       if (ep != 0 && usb_host_endpoint_halt(this->device_handle_, ep) == ESP_OK)
@@ -980,17 +981,20 @@ void USBStorageClient::on_disconnected() {
     this->luns_[i].sector_count = 0;
     this->luns_[i].ejected = false;
   }
+  // Waits for the command still on the pipes to end: the interface is released only with no
+  // transfer of it in flight, which the IDF requires (usb_host_interface_release()).
+  this->free_data_();
 
-  if (this->msc_interface_ != 0xFF) {
+  if (this->interface_claimed_) {
     this->release_interface(this->msc_interface_);
-    this->msc_interface_ = 0xFF;
+    this->interface_claimed_ = false;
   }
+  this->msc_interface_ = 0xFF;
 
   this->bulk_in_ep_ = 0;
   this->bulk_out_ep_ = 0;
   this->bulk_in_mps_ = 0;
   this->bulk_out_mps_ = 0;
-  this->free_data_();
 }
 
 void USBStorageClient::on_removed(usb_device_handle_t handle) { USBClient::on_removed(handle); }
