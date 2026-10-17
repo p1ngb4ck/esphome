@@ -3025,9 +3025,13 @@ async def _reconcile_vfs_fatfs_sdkconfig(
                 volumes - FATFS_SPARE_VOLUMES,
                 FATFS_MAX_VOLUMES,
             )
-        set_idf_sdkconfig_default(
-            "CONFIG_FATFS_VOLUME_COUNT", min(volumes, FATFS_MAX_VOLUMES)
-        )
+        # At least one volume per configured mount: a smaller sdkconfig_options value is raised.
+        volumes = min(volumes, FATFS_MAX_VOLUMES)
+        user_volumes = opts.get("CONFIG_FATFS_VOLUME_COUNT")
+        if isinstance(user_volumes, RawSdkconfigValue):
+            user_volumes = user_volumes.value
+        if user_volumes is None or int(str(user_volumes).strip('"')) < volumes:
+            add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", volumes)
         # Long filenames are a hard requirement of exFAT and are already set right above;
         # the FatFs #defines themselves come via a patched component copy, declared in the
         # manifest so it replaces the built-in fatfs and lands in src's REQUIRES.
