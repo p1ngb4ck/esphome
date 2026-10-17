@@ -33,7 +33,7 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 | # | Issue | Status |
 |---|---|---|
 | C1 | `file_speaker_` (audio queue resampler) is still stopped/finished/paused by the player (S:3194, 3230, 2942, 3086, 2861). Speaker rule. Open question to Olli: a resampler takes its input format only at start | CODE |
-| C2 | LVGL touched while paused, still to check in the code (2026-10-17): `prerender_controls_` for the next playlist item, the `pool_reclaim_req_` block in `pictures_loop_` before the held check (`picture_decoded_()` -> `show_page_`), `lv_image_set_src` in `handle_output_release_` / `release_media_`, `release_picture_buffers_`, the picture bar's `lv_obj_is_hidden` each loop | CODE (unchecked since) |
+| C2 | LVGL touched while paused, checked 2026-10-17, all four happen: a) `prerender_controls_()` at the start handshake of the next direct playlist item (LVGL stays paused between two items): label texts, layout, snapshots. b) `pictures_loop_`'s pool block while a direct sender (dashboard, desktop picture) or the next direct item asks for room: an in-flight decode finished by `picture_decoded_()` -> `show_page_` and `release_picture_buffers_()` (`lv_canvas_set_draw_buf`/`fill_bg` or `lv_image_set_src`); the cover art waits for LVGL (`cover_detach_pending_`), the pictures do not. c) `release_outputs_()` (canvas: `lv_image_set_src`) when a direct sender takes the canvas pair's room while LVGL is paused for it. d) `picture_controls_loop_()` every loop pass and `controls_shown()` (YAML `ui_enter`, called exactly while LVGL is paused) read `lv_obj_is_hidden` of the picture bar unguarded | CODE |
 
 ## D. Concurrency risks
 
