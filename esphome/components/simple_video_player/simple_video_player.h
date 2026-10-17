@@ -454,6 +454,19 @@ class SimpleVideoPlayer : public Component
   // 255 characters). Status callbacks run whenever it may have changed.
   std::string status_json();
   void add_on_status_callback(std::function<void()> &&callback) { this->status_callbacks_.add(std::move(callback)); }
+  /// A video file of the panel's own plays or is paused (not an AVI of the relay's, not an audio file).
+  bool local_video_active() const {
+    const PlayerState state = this->state_.load(std::memory_order_acquire);
+    bool audio_file = false;
+#ifdef SVP_AUDIO_FILES
+    audio_file = this->audio_session_.load(std::memory_order_acquire);
+#endif
+    bool relay_avi = false;
+#ifdef SVP_STREAM
+    relay_avi = this->net_session_;
+#endif
+    return (state == PlayerState::PLAYING || state == PlayerState::PAUSED) && !relay_avi && !audio_file;
+  }
 
 #ifdef SVP_DSI_OUTPUT
   // Direct output onto a display with draw_pixels_at() while LVGL is paused. Wired by the FINAL
@@ -2669,6 +2682,7 @@ class SimpleVideoPlayer : public Component
   CallbackManager<void()> picture_callbacks_;
 #endif
   CallbackManager<void()> status_callbacks_;
+  bool video_shown_{false};  // local_video_active() as the status last reported it
 #ifdef SVP_MEDIA_PLAYER
   media_player::MediaPlayer *media_player_{nullptr};
   void setup_media_player_();

@@ -66,7 +66,8 @@ u32 = frame_id (low 10 bits) | payload size (high 22 bits).
 
 `esphome.<device>_svp_play_audio(url, announce)`, `_svp_audio_command(command)`,
 `_svp_set_volume(volume)`, `_svp_cover()`, `_svp_stream_statistics(enable)` (never called by the relay).
-Status JSON fields read by the relay: `svp`, `port`, `state`, `volume`, `muted`, `pause`, `formats`, `playlist`.
+Status JSON fields read by the relay: `svp`, `port`, `state`, `volume`, `muted`, `pause`, `formats`, `playlist`,
+`video` (a video file of the panel's own plays or is paused; relay 0.9.46: no dashboard meanwhile, as for `playlist`).
 
 ## 4. Relay transcoding (R/svp_core/avi.py `ffmpeg_args`)
 

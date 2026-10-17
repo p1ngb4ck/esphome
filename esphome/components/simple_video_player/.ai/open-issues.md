@@ -50,7 +50,7 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 | # | Issue | Status |
 |---|---|---|
 | E2 | Audio files: no duration/seek (`duration_frames_` is set only from a video's info: the audio bar's time and seek never show) and no on_playback_started/finished for their sessions (was E6). One piece of work (Olli, 2026-10-17) | CODE |
-| E7 | Status JSON doesn't report a local video/playlist to the relay ("state" is the media player's) | CODE. A real gap (Olli, 2026-10-17) |
+| E7 | Status JSON doesn't report a local video/playlist to the relay ("state" is the media player's) | TO TEST (2026-10-17): status `video` (a video file of the panel's own plays or is paused); relay 0.9.46 counts it as the panel's own media like `playlist` (no dashboard meanwhile, shown again after) |
 
 ## F. Code hygiene (part of A9: the review/refactor phase with the rename)
 

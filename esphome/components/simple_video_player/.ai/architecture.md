@@ -233,7 +233,8 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
 - HA services (only with `media_player_id`, `api: custom_services: true`): `svp_play_audio`,
   `svp_audio_command`, `svp_set_volume`, `svp_cover`, `svp_stream_statistics`.
 - Status text sensor JSON (MS:41-71): `svp`, `port`, `state` (media player's), `volume`, `muted`,
-  `playlist`, `pause`, `formats`.
+  `playlist`, `video` (`local_video_active()`: a video file of its own PLAYING/PAUSED, not the relay's AVI,
+  not an audio file; republished when it changes), `pause`, `formats`.
 - Panel -> relay HTTP on the channel task: `/channels`, `/play`, `/stop`, `/browse`, `/image`,
   `/cover`, `/options`, `/desktop`, `/keyboard`.
 - Stream port: AVI ('RIFF') or udisp (16-byte header); panel reports 'C','V','A','L','N','F','S'.

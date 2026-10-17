@@ -290,8 +290,14 @@ void SimpleVideoPlayer::loop() {
   if (error >= 0)
     this->on_error_callbacks_.call(static_cast<uint8_t>(error));
   const bool state_changed = this->state_changed_.exchange(false, std::memory_order_acq_rel);
-  if (state_changed)
+  if (state_changed) {
     this->state_callbacks_.call();
+    // The status tells the relay whether a video of the panel's own has the panel ("video").
+    if (this->local_video_active() != this->video_shown_) {
+      this->video_shown_ = this->local_video_active();
+      this->status_callbacks_.call();
+    }
+  }
 #ifdef SVP_AUDIO_FILES
   if (this->audio_changed_.exchange(false, std::memory_order_acq_rel) || state_changed) {
     this->audio_callbacks_.call();
