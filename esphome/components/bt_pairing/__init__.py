@@ -180,8 +180,9 @@ _BASE_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(BTPairing),
         cv.Optional(CONF_MAX_DEVICES, default=8): cv.int_range(min=1, max=32),
-        # HID devices (keyboards, mice, remotes, game controllers) paired at most, Bluetooth
-        # Classic and LE together. 0: no internal HID slots.
+        # HID devices (keyboards, mice, remotes, game controllers): Bluetooth Classic ones
+        # connected at once (paired: up to max_devices; Bluedroid's HID host takes at most 7
+        # different ones per boot), BLE ones paired at most. 0: no internal HID slots.
         cv.Optional(CONF_MAX_HID_DEVICES, default=0): cv.int_range(min=0, max=8),
         # BLE devices that only advertise (buttons), heard without a connection.
         cv.Optional(CONF_MAX_BROADCAST_DEVICES, default=0): cv.int_range(min=0, max=8),
@@ -227,6 +228,10 @@ async def _slots_to_code(var, slots) -> None:
     for conf in slots.get("bt_hid", []):
         await bt_hid.to_code(conf)
         slot = await cg.get_variable(conf[CONF_ID])
+        # Shared: connections, taken by whichever paired Classic HID device connects; the
+        # devices themselves are paired up to max_devices.
+        cg.add(slot.set_slot(fnv1_hash("bt_pairing:bt_hid")))
+        cg.add(slot.set_pooled(True))
         cg.add(slot.set_log_name(""))
         cg.add(var.add_hid_slot(slot, slot))
     for conf in slots.get("ble_client", []):

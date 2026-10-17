@@ -108,6 +108,7 @@ void BTPairing::loop() {
     switch (this->load_()) {
       case LoadResult::OK:
         this->loaded_ = true;
+        this->migrate_records_();
         ESP_LOGI(TAG, "%u paired device(s) loaded", static_cast<unsigned>(this->records_.size()));
         this->log_records();
 #ifdef USE_BT_PAIRING_HID
@@ -595,15 +596,51 @@ bool BTPairing::slot_holds_many_(uint32_t slot) const {
   return false;
 }
 
+// A slot several targets share (holds_many): the one holding the device, else a free one.
 PairingTarget *BTPairing::target_of_(const uint8_t *address) const {
   const PairingRecord *record = this->find_address(address);
   if (record == nullptr || record->slot == 0)
     return nullptr;
+  PairingTarget *first = nullptr;
+  PairingTarget *free = nullptr;
   for (auto *target : this->targets_) {
-    if (target->pairing_slot() == record->slot)
+    if (target->pairing_slot() != record->slot)
+      continue;
+    const uint8_t *held = target->connected_address();
+    if (held != nullptr && memcmp(held, address, sizeof(record->address)) == 0)
       return target;
+    if (first == nullptr)
+      first = target;
+    if (free == nullptr && target->is_free())
+      free = target;
   }
-  return nullptr;
+  return free != nullptr ? free : first;
+}
+
+// Bluetooth Classic HID devices of a slot no target owns any more (the slots before they were
+// shared) go to the shared Classic HID slot.
+void BTPairing::migrate_records_() {
+  uint32_t pool = 0;
+  for (auto *target : this->targets_) {
+    if (target->pairs(Transport::CLASSIC, DeviceKind::HID) && target->holds_many())
+      pool = target->pairing_slot();
+  }
+  if (pool == 0)
+    return;
+  bool changed = false;
+  for (auto &record : this->records_) {
+    if (record.transport != static_cast<uint8_t>(Transport::CLASSIC) || record.slot == pool ||
+        this->slot_in_use(record.slot) || ((record.device_class >> 8) & 0x1F) != 0x05)
+      continue;
+    record.slot = pool;
+    changed = true;
+  }
+  if (!changed)
+    return;
+  this->dirty_ = true;
+#ifdef USE_BT_PAIRING_STORAGE
+  this->change_gen_++;
+#endif
 }
 
 // The slot already holding the device, else a free one within the HID budget.
@@ -754,7 +791,9 @@ void BTPairing::add_hid_slot(hid::HIDInput *input, PairingTarget *target) {
 const hid::KeyboardLayout *BTPairing::slot_layout_(const PairingTarget *target) const {
   if (this->device_layouts_.empty() || target->pairing_slot() == 0)
     return nullptr;
-  const PairingRecord *record = this->find_slot(target->pairing_slot());
+  const uint8_t *held = target->connected_address();
+  const PairingRecord *record =
+      held != nullptr ? this->find_address(held) : this->find_slot(target->pairing_slot());
   if (record == nullptr)
     return nullptr;
   for (const auto &entry : this->device_layouts_) {
@@ -813,9 +852,10 @@ void BTPairing::list_devices(std::vector<hid::InputDevice> &out) const {
       const PairingTarget *target = this->hid_targets_[i];
       if (target->pairing_slot() == record.slot) {
         hid = true;
-        connected = target->is_device_connected();
-        if (target->is_address_connected(record.address))
+        if (target->is_address_connected(record.address)) {
+          connected = true;
           kinds = this->hid_slots_[i]->get_device_kinds();
+        }
       }
     }
     if (!hid)
@@ -1014,6 +1054,7 @@ void BTPairing::file_read_next_() {
 void BTPairing::file_loaded_(LoadResult result) {
   this->loaded_ = true;
   if (result == LoadResult::OK) {
+    this->migrate_records_();
     ESP_LOGI(TAG, "%u paired device(s) loaded", static_cast<unsigned>(this->records_.size()));
     this->log_records();
 #ifdef USE_BT_PAIRING_HID

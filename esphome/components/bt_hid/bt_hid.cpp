@@ -46,7 +46,8 @@ struct HostEvent {
     LISTED,
     AUTH,
     FOUND,
-    SCAN_STATE
+    SCAN_STATE,
+    CLAIMED
   };
   Type type{INIT};
   uint8_t handle{0xFF};
@@ -74,7 +75,21 @@ struct Host {
   bool discovering{false};
   bool scan_requested{false};  // bt_hid.scan: its finds are logged
   uint32_t connecting_since{0};
+  // Shared slots (bt_pairing's): their paired devices (under the lock, the BTC task reads it),
+  // the ones disconnected on request (main loop), and the ones still to be paged once (main loop).
+  std::vector<std::array<uint8_t, ESP_BD_ADDR_LEN>> paired;
+  std::vector<std::array<uint8_t, ESP_BD_ADDR_LEN>> refused;
+  std::deque<std::array<uint8_t, ESP_BD_ADDR_LEN>> page_queue;
+  bool queue_built{false};
 };
+
+bool in_list(const std::vector<std::array<uint8_t, ESP_BD_ADDR_LEN>> &list, const uint8_t *bda) {
+  for (const auto &entry : list) {
+    if (memcmp(entry.data(), bda, ESP_BD_ADDR_LEN) == 0)
+      return true;
+  }
+  return false;
+}
 
 Host &host() {
   static Host instance;
@@ -95,20 +110,34 @@ void push(HostEvent &&event);
 
 // A device not configured here that pairs or connects on its own while a slot's pairing window
 // is open (it was in pairing mode already, or found us first): the slot takes it.
+// A paired device of the shared slots takes a free one of them.
 BTHIDDevice *find_or_adopt(const uint8_t *bda) {
   if (BTHIDDevice *dev = find_by_address(bda))
     return dev;
   BTHIDDevice *slot = nullptr;
+  HostEvent::Type type = HostEvent::ADOPTED;
   {
     LockGuard guard(host().lock);
-    slot = host().pairing;
-    // With a select the device is only listed, see note_connected().
-    if (slot == nullptr || slot->has_fixed_address() || slot->has_address() || slot->has_device_select())
-      return nullptr;
+    if (in_list(host().paired, bda)) {
+      for (auto *dev : host().devices) {
+        if (dev->is_pooled() && !dev->has_address() && host().pairing != dev) {
+          slot = dev;
+          break;
+        }
+      }
+      if (slot == nullptr)
+        return nullptr;
+      type = HostEvent::CLAIMED;
+    } else {
+      slot = host().pairing;
+      // With a select the device is only listed, see note_connected().
+      if (slot == nullptr || slot->has_fixed_address() || slot->has_address() || slot->has_device_select())
+        return nullptr;
+    }
     slot->adopt_address(bda);
   }
   HostEvent e;
-  e.type = HostEvent::ADOPTED;
+  e.type = type;
   memcpy(e.bda, bda, ESP_BD_ADDR_LEN);
   push(std::move(e));
   return slot;
@@ -122,7 +151,7 @@ void note_connected(const uint8_t *bda) {
   {
     LockGuard guard(host().lock);
     BTHIDDevice *slot = host().pairing;
-    listed = slot != nullptr && slot->has_device_select() && !slot->has_address();
+    listed = slot != nullptr && slot->has_device_select() && !slot->has_address() && !in_list(host().paired, bda);
   }
   if (!listed) {
     find_or_adopt(bda);
@@ -381,10 +410,12 @@ void handle_event(HostEvent &e) {
       h.connecting = false;
       const bool opened = e.status == ESP_HIDH_OK && e.conn == ESP_HIDH_CONN_STATE_CONNECTED && e.handle != 0xFF;
       BTHIDDevice *dev = opened ? find_or_adopt(e.bda) : find_by_address(e.bda);
-      if (dev != nullptr && opened && !dev->get_auto_connect()) {
+      if (dev != nullptr && opened && (!dev->get_auto_connect() || (dev->is_pooled() && in_list(h.refused, e.bda)))) {
         format_mac_addr_upper(e.bda, mac);
         ESP_LOGI(TAG, "[%s] Disconnected by request, refusing", mac);
         esp_bt_hid_host_disconnect(e.bda);
+        if (dev->is_pooled())
+          dev->release();
       } else if (dev != nullptr) {
         // Another connection under way in Bluedroid (btc_hh_connect): the page has not gone out.
         if (e.status == ESP_HIDH_BUSY)
@@ -395,7 +426,8 @@ void handle_event(HostEvent &e) {
           dev->end_pairing(true, nullptr);
       } else if (opened) {
         format_mac_addr_upper(e.bda, mac);
-        ESP_LOGW(TAG, "[%s] Not configured, disconnecting", mac);
+        ESP_LOGW(TAG, in_list(h.paired, e.bda) ? "[%s] No free slot, disconnecting" : "[%s] Not configured, disconnecting",
+                 mac);
         esp_bt_hid_host_disconnect(e.bda);
       }
       break;
@@ -430,6 +462,10 @@ void handle_event(HostEvent &e) {
     case HostEvent::ADOPTED:
       if (h.pairing != nullptr)
         h.pairing->on_adopted();
+      break;
+    case HostEvent::CLAIMED:
+      if (BTHIDDevice *dev = find_by_address(e.bda))
+        dev->on_claimed();
       break;
     case HostEvent::LISTED:
       if (h.pairing != nullptr && h.pairing->has_device_select() && find_by_address(e.bda) == nullptr)
@@ -494,6 +530,8 @@ void host_loop() {
       h.started = false;
       h.ready = false;
       h.connecting = false;
+      h.queue_built = false;
+      h.page_queue.clear();
       for (auto *dev : h.devices) {
         if (dev->is_connected())
           dev->on_close();
@@ -523,12 +561,54 @@ void host_loop() {
   for (auto *dev : h.devices)
     dev->restore_paired();
 
+  // Shared slots: each paired device is paged once after Classic came up; a slot held for a
+  // device that never connected is given up.
+  BTHIDDevice *shared = nullptr;
+  for (auto *dev : h.devices) {
+    if (dev->is_pooled()) {
+      shared = dev;
+      break;
+    }
+  }
+  if (shared != nullptr) {
+#ifdef USE_BT_PAIRING
+    if (h.ready && !h.queue_built && shared->paired_loaded()) {
+      h.queue_built = true;
+      std::vector<std::array<uint8_t, ESP_BD_ADDR_LEN>> paired;
+      shared->paired_addresses(paired);
+      h.page_queue.assign(paired.begin(), paired.end());
+    }
+#endif
+    for (auto *dev : h.devices) {
+      if (dev->is_pooled() && dev->has_address() && !dev->is_connected() && !dev->page_pending() &&
+          h.pairing != dev && !h.connecting && now - dev->held_since() > CONNECT_TIMEOUT_MS)
+        dev->release();
+    }
+  }
+
   // One outgoing connection at a time, and none while a scan runs: paging during an inquiry
   // fails, so a device found by a pairing scan is connected once the scan has stopped.
   if (h.connecting && now - h.connecting_since > CONNECT_TIMEOUT_MS)
     h.connecting = false;
   if (!h.ready || h.connecting || h.discovering)
     return;
+  while (!h.page_queue.empty()) {
+    BTHIDDevice *free = nullptr;
+    for (auto *dev : h.devices) {
+      if (dev->is_pooled() && !dev->has_address() && h.pairing != dev) {
+        free = dev;
+        break;
+      }
+    }
+    if (free == nullptr)
+      break;
+    const auto bda = h.page_queue.front();
+    h.page_queue.pop_front();
+    if (find_by_address(bda.data()) != nullptr || in_list(h.refused, bda.data()))
+      continue;
+    free->hold_for_page(bda.data());
+    break;
+  }
   for (auto *dev : h.devices) {
     if (dev->is_connected() || !dev->has_address() || !dev->get_auto_connect() ||
         (!dev->page_pending() && h.pairing != dev) || static_cast<int32_t>(now - dev->next_connect_ms()) < 0)
@@ -577,7 +657,24 @@ void BTHIDDevice::setup() {
 #ifdef USE_BT_PAIRING
   if (this->pairing_ != nullptr) {
     this->pairing_->add_target(this);
+#ifdef USE_BT_PAIRING_HID
+    // The first shared slot keeps the host's list of the shared slot's paired devices.
+    if (this->pooled_ && std::none_of(host().devices.begin(), host().devices.end() - 1,
+                                      [](const BTHIDDevice *dev) { return dev->is_pooled(); }))
+      this->pairing_->add_on_devices_callback([this]() { this->refresh_paired_(); });
+#endif
     this->pairing_->add_on_forget_callback([this](const bt_pairing::PairingRecord &record) {
+      if (this->pooled_) {
+        // Only the slot holding the device; it is given up once the device has gone.
+        if (!this->has_address() || memcmp(record.address, this->bda_, ESP_BD_ADDR_LEN) != 0)
+          return;
+        if (this->connected_) {
+          esp_bt_hid_host_virtual_cable_unplug(this->bda_);
+        } else {
+          this->release();
+        }
+        return;
+      }
       if (record.slot != this->slot_ && memcmp(record.address, this->bda_, ESP_BD_ADDR_LEN) != 0)
         return;
       if (this->connected_)
@@ -596,7 +693,8 @@ bool BTHIDDevice::stored_address_(uint8_t *bda) const {
   if (this->address_get_ != nullptr && parse_mac(this->address_get_(), bda))
     return true;
 #ifdef USE_BT_PAIRING
-  if (this->pairing_ != nullptr) {
+  // A shared slot holds no device of its own.
+  if (this->pairing_ != nullptr && !this->pooled_) {
     if (const auto *record = this->pairing_->find_slot(this->slot_); record != nullptr) {
       memcpy(bda, record->address, ESP_BD_ADDR_LEN);
       return true;
@@ -609,7 +707,7 @@ bool BTHIDDevice::stored_address_(uint8_t *bda) const {
 // A slot without a configured address takes the device it was paired with: from the
 // address global, or once the pairing database is loaded, from there.
 void BTHIDDevice::restore_paired() {
-  if (this->restored_ || this->fixed_address_)
+  if (this->restored_ || this->fixed_address_ || this->pooled_)
     return;
   uint8_t bda[ESP_BD_ADDR_LEN];
   const bool from_global = this->address_get_ != nullptr && parse_mac(this->address_get_(), bda);
@@ -670,6 +768,14 @@ void BTHIDDevice::unpair() {
     return;
   }
 #ifdef USE_BT_PAIRING
+  if (this->pooled_ && this->pairing_ != nullptr) {
+    if (this->has_address() && this->pairing_->find_address(this->bda_) != nullptr) {
+      this->pairing_->forget_address(this->bda_);
+    } else {
+      ESP_LOGW(TAG, "No device connected");
+    }
+    return;
+  }
   if (this->pairing_ != nullptr && this->pairing_->find_slot(this->slot_) != nullptr) {
     this->pairing_->forget_slot(this->slot_);
     return;
@@ -842,7 +948,88 @@ bool BTHIDDevice::on_pairing_candidate(const uint8_t *bda, uint32_t device_class
   return true;
 }
 
-void BTHIDDevice::adopt_address(const uint8_t *bda) { memcpy(this->bda_, bda, sizeof(this->bda_)); }
+void BTHIDDevice::adopt_address(const uint8_t *bda) {
+  memcpy(this->bda_, bda, sizeof(this->bda_));
+  this->held_since_ = millis();
+}
+
+void BTHIDDevice::on_claimed() {
+  this->auto_connect_ = true;
+  this->page_pending_ = false;
+  this->retry_ms_ = 0;
+}
+
+void BTHIDDevice::hold_for_page(const uint8_t *bda) {
+  this->set_bda_(bda);
+  this->held_since_ = millis();
+  this->connect();
+}
+
+void BTHIDDevice::release() {
+  this->set_bda_(nullptr);
+  this->auto_connect_ = true;
+  this->page_pending_ = false;
+  this->retry_ms_ = 0;
+}
+
+void BTHIDDevice::paired_addresses(std::vector<std::array<uint8_t, ESP_BD_ADDR_LEN>> &out) const {
+#ifdef USE_BT_PAIRING
+  if (this->pairing_ == nullptr)
+    return;
+  for (const auto &record : this->pairing_->records()) {
+    if (record.transport != static_cast<uint8_t>(bt_pairing::Transport::CLASSIC) || record.slot != this->slot_)
+      continue;
+    std::array<uint8_t, ESP_BD_ADDR_LEN> bda;
+    memcpy(bda.data(), record.address, ESP_BD_ADDR_LEN);
+    out.push_back(bda);
+  }
+#endif
+}
+
+void BTHIDDevice::refresh_paired_() {
+  std::vector<std::array<uint8_t, ESP_BD_ADDR_LEN>> paired;
+  this->paired_addresses(paired);
+  LockGuard guard(host().lock);
+  host().paired.swap(paired);
+}
+
+#ifdef USE_BT_PAIRING
+void BTHIDDevice::connect_address(const uint8_t *address) {
+  if (!this->pooled_) {
+    this->connect();
+    return;
+  }
+  auto &refused = host().refused;
+  refused.erase(std::remove_if(refused.begin(), refused.end(),
+                               [address](const std::array<uint8_t, ESP_BD_ADDR_LEN> &entry) {
+                                 return memcmp(entry.data(), address, ESP_BD_ADDR_LEN) == 0;
+                               }),
+                refused.end());
+  if (this->has_address() && memcmp(this->bda_, address, ESP_BD_ADDR_LEN) == 0) {
+    this->connect();
+    return;
+  }
+  if (this->has_address() || this->is_pairing()) {
+    ESP_LOGW(TAG, "All Bluetooth Classic HID slots in use");
+    return;
+  }
+  this->hold_for_page(address);
+}
+
+void BTHIDDevice::disconnect_address(const uint8_t *address) {
+  if (!this->pooled_) {
+    this->disconnect();
+    return;
+  }
+  if (!in_list(host().refused, address)) {
+    std::array<uint8_t, ESP_BD_ADDR_LEN> bda;
+    memcpy(bda.data(), address, ESP_BD_ADDR_LEN);
+    host().refused.push_back(bda);
+  }
+  if (this->has_address() && memcmp(this->bda_, address, ESP_BD_ADDR_LEN) == 0)
+    this->disconnect();
+}
+#endif
 
 void BTHIDDevice::on_adopted() {
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
@@ -941,6 +1128,9 @@ void BTHIDDevice::on_open(uint8_t handle, bool success, int status) {
   format_mac_addr_upper(this->bda_, mac);
   if (!success) {
     ESP_LOGD(TAG, "[%s] Connection failed: %d", mac, status);
+    // A shared slot is given up, unless the page has not gone out yet or a pairing retries.
+    if (this->pooled_ && status != ESP_HIDH_BUSY && host().pairing != this)
+      this->release();
     return;
   }
   this->handle_ = handle;
@@ -973,6 +1163,8 @@ void BTHIDDevice::on_close() {
       this->pairing_->on_connection(this, false);
 #endif
   }
+  if (this->pooled_ && host().pairing != this)
+    this->release();
 }
 
 void BTHIDDevice::on_descriptor(const std::vector<uint8_t> &descriptor, uint16_t vid, uint16_t pid) {

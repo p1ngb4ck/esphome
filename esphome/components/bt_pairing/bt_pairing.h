@@ -140,7 +140,7 @@ class BTPairing : public Component
   }
 
   void add_target(PairingTarget *target) { this->targets_.push_back(target); }
-  /// HID devices paired at most, Bluetooth Classic and LE together; 0: no limit.
+  /// HID slots in use at most (Bluetooth Classic: connected devices, BLE: paired ones); 0: no limit.
   void set_max_hid_devices(uint8_t max) { this->max_hid_devices_ = max; }
 #ifdef USE_BT_PAIRING_HID
   /// A slot's HID input, forwarded as this one's.
@@ -219,6 +219,7 @@ class BTPairing : public Component
   void publish_scanned_();
   PairingTarget *target_for_(const ScannedDevice &device, const char **reason) const;
   PairingTarget *target_of_(const uint8_t *address) const;
+  void migrate_records_();
   bool slot_holds_many_(uint32_t slot) const;
   void dispatch_(const ScannedDevice &device, PairingTarget *target);
   void scan_loop_();

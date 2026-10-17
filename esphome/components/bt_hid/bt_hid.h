@@ -16,6 +16,8 @@
 
 #include <esp_bt_defs.h>
 
+#include <array>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -71,7 +73,20 @@ class BTHIDDevice : public Component,
   void connect_device() override { this->connect(); }
   void disconnect_device() override { this->disconnect(); }
   void cancel_device_pairing() override { this->cancel_pairing(); }
+  bool holds_many() const override { return this->pooled_; }
+  const uint8_t *connected_address() const override {
+    return this->pooled_ && this->has_address() ? this->bda_ : nullptr;
+  }
+  bool is_address_connected(const uint8_t *address) const override {
+    return this->connected_ && memcmp(this->bda_, address, ESP_BD_ADDR_LEN) == 0;
+  }
+  void connect_address(const uint8_t *address) override;
+  void disconnect_address(const uint8_t *address) override;
 #endif
+  /// One of bt_pairing's shared slots: a connection, taken by whichever of its paired devices
+  /// connects or is connected to, and given up when that one goes.
+  void set_pooled(bool pooled) { this->pooled_ = pooled; }
+  bool is_pooled() const { return this->pooled_; }
   uint8_t get_device_kinds() const override {
     return this->connected_ && this->map_ != nullptr ? this->map_->device_kinds() : 0;
   }
@@ -143,6 +158,17 @@ class BTHIDDevice : public Component,
   void adopt_address(const uint8_t *bda);
   void on_adopted();
   void restore_paired();
+  /// Main loop, shared slots: a paired device took it (it connects), or it is paged for one.
+  void on_claimed();
+  void hold_for_page(const uint8_t *bda);
+  /// Main loop, shared slots: free again.
+  void release();
+  uint32_t held_since() const { return this->held_since_; }
+  /// Main loop, shared slots: the paired Classic HID devices of the shared slot.
+  void paired_addresses(std::vector<std::array<uint8_t, ESP_BD_ADDR_LEN>> &out) const;
+#ifdef USE_BT_PAIRING
+  bool paired_loaded() const { return this->pairing_ != nullptr && this->pairing_->is_loaded(); }
+#endif
 
  protected:
   void write_leds_(uint8_t leds) override;
@@ -150,6 +176,7 @@ class BTHIDDevice : public Component,
   bool pair_found_(const FoundDevice &found);
   void publish_found_();
   void set_bda_(const uint8_t *bda);
+  void refresh_paired_();
   bool stored_address_(uint8_t *bda) const;
 
   esp_bd_addr_t bda_{};
@@ -169,6 +196,7 @@ class BTHIDDevice : public Component,
   CallbackManager<void()> disconnect_cb_;
   uint32_t next_connect_ms_{0};
   uint32_t retry_ms_{0};
+  uint32_t held_since_{0};
   uint32_t slot_{0};
   uint32_t candidate_class_{0};
   uint8_t handle_{0xFF};
@@ -178,6 +206,7 @@ class BTHIDDevice : public Component,
   bool fixed_address_{false};
   bool restored_{false};
   bool page_pending_{true};
+  bool pooled_{false};
 };
 
 class PasskeyTrigger : public Trigger<uint32_t> {
