@@ -1124,7 +1124,8 @@ uint32_t LVHIDKeypadListener::press_(uint16_t page, uint16_t usage, uint8_t mods
       ((action >= KeyBindings::ACT_UP && action <= KeyBindings::ACT_RIGHT) || action == KeyBindings::ACT_ENTER)) {
     static constexpr uint32_t KEYS[] = {LV_KEY_UP, LV_KEY_DOWN, LV_KEY_LEFT, LV_KEY_RIGHT};
     pointer->key_press(static_cast<uint32_t>(page) << 16 | usage,
-                       action == KeyBindings::ACT_ENTER ? LV_KEY_ENTER : KEYS[action - KeyBindings::ACT_UP]);
+                       action == KeyBindings::ACT_ENTER ? static_cast<uint32_t>(LV_KEY_ENTER)
+                                                        : KEYS[action - KeyBindings::ACT_UP]);
     return 0;
   }
   const uint32_t key = action < KeyBindings::BUILTIN_COUNT ? this->builtin_(action, focused) : 0;
