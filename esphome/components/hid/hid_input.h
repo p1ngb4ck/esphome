@@ -73,6 +73,7 @@ struct InputDevice {
   std::string key;
   std::string name;
   bool connected;
+  uint8_t kinds{0};  // HIDDeviceKind bits; 0 when not known
 };
 
 // Key names, emitted by hid/__init__.py from its table.

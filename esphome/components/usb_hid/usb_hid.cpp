@@ -55,7 +55,7 @@ void USBHIDClient::setup() {
 
 void USBHIDClient::list_devices(std::vector<hid::InputDevice> &out) const {
   if (!this->device_key_.empty())
-    out.push_back({this->device_key_, this->device_name_, true});
+    out.push_back({this->device_key_, this->device_name_, true, this->get_device_kinds()});
 }
 
 void USBHIDClient::set_device_layout(const std::string &key, const hid::KeyboardLayout *layout) {
@@ -354,6 +354,8 @@ void USBHIDClient::start_reading_() {
   ESP_LOGI(TAG, "HID device ready (%u interfaces)", static_cast<unsigned>(this->interfaces_.size()));
   this->write_leds_(this->leds_);
   this->report_connected_();
+  // What the device is (get_device_kinds()) is known from here on.
+  this->devices_cb_.call();
 #ifdef USE_TEXT_SENSOR
   if (this->device_name_sensor_ != nullptr) {
     usb_host::UsbDeviceInfo info;

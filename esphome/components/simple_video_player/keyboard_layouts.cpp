@@ -60,7 +60,8 @@ void SimpleVideoPlayer::keyboard_setup_() {
       this->kbd_inputs_[index].input->list_devices(devices);
       bool added = false;
       for (const auto &device : devices) {
-        if (device.key.rfind("usb:", 0) != 0 || this->keyboard_assigned_(device.key) != nullptr)
+        if (device.key.rfind("usb:", 0) != 0 || (device.kinds & hid::HID_DEVICE_KEYBOARD) == 0 ||
+            this->keyboard_assigned_(device.key) != nullptr)
           continue;
         for (KbdAssign &entry : this->kbd_assign_->entries) {
           if (entry.key[0] == '\0') {
@@ -393,6 +394,7 @@ std::string SimpleVideoPlayer::keyboard_standard_(size_t input) const {
 const PoolList<SimpleVideoPlayer::KeyboardDevice> &SimpleVideoPlayer::keyboard_devices() const {
   PoolList<KeyboardDevice> &out = this->kbd_devices_;
   out.clear();
+  std::vector<std::string> others;  // devices there now that are no keyboards
   for (size_t i = 0; i < this->kbd_inputs_.size(); i++) {
     const KbdInput &input = this->kbd_inputs_[i];
     const KbdAssign *standard = this->keyboard_assigned_("@" + input.name);
@@ -401,6 +403,10 @@ const PoolList<SimpleVideoPlayer::KeyboardDevice> &SimpleVideoPlayer::keyboard_d
     std::vector<hid::InputDevice> devices;
     input.input->list_devices(devices);
     for (const auto &device : devices) {
+      if ((device.kinds & hid::HID_DEVICE_KEYBOARD) == 0) {
+        others.push_back(device.key);
+        continue;
+      }
       const KbdAssign *entry = this->keyboard_assigned_(device.key);
       out.push_back(KeyboardDevice{device.key.c_str(), device.name.c_str(), static_cast<uint8_t>(i), device.connected,
                                    entry != nullptr ? entry->layout : ""});
@@ -414,6 +420,8 @@ const PoolList<SimpleVideoPlayer::KeyboardDevice> &SimpleVideoPlayer::keyboard_d
       bool listed = false;
       for (const auto &device : out)
         listed = listed || std::strncmp(device.key.c_str(), entry.key, sizeof(entry.key) - 1) == 0;
+      for (const auto &key : others)
+        listed = listed || std::strncmp(key.c_str(), entry.key, sizeof(entry.key) - 1) == 0;
       if (!listed)
         out.push_back(KeyboardDevice{entry.key, entry.name, entry.input, false, entry.layout});
     }

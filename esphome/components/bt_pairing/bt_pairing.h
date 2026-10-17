@@ -151,6 +151,8 @@ class BTPairing : public Component
   const std::string &event_device() const { return this->event_device_; }
   /// The paired devices of its HID slots ("bt:AA:BB:CC:DD:EE:FF"); each types with its own layout.
   void list_devices(std::vector<hid::InputDevice> &out) const override;
+  /// HIDDeviceKind bits a paired device announced: Classic in its Class of Device, LE in its appearance.
+  static uint8_t record_kinds(const PairingRecord &record);
   void set_device_layout(const std::string &key, const hid::KeyboardLayout *layout) override;
   /// Pad outputs go to every slot's device.
   void rumble(uint8_t strong, uint8_t weak, uint32_t duration_ms) override {

@@ -764,21 +764,66 @@ const hid::KeyboardLayout *BTPairing::slot_layout_(const PairingTarget *target) 
   return nullptr;
 }
 
+uint8_t BTPairing::record_kinds(const PairingRecord &record) {
+  const uint32_t value = record.device_class;
+  if (record.transport == static_cast<uint8_t>(Transport::LE)) {
+    if ((value >> 6) == 0x06)  // remote control category (0x0180)
+      return hid::HID_DEVICE_REMOTE;
+    switch (value) {
+      case 0x03C1:  // keyboard
+        return hid::HID_DEVICE_KEYBOARD;
+      case 0x03C2:  // mouse
+        return hid::HID_DEVICE_MOUSE;
+      case 0x03C3:  // joystick
+      case 0x03C4:  // gamepad
+        return hid::HID_DEVICE_GAMEPAD;
+      default:
+        return 0;
+    }
+  }
+  if (((value >> 8) & 0x1F) != 0x05)  // major device class: peripheral
+    return 0;
+  const uint32_t minor = (value >> 2) & 0x3F;
+  uint8_t kinds = 0;
+  if (minor & 0x10)
+    kinds |= hid::HID_DEVICE_KEYBOARD;
+  if (minor & 0x20)
+    kinds |= hid::HID_DEVICE_MOUSE;
+  switch (minor & 0x0F) {
+    case 0x01:  // joystick
+    case 0x02:  // gamepad
+      kinds |= hid::HID_DEVICE_GAMEPAD;
+      break;
+    case 0x03:  // remote control
+      kinds |= hid::HID_DEVICE_REMOTE;
+      break;
+    default:
+      break;
+  }
+  return kinds;
+}
+
 void BTPairing::list_devices(std::vector<hid::InputDevice> &out) const {
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   for (const auto &record : this->records_) {
     bool hid = false;
     bool connected = false;
-    for (const PairingTarget *target : this->hid_targets_) {
+    uint8_t kinds = 0;
+    for (size_t i = 0; i < this->hid_targets_.size(); i++) {
+      const PairingTarget *target = this->hid_targets_[i];
       if (target->pairing_slot() == record.slot) {
         hid = true;
         connected = target->is_device_connected();
+        if (target->is_address_connected(record.address))
+          kinds = this->hid_slots_[i]->get_device_kinds();
       }
     }
     if (!hid)
       continue;
+    if (kinds == 0)
+      kinds = record_kinds(record);
     format_mac_addr_upper(record.address, mac);
-    out.push_back({std::string("bt:") + mac, record.name[0] != '\0' ? record.name : mac, connected});
+    out.push_back({std::string("bt:") + mac, record.name[0] != '\0' ? record.name : mac, connected, kinds});
   }
 }
 
