@@ -919,6 +919,22 @@ _HUB_REQUEST_REPLACEMENT = """    EXT_HUB_ENTER_CRITICAL();
         }
         return ext_hub_control_request(ext_hub_dev, port1, data->control.req, data->control.feature);"""
 
+# A status change report with the hub's own bit and port bits: device_has_changed() re-armed the
+# IN endpoint at once, and the last handled port re-armed it again (PROC_COMPLETED), which fails
+# with the URB still in flight and drops the hub. Re-armed right away only when no port changed.
+_HUB_STATUS_CHANGE_ANCHOR = """        if (device_status & EXT_HUB_STATUS_CHANGE_FLAG) {
+            // Check device status
+            device_has_changed(ext_hub_dev);
+        }"""
+
+_HUB_STATUS_CHANGE_REPLACEMENT = """        if (device_status == EXT_HUB_STATUS_CHANGE_FLAG) {
+            // Check device status
+            device_has_changed(ext_hub_dev);
+        } else if (device_status & EXT_HUB_STATUS_CHANGE_FLAG) {
+            // The IN EP is re-armed once the changed ports were handled
+            ESP_LOGW(EXT_HUB_TAG, "Hub status change has not been implemented yet");
+        }"""
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -975,6 +991,7 @@ PATCHES = (
     ("src/ext_hub.c", _HUB_PORT_FEATURE_ANCHOR, _HUB_PORT_FEATURE_REPLACEMENT),
     ("src/ext_hub.c", _HUB_PORT_STATUS_ANCHOR, _HUB_PORT_STATUS_REPLACEMENT),
     ("src/ext_hub.c", _HUB_REQUEST_ANCHOR, _HUB_REQUEST_REPLACEMENT),
+    ("src/ext_hub.c", _HUB_STATUS_CHANGE_ANCHOR, _HUB_STATUS_CHANGE_REPLACEMENT),
 )
 
 # Identifies an existing patched copy. It has to change whenever anything about that copy
