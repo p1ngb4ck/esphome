@@ -1,3 +1,36 @@
+# Session order (Olli, 2026-10-17, evening) — binding
+
+Inputs and settings, in short steps Olli tests one by one; design approved in the design artifact
+("ESP32-P4 Panel UI Design": Settings, SetMice, SetRemotes, SetGamepads, SetGamepad, SetGestures).
+Olli: "please keep current design mostly, just "add" the new settings submenu entries and -pages".
+
+Olli's list:
+1. Keyboards section lists all HID devices, should list keyboards only. (done, e9b53f823e)
+2. Bluetooth disconnect icon wrong. (done, lvgl_media.yaml)
+3. Allowed paired BT devices: as many as possible (paired up to max_devices, Classic HID slots
+   shared). (done, 0a292aeadc, 4b111c82aa)
+4. Mice and remote controls: settings pages of their own.
+5. Remote controls: pointer mode, with a configurable mode key.
+6. Gamepads section with test functions. Mice, remote controls and gamepads list their devices as
+   sub-entries under the section (Olli: keyboards keep their current page, no sub-entry per keyboard).
+7. Key bindings for every input that makes sense (gamepad buttons, ...).
+8. Gestures / swipe control next to key bindings ("general" gesture/touch/pad/analog settings).
+9. Long-pressed direction keys speed up navigation/selection/change, with sane settings and a max.
+10. Gamepad touchpads usable as display touch or for swiping (excluding each other).
+11. Gamepad test page: a drawing per connected controller (Xbox, PlayStation, Steam, a common one
+    for the rest), in the style of their calibration websites.
+
+Steps: a) Settings nav: Mice, Remote controls, Gamepads (sections 13-15) with their devices as
+sub-entries. b) Gamepads pages. c) Mice page. d) Remote controls page. e) Key bindings for any
+input, hold-to-speed-up. f) Gestures and touch page.
+
+Status:
+- a) done (lvgl_media.yaml), awaiting Olli's test.
+
+---
+
+# Previous session order (all done)
+
 # Session order (Olli, 2026-10-17, given before he went to sleep) — binding
 
 Read this file, README.md, architecture.md, open-issues.md and CLAUDE.md FIRST after every
