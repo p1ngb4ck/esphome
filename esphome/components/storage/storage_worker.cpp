@@ -143,7 +143,7 @@ bool StorageWorker::is_task_safe_(const TransferRequest &req) const {
   // the worker takes that at face value, as it does for every other task-routed call.
   if (req.op == RequestOp::FORMAT)
     return (req.format_target->get_capabilities() & StorageCaps::STORAGE_CAP_IO_TASK_SAFE) != 0;
-  if (req.op == RequestOp::MOUNT)
+  if (req.op == RequestOp::MOUNT || req.op == RequestOp::LIST_DIR)
     return (req.dst_storage->get_capabilities() & StorageCaps::STORAGE_CAP_IO_TASK_SAFE) != 0;
   // Every storage this op touches must be task-safe, or a background task would race the main
   // loop on it. A copy/move touches src_storage AND dst_storage (both non-null, no raw_device).
@@ -488,12 +488,15 @@ StorageError StorageWorker::async_raw_erase(RawStorage *device, uint64_t address
 }
 
 StorageError StorageWorker::submit_control_op_(RequestOp op, Storage *target, CompletionCallback &&on_done,
-                                               TransferJob *job_out) {
+                                               TransferJob *job_out, const char *path,
+                                               bool (*list_entry)(const FileStat *, void *), void *list_ctx) {
   // After mark_failed() (no registry -> the drain contract cannot hold) update() never runs,
   // so a queued request would never complete. Reject up front so callers chaining on the
   // completion learn the worker is unusable instead of hanging forever.
   if (this->is_failed())
     return StorageError::STORAGE_ERROR_NOT_READY;
+  if (strlen(path) >= STORAGE_WORKER_MAX_PATH)
+    return StorageError::STORAGE_ERROR_INVALID_ARGS;
   this->ensure_started_();
   TransferRequest *slot = nullptr;
   for (auto &req : this->pool_) {
@@ -514,7 +517,9 @@ StorageError StorageWorker::submit_control_op_(RequestOp op, Storage *target, Co
   slot->dst_storage = op == RequestOp::FORMAT ? nullptr : static_cast<PathStorage *>(target);
   slot->format_target = op == RequestOp::FORMAT ? target : nullptr;
   slot->src_path[0] = '\0';
-  slot->dst_path[0] = '\0';
+  strcpy(slot->dst_path, path);  // LIST_DIR's directory; "" for the others
+  slot->list_entry = list_entry;
+  slot->list_ctx = list_ctx;
   slot->raw_device = nullptr;
   slot->raw_address = 0;
   slot->raw_erase_pos = 0;
@@ -584,6 +589,17 @@ StorageError StorageWorker::async_mount(PathStorage *target, CompletionCallback 
   // check, overlaps_active_(), has_active_task_io() and the completion drain treat it
   // like any transfer. run_chunk_ resolves it back through as_mountable().
   return this->submit_control_op_(RequestOp::MOUNT, target, std::move(on_done), job_out);
+}
+
+StorageError StorageWorker::async_list_dir(PathStorage *target, const char *path,
+                                           bool (*entry)(const FileStat *, void *), void *ctx,
+                                           CompletionCallback &&on_done, TransferJob *job_out) {
+  if (target == nullptr || path == nullptr || entry == nullptr)
+    return StorageError::STORAGE_ERROR_INVALID_ARGS;
+  // Same slot shape as MOUNT (target in dst_storage), with the directory in dst_path: registry
+  // check, overlaps_active_(), has_active_task_io() and the completion drain treat it like any
+  // transfer on that storage.
+  return this->submit_control_op_(RequestOp::LIST_DIR, target, std::move(on_done), job_out, path, entry, ctx);
 }
 
 StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64_t address, uint64_t size,
@@ -1941,6 +1957,11 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
       return;
     }
     finish_request(req, m->mount());
+    return;
+  }
+  if (req.op == RequestOp::LIST_DIR) {
+    // One blocking list_dir(): the entries go to the caller's callback on this engine's thread.
+    finish_request(req, static_cast<PathStorage *>(req.dst_storage)->list_dir(req.dst_path, req.list_entry, req.list_ctx));
     return;
   }
   if (req.op == RequestOp::RAW_READ_TO_FILE || req.op == RequestOp::RAW_WRITE_FROM_FILE ||

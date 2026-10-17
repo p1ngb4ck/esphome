@@ -68,6 +68,10 @@ enum class RequestOp : uint8_t {
   // resolve, connect and probe, which must never sit on the main loop. The target rides in
   // dst_storage; run resolves it back to MountableStorage via as_mountable().
   MOUNT,
+  // A directory's entries: one blocking list_dir() of dst_path on dst_storage, each entry handed to
+  // the caller's list_entry with list_ctx -- on the worker task for task-safe media, else from a
+  // loop() step. Same single-blocking-call shape as MOUNT; no handles, no change feed.
+  LIST_DIR,
 };
 
 // Where a request currently stands. Transitions:
@@ -258,6 +262,9 @@ struct TransferRequest {
   // overwrite clearing, the tree-vs-file decision) happens HERE, inside the engine that owns
   // the storages -- executed once on the request's first pass.
   bool overwrite{false};
+  // LIST_DIR only: where each entry goes (the caller's, valid until its completion).
+  bool (*list_entry)(const storage::FileStat *entry, void *ctx){nullptr};
+  void *list_ctx{nullptr};
   bool pre_phase_done{false};
   // Stall watchdog (check_stalled_): refreshed whenever the request demonstrably moves; a
   // request that stops moving is finished with TIMEOUT so its storages -- and everything
@@ -511,6 +518,14 @@ class StorageWorker : public PollingComponent {
   // fires once with the driver's mount() result.
   storage::StorageError async_mount(storage::PathStorage *target, CompletionCallback &&on_done,
                                     TransferJob *job_out = nullptr);
+  // A directory's entries, off the main loop -- same contract as async_mount(): one blocking
+  // list_dir(path) on the worker task for task-safe media, loop-sliced otherwise. `entry` is called
+  // for each entry with `ctx` (on that task, or the loop step), so ctx belongs to the walk: the
+  // caller leaves it alone until on_done fires (main loop) with list_dir()'s result. Return false
+  // from `entry` to stop early, as with list_dir().
+  storage::StorageError async_list_dir(storage::PathStorage *target, const char *path,
+                                       bool (*entry)(const storage::FileStat *entry, void *ctx), void *ctx,
+                                       CompletionCallback &&on_done, TransferJob *job_out = nullptr);
   storage::StorageError async_format(storage::Storage *target, CompletionCallback &&on_done,
                                      TransferJob *job_out = nullptr);
 
@@ -609,7 +624,9 @@ class StorageWorker : public PollingComponent {
 
  protected:
   storage::StorageError submit_control_op_(RequestOp op, storage::Storage *target, CompletionCallback &&on_done,
-                                           TransferJob *job_out);
+                                           TransferJob *job_out, const char *path = "",
+                                           bool (*list_entry)(const storage::FileStat *, void *) = nullptr,
+                                           void *list_ctx = nullptr);
   storage::StorageError submit_(RequestOp op, storage::PathStorage *src, const char *src_path,
                                 storage::PathStorage *dst, const char *dst_path, CompletionCallback &&on_done,
                                 TransferJob *job_out = nullptr, bool overwrite = false);
