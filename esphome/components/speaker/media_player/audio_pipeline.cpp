@@ -254,8 +254,10 @@ esp_err_t AudioPipeline::start_tasks_() {
   }
 
   if (!this->decode_task_.is_created()) {
+    // One above the reader and the main loop: paced by its sink, it takes no more than the sound needs,
+    // and the sound does not wait for them. The reader fills its ring as fast as the source gives.
     if (!this->decode_task_.create(decode_task, (this->base_name_ + "_decode").c_str(), DECODE_TASK_STACK_SIZE,
-                                   (void *) this, this->priority_, this->task_stack_in_psram_)) {
+                                   (void *) this, this->priority_ + 1, this->task_stack_in_psram_)) {
       return ESP_ERR_NO_MEM;
     }
   }
