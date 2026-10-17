@@ -146,7 +146,7 @@ sound block are sized for this lead; sound released when the cursor leads by `au
 
 ## 9. PSRAM pool and buffers (today)
 
-Pool: `psram_pool_size` (default 12 MiB, 6-28; device 13 MB = 13,000,000). Plan in `plan_pool_()`
+Pool: `psram_pool_size` (default 12 MiB, 6-28; device 15 MB = 15,000,000). Plan in `plan_pool_()`
 `plan_pool_()`: everything listed as "fixed" is reserved; the rest (`ring_room_`) is the read-ahead
 ring's and the sound block's. A video takes the ring for `prebuffer` + its lead at `MAX_MEDIA_RATE`
 (4 MiB/s, whole 256 KiB chunks, at least two) and the sound block for its lead; both are kept and taken
