@@ -2085,7 +2085,7 @@ KEY_FATFS_REQUIRED = "fatfs_required"
 KEY_FATFS_VOLUMES = "fatfs_volumes"
 # FAT volumes beyond the configured mounts, for mounts that come and go at runtime (USB
 # sticks taken by a wildcard entry, say).
-FATFS_SPARE_VOLUMES = 2
+FATFS_SPARE_VOLUMES = 3
 FATFS_MAX_VOLUMES = 10  # Kconfig range of CONFIG_FATFS_VOLUME_COUNT
 KEY_ADC_ONESHOT_IRAM_REQUIRED = "adc_oneshot_iram_required"
 KEY_LIBC_PICOLIBC_NEWLIB_COMPAT_REQUIRED = "libc_picolibc_newlib_compat_required"
