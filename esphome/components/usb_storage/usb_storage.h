@@ -18,6 +18,7 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include <atomic>
 #include <vector>
 
 namespace esphome::usb_storage {
@@ -52,6 +53,8 @@ class USBStorageClient : public usb_host::USBClient {
   // path is gone from the VFS entirely; the slot mounts again once its medium was out and
   // back in, the device was (re)inserted, or check_card() asks for it.
   void unmount_filesystem(uint8_t index);
+  /// Mounts a slot that was unmounted by request again, once its medium answers. False: no device.
+  bool mount_filesystem(uint8_t index);
   USBStorageClient() : usb_host::USBClient(0, 0) { this->add_class_match(USB_CLASS_MASS_STORAGE); }
 
   void setup() override;
@@ -258,9 +261,6 @@ class USBStorageDevice : public esphome::storage::FilesystemStorage, public esph
 
   // No-RTTI downcast hook -- see PathStorage::as_mountable().
   storage::MountableStorage *as_mountable() override { return this; }
-  // The FAT mount lifecycle is owned by the USB hotplug client -- insertion auto-mounts, so
-  // only the safe-eject direction may be invoked externally (mount() below is a status no-op).
-  uint8_t get_mount_caps() const override { return storage::MountableStorage::MOUNT_CAP_UNMOUNT; }
   storage::StorageError format() override;
   storage::StorageError sync() override;
   storage::StorageError open(const char *path, storage::FileHandle *&handle, storage::OpenMode mode) override;
@@ -310,6 +310,8 @@ class USBStorageDevice : public esphome::storage::FilesystemStorage, public esph
   // touches this device. is_mounted() stays true until then, so an interval-based remount
   // check does not race the pending unmount.
   bool unmount_pending_{false};
+  // mount() may run on the storage worker's task; loop() hands it to the client.
+  std::atomic<bool> mount_pending_{false};
   // True while a worker job that references this device is in flight -- the worker cannot be
   // queried for "jobs touching storage X" cheaply, so the device tracks it via open handles
   // (every transfer holds a handle open for its duration) plus this guard for the brief
