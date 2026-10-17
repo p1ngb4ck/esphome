@@ -187,7 +187,8 @@ async def to_code(config):
     # LFN mode/length and volume count are set as user-overridable defaults by the esp32
     # platform once any component calls require_fatfs() -- see
     # _reconcile_vfs_fatfs_sdkconfig(). Override via esp32 framework sdkconfig_options.
-    require_fatfs()
+    entries = config.get(CONF_DEVICES) or [{}]
+    require_fatfs(sum(1 + len(entry.get(CONF_LUNS, [])) for entry in entries))
     include_builtin_idf_component("fatfs")
     include_builtin_idf_component("esp_vfs_fat")
 

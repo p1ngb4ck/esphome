@@ -2082,6 +2082,11 @@ KEY_VFS_TERMIOS_REQUIRED = "vfs_termios_required"
 # These are stored in CORE.data[KEY_ESP32] dict
 KEY_USB_SERIAL_JTAG_SECONDARY_REQUIRED = "usb_serial_jtag_secondary_required"
 KEY_FATFS_REQUIRED = "fatfs_required"
+KEY_FATFS_VOLUMES = "fatfs_volumes"
+# FAT volumes beyond the configured mounts, for mounts that come and go at runtime (USB
+# sticks taken by a wildcard entry, say).
+FATFS_SPARE_VOLUMES = 2
+FATFS_MAX_VOLUMES = 10  # Kconfig range of CONFIG_FATFS_VOLUME_COUNT
 KEY_ADC_ONESHOT_IRAM_REQUIRED = "adc_oneshot_iram_required"
 KEY_LIBC_PICOLIBC_NEWLIB_COMPAT_REQUIRED = "libc_picolibc_newlib_compat_required"
 
@@ -2225,13 +2230,17 @@ def idf_version() -> cv.Version:
     return CORE.data[KEY_ESP32][KEY_IDF_VERSION]
 
 
-def require_fatfs() -> None:
+def require_fatfs(volumes: int = 0) -> None:
     """Mark that FATFS support is required by a component.
 
     Call this from components that use FATFS (e.g., SD card, storage components).
     This prevents FATFS from being disabled when disable_fatfs is set.
+    volumes: the FAT volumes the caller mounts; CONFIG_FATFS_VOLUME_COUNT is sized from their sum.
     """
     CORE.data[KEY_ESP32][KEY_FATFS_REQUIRED] = True
+    CORE.data[KEY_ESP32][KEY_FATFS_VOLUMES] = (
+        CORE.data[KEY_ESP32].get(KEY_FATFS_VOLUMES, 0) + volumes
+    )
 
 
 def require_adc_oneshot_iram() -> None:
@@ -3007,7 +3016,18 @@ async def _reconcile_vfs_fatfs_sdkconfig(
             set_idf_sdkconfig_default("CONFIG_FATFS_LFN_HEAP", True)
         if not opts.get("CONFIG_FATFS_LFN_NONE", False):
             set_idf_sdkconfig_default("CONFIG_FATFS_MAX_LFN", 255)
-        set_idf_sdkconfig_default("CONFIG_FATFS_VOLUME_COUNT", 4)
+        volumes = (
+            CORE.data[KEY_ESP32].get(KEY_FATFS_VOLUMES, 0) + FATFS_SPARE_VOLUMES
+        )
+        if volumes > FATFS_MAX_VOLUMES:
+            _LOGGER.warning(
+                "%d FAT volumes configured, ESP-IDF supports at most %d",
+                volumes - FATFS_SPARE_VOLUMES,
+                FATFS_MAX_VOLUMES,
+            )
+        set_idf_sdkconfig_default(
+            "CONFIG_FATFS_VOLUME_COUNT", min(volumes, FATFS_MAX_VOLUMES)
+        )
         # Long filenames are a hard requirement of exFAT and are already set right above;
         # the FatFs #defines themselves come via a patched component copy, declared in the
         # manifest so it replaces the built-in fatfs and lands in src's REQUIRES.
