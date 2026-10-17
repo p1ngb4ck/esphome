@@ -2087,6 +2087,10 @@ KEY_FATFS_VOLUMES = "fatfs_volumes"
 # sticks taken by a wildcard entry, say).
 FATFS_SPARE_VOLUMES = 3
 FATFS_MAX_VOLUMES = 10  # Kconfig range of CONFIG_FATFS_VOLUME_COUNT
+# CONFIG_VFS_MAX_COUNT: its Kconfig default (what registers before any FAT mount: console,
+# sockets, eventfd, ...) plus one entry per FAT volume; Kconfig range up to 20.
+VFS_BASE_COUNT = 8
+VFS_COUNT_LIMIT = 20
 KEY_ADC_ONESHOT_IRAM_REQUIRED = "adc_oneshot_iram_required"
 KEY_LIBC_PICOLIBC_NEWLIB_COMPAT_REQUIRED = "libc_picolibc_newlib_compat_required"
 
@@ -3032,6 +3036,16 @@ async def _reconcile_vfs_fatfs_sdkconfig(
             user_volumes = user_volumes.value
         if user_volumes is None or int(str(user_volumes).strip('"')) < volumes:
             add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", volumes)
+        else:
+            volumes = int(str(user_volumes).strip('"'))
+        # Every FAT mount is a VFS entry too (esp_vfs_fat_register -> esp_vfs_register_fs,
+        # ESP_ERR_NO_MEM once the table is full): a smaller sdkconfig_options value is raised.
+        vfs_count = min(VFS_BASE_COUNT + volumes, VFS_COUNT_LIMIT)
+        user_vfs = opts.get("CONFIG_VFS_MAX_COUNT")
+        if isinstance(user_vfs, RawSdkconfigValue):
+            user_vfs = user_vfs.value
+        if user_vfs is None or int(str(user_vfs).strip('"')) < vfs_count:
+            add_idf_sdkconfig_option("CONFIG_VFS_MAX_COUNT", vfs_count)
         # Long filenames are a hard requirement of exFAT and are already set right above;
         # the FatFs #defines themselves come via a patched component copy, declared in the
         # manifest so it replaces the built-in fatfs and lands in src's REQUIRES.
