@@ -984,6 +984,56 @@ _LS_PERIODIC_FREE_REPLACEMENT = """    pipe->port->num_pipes_idle--;
     pipe->port->ls_pre_periodic_chans &= ~(1U << pipe->chan_obj->flags.chan_idx);
     usb_dwc_hal_chan_free(pipe->port->hal, pipe->chan_obj);"""
 
+# External hub port whose device failed to enumerate: the port was disabled for good. Once the
+# device object is freed (recycle), the port is reset and the device enumerated again, a bounded
+# number of times. dev_reset_attempts cannot count this: every reset completion clears it.
+_ENUM_RETRY_DEFINE_ANCHOR = """#define EXT_PORT_RESET_ATTEMPTS     1
+#endif"""
+
+_ENUM_RETRY_DEFINE_REPLACEMENT = """#define EXT_PORT_RESET_ATTEMPTS     1
+#endif
+// Further enumerations of a device after a failed one
+#define EXT_PORT_ENUM_RETRIES       2"""
+
+_ENUM_RETRY_FIELD_ANCHOR = """    uint8_t dev_reset_attempts;             /**< Ports' device reset failure */"""
+
+_ENUM_RETRY_FIELD_REPLACEMENT = """    uint8_t dev_reset_attempts;             /**< Ports' device reset failure */
+    uint8_t enum_retries;                   /**< Enumerations repeated after a failed one */"""
+
+_ENUM_RETRY_CONNECT_ANCHOR = """                // New device connected, flush reset attempts
+                ext_port->dev_reset_attempts = 0;"""
+
+_ENUM_RETRY_CONNECT_REPLACEMENT = """                // New device connected, flush reset attempts
+                ext_port->dev_reset_attempts = 0;
+                ext_port->enum_retries = 0;"""
+
+_ENUM_RETRY_ACTIVE_ANCHOR = """    ext_port->flags.has_enum_device = 1;
+
+    if (!ext_port->flags.in_pending_list || ext_port->flags.waiting_recycle) {"""
+
+_ENUM_RETRY_ACTIVE_REPLACEMENT = """    ext_port->flags.has_enum_device = 1;
+    ext_port->enum_retries = 0;
+
+    if (!ext_port->flags.in_pending_list || ext_port->flags.waiting_recycle) {"""
+
+_ENUM_RETRY_RECYCLE_ANCHOR = """    case USB_PORT_STATE_DISABLED:
+        // We don't need to do anything, as port will be handled after completing USB_FEATURE_PORT_ENABLE
+        if (ext_port->flags.is_gone) {"""
+
+_ENUM_RETRY_RECYCLE_REPLACEMENT = """    case USB_PORT_STATE_DISABLED:
+        if (!ext_port->flags.is_gone && !ext_port->flags.has_enum_device && port_has_connection(ext_port) &&
+                ext_port->enum_retries < EXT_PORT_ENUM_RETRIES) {
+            // Enumeration failed: reset the port and enumerate the device again
+            ext_port->enum_retries++;
+            ext_port->dev_reset_attempts = 0;
+            ext_port->dev_state = PORT_DEV_NOT_PRESENT;
+            ext_port->state = USB_PORT_STATE_RESETTING;
+            handle_port(ext_port);
+            break;
+        }
+        // We don't need to do anything, as port will be handled after completing USB_FEATURE_PORT_ENABLE
+        if (ext_port->flags.is_gone) {"""
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -1046,6 +1096,11 @@ PATCHES = (
     ("src/hcd_dwc.c", _LS_PERIODIC_EXEC_ANCHOR, _LS_PERIODIC_EXEC_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_PERIODIC_ALLOC_ANCHOR, _LS_PERIODIC_ALLOC_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_PERIODIC_FREE_ANCHOR, _LS_PERIODIC_FREE_REPLACEMENT),
+    ("src/ext_port.c", _ENUM_RETRY_DEFINE_ANCHOR, _ENUM_RETRY_DEFINE_REPLACEMENT),
+    ("src/ext_port.c", _ENUM_RETRY_FIELD_ANCHOR, _ENUM_RETRY_FIELD_REPLACEMENT),
+    ("src/ext_port.c", _ENUM_RETRY_CONNECT_ANCHOR, _ENUM_RETRY_CONNECT_REPLACEMENT),
+    ("src/ext_port.c", _ENUM_RETRY_ACTIVE_ANCHOR, _ENUM_RETRY_ACTIVE_REPLACEMENT),
+    ("src/ext_port.c", _ENUM_RETRY_RECYCLE_ANCHOR, _ENUM_RETRY_RECYCLE_REPLACEMENT),
 )
 
 # Identifies an existing patched copy. It has to change whenever anything about that copy
