@@ -71,6 +71,11 @@ round without Olli's go.
   (Open: `file_speaker_` still violates this, see open-issues.)
 - The default audio path (speaker media player, HA audio to the device) stays as it is.
 
+### Sessions
+- A running desktop session, video, stream or dashboard is never interrupted by a call from outside
+  (HA, relay); a call made on the panel itself (opening the dashboard, another kind of media) ends
+  what runs and takes over (Olli, 2026-10-17).
+
 ### LVGL / display
 - Never call LVGL (any widget, even hidden, even a read) while LVGL is paused or DSI-direct runs.
 - LVGL updates are event-driven, guarded by "LVGL runs" and "element active". No interval-driven
