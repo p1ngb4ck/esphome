@@ -66,14 +66,10 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
   copy (R:1139 vs SP:2090), `decoded_size` (C:24) vs `jpeg_decoded_size` (P:837), bar focus logic.
 - Actions registered unconditionally in `__init__.py` while their C++ exists only under `SVP_*`.
 
-## G. Buffer plan backlog (proposal; each step needs Olli's go, one commit each)
+## G. Buffer plan backlog (each step needs Olli's go, one commit each)
 
-1. Ring sized by need (bitrate x (jitter + BT delay) for streams, read-ahead for SD) instead of "the
-   rest"; audio rings sized by `audio_latency` needs, not by the ring.
-2. Pictures: one decoded page (the shown one), neighbours undecoded, decode buffer only on demand.
-3. Cover: buffer only for the visible view; drop `cover_file_` after decode.
-4. Audio: one ring by mode (input for compressed, none or small for PCM), no idle ring.
-5. DSI: decode straight into the panel framebuffer if mipi_dsi permits (verify in source first).
-6. Controls snapshots: reduce to what compositing needs.
-7. Buffer manager: one owner table (who holds what, by mode), handover by mode switch only, no
-   all-or-nothing `release_media_`; fix B11, D1-D3 there.
+Items 1-5 (ring by need, pictures with 2 pages, cover on demand, one sound block, DSI direct) are
+implemented and wait for Olli's test; the controls snapshots item is struck (Olli, 2026-10-17).
+
+1. Buffer manager: one owner table (who holds what, by mode), handover by mode switch only, no
+   all-or-nothing `release_media_`; fix B11 and D2 there.
