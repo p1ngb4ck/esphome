@@ -31,6 +31,10 @@ Status:
   overview with a drawing per connected controller, one controller's page (drawing, sticks,
   triggers, player light, light bar, Test rumble). Touchpad mode comes with item 10. Mice and
   Remote controls pages list their devices; their settings are steps c and d. Awaiting Olli's test.
+- c) Mice: pointer speed, wheel lines, acceleration, reverse wheel (lvgl 2272faf7cb; entities
+  mouse_speed, mouse_wheel_lines, mouse_acceleration, mouse_reverse_wheel). Awaiting Olli's test.
+- d) Remote controls: pointer mode (lvgl 7d098f19c3; key action pointer_mode, default MENU;
+  remote_pointer_step, remote_hold_after, remote_hold_most). Awaiting Olli's test.
 
 ---
 
