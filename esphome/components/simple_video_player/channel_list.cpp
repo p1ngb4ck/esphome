@@ -182,6 +182,10 @@ void SimpleVideoPlayer::ha_browse(const std::string &type, const std::string &id
     ESP_LOGW(TAG, "Too many listings asked for: %s not listed", id.c_str());
     return;
   }
+  if (this->ha_browse_waiting_ != 0 || !network::is_connected()) {
+    this->ha_browse_waiting_++;  // asked for by channel_loop_() once the network is up
+    return;
+  }
   if (this->channel_request_(CHANNEL_CMD_HA_BROWSE, 0))
     return;
   xSemaphoreTake(this->channel_lock_, portMAX_DELAY);  // the task's queue is full: not asked for
@@ -314,6 +318,9 @@ void SimpleVideoPlayer::channel_loop_() {
     this->channel_requested_once_ = true;
     this->channel_request_(CHANNEL_CMD_REFRESH, 0);
   }
+  while (this->ha_browse_waiting_ != 0 && network::is_connected() &&
+         this->channel_request_(CHANNEL_CMD_HA_BROWSE, 0))
+    this->ha_browse_waiting_--;
 #ifdef SVP_USE_LVGL
   // The dropdown's options are LVGL's: a list that came while LVGL is paused waits for it to run.
   if (this->channel_widget_ != nullptr && this->lvgl_component_ != nullptr && this->lvgl_component_->is_paused())

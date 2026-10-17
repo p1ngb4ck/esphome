@@ -2535,6 +2535,7 @@ class SimpleVideoPlayer : public Component
   };
   PsramPtr<HaTexts> ha_texts_;
   PoolList<std::pair<HaType, SvpId>> ha_reqs_;  // type, id: listings asked for, in turn
+  uint16_t ha_browse_waiting_{0};                // of them, not asked from the task yet: no network
   PoolList<HaItem> ha_src_items_;
   bool ha_src_ok_{false}, ha_last_sources_{false};
   // The sources of each type listed by the task since the main loop last took them, in turn: one a

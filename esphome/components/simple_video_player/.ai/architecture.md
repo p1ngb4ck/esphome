@@ -236,5 +236,6 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
   `playlist`, `video` (`local_video_active()`: a video file of its own PLAYING/PAUSED, not the relay's AVI,
   not an audio file; republished when it changes), `pause`, `formats`.
 - Panel -> relay HTTP on the channel task: `/channels`, `/play`, `/stop`, `/browse`, `/image`,
-  `/cover`, `/options`, `/desktop`, `/keyboard`.
+  `/cover`, `/options`, `/desktop`, `/keyboard`. The first `/channels` and every `/browse` asked for
+  before the network is up wait in `channel_loop_()` (`ha_browse_waiting_`) until `network::is_connected()`.
 - Stream port: AVI ('RIFF') or udisp (16-byte header); panel reports 'C','V','A','L','N','F','S'.
