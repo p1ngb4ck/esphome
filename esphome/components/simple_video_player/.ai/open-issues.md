@@ -21,7 +21,6 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 | A12 | Relay options: `sample_rate` and `channels` got no choices (relay: `SAMPLE_RATES`/`CHANNEL_MODES` are dicts, `_choices` took lists only) so the panel offered false/true and setting one answered HTTP 500 (KeyError); the panel dropped an empty first choice (`default_output` "as it is"). Fixed: relay 0.9.43, bb532a6687; awaiting Olli's test | Labels on the panel are the raw values (device, prefer_48000, ...) |
 | A13 | Header icons: rework; already very good, not yet perfect (Olli, 2026-10-16). TODO | Details from Olli; design first |
 | A15 | On-screen keyboard settings, most important: "show the on-screen keyboard even if a physical keyboard is connected" (default no); in LVGL settings and reachable from HA. TODO 2026-10-16 | Scope with Olli first |
-| A17 | Pictures page: the picture's close button ("Close", `close_picture()`) only an X like the other close buttons, and it must not stick out of its area on the right. Small item (Olli, 2026-10-17) | TODO |
 | A18 | **svp_relay on the Pi 5: stability and performance** (Olli, 2026-10-17). TODO | Scope with Olli first |
 | A6 | TV regression 2026-10-15 fixed by 6a5877bba8 (cover on demand + reclaim before a video's buffers). Which of the two fixed it is not proven; likely the reclaim (no holes for the ring) | Keep in mind for B3 |
 
