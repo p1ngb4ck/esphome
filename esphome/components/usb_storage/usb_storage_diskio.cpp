@@ -85,18 +85,18 @@ static const ff_diskio_impl_t USB_DISKIO_DRIVER = {
     .ioctl = diskio_ioctl,
 };
 
+// A drive no one else has (SD cards take theirs from the same table).
 int usb_diskio_register(USBStorageClient *client, uint8_t index) {
-  for (int i = 0; i < MAX_DRIVES; i++) {
-    if (get_clients()[i] == nullptr) {
-      get_clients()[i] = client;
-      get_indexes()[i] = index;
-      ff_diskio_register(static_cast<BYTE>(i), &USB_DISKIO_DRIVER);
-      ESP_LOGD(TAG, "Registered USB DISKIO on drive %d", i);
-      return i;
-    }
+  BYTE drive = 0xFF;
+  if (ff_diskio_get_drive(&drive) != ESP_OK || drive >= MAX_DRIVES) {
+    ESP_LOGE(TAG, "No free FATFS drive slots (max %d)", MAX_DRIVES);
+    return -1;
   }
-  ESP_LOGE(TAG, "No free FATFS drive slots (max %d)", MAX_DRIVES);
-  return -1;
+  get_clients()[drive] = client;
+  get_indexes()[drive] = index;
+  ff_diskio_register(drive, &USB_DISKIO_DRIVER);
+  ESP_LOGD(TAG, "Registered USB DISKIO on drive %d", drive);
+  return drive;
 }
 
 void usb_diskio_unregister(int drive) {
