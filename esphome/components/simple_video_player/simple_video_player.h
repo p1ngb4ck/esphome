@@ -1821,6 +1821,7 @@ class SimpleVideoPlayer : public Component
   uint32_t pic_generation_{0};           // bumped with every listing; older reads are dropped
   static constexpr size_t MAX_IMAGES = 1000;
   PoolList<ImageEntry> images_;
+  PoolList<uint16_t> images_order_;  // sorting images_ (sort_by_order)
   bool pic_list_failed_{false};  // the folder's listing failed: images_ empty
   int current_image_{-1};
   int pic_wanted_{-1};                   // requested, not read yet
@@ -2431,6 +2432,7 @@ class SimpleVideoPlayer : public Component
 
   // Playlist (main loop only). The playback task asks loop() for the next item at the end of a file.
   PoolList<SvpPath> playlist_;
+  PoolList<uint16_t> playlist_order_;  // sorting playlist_ (sort_by_order)
   size_t playlist_index_{0};
   RepeatMode repeat_{RepeatMode::OFF};
   std::atomic<bool> advance_req_{false};

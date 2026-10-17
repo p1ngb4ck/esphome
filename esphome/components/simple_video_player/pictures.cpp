@@ -76,7 +76,7 @@ void SimpleVideoPlayer::pictures_setup_() {
   if (this->pic_canvas_ == nullptr)
     return;
   // At the pool's end for good (plan_pool_()).
-  if (!this->images_.reserve(this->pool_, MAX_IMAGES)) {
+  if (!this->images_.reserve(this->pool_, MAX_IMAGES) || !this->images_order_.reserve(this->pool_, MAX_IMAGES)) {
     ESP_LOGE(TAG, "Pictures disabled: no room in the PSRAM pool for their list");
     return;
   }
@@ -367,8 +367,9 @@ void SimpleVideoPlayer::list_directory_() {
     this->picture_callbacks_.call();
     return;
   }
-  std::sort(this->images_.begin(), this->images_.end(),
-            [](const ImageEntry &a, const ImageEntry &b) { return strcasecmp(a.filename.c_str(), b.filename.c_str()) < 0; });
+  sort_by_order(this->images_, this->images_order_, [](const ImageEntry &a, const ImageEntry &b) {
+    return strcasecmp(a.filename.c_str(), b.filename.c_str()) < 0;
+  });
   ESP_LOGI(TAG, "%u pictures in %s", static_cast<unsigned>(this->images_.size()), this->pic_dir_.c_str());
   this->picture_callbacks_.call();
 

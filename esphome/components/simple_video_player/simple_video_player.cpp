@@ -92,7 +92,8 @@ void SimpleVideoPlayer::setup() {
     return;
   }
   // The lists, at the pool's end for good (plan_pool_()).
-  bool lists = this->playlist_.reserve(this->pool_, MAX_PLAYLIST);
+  bool lists =
+      this->playlist_.reserve(this->pool_, MAX_PLAYLIST) && this->playlist_order_.reserve(this->pool_, MAX_PLAYLIST);
 #ifdef SVP_AUDIO_FILES
   if (this->file_speaker_ != nullptr)
     lists = lists && this->audio_queue_.reserve(this->pool_, MAX_PLAYLIST) &&
@@ -714,8 +715,8 @@ void SimpleVideoPlayer::load_folder_playlist_(const std::string &path) {
     ESP_LOGW(TAG, "Listing %s failed: %s", dir.c_str(), storage::error_to_string(err));
     return;
   }
-  std::sort(this->playlist_.begin(), this->playlist_.end(),
-            [](const SvpPath &a, const SvpPath &b) { return strcasecmp(a.c_str(), b.c_str()) < 0; });
+  sort_by_order(this->playlist_, this->playlist_order_,
+                [](const SvpPath &a, const SvpPath &b) { return strcasecmp(a.c_str(), b.c_str()) < 0; });
   const std::string file = path.substr(slash + 1);
   for (size_t i = 0; i < this->playlist_.size(); i++) {
     SvpPath &entry = this->playlist_[i];
@@ -2234,7 +2235,7 @@ bool SimpleVideoPlayer::plan_pool_() {
 #endif
 #ifdef SVP_PICTURES
   if (this->pic_canvas_ != nullptr)
-    fixed += this->images_.bytes(MAX_IMAGES);
+    fixed += this->images_.bytes(MAX_IMAGES) + this->images_order_.bytes(MAX_IMAGES);
   if (this->pic_canvas_ != nullptr && this->thumbs_enabled_ && this->thumb_container_ != nullptr &&
       this->thumb_count_ > 0)
     fixed += pool_round(static_cast<size_t>(lv_draw_buf_width_to_stride(this->thumb_w_, LV_COLOR_FORMAT_RGB565)) *
@@ -2242,7 +2243,7 @@ bool SimpleVideoPlayer::plan_pool_() {
              this->thumb_slots_.bytes(this->thumb_count_) + this->thumb_queue_.bytes(this->thumb_count_);
 #endif
   // The lists (setup(), the features' setups).
-  fixed += this->playlist_.bytes(MAX_PLAYLIST);
+  fixed += this->playlist_.bytes(MAX_PLAYLIST) + this->playlist_order_.bytes(MAX_PLAYLIST);
 #ifdef SVP_AUDIO_FILES
   if (this->file_speaker_ != nullptr)
     fixed += this->audio_queue_.bytes(MAX_PLAYLIST) + this->audio_titles_.bytes(MAX_PLAYLIST) +

@@ -244,4 +244,36 @@ template<class T> class PoolList {
   size_t capacity_{0};
 };
 
+/// Sorts list by less through order (its index scratch, as large as list): the indexes are sorted,
+/// then each entry moved once into its place (in cycles, one entry held aside).
+template<class T, class Less> void sort_by_order(PoolList<T> &list, PoolList<uint16_t> &order, Less less) {
+  const size_t count = list.size();
+  if (count < 2 || order.capacity() < count || count > UINT16_MAX) {
+    std::sort(list.begin(), list.end(), less);
+    return;
+  }
+  order.clear();
+  for (size_t i = 0; i < count; i++)
+    order.push_back(static_cast<uint16_t>(i));
+  std::sort(order.begin(), order.end(), [&](uint16_t a, uint16_t b) { return less(list[a], list[b]); });
+  // order[at]: the entry that goes to at; set to at once it is there.
+  for (size_t i = 0; i < count; i++) {
+    if (order[i] == i)
+      continue;
+    T held = list[i];
+    size_t at = i;
+    while (true) {
+      const size_t from = order[at];
+      order[at] = static_cast<uint16_t>(at);
+      if (from == i) {
+        list[at] = held;
+        break;
+      }
+      list[at] = list[from];
+      at = from;
+    }
+  }
+  order.clear();
+}
+
 }  // namespace esphome::simple_video_player
