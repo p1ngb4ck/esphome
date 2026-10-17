@@ -3527,6 +3527,7 @@ void SimpleVideoPlayer::audio_advance_() {
       this->file_speaker_->finish();
       this->file_speaker_open_ = false;
     }
+    this->audio_session_.store(false, std::memory_order_release);  // between tracks it stays set
     this->audio_changed_.store(true, std::memory_order_release);
   }
 }

@@ -28,8 +28,6 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 
 | # | Issue | Status |
 |---|---|---|
-| B3 | Pictures and cover are not in the pool plan; they live off whatever the ring leaves or by freeing all media buffers (`release_media_` is all-or-nothing, P:501, C:61). Fragmentation possible when pieces stay inside the free area | CODE / PLAUSIBLE |
-| B9 | Controls: 3 × bar snapshot reserved (CT:331-342); check need | CODE |
 | B10 | `channel_http_` response buffer outside the pool: PSRAM heap, `heap_caps_realloc` up to 256 KiB per request (CL). Checked 2026-10-17 | CODE |
 | B11 | `pool_reclaim_req_` stays set after the 2 s `wait_alloc_answer_` timeout: the main loop frees the pictures/cover buffers later for nobody (the output request is taken back already). Checked 2026-10-17 | CODE |
 
@@ -47,7 +45,6 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 |---|---|---|
 | D2 | Reclaim waits (2 s) are shorter than an HA picture fetch (15 s); a video start during one can fail with BUFFER_ALLOCATION_FAILED | CODE |
 | D4 | `dev_lock_` held across blocking socket sends while the main loop waits portMAX on it (U:592-609, 1190-1205 vs 307, 331) | CODE |
-| D5 | `stream_play_audio_` reachable from net task and spice task without a lock | PLAUSIBLE. Analysed 2026-10-16: not concurrent as things are: `desktop_take_panel_()` waits until a stream sender has let go before the session's channels open, and during a desktop session only svp_relay's caster gets in (stream_net_task_), which sends pictures, no sound (relay `desktop/caster.py`); the SPICE sound comes on the playback channel only. The exclusion rests on the relay's behaviour, not on a lock. Not changed |
 | D6 | Plain fields shared across tasks without atomics: `repeat_` (enum, main loop + controls), `pic_read_` fields | CODE |
 | D7 | `start_req_` not reset when the playback ends early: loop may still prerender, pause LVGL, fire on_started | CODE (2026-10-16): the playback task sets 1 and waits for 2 while `playing()`, at most 2 s; a stop in that window, or a main loop blocked over 2 s (A2), leaves 1, and the next loop pass prerenders, pauses LVGL (DSI direct) and fires on_started for a session already stopped; the DSI block below gives LVGL back once the task is gone. Only `start_playback_` resets it. Not changed |
 | D8 | spice/net tasks prio 4 without affinity can preempt playback and loopTask (prio 1) on core 1 | CODE |
@@ -56,7 +53,6 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 
 | # | Issue | Status |
 |---|---|---|
-| E1 | `audio_session_` is only reset by `start_playback_` (S:667): stays true after a track/queue ends | CODE. Analysed 2026-10-16, not changed: between tracks it must stay true (`audio_advance_` keeps the file speaker open). After the queue's end (state STOPPED, `audio_current_` false) the stale flag only makes `stop()` set `audio_halted_`, `spice_sound_take_()` / a relay AVI call `end_session_()` on a stopped player (log "Audio file stopped" without one playing), `release_media_`/`picture_session_busy_` skip checks that a stopped player passes anyway. No functional fault found; a reset would belong at the queue's end in `audio_advance_` after the speaker finish, untested, so left |
 | E2 | Audio files: no duration/seek (`duration_frames_` is set only from a video's info: the audio bar's time and seek never show) and no on_playback_started/finished for their sessions (was E6). One piece of work (Olli, 2026-10-17) | CODE |
 | E7 | Status JSON doesn't report a local video/playlist to the relay ("state" is the media player's) | CODE. A real gap (Olli, 2026-10-17) |
 
