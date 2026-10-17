@@ -134,6 +134,10 @@ void SimpleVideoPlayer::pictures_setup_() {
 }
 
 bool SimpleVideoPlayer::pictures_held_() const {
+  // A stream, a dashboard or a desktop session has the panel: nothing interrupts it, a picture
+  // asked for meanwhile waits.
+  if (this->is_network_session())
+    return true;
 #ifdef SVP_AUDIO_FILES
   if (this->audio_session_.load(std::memory_order_acquire))
     return false;  // music plays on with the pictures
