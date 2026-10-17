@@ -17,6 +17,12 @@ static USBStorageClient **get_clients() {
   return clients;
 }
 
+// The client's slot each drive is.
+static uint8_t *get_indexes() {
+  static uint8_t indexes[MAX_DRIVES] = {};
+  return indexes;
+}
+
 // DISKIO callbacks -- called from FATFS context (may be main loop or a dedicated task).
 // All calls that do actual I/O block on a semaphore until the USB transfer callback fires.
 
@@ -29,7 +35,7 @@ static DSTATUS diskio_initialize(BYTE drive) {
 static DSTATUS diskio_status(BYTE drive) {
   if (drive >= MAX_DRIVES || get_clients()[drive] == nullptr)
     return STA_NOINIT;
-  return get_clients()[drive]->is_disk_ready() ? 0 : STA_NOINIT;
+  return get_clients()[drive]->is_disk_ready(get_indexes()[drive]) ? 0 : STA_NOINIT;
 }
 
 // Sector parameters are uint32_t by ESP-IDF's ff_diskio_impl_t contract -- the glue layer is
@@ -39,13 +45,13 @@ static DSTATUS diskio_status(BYTE drive) {
 static DRESULT diskio_read(BYTE drive, BYTE *buf, uint32_t sector, UINT count) {
   if (drive >= MAX_DRIVES || get_clients()[drive] == nullptr)
     return RES_NOTRDY;
-  return get_clients()[drive]->scsi_read(sector, buf, count) ? RES_OK : RES_ERROR;
+  return get_clients()[drive]->scsi_read(get_indexes()[drive], sector, buf, count) ? RES_OK : RES_ERROR;
 }
 
 static DRESULT diskio_write(BYTE drive, const BYTE *buf, uint32_t sector, UINT count) {
   if (drive >= MAX_DRIVES || get_clients()[drive] == nullptr)
     return RES_NOTRDY;
-  return get_clients()[drive]->scsi_write(sector, buf, count) ? RES_OK : RES_ERROR;
+  return get_clients()[drive]->scsi_write(get_indexes()[drive], sector, buf, count) ? RES_OK : RES_ERROR;
 }
 
 static DRESULT diskio_ioctl(BYTE drive, BYTE cmd, void *buf) {
@@ -53,14 +59,15 @@ static DRESULT diskio_ioctl(BYTE drive, BYTE cmd, void *buf) {
     return RES_NOTRDY;
 
   USBStorageClient *client = get_clients()[drive];
+  const uint8_t index = get_indexes()[drive];
   switch (cmd) {
     case CTRL_SYNC:
       return RES_OK;
     case GET_SECTOR_COUNT:
-      *reinterpret_cast<LBA_t *>(buf) = client->get_sector_count();
+      *reinterpret_cast<LBA_t *>(buf) = client->get_sector_count(index);
       return RES_OK;
     case GET_SECTOR_SIZE:
-      *reinterpret_cast<WORD *>(buf) = static_cast<WORD>(client->get_sector_size());
+      *reinterpret_cast<WORD *>(buf) = static_cast<WORD>(client->get_sector_size(index));
       return RES_OK;
     case GET_BLOCK_SIZE:
       *reinterpret_cast<DWORD *>(buf) = 1;  // erase block size in sectors -- 1 = unknown
@@ -79,13 +86,14 @@ static const ff_diskio_impl_t USB_DISKIO_DRIVER = {
 };
 
 // A drive no one else has (SD cards take theirs from the same table).
-int usb_diskio_register(USBStorageClient *client) {
+int usb_diskio_register(USBStorageClient *client, uint8_t index) {
   BYTE drive = 0xFF;
   if (ff_diskio_get_drive(&drive) != ESP_OK || drive >= MAX_DRIVES) {
     ESP_LOGE(TAG, "No free FATFS drive slots (max %d)", MAX_DRIVES);
     return -1;
   }
   get_clients()[drive] = client;
+  get_indexes()[drive] = index;
   ff_diskio_register(drive, &USB_DISKIO_DRIVER);
   ESP_LOGD(TAG, "Registered USB DISKIO on drive %d", drive);
   return drive;

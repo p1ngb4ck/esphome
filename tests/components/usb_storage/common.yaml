@@ -5,6 +5,11 @@ usb_storage:
   devices:
     - id: usb_drive_0
       mount_path: /usb
+      card_check_interval: never
+      luns:
+        - id: usb_drive_0_sd2
+          lun: 1
+          mount_path: /usb_sd2
     - id: usb_drive_1
       mount_path: /usb2
       vid: 0x0781
