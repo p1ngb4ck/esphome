@@ -6,6 +6,8 @@ from esphome.components.esp32 import (
     VARIANT_ESP32S2,
     VARIANT_ESP32S3,
     VARIANT_ESP32S31,
+    add_idf_sdkconfig_option,
+    get_esp32_variant,
     include_builtin_idf_component,
     only_on_variant,
     require_fatfs,
@@ -27,6 +29,7 @@ from esphome.components.storage import (
 )
 from esphome.components.usb_host import usb_host_ns
 import esphome.config_validation as cv
+import esphome.final_validate as fv
 from esphome.const import CONF_DEVICES, CONF_ID, CONF_TRIGGER_ID
 
 CODEOWNERS = ["@p1ngb4ck"]
@@ -132,6 +135,10 @@ CONFIG_SCHEMA = cv.All(
 
 def _final_validate(config):
     final_validate_file_system(config)
+    # The data phase transfers (2 x 32 KB) are DMA buffers; on the ESP32-P4 the USB DMA reaches
+    # PSRAM, so they go there instead of internal RAM.
+    if get_esp32_variant() == VARIANT_ESP32P4 and "psram" not in fv.full_config.get():
+        raise cv.Invalid("usb_storage on the ESP32-P4 needs psram for its transfer buffers")
     return config
 
 
@@ -158,6 +165,9 @@ async def to_code(config):
 
     cg.add_define("USE_USB_BULK_TRANSFERS")
     cg.add_define("USE_USB_CONTROL_TRANSFERS")
+    if get_esp32_variant() == VARIANT_ESP32P4:
+        # Every USB DMA buffer in PSRAM: the data phase transfers are 32 KB each.
+        add_idf_sdkconfig_option("CONFIG_USB_HOST_DWC_DMA_CAP_MEMORY_IN_PSRAM", True)
 
 
 # Actions

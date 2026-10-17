@@ -91,6 +91,32 @@ class USBStorageClient : public usb_host::USBClient {
   bool scsi_test_unit_ready_();
   bool scsi_request_sense_(uint8_t &key, uint8_t &asc);
   bool clear_halt_(uint8_t ep);
+  bool reset_recovery_();
+
+  // Data phase of READ(10)/WRITE(10) on two transfers of its own: one is on the bus while the
+  // other is copied, each up to DATA_XFER_SIZE bytes. On the ESP32-P4 they are PSRAM
+  // (CONFIG_USB_HOST_DWC_DMA_CAP_MEMORY_IN_PSRAM), elsewhere the USB DMA only reaches internal
+  // RAM, so they stay one sector small there.
+  static constexpr uint8_t DATA_XFERS = 2;
+#ifdef USE_ESP32_VARIANT_ESP32P4
+  static constexpr size_t DATA_XFER_SIZE = 32768;
+#else
+  static constexpr size_t DATA_XFER_SIZE = 512;
+#endif
+  struct DataXfer {
+    usb_transfer_t *xfer{nullptr};
+    SemaphoreHandle_t done{nullptr};
+    uint32_t len{0};
+    bool busy{false};
+  };
+  enum class DataResult : uint8_t { OK, STALL, FAIL };
+  static void data_done_cb(usb_transfer_t *xfer);
+  uint32_t data_piece_(uint16_t mps) const;
+  bool data_submit_(DataXfer &d, uint8_t ep, uint32_t len);
+  void data_cancel_(uint8_t ep);
+  DataResult data_phase_(bool in, uint8_t *in_buf, const uint8_t *out_buf, uint32_t len);
+  // Data phase and status of a command whose CBW went out; recovers the pipe on failure.
+  bool data_command_(bool in, uint8_t *in_buf, const uint8_t *out_buf, uint32_t len, uint32_t tag);
 
   bool send_cbw_(uint32_t tag, uint32_t data_len, uint8_t flags, const uint8_t *cdb, uint8_t cdb_len);
   bool recv_data_(uint8_t *buf, uint16_t len);
@@ -144,6 +170,7 @@ class USBStorageClient : public usb_host::USBClient {
   bool transfer_stalled_{false};
   uint16_t transfer_len_{0};
   uint8_t ready_tries_{0};
+  DataXfer data_[DATA_XFERS]{};
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

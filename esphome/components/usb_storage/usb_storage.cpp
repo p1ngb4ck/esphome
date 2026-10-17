@@ -79,6 +79,16 @@ void USBStorageClient::setup() {
     this->mark_failed();
     return;
   }
+  for (auto &d : this->data_) {
+    d.done = xSemaphoreCreateBinary();
+    if (d.done == nullptr || usb_host_transfer_alloc(DATA_XFER_SIZE, 0, &d.xfer) != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to allocate the %u byte data transfers", static_cast<unsigned>(DATA_XFER_SIZE));
+      this->mark_failed();
+      return;
+    }
+    d.xfer->callback = data_done_cb;
+    d.xfer->context = &d;
+  }
 
   this->fatfs_drive_ = usb_diskio_register(this);
   if (this->fatfs_drive_ < 0) {
@@ -242,9 +252,10 @@ bool USBStorageClient::send_chunked_(const uint8_t *buf, uint32_t len) {
 // as the IDF's MSC host driver does.
 bool USBStorageClient::clear_halt_(uint8_t ep) {
   static constexpr uint16_t FEATURE_ENDPOINT_HALT = 0;
-  if (usb_host_endpoint_halt(this->device_handle_, ep) != ESP_OK ||
-      usb_host_endpoint_flush(this->device_handle_, ep) != ESP_OK ||
-      usb_host_endpoint_clear(this->device_handle_, ep) != ESP_OK)
+  if (usb_host_endpoint_halt(this->device_handle_, ep) != ESP_OK)
+    return false;
+  usb_host_endpoint_flush(this->device_handle_, ep);  // nothing queued: refused, nothing to retire
+  if (usb_host_endpoint_clear(this->device_handle_, ep) != ESP_OK)
     return false;
   auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb(s, this); };
   if (!this->control_transfer(usb_host::USB_DIR_OUT | usb_host::USB_TYPE_STANDARD | usb_host::USB_RECIP_ENDPOINT,
@@ -381,56 +392,179 @@ bool USBStorageClient::scsi_read_capacity_() {
 // Public DISKIO interface (called from FATFS context -- blocking)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Data phase on the client's own two transfers (see DataXfer): submitted ahead, completed in
+// order, so the next piece is already on the bus while the last one is copied.
+void USBStorageClient::data_done_cb(usb_transfer_t *xfer) { xSemaphoreGive(static_cast<DataXfer *>(xfer->context)->done); }
+
+// Bytes per data transfer: whole packets, at most 127 of them per transfer (the DWC controller's
+// limit, see usb_host_transfer_alloc() in usb_host.h), at most the transfer's buffer.
+uint32_t USBStorageClient::data_piece_(uint16_t mps) const {
+  if (mps == 0)
+    return 0;
+  uint32_t piece = std::min<uint32_t>(DATA_XFER_SIZE, 127u * mps);
+  return piece - piece % mps;
+}
+
+bool USBStorageClient::data_submit_(DataXfer &d, uint8_t ep, uint32_t len) {
+  usb_transfer_t *t = d.xfer;
+  xSemaphoreTake(d.done, 0);
+  t->device_handle = this->device_handle_;
+  t->bEndpointAddress = ep;
+  t->num_bytes = static_cast<int>(len);
+  t->flags = 0;
+  if (usb_host_transfer_submit(t) != ESP_OK)
+    return false;
+  d.busy = true;
+  return true;
+}
+
+// Retires what is still on the bus: a halted and flushed endpoint hands its transfers back.
+void USBStorageClient::data_cancel_(uint8_t ep) {
+  bool busy = false;
+  for (auto &d : this->data_)
+    busy |= d.busy;
+  if (!busy)
+    return;
+  usb_host_endpoint_halt(this->device_handle_, ep);
+  usb_host_endpoint_flush(this->device_handle_, ep);
+  for (auto &d : this->data_) {
+    if (d.busy) {
+      xSemaphoreTake(d.done, portMAX_DELAY);
+      d.busy = false;
+    }
+  }
+  usb_host_endpoint_clear(this->device_handle_, ep);
+}
+
+USBStorageClient::DataResult USBStorageClient::data_phase_(bool in, uint8_t *in_buf, const uint8_t *out_buf,
+                                                           uint32_t len) {
+  const uint8_t ep = in ? this->bulk_in_ep_ : this->bulk_out_ep_;
+  const uint32_t piece = this->data_piece_(in ? this->bulk_in_mps_ : this->bulk_out_mps_);
+  if (piece == 0)
+    return DataResult::FAIL;
+  uint32_t submitted = 0;
+  uint32_t done = 0;
+  uint8_t next = 0;
+  uint8_t head = 0;
+  DataResult result = DataResult::OK;
+  while (done < len) {
+    while (submitted < len && !this->data_[next].busy) {
+      DataXfer &d = this->data_[next];
+      d.len = std::min(piece, len - submitted);
+      if (!in)
+        memcpy(d.xfer->data_buffer, out_buf + submitted, d.len);
+      const uint32_t wire = in ? this->round_up_to_in_mps_(static_cast<uint16_t>(d.len)) : d.len;
+      if (!this->data_submit_(d, ep, wire)) {
+        result = DataResult::FAIL;
+        break;
+      }
+      submitted += d.len;
+      next = (next + 1) % DATA_XFERS;
+    }
+    if (result != DataResult::OK)
+      break;
+    DataXfer &d = this->data_[head];
+    if (xSemaphoreTake(d.done, pdMS_TO_TICKS(5000)) != pdTRUE) {
+      result = DataResult::FAIL;
+      break;
+    }
+    d.busy = false;
+    const usb_transfer_t *t = d.xfer;
+    if (t->status != USB_TRANSFER_STATUS_COMPLETED || static_cast<uint32_t>(t->actual_num_bytes) != d.len) {
+      result = t->status == USB_TRANSFER_STATUS_STALL ? DataResult::STALL : DataResult::FAIL;
+      break;
+    }
+    if (in)
+      memcpy(in_buf + done, t->data_buffer, d.len);
+    done += d.len;
+    head = (head + 1) % DATA_XFERS;
+  }
+  if (result != DataResult::OK)
+    this->data_cancel_(ep);
+  return result;
+}
+
+// BOT 5.3.4 reset recovery: Bulk-Only Mass Storage Reset, then the halt of both bulk endpoints
+// cleared.
+bool USBStorageClient::reset_recovery_() {
+  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb(s, this); };
+  const bool ok =
+      this->control_transfer(usb_host::USB_DIR_OUT | usb_host::USB_TYPE_CLASS | usb_host::USB_RECIP_INTERFACE,
+                             MSC_REQUEST_RESET, 0, this->msc_interface_, cb) &&
+      this->wait_transfer_();
+  this->clear_halt_(this->bulk_in_ep_);
+  this->clear_halt_(this->bulk_out_ep_);
+  return ok;
+}
+
+bool USBStorageClient::data_command_(bool in, uint8_t *in_buf, const uint8_t *out_buf, uint32_t len, uint32_t tag) {
+  const DataResult result = this->data_phase_(in, in_buf, out_buf, len);
+  if (result == DataResult::STALL) {
+    // BOT 6.7.2 / 6.7.3: the device ended the data phase with a STALL, its status still follows
+    ESP_LOGE(TAG, "Data phase stalled");
+    if (this->clear_halt_(in ? this->bulk_in_ep_ : this->bulk_out_ep_))
+      this->recv_csw_(tag);
+    return false;
+  }
+  if (result != DataResult::OK) {
+    ESP_LOGE(TAG, "Data phase failed, reset recovery");
+    this->reset_recovery_();
+    return false;
+  }
+  return this->recv_csw_(tag);
+}
+
+// One READ(10) / WRITE(10) for all sectors FATFS asks for at once (up to 65535 per command).
 bool USBStorageClient::scsi_read(uint32_t lba, uint8_t *buf, uint32_t count) {
-  for (uint32_t i = 0; i < count; i++) {
+  while (count > 0) {
+    const uint32_t n = std::min<uint32_t>(count, 0xFFFF);
     uint8_t cdb[10] = {
         SCSI_CMD_READ_10,
         0,
-        static_cast<uint8_t>((lba + i) >> 24),
-        static_cast<uint8_t>((lba + i) >> 16),
-        static_cast<uint8_t>((lba + i) >> 8),
-        static_cast<uint8_t>((lba + i) & 0xFF),
+        static_cast<uint8_t>(lba >> 24),
+        static_cast<uint8_t>(lba >> 16),
+        static_cast<uint8_t>(lba >> 8),
+        static_cast<uint8_t>(lba & 0xFF),
         0,
-        0,
-        1,
+        static_cast<uint8_t>(n >> 8),
+        static_cast<uint8_t>(n & 0xFF),
         0,
     };
-    uint32_t tag = this->cbw_tag_++;
-    uint8_t *sector_buf = buf + i * this->sector_size_;
-
-    if (!this->send_cbw_(tag, this->sector_size_, MSC_BOT_CBW_FLAGS_IN, cdb, sizeof(cdb)))
+    const uint32_t bytes = n * this->sector_size_;
+    const uint32_t tag = this->cbw_tag_++;
+    if (!this->send_cbw_(tag, bytes, MSC_BOT_CBW_FLAGS_IN, cdb, sizeof(cdb)) ||
+        !this->data_command_(true, buf, nullptr, bytes, tag))
       return false;
-    if (!this->recv_chunked_(sector_buf, this->sector_size_))
-      return false;
-    if (!this->recv_csw_(tag))
-      return false;
+    lba += n;
+    buf += bytes;
+    count -= n;
   }
   return true;
 }
 
 bool USBStorageClient::scsi_write(uint32_t lba, const uint8_t *buf, uint32_t count) {
-  for (uint32_t i = 0; i < count; i++) {
+  while (count > 0) {
+    const uint32_t n = std::min<uint32_t>(count, 0xFFFF);
     uint8_t cdb[10] = {
         SCSI_CMD_WRITE_10,
         0,
-        static_cast<uint8_t>((lba + i) >> 24),
-        static_cast<uint8_t>((lba + i) >> 16),
-        static_cast<uint8_t>((lba + i) >> 8),
-        static_cast<uint8_t>((lba + i) & 0xFF),
+        static_cast<uint8_t>(lba >> 24),
+        static_cast<uint8_t>(lba >> 16),
+        static_cast<uint8_t>(lba >> 8),
+        static_cast<uint8_t>(lba & 0xFF),
         0,
-        0,
-        1,
+        static_cast<uint8_t>(n >> 8),
+        static_cast<uint8_t>(n & 0xFF),
         0,
     };
-    uint32_t tag = this->cbw_tag_++;
-    const uint8_t *sector_buf = buf + i * this->sector_size_;
-
-    if (!this->send_cbw_(tag, this->sector_size_, MSC_BOT_CBW_FLAGS_OUT, cdb, sizeof(cdb)))
+    const uint32_t bytes = n * this->sector_size_;
+    const uint32_t tag = this->cbw_tag_++;
+    if (!this->send_cbw_(tag, bytes, MSC_BOT_CBW_FLAGS_OUT, cdb, sizeof(cdb)) ||
+        !this->data_command_(false, nullptr, buf, bytes, tag))
       return false;
-    if (!this->send_chunked_(sector_buf, this->sector_size_))
-      return false;
-    if (!this->recv_csw_(tag))
-      return false;
+    lba += n;
+    buf += bytes;
+    count -= n;
   }
   return true;
 }
