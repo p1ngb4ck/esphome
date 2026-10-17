@@ -795,10 +795,10 @@ void USBStorageClient::async_done_(Step step, uint8_t status) {
       const uint8_t key = this->async_buf_[2] & 0x0F;
       const uint8_t asc = this->async_buf_[12];
       if (status != MSC_BOT_CSW_STATUS_GOOD || asc == ASC_MEDIUM_NOT_PRESENT) {
-        if (lun.mounted)
+        if (lun.mounted) {
           ESP_LOGI(TAG, "Medium removed from '%s'", lun.mount_path);
-        if (lun.mounted || lun.ejected)
           this->unmount_lun_(index);
+        }
         lun.ejected = false;
         this->next_lun_();
         return;
@@ -932,10 +932,9 @@ bool USBStorageClient::mount_lun_(uint8_t index) {
   return true;
 }
 
-// The medium or the device is gone: the slot's device leaves the registry, mounted or not.
 void USBStorageClient::unmount_lun_(uint8_t index) {
   Lun &lun = this->luns_[index];
-  if (lun.device != nullptr && (lun.device->is_mounted() || lun.ejected))
+  if (lun.device != nullptr && lun.device->is_mounted())
     lun.device->on_device_disconnected();
   lun.ready = false;
   if (!lun.mounted)
@@ -960,14 +959,6 @@ void USBStorageClient::unmount_filesystem(uint8_t index) {
     return;
   this->unmount_lun_(index);
   this->luns_[index].ejected = true;
-}
-
-bool USBStorageClient::mount_filesystem(uint8_t index) {
-  if (!this->is_connected() || index >= this->luns_.size())
-    return false;
-  this->luns_[index].ejected = false;
-  this->start_check_();
-  return true;
 }
 
 void USBStorageClient::on_disconnected() {
@@ -1064,13 +1055,13 @@ bool USBStorageDevice::remount_device() {
 void USBStorageDevice::unmount_device() {
   if (!this->fs_mounted_)
     return;
-  // Safe eject: the worker is drained (quiesce, see the registry contract), then the FAT mount
-  // and VFS registration go. The device stays registered, unmounted, so it can be mounted again
-  // (mount()); it leaves the registry when its medium or the device goes.
+  // Safe-eject semantics: unregister from the storage registry first (drains worker jobs,
+  // see the registry contract), then tear the FAT mount + VFS registration down completely.
+  // The device intentionally "disappears" -- get_mount_caps() is UNMOUNT-only, so there is no
+  // mount button; the next mount happens when the stick is physically (re)inserted, which
+  // re-runs the client's connect flow.
   ESP_LOGI(TAG, "Device unmounted");
-  if (storage::global_storage_registry != nullptr)
-    storage::global_storage_registry->quiesce_storage(this);
-  this->fs_mounted_ = false;
+  this->on_device_disconnected();
   if (this->client_ != nullptr)
     this->client_->unmount_filesystem(this->lun_index_);
 }
@@ -1156,15 +1147,10 @@ storage::StorageError USBStorageDevice::get_info(storage::StorageInfo *info) {
   return storage::StorageError::STORAGE_ERROR_OK;
 }
 
-// A slot unmounted by request mounts again (the client asks its medium, then mounts it).
-// Returns OK = mount accepted/initiated, as unmount() does.
+// mount/unmount are driven by USBStorageClient events -- these are no-ops
+// when called directly (the client owns the FAT mount lifecycle).
 storage::StorageError USBStorageDevice::mount() {
-  if (this->fs_mounted_)
-    return storage::StorageError::STORAGE_ERROR_OK;
-  if (this->client_ == nullptr || !this->client_->is_connected())
-    return storage::StorageError::STORAGE_ERROR_NOT_READY;
-  this->mount_pending_ = true;
-  return storage::StorageError::STORAGE_ERROR_OK;
+  return this->fs_mounted_ ? storage::StorageError::STORAGE_ERROR_OK : storage::StorageError::STORAGE_ERROR_NOT_READY;
 }
 
 bool USBStorageDevice::has_open_handles_() const {
@@ -1191,8 +1177,6 @@ storage::StorageError USBStorageDevice::unmount() {
 }
 
 void USBStorageDevice::loop() {
-  if (this->mount_pending_.exchange(false) && this->client_ != nullptr)
-    this->client_->mount_filesystem(this->lun_index_);
   if (!this->unmount_pending_)
     return;
   // Wait until nothing references the device: no open file handle, and no worker job whose
