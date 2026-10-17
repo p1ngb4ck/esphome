@@ -21,7 +21,6 @@ static const char *const TAG = "simple_video_player.pictures";
 
 static constexpr size_t PICTURE_STEP = 1024 * 1024;  // picture buffers grow in these
 static constexpr uint32_t LIST_RETRY_MS = 1000;
-static constexpr size_t MAX_IMAGES = 1000;
 static constexpr int32_t LONG_PRESS_SLOP = 20;  // px the finger may move and still long-press
 
 static std::string lower(std::string text) {
@@ -76,6 +75,11 @@ size_t SimpleVideoPlayer::pictures_bytes_() const {
 void SimpleVideoPlayer::pictures_setup_() {
   if (this->pic_canvas_ == nullptr)
     return;
+  // At the pool's end for good (plan_pool_()).
+  if (!this->images_.reserve(this->pool_, MAX_IMAGES)) {
+    ESP_LOGE(TAG, "Pictures disabled: no room in the PSRAM pool for their list");
+    return;
+  }
   this->pic_lvgl_buf_ = lv_canvas_get_draw_buf(this->pic_canvas_);
   this->update_picture_size_();
   lv_display_t *display = lv_obj_get_display(this->pic_canvas_);
@@ -322,10 +326,19 @@ void SimpleVideoPlayer::list_directory_() {
       (storage::global_storage_worker != nullptr && storage::global_storage_worker->has_active_task_io(storage)))
     return;
 
+  // Listed straight into images_ (the old list goes; a failed listing leaves none, pic_list_failed_).
+  this->pic_generation_++;  // a read in flight belongs to the old list
+  this->images_.clear();
+  for (ThumbSlot &slot : this->thumb_slots_) {
+    slot.image = -1;  // nothing carries over into the new list
+    slot.loaded = false;
+  }
+  this->current_image_ = -1;
+  this->pic_wanted_ = -1;
   struct Context {
-    PsramVector<ImageEntry> found;
+    PoolList<ImageEntry> *found;
     const std::string *dir;
-  } context{{}, &this->pic_dir_};
+  } context{&this->images_, &this->pic_dir_};
   const storage::StorageError err =
       storage->list_dir((rel == nullptr || rel[0] == '\0') ? "/" : rel,
                         [](const storage::FileStat *entry, void *ctx) -> bool {
@@ -333,29 +346,29 @@ void SimpleVideoPlayer::list_directory_() {
                           runtime_image::ImageFormat format;
                           if (entry->is_dir || entry->name[0] == '.' || !picture_format(entry->name, &format))
                             return true;
-                          ImageEntry image{PsramString(context->dir->c_str()), PsramString(entry->name), entry->size};
-                          image.path += '/';
-                          image.path += entry->name;
-                          context->found.push_back(std::move(image));
-                          return context->found.size() < MAX_IMAGES;
+                          if (!SvpId::fits(context->dir->size() + 1 + std::strlen(entry->name))) {
+                            ESP_LOGW(TAG, "%s left out: its path is too long", entry->name);
+                            return true;
+                          }
+                          ImageEntry *image = context->found->emplace_back();
+                          image->path = *context->dir;
+                          image->path += '/';
+                          image->path += entry->name;
+                          image->filename = entry->name;
+                          image->size = entry->size;
+                          return !context->found->full();
                         },
                         &context);
   this->pic_list_pending_ = false;
-  if (err != storage::StorageError::STORAGE_ERROR_OK) {
+  this->pic_list_failed_ = err != storage::StorageError::STORAGE_ERROR_OK;
+  if (this->pic_list_failed_) {
+    this->images_.clear();
     ESP_LOGW(TAG, "Cannot list %s: %s", this->pic_dir_.c_str(), storage::error_to_string(err));
+    this->picture_callbacks_.call();
     return;
   }
-  std::sort(context.found.begin(), context.found.end(),
+  std::sort(this->images_.begin(), this->images_.end(),
             [](const ImageEntry &a, const ImageEntry &b) { return strcasecmp(a.filename.c_str(), b.filename.c_str()) < 0; });
-
-  this->pic_generation_++;  // a read in flight belongs to the old list
-  this->images_ = std::move(context.found);
-  for (ThumbSlot &slot : this->thumb_slots_) {
-    slot.image = -1;  // nothing carries over into the new list
-    slot.loaded = false;
-  }
-  this->current_image_ = -1;
-  this->pic_wanted_ = -1;
   ESP_LOGI(TAG, "%u pictures in %s", static_cast<unsigned>(this->images_.size()), this->pic_dir_.c_str());
   this->picture_callbacks_.call();
 
@@ -406,24 +419,27 @@ bool SimpleVideoPlayer::show_image(const std::string &path) {
 bool SimpleVideoPlayer::ha_show_pictures(size_t index) {
   if (!this->pic_ready_ || index >= this->ha_items_.size() || this->ha_items_[index].dir)
     return false;
-  PsramVector<ImageEntry> found;
+  size_t before = 0;  // the pictures listed before it
+  for (size_t i = 0; i < index; i++)
+    before += this->ha_items_[i].dir ? 0 : 1;
+  if (before >= MAX_IMAGES)
+    return false;
+  this->pic_generation_++;  // a read in flight belongs to the old list
+  this->images_.clear();
   int show = -1;
-  for (size_t i = 0; i < this->ha_items_.size() && found.size() < MAX_IMAGES; i++) {
+  for (size_t i = 0; i < this->ha_items_.size() && !this->images_.full(); i++) {
     const HaItem &item = this->ha_items_[i];
     if (item.dir)
       continue;
     if (i == index)
-      show = static_cast<int>(found.size());
-    found.push_back(ImageEntry{item.id, item.title, 0});
+      show = static_cast<int>(this->images_.size());
+    this->images_.push_back(ImageEntry{item.id, item.title, 0});
   }
-  if (show < 0)
-    return false;
-  this->pic_dir_ = this->ha_id_.c_str();
+  this->pic_dir_ = this->ha_id().c_str();
   this->pic_dir_index_ = SIZE_MAX;
   this->pic_list_pending_ = false;
+  this->pic_list_failed_ = false;
   this->pic_select_.clear();
-  this->pic_generation_++;  // a read in flight belongs to the old list
-  this->images_ = std::move(found);
   for (ThumbSlot &slot : this->thumb_slots_) {
     slot.image = -1;
     slot.loaded = false;
@@ -706,7 +722,7 @@ void SimpleVideoPlayer::start_read_(bool thumbnail, size_t index, size_t slot, b
     read.file = file;
     read.limit = file->capacity - 16;  // room past it for the decoder, as with a file
     xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
-    this->pic_remote_id_ = entry.path;
+    this->ha_texts_->picture_id = entry.path;
     xSemaphoreGive(this->channel_lock_);
     if (!this->channel_request_(CHANNEL_CMD_IMAGE, 0)) {
       read.failed = true;  // the task's queue is full: not read this time
@@ -1500,7 +1516,12 @@ bool SimpleVideoPlayer::setup_thumbnails_() {
   this->thumb_stride_ = lv_draw_buf_width_to_stride(this->thumb_w_, LV_COLOR_FORMAT_RGB565);
   const size_t slot_bytes = static_cast<size_t>(this->thumb_stride_) * this->thumb_h_;
   const size_t total = slot_bytes * this->thumb_count_;
-  // At the start of the pool for good (plan_pool_()).
+  // The slots' list at the pool's end, their pictures at its start, for good (plan_pool_()).
+  if (!this->thumb_slots_.reserve(this->pool_, this->thumb_count_) ||
+      !this->thumb_queue_.reserve(this->pool_, this->thumb_count_)) {
+    ESP_LOGE(TAG, "Thumbnails disabled: no room in the PSRAM pool for their slots");
+    return false;
+  }
   this->thumb_buffer_ = this->pool_.alloc(total);
   if (this->thumb_buffer_ == nullptr) {
     ESP_LOGE(TAG, "Thumbnails need %u bytes of the PSRAM pool -- disabled", static_cast<unsigned>(total));
@@ -1537,9 +1558,8 @@ bool SimpleVideoPlayer::setup_thumbnails_() {
   lv_obj_set_scroll_dir(box, this->thumb_layout_ == ThumbnailLayout::HORIZONTAL ? LV_DIR_HOR : LV_DIR_VER);
   lv_obj_add_event_cb(box, &SimpleVideoPlayer::thumbnail_event_, LV_EVENT_SCROLL, this);
 
-  this->thumb_slots_.resize(this->thumb_count_);
   for (size_t i = 0; i < this->thumb_count_; i++) {
-    ThumbSlot &slot = this->thumb_slots_[i];
+    ThumbSlot &slot = *this->thumb_slots_.emplace_back();
     slot.data = this->thumb_buffer_ + i * slot_bytes;
     lv_obj_t *button = lv_obj_create(box);
     lv_obj_set_size(button, this->thumb_w_, this->thumb_h_);

@@ -91,6 +91,19 @@ void SimpleVideoPlayer::setup() {
     this->mark_failed();
     return;
   }
+  // The lists, at the pool's end for good (plan_pool_()).
+  bool lists = this->playlist_.reserve(this->pool_, MAX_PLAYLIST);
+#ifdef SVP_AUDIO_FILES
+  if (this->file_speaker_ != nullptr)
+    lists = lists && this->audio_queue_.reserve(this->pool_, MAX_PLAYLIST) &&
+            this->audio_titles_.reserve(this->pool_, MAX_PLAYLIST) &&
+            this->audio_order_.reserve(this->pool_, MAX_PLAYLIST);
+#endif
+  if (!lists) {
+    ESP_LOGE(TAG, "No room in the PSRAM pool for the playlist");
+    this->mark_failed();
+    return;
+  }
 
   // Before loop() runs (which serves its storage calls); its ring comes with the session buffers.
   this->file_reader_ = psram_make<BufferedFileReader>();
@@ -527,12 +540,18 @@ void SimpleVideoPlayer::play(const std::string &video_path, bool folder_playlist
 void SimpleVideoPlayer::play_list(std::vector<std::string> paths, size_t start) {
   if (paths.empty())
     return;
-  if (paths.size() > MAX_PLAYLIST)
-    paths.resize(MAX_PLAYLIST);
   this->playlist_.clear();
-  this->playlist_.reserve(paths.size());
-  for (const auto &path : paths)
+  for (const auto &path : paths) {
+    if (this->playlist_.full())
+      break;
+    if (!SvpPath::fits(path.size())) {
+      ESP_LOGW(TAG, "%s left out of the playlist: its path is too long", path.c_str());
+      continue;
+    }
     this->playlist_.emplace_back(path.c_str());
+  }
+  if (this->playlist_.empty())
+    return;
   this->play_index_(std::min(start, this->playlist_.size() - 1));
 }
 
@@ -600,8 +619,10 @@ void SimpleVideoPlayer::run_pending_start_() {
     this->playlist_index_ = 0;
     if (this->start_folder_)
       this->load_folder_playlist_(this->start_path_);
-    if (this->playlist_.empty())
+    if (this->playlist_.empty() && SvpPath::fits(this->start_path_.size()))
       this->playlist_.emplace_back(this->start_path_.c_str());
+    if (this->playlist_.empty())
+      ESP_LOGW(TAG, "%s: its path is too long", this->start_path_.c_str());
     index = this->playlist_index_;
     this->start_path_.clear();
   }
@@ -660,11 +681,16 @@ void SimpleVideoPlayer::load_folder_playlist_(const std::string &path) {
     ESP_LOGW(TAG, "Cannot list %s for the playlist", dir.c_str());
     return;
   }
-  PsramVector<PsramString> names;
+  // The names straight into playlist_ (one place left for the file itself), then the folder put
+  // before them; those whose path would not fit are left out.
+  struct Context {
+    PoolList<SvpPath> *names;
+    size_t dir_len;
+  } context{&this->playlist_, dir.size()};
   const storage::StorageError err = storage->list_dir(
       (rel == nullptr || rel[0] == '\0') ? "/" : rel,
-      [](const storage::FileStat *entry, void *context) -> bool {
-        auto *names = static_cast<PsramVector<PsramString> *>(context);
+      [](const storage::FileStat *entry, void *ctx) -> bool {
+        auto *context = static_cast<Context *>(ctx);
         if (entry->is_dir || entry->name[0] == '.')
           return true;
         const char *dot = strrchr(entry->name, '.');
@@ -673,30 +699,37 @@ void SimpleVideoPlayer::load_folder_playlist_(const std::string &path) {
         std::string extension(dot);
         for (char &c : extension)
           c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-        if (extension == ".avi" || extension == ".mjpeg" || extension == ".mjpg")
-          names->emplace_back(entry->name);
-        return names->size() < MAX_PLAYLIST;
+        if (extension != ".avi" && extension != ".mjpeg" && extension != ".mjpg")
+          return true;
+        if (!SvpPath::fits(context->dir_len + 1 + std::strlen(entry->name))) {
+          ESP_LOGW(TAG, "%s left out of the playlist: its path is too long", entry->name);
+          return true;
+        }
+        context->names->emplace_back(entry->name);
+        return context->names->size() + 1 < context->names->capacity();
       },
-      &names);
+      &context);
   if (err != storage::StorageError::STORAGE_ERROR_OK) {
+    this->playlist_.clear();
     ESP_LOGW(TAG, "Listing %s failed: %s", dir.c_str(), storage::error_to_string(err));
     return;
   }
-  std::sort(names.begin(), names.end(),
-            [](const PsramString &a, const PsramString &b) { return strcasecmp(a.c_str(), b.c_str()) < 0; });
+  std::sort(this->playlist_.begin(), this->playlist_.end(),
+            [](const SvpPath &a, const SvpPath &b) { return strcasecmp(a.c_str(), b.c_str()) < 0; });
   const std::string file = path.substr(slash + 1);
-  this->playlist_.reserve(names.size() + 1);
-  for (size_t i = 0; i < names.size(); i++) {
-    if (file == names[i].c_str())
+  for (size_t i = 0; i < this->playlist_.size(); i++) {
+    SvpPath &entry = this->playlist_[i];
+    if (file == entry.c_str())
       this->playlist_index_ = i;
-    PsramString full(dir.c_str());
+    SvpPath full(dir.c_str());
     full += '/';
-    full += names[i];
-    this->playlist_.push_back(std::move(full));
+    full += entry.c_str();
+    entry = full;
   }
   if (this->playlist_index_ >= this->playlist_.size() || path != this->playlist_[this->playlist_index_].c_str()) {
     // The file itself is not among them (another extension, hidden): play it first, then the folder.
-    this->playlist_.insert(this->playlist_.begin(), PsramString(path.c_str()));
+    if (SvpPath::fits(path.size()))
+      this->playlist_.insert(this->playlist_.begin(), SvpPath(path.c_str()));
     this->playlist_index_ = 0;
   }
   ESP_LOGI(TAG, "Playlist: %u videos in %s", static_cast<unsigned>(this->playlist_.size()), dir.c_str());
@@ -2200,10 +2233,26 @@ bool SimpleVideoPlayer::plan_pool_() {
   }
 #endif
 #ifdef SVP_PICTURES
+  if (this->pic_canvas_ != nullptr)
+    fixed += this->images_.bytes(MAX_IMAGES);
   if (this->pic_canvas_ != nullptr && this->thumbs_enabled_ && this->thumb_container_ != nullptr &&
       this->thumb_count_ > 0)
     fixed += pool_round(static_cast<size_t>(lv_draw_buf_width_to_stride(this->thumb_w_, LV_COLOR_FORMAT_RGB565)) *
-                        this->thumb_h_ * this->thumb_count_);
+                        this->thumb_h_ * this->thumb_count_) +
+             this->thumb_slots_.bytes(this->thumb_count_) + this->thumb_queue_.bytes(this->thumb_count_);
+#endif
+  // The lists (setup(), the features' setups).
+  fixed += this->playlist_.bytes(MAX_PLAYLIST);
+#ifdef SVP_AUDIO_FILES
+  if (this->file_speaker_ != nullptr)
+    fixed += this->audio_queue_.bytes(MAX_PLAYLIST) + this->audio_titles_.bytes(MAX_PLAYLIST) +
+             this->audio_order_.bytes(MAX_PLAYLIST);
+#endif
+#ifdef SVP_CHANNEL_LIST
+  if (!this->channel_url_.empty()) {
+    fixed += pool_round(sizeof(HaTexts));
+    this->channel_lists_(nullptr, &fixed);
+  }
 #endif
 #ifdef SVP_AUDIO_FILES
   if (this->file_speaker_ != nullptr)
@@ -2211,7 +2260,8 @@ bool SimpleVideoPlayer::plan_pool_() {
 #endif
 #ifdef SVP_KEYBOARD
   fixed += pool_round(KBD_LIST_BYTES) + pool_round(KBD_MAX * sizeof(KbdEntry)) + KBD_SLOTS * pool_round(KBD_LAYOUT_BYTES) +
-           pool_round(sizeof(KbdAssignTable));
+           pool_round(sizeof(KbdAssignTable)) + this->kbd_downloads_.bytes(KBD_DOWNLOADS_MAX) +
+           this->kbd_devices_.bytes(KBD_DEVICES_MAX);
 #endif
   // The player's objects, a piece each (psram_make(), the sound ring's, the audio decoder's own).
   fixed += 2 * pool_round(sizeof(BufferedFileReader)) + pool_round(sizeof(AVIParser));
@@ -3220,9 +3270,9 @@ void SimpleVideoPlayer::stop_audio_task_() {
 // The order of play from audio_pos_ 0: `first` leads, shuffled or as added.
 void SimpleVideoPlayer::audio_order_build_(size_t first) {
   const size_t count = this->audio_queue_.size();
-  this->audio_order_.resize(count);
+  this->audio_order_.clear();
   for (size_t i = 0; i < count; i++)
-    this->audio_order_[i] = static_cast<uint16_t>(i);
+    this->audio_order_.push_back(static_cast<uint16_t>(i));
   if (!this->audio_shuffle_ || count < 2) {
     this->audio_pos_ = std::min(first, count != 0 ? count - 1 : 0);
     return;
@@ -3253,8 +3303,8 @@ void SimpleVideoPlayer::audio_start_(size_t pos) {
   this->audio_halted_ = false;
   this->start_pending_.store(false, std::memory_order_release);
 #ifdef SVP_CHANNEL_LIST
-  const PsramString &track = this->audio_queue_[this->audio_order_[pos]];
-  if (track.rfind("media-source://", 0) == 0) {
+  const SvpId &track = this->audio_queue_[this->audio_order_[pos]];
+  if (track.starts_with("media-source://")) {
     // Home Assistant's: svp_relay plays it on the media player; its going idle at the end goes on.
     this->audio_start_pending_.store(false, std::memory_order_release);
     if (!this->is_network_session())
@@ -3283,8 +3333,12 @@ void SimpleVideoPlayer::audio_start_(size_t pos) {
 }
 
 void SimpleVideoPlayer::audio_queue_add(const std::string &path, const std::string &title) {
-  if (this->audio_queue_.size() >= MAX_PLAYLIST)
+  if (this->audio_queue_.full())
     return;
+  if (!SvpId::fits(path.size())) {
+    ESP_LOGW(TAG, "%s not queued: its path is too long", path.c_str());
+    return;
+  }
   this->audio_queue_.emplace_back(path.c_str());
   this->audio_titles_.emplace_back(title.c_str());
   this->audio_order_.push_back(static_cast<uint16_t>(this->audio_queue_.size() - 1));
@@ -3297,8 +3351,8 @@ std::string SimpleVideoPlayer::audio_queue_title(size_t index) const {
     return "";
   if (index < this->audio_titles_.size() && !this->audio_titles_[index].empty())
     return this->audio_titles_[index].c_str();
-  const PsramString &path = this->audio_queue_[index];
-  return path.substr(path.rfind('/') + 1).c_str();
+  const SvpId &path = this->audio_queue_[index];
+  return path.substr(path.rfind('/') + 1);
 }
 
 void SimpleVideoPlayer::audio_queue_clear() {

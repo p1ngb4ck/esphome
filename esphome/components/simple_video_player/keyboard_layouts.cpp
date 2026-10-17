@@ -43,6 +43,8 @@ void SimpleVideoPlayer::keyboard_setup_() {
     slot.data = this->pool_.alloc(KBD_LAYOUT_BYTES);
     ok = ok && slot.data != nullptr;
   }
+  ok = ok && this->kbd_downloads_.reserve(this->pool_, KBD_DOWNLOADS_MAX) &&
+       this->kbd_devices_.reserve(this->pool_, KBD_DEVICES_MAX);
   if (!ok) {
     ESP_LOGE(TAG, "Keyboard layouts disabled: no room in the PSRAM pool");
     return;
@@ -124,7 +126,7 @@ void SimpleVideoPlayer::keyboard_entity_pick(size_t index) {
 void SimpleVideoPlayer::keyboard_entities_() {
   if (this->kbd_entity_labels_ == nullptr)
     return;
-  const auto devices = this->keyboard_devices();
+  const auto &devices = this->keyboard_devices();
   size_t count = 0;
   size_t picked = 0;
   bool found = false;
@@ -168,7 +170,7 @@ void SimpleVideoPlayer::keyboard_entities_() {
   if (this->kbd_layout_sensor_ != nullptr) {
     const auto &device = devices[picked];
     const bool standard = device.key[0] == '@';
-    this->kbd_layout_sensor_->publish_state(!device.layout.empty() ? device.layout
+    this->kbd_layout_sensor_->publish_state(!device.layout.empty() ? std::string(device.layout)
                                             : standard            ? std::string("own")
                                                                   : std::string("standard"));
   }
@@ -388,19 +390,20 @@ std::string SimpleVideoPlayer::keyboard_standard_(size_t input) const {
   return entry != nullptr ? std::string(entry->layout) : this->kbd_inputs_[input].layout;
 }
 
-PsramVector<SimpleVideoPlayer::KeyboardDevice> SimpleVideoPlayer::keyboard_devices() const {
-  PsramVector<KeyboardDevice> out;
+const PoolList<SimpleVideoPlayer::KeyboardDevice> &SimpleVideoPlayer::keyboard_devices() const {
+  PoolList<KeyboardDevice> &out = this->kbd_devices_;
+  out.clear();
   for (size_t i = 0; i < this->kbd_inputs_.size(); i++) {
     const KbdInput &input = this->kbd_inputs_[i];
     const KbdAssign *standard = this->keyboard_assigned_("@" + input.name);
-    out.push_back(KeyboardDevice{"@" + input.name, input.name, static_cast<uint8_t>(i), true,
-                                 standard != nullptr ? std::string(standard->layout) : input.layout});
+    out.push_back(KeyboardDevice{("@" + input.name).c_str(), input.name.c_str(), static_cast<uint8_t>(i), true,
+                                 standard != nullptr ? standard->layout : input.layout.c_str()});
     std::vector<hid::InputDevice> devices;
     input.input->list_devices(devices);
     for (const auto &device : devices) {
       const KbdAssign *entry = this->keyboard_assigned_(device.key);
-      out.push_back(KeyboardDevice{device.key, device.name, static_cast<uint8_t>(i), device.connected,
-                                   entry != nullptr ? std::string(entry->layout) : std::string()});
+      out.push_back(KeyboardDevice{device.key.c_str(), device.name.c_str(), static_cast<uint8_t>(i), device.connected,
+                                   entry != nullptr ? entry->layout : ""});
     }
   }
   // The USB devices seen before and not there now: under the keyboard they were seen behind.
@@ -410,7 +413,7 @@ PsramVector<SimpleVideoPlayer::KeyboardDevice> SimpleVideoPlayer::keyboard_devic
         continue;
       bool listed = false;
       for (const auto &device : out)
-        listed = listed || device.key.compare(0, sizeof(entry.key) - 1, entry.key) == 0;
+        listed = listed || std::strncmp(device.key.c_str(), entry.key, sizeof(entry.key) - 1) == 0;
       if (!listed)
         out.push_back(KeyboardDevice{entry.key, entry.name, entry.input, false, entry.layout});
     }
@@ -505,8 +508,10 @@ std::string SimpleVideoPlayer::keyboard_summary() const {
 
 void SimpleVideoPlayer::keyboard_download(const std::vector<std::string> &names) {
   for (const auto &name : names) {
-    if (!name.empty())
-      this->kbd_downloads_.emplace_back(name.c_str());
+    if (name.empty())
+      continue;
+    if (!FixedString<32>::fits(name.size()) || this->kbd_downloads_.emplace_back(name.c_str()) == nullptr)
+      ESP_LOGW(TAG, "Layout %s not downloaded: %s", name.c_str(), this->kbd_downloads_.full() ? "too many at once" : "name too long");
   }
   this->keyboard_next_();
   this->kbd_callbacks_.call();

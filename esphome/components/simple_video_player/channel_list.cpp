@@ -23,14 +23,45 @@ namespace esphome::simple_video_player {
 
 static const char *const TAG = "simple_video_player.channels";
 
-static constexpr size_t CHANNEL_MAX = 300;
-static constexpr size_t HA_ITEMS_MAX = 500;  // as the relay sends at most
 static constexpr size_t CHANNEL_RESPONSE_MAX = 256 * 1024;
 static constexpr uint32_t RELAY_SLOW_TIMEOUT_MS = 15000;  // /desktop: once the desktop is up; /image: once fitted
 // /options keyboard_install: answered once svp_relay has downloaded and made the keyboard layouts.
 static constexpr uint32_t RELAY_INSTALL_TIMEOUT_MS = 180000;
 
+// The lists' pieces (plan_pool_() counts them through this with pool nullptr): false when one has no room.
+bool SimpleVideoPlayer::channel_lists_(PsramPool *pool, size_t *bytes) {
+  bool ok = true;
+  auto add = [&](auto &list, size_t capacity) {
+    if (pool == nullptr) {
+      *bytes += list.bytes(capacity);
+    } else {
+      ok = ok && list.reserve(*pool, capacity);
+    }
+  };
+  add(this->channel_names_, CHANNEL_MAX);
+  add(this->channel_new_names_, CHANNEL_MAX);
+  add(this->channel_refs_, CHANNEL_MAX);
+  add(this->channel_new_refs_, CHANNEL_MAX);
+  add(this->ha_reqs_, HA_REQS_MAX);
+  add(this->ha_src_items_, HA_SOURCES_MAX);
+  for (HaSources &sources : this->ha_new_srcs_)
+    add(sources.items, HA_SOURCES_MAX);
+  add(this->ha_items_, HA_ITEMS_MAX);
+  add(this->ha_new_items_, HA_ITEMS_MAX);
+  add(this->opt_values_, OPT_VALUES_MAX);
+  add(this->opt_new_values_, OPT_VALUES_MAX);
+  add(this->opt_choices_, OPT_CHOICES_MAX);
+  add(this->opt_new_choices_, OPT_CHOICES_MAX);
+  add(this->opt_sets_, OPT_SETS_MAX);
+  return ok;
+}
+
 bool SimpleVideoPlayer::setup_channel_list_() {
+  this->ha_texts_ = psram_make<HaTexts>();
+  if (!this->ha_texts_ || !this->channel_lists_(&this->pool_, nullptr)) {
+    ESP_LOGE(TAG, "No room in the PSRAM pool for the channel and Home Assistant lists");
+    return false;
+  }
   this->channel_q_ = xQueueCreate(8, sizeof(ChannelCmd));
   this->channel_lock_ = xSemaphoreCreateMutex();
   if (this->channel_q_ == nullptr || this->channel_lock_ == nullptr ||
@@ -68,9 +99,17 @@ static std::string url_encoded(const char *text) {
 void SimpleVideoPlayer::ha_browse(const std::string &type, const std::string &id) {
   if (this->channel_lock_ == nullptr)
     return;
+  if (!HaType::fits(type.size()) || !SvpId::fits(id.size())) {
+    ESP_LOGW(TAG, "Media id too long: %s", id.c_str());
+    return;
+  }
   xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
-  this->ha_reqs_.emplace_back(PsramString(type.c_str()), PsramString(id.c_str()));
+  const bool queued = this->ha_reqs_.emplace_back(type.c_str(), id.c_str()) != nullptr;
   xSemaphoreGive(this->channel_lock_);
+  if (!queued) {
+    ESP_LOGW(TAG, "Too many listings asked for: %s not listed", id.c_str());
+    return;
+  }
   if (this->channel_request_(CHANNEL_CMD_HA_BROWSE, 0))
     return;
   xSemaphoreTake(this->channel_lock_, portMAX_DELAY);  // the task's queue is full: not asked for
@@ -124,8 +163,12 @@ bool SimpleVideoPlayer::audio_remote_command_(media_player::MediaPlayerCommand c
 void SimpleVideoPlayer::ha_play_request_(const std::string &id) {
   if (this->channel_lock_ == nullptr || id.empty())
     return;
+  if (!SvpId::fits(id.size())) {
+    ESP_LOGW(TAG, "Media id too long: %s", id.c_str());
+    return;
+  }
   xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
-  this->ha_play_id_.assign(id.c_str());
+  this->ha_texts_->play_id.assign(id.c_str());
   xSemaphoreGive(this->channel_lock_);
   this->channel_request_(CHANNEL_CMD_HA_PLAY, 0);
 }
@@ -151,6 +194,17 @@ std::string SimpleVideoPlayer::relay_choices(const std::string &key) const {
 void SimpleVideoPlayer::relay_option_set(const std::string &key, const std::string &value) {
   if (this->channel_lock_ == nullptr)
     return;
+  if (!OptPair::first_type::fits(key.size()) || !OptPair::second_type::fits(value.size())) {
+    ESP_LOGW(TAG, "Relay setting %s: too long", key.c_str());
+    return;
+  }
+  xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
+  const bool queued = this->opt_sets_.emplace_back(key.c_str(), value.c_str()) != nullptr;
+  xSemaphoreGive(this->channel_lock_);
+  if (!queued) {
+    ESP_LOGW(TAG, "Relay setting %s not sent: too many waiting", key.c_str());
+    return;
+  }
   // Shown as set at once; the relay sets the panel up again with it.
   bool known = false;
   for (auto &option : this->opt_values_) {
@@ -160,10 +214,7 @@ void SimpleVideoPlayer::relay_option_set(const std::string &key, const std::stri
     }
   }
   if (!known)
-    this->opt_values_.emplace_back(PsramString(key.c_str()), PsramString(value.c_str()));
-  xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
-  this->opt_sets_.emplace_back(PsramString(key.c_str()), PsramString(value.c_str()));
-  xSemaphoreGive(this->channel_lock_);
+    this->opt_values_.emplace_back(key.c_str(), value.c_str());
   this->channel_request_(CHANNEL_CMD_OPTIONS_SET, 0);
 }
 
@@ -199,9 +250,13 @@ void SimpleVideoPlayer::channel_loop_() {
   if (!this->channel_new_.load(std::memory_order_acquire))
     return;
   // LVGL keeps pointers into channel_names_: swap the lists and set the options in one go, here on
-  // the LVGL thread. The flag is cleared under the lock, where the channel task sets it: a list
-  // written meanwhile is not swapped twice (which would bring back the one before).
+  // the LVGL thread. The flag is checked and cleared under the lock, where the channel task sets it
+  // and clears it before it writes the next list (outside the lock).
   xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
+  if (!this->channel_new_.load(std::memory_order_relaxed)) {
+    xSemaphoreGive(this->channel_lock_);
+    return;
+  }
   this->channel_new_.store(false, std::memory_order_relaxed);
   this->channel_names_.swap(this->channel_new_names_);
   this->channel_refs_.swap(this->channel_new_refs_);
@@ -222,45 +277,56 @@ void SimpleVideoPlayer::channel_loop_() {
 }
 
 void SimpleVideoPlayer::ha_loop_() {
-  // Each flag is cleared under channel_lock_, where the channel task sets it (see channel_loop_()).
+  // Each flag is checked and cleared under channel_lock_, where the channel task sets it (see
+  // channel_loop_()). The sources come in a ring: each listed one is taken, oldest first.
   if (this->ha_new_src_.load(std::memory_order_acquire)) {
-    PsramVector<HaSources> listed;
-    xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
-    this->ha_new_src_.store(false, std::memory_order_relaxed);
-    listed.swap(this->ha_new_srcs_);
-    xSemaphoreGive(this->channel_lock_);
-    for (auto &sources : listed) {
-      this->ha_src_items_ = std::move(sources.items);
-      this->ha_src_type_ = std::move(sources.type);
+    while (true) {
+      xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
+      if (this->ha_srcs_count_ == 0) {
+        this->ha_new_src_.store(false, std::memory_order_relaxed);
+        xSemaphoreGive(this->channel_lock_);
+        break;
+      }
+      HaSources &sources = this->ha_new_srcs_[this->ha_srcs_head_];
+      this->ha_src_items_.swap(sources.items);
+      this->ha_texts_->sources_type = sources.type;
       this->ha_src_ok_ = sources.ok;
+      this->ha_srcs_head_ = static_cast<uint8_t>((this->ha_srcs_head_ + 1) % HA_SOURCE_LISTS);
+      this->ha_srcs_count_--;
+      xSemaphoreGive(this->channel_lock_);
       this->ha_last_sources_ = true;
       this->ha_callbacks_.call();
     }
   }
   if (this->ha_new_.load(std::memory_order_acquire)) {
     xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
-    this->ha_new_.store(false, std::memory_order_relaxed);
-    this->ha_items_.swap(this->ha_new_items_);
-    this->ha_type_.swap(this->ha_new_type_);
-    this->ha_id_.swap(this->ha_new_id_);
-    this->ha_title_.swap(this->ha_new_title_);
-    this->ha_path_.swap(this->ha_new_path_);
-    this->ha_parent_.swap(this->ha_new_parent_);
-    this->ha_ok_ = this->ha_new_ok_;
+    const bool listed = this->ha_new_.load(std::memory_order_relaxed);
+    if (listed) {
+      this->ha_new_.store(false, std::memory_order_relaxed);
+      this->ha_items_.swap(this->ha_new_items_);
+      this->ha_texts_->shown ^= 1;
+      this->ha_ok_ = this->ha_new_ok_;
+    }
     xSemaphoreGive(this->channel_lock_);
-    this->ha_last_sources_ = false;
-    this->ha_callbacks_.call();
+    if (listed) {
+      this->ha_last_sources_ = false;
+      this->ha_callbacks_.call();
+    }
   }
   if (this->opt_new_.load(std::memory_order_acquire)) {
     xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
-    this->opt_new_.store(false, std::memory_order_relaxed);
-    if (this->opt_new_ok_) {  // else what was read before stays shown
-      this->opt_values_.swap(this->opt_new_values_);
-      this->opt_choices_.swap(this->opt_new_choices_);
+    const bool listed = this->opt_new_.load(std::memory_order_relaxed);
+    if (listed) {
+      this->opt_new_.store(false, std::memory_order_relaxed);
+      if (this->opt_new_ok_) {  // else what was read before stays shown
+        this->opt_values_.swap(this->opt_new_values_);
+        this->opt_choices_.swap(this->opt_new_choices_);
+      }
+      this->opt_ok_ = this->opt_new_ok_;
     }
-    this->opt_ok_ = this->opt_new_ok_;
     xSemaphoreGive(this->channel_lock_);
-    this->opt_callbacks_.call();
+    if (listed)
+      this->opt_callbacks_.call();
   }
 }
 
@@ -277,16 +343,27 @@ void SimpleVideoPlayer::channel_task_loop_() {
       size_t len = 0;
       if (!this->channel_http_("/channels?refresh=1", nullptr, &body, &len))
         continue;
-      PsramVector<PsramString> names, refs;
+      // The next list is written outside the lock: one not taken yet is given up first.
+      xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
+      this->channel_new_.store(false, std::memory_order_relaxed);
+      xSemaphoreGive(this->channel_lock_);
+      auto &names = this->channel_new_names_;
+      auto &refs = this->channel_new_refs_;
+      names.clear();
+      refs.clear();
       const bool ok = json::parse_json(reinterpret_cast<const uint8_t *>(body), len, [&](JsonObject root) -> bool {
         JsonArray channels = root["channels"];
         for (JsonObject channel : channels) {
-          if (names.size() >= CHANNEL_MAX)
+          if (names.full() || refs.full())
             break;
           const char *name = channel["name"] | "";
           const char *ref = channel["ref"] | "";
           if (*ref == '\0')
             continue;
+          if (!FixedString<256>::fits(ref)) {
+            ESP_LOGW(TAG, "Channel %s left out: its reference is too long", name);
+            continue;
+          }
           names.emplace_back(name);
           refs.emplace_back(ref);
         }
@@ -299,8 +376,6 @@ void SimpleVideoPlayer::channel_task_loop_() {
       }
       ESP_LOGI(TAG, "%u channels", static_cast<unsigned>(names.size()));
       xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
-      this->channel_new_names_ = std::move(names);
-      this->channel_new_refs_ = std::move(refs);
       this->channel_new_.store(true, std::memory_order_release);  // under the lock: see channel_loop_()
       xSemaphoreGive(this->channel_lock_);
       continue;
@@ -329,7 +404,7 @@ void SimpleVideoPlayer::channel_task_loop_() {
       this->ha_browse_task_();
     } else if (request.cmd == CHANNEL_CMD_HA_PLAY) {
       xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
-      const std::string id = this->ha_play_id_.c_str();
+      const std::string id = this->ha_texts_->play_id.c_str();
       xSemaphoreGive(this->channel_lock_);
       const std::string payload = json::build_json([&](JsonObject root) {
         root["ref"] = id;
@@ -374,51 +449,81 @@ void SimpleVideoPlayer::ha_browse_task_() {
     path += "&id=" + url_encoded(id.c_str());
   char *body = nullptr;
   size_t len = 0;
-  PsramVector<HaItem> items;
-  PsramString title, where, parent;
   bool ok = this->channel_http_(path.c_str(), nullptr, &body, &len);
+  // Written outside the lock: the sources into the ring's next list (the oldest given up when it is
+  // full), a folder into the next listing (one not taken yet given up first).
+  HaSources *sources = nullptr;
+  HaListing *listing = nullptr;
+  xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
+  if (id.empty()) {
+    if (this->ha_srcs_count_ == HA_SOURCE_LISTS) {
+      this->ha_srcs_head_ = static_cast<uint8_t>((this->ha_srcs_head_ + 1) % HA_SOURCE_LISTS);
+      this->ha_srcs_count_--;
+    }
+    sources = &this->ha_new_srcs_[(this->ha_srcs_head_ + this->ha_srcs_count_) % HA_SOURCE_LISTS];
+  } else {
+    this->ha_new_.store(false, std::memory_order_relaxed);
+    listing = &this->ha_texts_->listings[this->ha_texts_->shown ^ 1];
+  }
+  xSemaphoreGive(this->channel_lock_);
+  PoolList<HaItem> &items = sources != nullptr ? sources->items : this->ha_new_items_;
+  items.clear();
+  if (listing != nullptr) {
+    listing->type.assign(type.c_str());
+    listing->id.assign(id.c_str());
+    listing->title.clear();
+    listing->path.clear();
+    listing->parent.clear();
+  }
   if (ok) {
     ok = json::parse_json(reinterpret_cast<const uint8_t *>(body), len, [&](JsonObject root) -> bool {
-      title.assign(root["title"] | "");
-      where.assign(root["path"] | "");
-      parent.assign(root["parent"] | "");
+      if (listing != nullptr) {
+        listing->title.assign(root["title"] | "");
+        listing->path.assign(root["path"] | "");
+        const char *parent = root["parent"] | "";
+        if (SvpId::fits(parent))
+          listing->parent.assign(parent);
+      }
       JsonArray list = root["items"].as<JsonArray>();
       for (JsonObject item : list) {
-        if (items.size() >= HA_ITEMS_MAX)
+        if (items.full())
           break;
         const char *item_id = item["id"] | "";
         if (*item_id == '\0')
           continue;
-        items.push_back(HaItem{PsramString(item["title"] | ""), PsramString(item_id), item["dir"] | false});
+        if (!SvpId::fits(item_id)) {
+          ESP_LOGW(TAG, "%s left out: its id is too long", item["title"] | "");
+          continue;
+        }
+        items.emplace_back(HaItem{item["title"] | "", item_id, item["dir"] | false});
       }
       return true;
     });
     heap_caps_free(body);
   }
-  xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
-  if (id.empty()) {
-    this->ha_new_srcs_.push_back(HaSources{PsramString(type.c_str()), std::move(items), ok});
-  } else {
-    this->ha_new_items_ = std::move(items);
-    this->ha_new_type_.assign(type.c_str());
-    this->ha_new_id_.assign(id.c_str());
-    this->ha_new_title_ = std::move(title);
-    this->ha_new_path_ = std::move(where);
-    this->ha_new_parent_ = std::move(parent);
-    this->ha_new_ok_ = ok;
+  if (sources != nullptr) {
+    sources->type.assign(type.c_str());
+    sources->ok = ok;
   }
-  (id.empty() ? this->ha_new_src_ : this->ha_new_).store(true, std::memory_order_release);  // under the lock
+  xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
+  if (sources != nullptr) {
+    this->ha_srcs_count_++;
+    this->ha_new_src_.store(true, std::memory_order_release);  // under the lock
+  } else {
+    this->ha_new_ok_ = ok;
+    this->ha_new_.store(true, std::memory_order_release);  // under the lock
+  }
   xSemaphoreGive(this->channel_lock_);
 }
 
 #ifdef SVP_PICTURES
-bool SimpleVideoPlayer::remote_image_(const ImageEntry &entry) { return entry.path.rfind("media-source://", 0) == 0; }
+bool SimpleVideoPlayer::remote_image_(const ImageEntry &entry) { return entry.path.starts_with("media-source://"); }
 
 // Channel task: the picture of pic_read_ into its file, fitted by the relay to the display and to the
 // file's room; pic_read_ stays the main loop's but for what is set here before done.
 void SimpleVideoPlayer::image_task_() {
   xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
-  const std::string id = this->pic_remote_id_.c_str();
+  const std::string id = this->ha_texts_->picture_id.c_str();
   xSemaphoreGive(this->channel_lock_);
   PictureRead &read = this->pic_read_;
   char query[64];
@@ -466,26 +571,38 @@ void SimpleVideoPlayer::options_get_task_() {
   snprintf(path, sizeof(path), "/options?port=%u", static_cast<unsigned>(this->stream_port_));
   char *body = nullptr;
   size_t len = 0;
-  PsramVector<std::pair<PsramString, PsramString>> values, choices;
   bool ok = this->channel_http_(path, nullptr, &body, &len);
+  // Written outside the lock (a set not taken yet given up first).
+  xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
+  this->opt_new_.store(false, std::memory_order_relaxed);
+  xSemaphoreGive(this->channel_lock_);
+  auto &values = this->opt_new_values_;
+  auto &choices = this->opt_new_choices_;
+  values.clear();
+  choices.clear();
   if (ok) {
     ok = json::parse_json(reinterpret_cast<const uint8_t *>(body), len, [&](JsonObject root) -> bool {
       JsonObject values_in = root["values"].as<JsonObject>();
       for (JsonPair pair : values_in) {
         JsonVariant value = pair.value();
-        PsramString text;
+        std::string text;
         if (value.is<bool>()) {
           text = value.as<bool>() ? "true" : "false";
         } else if (value.is<long>()) {
-          text = std::to_string(value.as<long>()).c_str();
+          text = std::to_string(value.as<long>());
         } else {
           text = value.as<const char *>() != nullptr ? value.as<const char *>() : "";
         }
-        values.emplace_back(PsramString(pair.key().c_str()), std::move(text));
+        if (!OptPair::first_type::fits(pair.key().c_str()) || !OptPair::second_type::fits(text.size())) {
+          ESP_LOGW(TAG, "Relay setting %s left out: too long", pair.key().c_str());
+          continue;
+        }
+        if (values.emplace_back(pair.key().c_str(), text) == nullptr)
+          ESP_LOGW(TAG, "Relay setting %s left out: too many", pair.key().c_str());
       }
       JsonObject choices_in = root["choices"].as<JsonObject>();
       for (JsonPair pair : choices_in) {
-        PsramString lines;
+        std::string lines;
         bool first = true;
         for (JsonVariant choice : pair.value().as<JsonArray>()) {
           if (!first)
@@ -493,15 +610,18 @@ void SimpleVideoPlayer::options_get_task_() {
           first = false;
           lines += choice.as<const char *>() != nullptr ? choice.as<const char *>() : "";
         }
-        choices.emplace_back(PsramString(pair.key().c_str()), std::move(lines));
+        if (!OptPair::first_type::fits(pair.key().c_str()) || !OptPair::second_type::fits(lines.size())) {
+          ESP_LOGW(TAG, "Choices of %s left out: too long", pair.key().c_str());
+          continue;
+        }
+        if (choices.emplace_back(pair.key().c_str(), lines) == nullptr)
+          ESP_LOGW(TAG, "Choices of %s left out: too many", pair.key().c_str());
       }
       return true;
     });
     heap_caps_free(body);
   }
   xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
-  this->opt_new_values_ = std::move(values);
-  this->opt_new_choices_ = std::move(choices);
   this->opt_new_ok_ = ok;
   this->opt_new_.store(true, std::memory_order_release);  // under the lock
   xSemaphoreGive(this->channel_lock_);
@@ -509,18 +629,23 @@ void SimpleVideoPlayer::options_get_task_() {
 
 // Channel task: the settings changed on the panel, to the relay.
 void SimpleVideoPlayer::options_set_task_() {
-  PsramVector<std::pair<PsramString, PsramString>> sets;
-  xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
-  sets.swap(this->opt_sets_);
-  xSemaphoreGive(this->channel_lock_);
   bool installed = false;
-  for (const auto &set : sets) {
+  while (true) {
+    xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
+    if (this->opt_sets_.empty()) {
+      xSemaphoreGive(this->channel_lock_);
+      break;
+    }
+    const std::string key = this->opt_sets_.front().first.c_str();
+    const std::string value = this->opt_sets_.front().second.c_str();
+    this->opt_sets_.erase(this->opt_sets_.begin());
+    xSemaphoreGive(this->channel_lock_);
     const std::string payload = json::build_json([&](JsonObject root) {
       root["port"] = this->stream_port_;
-      root["key"] = set.first.c_str();
-      root["value"] = set.second.c_str();
+      root["key"] = key;
+      root["value"] = value;
     });
-    const bool install = set.first == "keyboard_install";
+    const bool install = key == "keyboard_install";
     this->channel_http_("/options", payload.c_str(), nullptr, nullptr, nullptr, 0,
                         install ? RELAY_INSTALL_TIMEOUT_MS : 0);
     installed |= install;

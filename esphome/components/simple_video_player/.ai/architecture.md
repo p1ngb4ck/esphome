@@ -194,12 +194,23 @@ Objects of svp's own, a pool piece each from the pool's end (`alloc_top`: they n
 buffers' stretch), counted in `plan_pool_()` (`psram_make`, `PoolAllocator`):
 file readers, AVI parser, PNG/BMP decoder, the sound ring's object (with its shared_ptr block), the
 audio decoder with its source, transfer buffer (and its data) and codec objects (`audio::AudioHeap`).
-Not yet in the pool: the `PsramVector`/`PsramString` lists (PSRAM heap). Stay outside by decision
+The lists (`pool_list.h`): a `PoolList` of fixed capacity each, its entries `FixedString`s kept in
+place, a piece from the pool's end taken in setup for good, counted in `plan_pool_()`; full: refused;
+a path/id too long: left out (logged), a title: cut. Taken only for the features configured:
+`playlist_` 500 × 256 B; the audio queue (file speaker) 500 × (384 + 128 + 2) B; pictures (canvas)
+`images_` 1000 × (384 + 128 + 8) B, thumbnail slots/queue per thumbnail; channel list (`url`, with
+`HaTexts`: the folder listing's texts ×2, play/picture ids) channels 4 × 300 × 64/256 B, HA folders
+2 × 500 × (128 + 384) B, sources 32 + a ring of 3 × 32, listings asked 8, relay settings 32/16 (×2),
+8 sets; keyboard layouts: downloads 16 × 32 B, `keyboard_devices()` 32 (one list, made anew per
+call). The channel task writes the "new" list outside `channel_lock_` after clearing its flag under
+it; the main loop takes it only with the flag set, checked under the lock. A local picture folder is
+listed straight into `images_`: a failed listing leaves it empty (`picture_listing_failed()`, the
+device YAML shows "Listing failed"). Still on the PSRAM heap: the configuration's lists filled before
+the pool exists (picture folders, controls buttons, keyboards). Stay outside by decision
 (Olli, 2026-10-17): the codec libraries' own working buffers (FLAC_MALLOC etc.) -- ESPHome's audio
 codecs as they are, in PSRAM.
 Outside the pool (svp): `spice_scratch_` 20 KiB internal; per USB slot 4 KiB internal `stage_` +
-bookkeeping; task stacks 48 KiB PSRAM; PsramVector/PsramString lists (playlist, images, queue,
-HA items); `channel_http_` response buffer PSRAM 16-256 KiB per request; AudioDecoder internals;
+bookkeeping; task stacks 48 KiB PSRAM; the configuration's PsramVector lists (above); `channel_http_` response buffer PSRAM 16-256 KiB per request; AudioDecoder internals;
 PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
 
 ## 10. Home Assistant / relay interface (summary; details in protocol.md)

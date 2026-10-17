@@ -21,7 +21,7 @@ round without Olli's go.
 | Item | Fact |
 |---|---|
 | MCU | ESP32-P4 (engineering sample, silicon < v3: `CONFIG_ESP32P4_SELECTS_REV_LESS_V3`), 2 HP cores, 360 MHz in the device YAML |
-| RAM | 512 KB internal SRAM (scarce), 32 MB PSRAM. svp gets one PSRAM pool (`psram_pool_size`, device: 13 MB). Idle free PSRAM on the device: ~5.5 MB (Olli, 2026-10-15) |
+| RAM | 512 KB internal SRAM (scarce), 32 MB PSRAM. svp gets one PSRAM pool (`psram_pool_size`, device: 15 MB). Idle free PSRAM on the device: ~5.5 MB (Olli, 2026-10-15) |
 | IDF | Must build with ESP-IDF 5.5.5 (ESPHome's) and 6.1 (Olli's device: 6.1, `release/v6.1`) |
 | Display | MIPI-DSI panel 800x1280 native, LVGL screen 1280x800 (rotated). DSI-direct video: decoded frame copied into the panel framebuffer; LVGL paused meanwhile |
 | Decoders | HW JPEG decoder (the only video path: MJPEG), shared by video, stream stills, pictures, cover (driver `codec_mutex` serialises). No H.264. PNG/BMP in software |

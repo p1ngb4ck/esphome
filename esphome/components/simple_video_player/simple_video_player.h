@@ -68,6 +68,7 @@
 #include "buffered_file_reader.h"
 #include "avi_parser.h"
 #include "psram_pool.h"
+#include "pool_list.h"
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -316,10 +317,14 @@ template<class T, class U> bool operator!=(const PoolAllocator<T> & /*a*/, const
   return false;
 }
 
+using SvpPath = FixedString<256>;   // a local file's path
+using SvpId = FixedString<384>;     // a local path or a Home Assistant media id
+using SvpTitle = FixedString<128>;  // a name shown
+
 #ifdef SVP_PICTURES
 struct ImageEntry {
-  PsramString path;
-  PsramString filename;
+  SvpId path;
+  SvpTitle filename;
   uint64_t size{0};
 };
 
@@ -405,7 +410,7 @@ class SimpleVideoPlayer : public Component
   size_t audio_queue_size() const { return this->audio_queue_.size(); }
   /// Counts the changes of the queue's tracks (added, cleared).
   uint32_t audio_queue_generation() const { return this->audio_queue_gen_; }
-  const PsramString &audio_queue_item(size_t index) const { return this->audio_queue_[index]; }
+  TextView audio_queue_item(size_t index) const { return this->audio_queue_[index]; }
   std::string audio_queue_title(size_t index) const;
   /// The queue's track that plays or played last; -1 for none.
   int audio_queue_index() const {
@@ -550,7 +555,7 @@ class SimpleVideoPlayer : public Component
   void channel_play(int index);
   void channel_stop() { this->channel_request_(CHANNEL_CMD_STOP, 0); }
   // Main loop: the names of the channels; the version changes with every new list.
-  const PsramVector<PsramString> &get_channel_names() const { return this->channel_names_; }
+  const PoolList<FixedString<64>> &get_channel_names() const { return this->channel_names_; }
   uint32_t get_channel_list_version() const { return this->channel_version_; }
   // The channel played last, -1 for none.
   int get_channel_index() const { return this->channel_index_; }
@@ -559,23 +564,25 @@ class SimpleVideoPlayer : public Component
   // "image"; id empty) or a folder of one, listed for the main loop (add_on_ha_browse_callback); a
   // sound or video played through the relay, pictures shown on the picture canvas like local ones.
   struct HaItem {
-    PsramString title;
-    PsramString id;
+    SvpTitle title;
+    SvpId id;
     bool dir{false};
   };
   void ha_browse(const std::string &type, const std::string &id);
   // The sources of a type, listed last; whether the callback is for them (else for a folder).
-  const PsramVector<HaItem> &ha_source_items() const { return this->ha_src_items_; }
-  const PsramString &ha_sources_type() const { return this->ha_src_type_; }
+  const PoolList<HaItem> &ha_source_items() const { return this->ha_src_items_; }
+  TextView ha_sources_type() const { return this->ha_texts_ ? TextView(this->ha_texts_->sources_type) : TextView(); }
   bool ha_sources_listed() const { return this->ha_src_ok_; }
   bool ha_last_sources() const { return this->ha_last_sources_; }
   // The folder listed last.
-  const PsramVector<HaItem> &ha_items() const { return this->ha_items_; }
-  const PsramString &ha_type() const { return this->ha_type_; }
-  const PsramString &ha_id() const { return this->ha_id_; }
-  const PsramString &ha_title() const { return this->ha_title_; }
-  const PsramString &ha_path() const { return this->ha_path_; }
-  const PsramString &ha_parent() const { return this->ha_parent_; }  // empty: none
+  const PoolList<HaItem> &ha_items() const { return this->ha_items_; }
+  TextView ha_type() const { return this->ha_texts_ ? TextView(this->ha_texts_->listing().type) : TextView(); }
+  TextView ha_id() const { return this->ha_texts_ ? TextView(this->ha_texts_->listing().id) : TextView(); }
+  TextView ha_title() const { return this->ha_texts_ ? TextView(this->ha_texts_->listing().title) : TextView(); }
+  TextView ha_path() const { return this->ha_texts_ ? TextView(this->ha_texts_->listing().path) : TextView(); }
+  TextView ha_parent() const {  // empty: none
+    return this->ha_texts_ ? TextView(this->ha_texts_->listing().parent) : TextView();
+  }
   bool ha_listed() const { return this->ha_ok_; }  // false: the last listing failed
   void ha_play(const std::string &id);
   // The pictures of the folder listed, from ha_items()[index] on.
@@ -625,17 +632,17 @@ class SimpleVideoPlayer : public Component
   size_t keyboard_find(const std::string &query, int *out, size_t max) const;
 
   struct KeyboardDevice {
-    std::string key;   // hid::InputDevice's; "@" and the keyboard's name for a keyboard's standard
-    std::string name;
-    uint8_t input;     // which keyboard
-    bool connected;
-    std::string layout;  // given it: "" none (the keyboard's standard / for a standard: its own)
+    FixedString<48> key;  // hid::InputDevice's; "@" and the keyboard's name for a keyboard's standard
+    FixedString<48> name;
+    uint8_t input{0};     // which keyboard
+    bool connected{false};
+    FixedString<32> layout;  // given it: "" none (the keyboard's standard / for a standard: its own)
   };
   size_t keyboard_input_count() const { return this->kbd_inputs_.size(); }
   const std::string &keyboard_input_name(size_t index) const { return this->kbd_inputs_[index].name; }
   /// Each keyboard's standard (key "@name") and every device of theirs: those behind them now, and
-  /// the USB ones seen before.
-  PsramVector<KeyboardDevice> keyboard_devices() const;
+  /// the USB ones seen before. Made anew by every call (one list, kept by the player).
+  const PoolList<KeyboardDevice> &keyboard_devices() const;
   /// The layout given a device or a keyboard's standard (key as KeyboardDevice's), "" none: kept,
   /// then put on it once read. False: no such device, or no room to keep it.
   bool keyboard_assign(const std::string &key, const std::string &layout);
@@ -856,6 +863,8 @@ class SimpleVideoPlayer : public Component
   void toggle_slideshow();
   SlideshowMode get_slideshow_mode() const { return this->slideshow_mode_; }
   size_t get_image_count() const { return this->images_.size(); }
+  /// The folder's last listing failed (no pictures listed).
+  bool picture_listing_failed() const { return this->pic_list_failed_; }
   int get_current_index() const { return this->current_image_; }
   const ImageEntry *get_current_image() const {
     return this->current_image_ >= 0 && static_cast<size_t>(this->current_image_) < this->images_.size()
@@ -1145,6 +1154,7 @@ class SimpleVideoPlayer : public Component
     uint16_t index;
   };
   bool setup_channel_list_();
+  bool channel_lists_(PsramPool *pool, size_t *bytes);
   bool channel_request_(uint8_t cmd, uint16_t index);
   void channel_loop_();
   void ha_loop_();
@@ -1500,9 +1510,9 @@ class SimpleVideoPlayer : public Component
   static constexpr size_t AUDIO_FILE_RING_SIZE = 128 * 1024;
   // Main loop only. audio_order_ is the queue's order of play (shuffled or as added), audio_pos_
   // the place in it of the track that plays or played last.
-  PsramVector<PsramString> audio_queue_;
-  PsramVector<PsramString> audio_titles_;  // per track; empty: its file's name
-  PsramVector<uint16_t> audio_order_;
+  PoolList<SvpId> audio_queue_;
+  PoolList<SvpTitle> audio_titles_;  // per track; empty: its file's name
+  PoolList<uint16_t> audio_order_;
   size_t audio_pos_{0};
   uint32_t audio_queue_gen_{0};
   bool audio_current_{false};  // audio_pos_ names a track: not before the first and after the last
@@ -1809,7 +1819,9 @@ class SimpleVideoPlayer : public Component
   bool pic_list_pending_{false};
   uint32_t pic_list_retry_ms_{0};
   uint32_t pic_generation_{0};           // bumped with every listing; older reads are dropped
-  PsramVector<ImageEntry> images_;
+  static constexpr size_t MAX_IMAGES = 1000;
+  PoolList<ImageEntry> images_;
+  bool pic_list_failed_{false};  // the folder's listing failed: images_ empty
   int current_image_{-1};
   int pic_wanted_{-1};                   // requested, not read yet
   PictureRead pic_read_;
@@ -1882,11 +1894,11 @@ class SimpleVideoPlayer : public Component
   uint32_t thumb_auto_hide_ms_{10000};
   bool thumbs_visible_{false};
   uint32_t thumb_touched_ms_{0};
-  PsramVector<ThumbSlot> thumb_slots_;
+  PoolList<ThumbSlot> thumb_slots_;
   uint8_t *thumb_buffer_{nullptr};  // PSRAM, all slots
   uint32_t thumb_stride_{0};
   size_t thumb_window_{0};               // image shown by slot 0
-  PsramVector<size_t> thumb_queue_;      // slots to load, first first
+  PoolList<size_t> thumb_queue_;         // slots to load, first first
   int32_t thumb_scroll_pos_{0};
   uint32_t thumb_scroll_ms_{0};
   float thumb_scroll_velocity_{0.0f};
@@ -2280,13 +2292,16 @@ class SimpleVideoPlayer : public Component
   std::string kbd_table_rel_, kbd_table_tmp_;
   size_t kbd_table_len_{0}, kbd_table_got_{0};
   bool kbd_table_loaded_{false}, kbd_table_busy_{false}, kbd_table_dirty_{false};
-  PsramVector<PsramString> kbd_downloads_;
+  static constexpr size_t KBD_DOWNLOADS_MAX = 16;
+  PoolList<FixedString<32>> kbd_downloads_;
+  static constexpr size_t KBD_DEVICES_MAX = KBD_ASSIGN_MAX + 8;
+  mutable PoolList<KeyboardDevice> kbd_devices_;  // keyboard_devices()'
   int8_t kbd_loading_{-1};      // the slot being read into
   bool kbd_downloading_{false};  // ... for a download (kept, not put on a keyboard)
   KbdStep kbd_step_{KBD_IDLE};
   bool kbd_ready_{false};
   bool kbd_kept_{false};  // its file written so far
-  PsramString kbd_loading_name_;
+  FixedString<32> kbd_loading_name_;
   size_t kbd_len_{0};
   size_t kbd_got_{0};
   storage::StreamHandle kbd_handle_{};
@@ -2321,38 +2336,63 @@ class SimpleVideoPlayer : public Component
   QueueHandle_t channel_q_{nullptr};
   SemaphoreHandle_t channel_lock_{nullptr};
   // Shown in the dropdown (LVGL holds pointers into channel_names_) / next list from the task.
-  PsramVector<PsramString> channel_names_, channel_refs_;
-  PsramVector<PsramString> channel_new_names_, channel_new_refs_;
+  static constexpr size_t CHANNEL_MAX = 300;
+  PoolList<FixedString<64>> channel_names_, channel_new_names_;
+  PoolList<FixedString<256>> channel_refs_, channel_new_refs_;
   std::atomic<bool> channel_new_{false};
   bool channel_requested_once_{false};
   uint32_t channel_version_{0};
   int channel_index_{-1};
   // Home Assistant media (channel_lock_ for what the task and the main loop share).
-  PsramVector<std::pair<PsramString, PsramString>> ha_reqs_;  // type, id: listings asked for, in turn
-  PsramString ha_play_id_;
-  PsramVector<HaItem> ha_src_items_;
-  PsramString ha_src_type_;
+  static constexpr size_t HA_ITEMS_MAX = 500;  // as the relay sends at most
+  static constexpr size_t HA_SOURCES_MAX = 32;
+  static constexpr size_t HA_REQS_MAX = 8;
+  using HaType = FixedString<16>;
+  // A folder's listing, besides its items.
+  struct HaListing {
+    HaType type;
+    SvpId id;
+    SvpTitle title;
+    SvpPath path;
+    SvpId parent;
+  };
+  // The texts shared with the channel task (a pool piece). listings[shown]: the main loop's; the other
+  // the task's to write while ha_new_ is clear.
+  struct HaTexts {
+    HaListing listings[2];
+    uint8_t shown{0};
+    const HaListing &listing() const { return this->listings[this->shown]; }
+    HaType sources_type;
+    SvpId play_id;
+    SvpId picture_id;  // the picture the task fetches into pic_read_.file
+  };
+  PsramPtr<HaTexts> ha_texts_;
+  PoolList<std::pair<HaType, SvpId>> ha_reqs_;  // type, id: listings asked for, in turn
+  PoolList<HaItem> ha_src_items_;
   bool ha_src_ok_{false}, ha_last_sources_{false};
   // The sources of each type listed by the task since the main loop last took them, in turn: one a
   // type was asked for right after another's must not take its place.
+  // A ring of HA_SOURCE_LISTS; the task fills the one after the last listed, outside the lock.
   struct HaSources {
-    PsramString type;
-    PsramVector<HaItem> items;
-    bool ok;
+    HaType type;
+    PoolList<HaItem> items;
+    bool ok{false};
   };
-  PsramVector<HaSources> ha_new_srcs_;
+  static constexpr size_t HA_SOURCE_LISTS = 3;
+  HaSources ha_new_srcs_[HA_SOURCE_LISTS];
+  uint8_t ha_srcs_head_{0}, ha_srcs_count_{0};
   std::atomic<bool> ha_new_src_{false};
-  PsramVector<HaItem> ha_items_, ha_new_items_;
-  PsramString ha_type_, ha_id_, ha_title_, ha_path_, ha_parent_;
-  PsramString ha_new_type_, ha_new_id_, ha_new_title_, ha_new_path_, ha_new_parent_;
+  PoolList<HaItem> ha_items_, ha_new_items_;
   bool ha_ok_{false}, ha_new_ok_{false};
   std::atomic<bool> ha_new_{false};
   CallbackManager<void()> ha_callbacks_;
-  PsramString pic_remote_id_;     // the picture the task fetches into pic_read_.file
   int32_t pic_remote_w_{0}, pic_remote_h_{0};  // no larger than the display (the relay fits it)
   // svp_relay settings: key and value, key and choices (one per line); sets waiting for the task.
-  PsramVector<std::pair<PsramString, PsramString>> opt_values_, opt_new_values_, opt_choices_, opt_new_choices_,
-      opt_sets_;
+  static constexpr size_t OPT_VALUES_MAX = 32;
+  static constexpr size_t OPT_CHOICES_MAX = 16;
+  static constexpr size_t OPT_SETS_MAX = 8;
+  using OptPair = std::pair<FixedString<32>, FixedString<256>>;
+  PoolList<OptPair> opt_values_, opt_new_values_, opt_choices_, opt_new_choices_, opt_sets_;
   bool opt_ok_{false}, opt_new_ok_{false};
   std::atomic<bool> opt_new_{false};
   CallbackManager<void()> opt_callbacks_;
@@ -2390,7 +2430,7 @@ class SimpleVideoPlayer : public Component
   volatile bool playback_task_stop_{false};
 
   // Playlist (main loop only). The playback task asks loop() for the next item at the end of a file.
-  PsramVector<PsramString> playlist_;
+  PoolList<SvpPath> playlist_;
   size_t playlist_index_{0};
   RepeatMode repeat_{RepeatMode::OFF};
   std::atomic<bool> advance_req_{false};
