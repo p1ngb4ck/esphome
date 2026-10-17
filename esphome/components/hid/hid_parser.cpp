@@ -180,6 +180,31 @@ uint8_t HIDReportMap::device_kinds() const {
   static constexpr uint16_t GENERIC_DESKTOP = 0x01;
   static constexpr uint16_t CONSUMER = 0x0C;
   static constexpr uint16_t DIGITIZER = 0x0D;
+  static constexpr uint16_t KEYBOARD_PAGE = 0x07;
+  static constexpr uint16_t KEY_A = 0x04;
+  static constexpr uint16_t KEY_Z = 0x1D;
+  // A keyboard collection without letter keys (a remote's keys sent as keyboard usages) is not a keyboard.
+  bool letters = false;
+  for (const auto &field : this->fields_) {
+    if (letters)
+      break;
+    if (field.kind != HIDReportKind::INPUT || field.is_constant())
+      continue;
+    const HIDUsage application = this->application_usage(field.collection_id);
+    if (application.page != GENERIC_DESKTOP || application.usage != 0x06)
+      continue;
+    if (field.has_usage_range && field.usage_minimum.page == KEYBOARD_PAGE && field.usage_minimum.usage <= KEY_Z &&
+        field.usage_maximum.usage >= KEY_A) {
+      letters = true;
+      break;
+    }
+    for (const auto &usage : field.usages) {
+      if (usage.page == KEYBOARD_PAGE && usage.usage >= KEY_A && usage.usage <= KEY_Z) {
+        letters = true;
+        break;
+      }
+    }
+  }
   uint8_t kinds = 0;
   bool controls = false;
   for (const auto &collection : this->collections_) {
@@ -189,6 +214,12 @@ uint8_t HIDReportMap::device_kinds() const {
     if (usage.page == GENERIC_DESKTOP) {
       switch (usage.usage) {
         case 0x06:  // keyboard
+          if (letters) {
+            kinds |= HID_DEVICE_KEYBOARD;
+          } else {
+            controls = true;
+          }
+          break;
         case 0x07:  // keypad
           kinds |= HID_DEVICE_KEYBOARD;
           break;

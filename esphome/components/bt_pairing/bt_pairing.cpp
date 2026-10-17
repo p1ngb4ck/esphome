@@ -860,8 +860,14 @@ void BTPairing::list_devices(std::vector<hid::InputDevice> &out) const {
     }
     if (!hid)
       continue;
-    if (kinds == 0)
-      kinds = record_kinds(record);
+    // What the device says it is (appearance, class of device): a remote that also has a keyboard
+    // collection for its keys is a remote.
+    const uint8_t declared = record_kinds(record);
+    if (kinds == 0) {
+      kinds = declared;
+    } else if (declared == hid::HID_DEVICE_REMOTE) {
+      kinds = (kinds & ~hid::HID_DEVICE_KEYBOARD) | hid::HID_DEVICE_REMOTE;
+    }
     format_mac_addr_upper(record.address, mac);
     out.push_back({std::string("bt:") + mac, record.name[0] != '\0' ? record.name : mac, connected, kinds});
   }
