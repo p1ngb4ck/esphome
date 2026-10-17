@@ -759,7 +759,7 @@ void USBStorageClient::unmount_filesystem() {
 
 void USBStorageClient::on_disconnected() {
   // Transfers still out on the bulk endpoints come back now, so a SCSI command of the storage
-  // worker ends at once instead of on its timeouts (free_data_() waits for it).
+  // worker ends at once instead of on its timeouts.
   if (this->device_handle_ != nullptr) {
     for (const uint8_t ep : {this->bulk_in_ep_, this->bulk_out_ep_}) {
       if (ep != 0 && usb_host_endpoint_halt(this->device_handle_, ep) == ESP_OK)
@@ -771,6 +771,9 @@ void USBStorageClient::on_disconnected() {
   this->disk_ready_ = false;
 
   this->unmount_filesystem();
+  // Waits for a command still on the pipes: the IDF releases an interface only with none of its
+  // transfers in flight, and the device close after it needs that.
+  this->free_data_();
 
   if (this->msc_interface_ != 0xFF) {
     this->release_interface(this->msc_interface_);
@@ -782,7 +785,6 @@ void USBStorageClient::on_disconnected() {
   this->bulk_out_ep_ = 0;
   this->bulk_in_mps_ = 0;
   this->bulk_out_mps_ = 0;
-  this->free_data_();
 }
 
 void USBStorageClient::on_removed(usb_device_handle_t handle) { USBClient::on_removed(handle); }
