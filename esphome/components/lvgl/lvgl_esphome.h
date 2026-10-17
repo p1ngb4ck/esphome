@@ -642,12 +642,27 @@ class LVHIDPointerListener final : public Parented<LvglComponent> {
   void set_default_cursor();
   // The cursor hides after this long without motion (0: never) and shows again with the next.
   void set_hide_after(uint32_t ms);
+  /// Motion times this (1: as the device reports it).
+  void set_speed(float speed) { this->speed_ = speed; }
+  /// Fast moves go further: a report's motion is multiplied more the larger it is (up to 3 times).
+  void set_acceleration(bool on) { this->acceleration_ = on; }
+  /// A wheel step scrolls this many lines (WHEEL_LINE each).
+  void set_wheel_lines(uint8_t lines) { this->wheel_lines_ = lines; }
+  void set_reverse_wheel(bool reverse) { this->reverse_wheel_ = reverse; }
   lv_indev_t *get_drv() { return this->drv_; }
+
+  static constexpr int32_t WHEEL_LINE = 40;
 
  protected:
   void move_(int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons);
   void set_cursor_(lv_obj_t *cursor);
 
+  float speed_{1.0f};
+  float rest_x_{0.0f};  // motion below a pixel, carried to the next report
+  float rest_y_{0.0f};
+  bool acceleration_{false};
+  bool reverse_wheel_{false};
+  uint8_t wheel_lines_{1};
   int32_t x_{0};
   int32_t y_{0};
   bool pressed_{false};

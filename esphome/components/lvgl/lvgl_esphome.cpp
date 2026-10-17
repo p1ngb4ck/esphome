@@ -1415,17 +1415,27 @@ void LVHIDPointerListener::move_(int16_t dx, int16_t dy, int16_t wheel, int16_t 
   if (this->cursor_ != nullptr && lv_obj_is_hidden(this->cursor_))
     lv_obj_set_hidden(this->cursor_, false);
   lv_display_t *disp = this->parent_->get_disp();
-  this->x_ = std::clamp<int32_t>(this->x_ + dx, 0, lv_display_get_horizontal_resolution(disp) - 1);
-  this->y_ = std::clamp<int32_t>(this->y_ + dy, 0, lv_display_get_vertical_resolution(disp) - 1);
+  float factor = this->speed_;
+  if (this->acceleration_)
+    factor *= std::min(3.0f, 1.0f + static_cast<float>(std::abs(dx) + std::abs(dy)) / 20.0f);
+  const float fx = dx * factor + this->rest_x_;
+  const float fy = dy * factor + this->rest_y_;
+  const auto mx = static_cast<int32_t>(fx);
+  const auto my = static_cast<int32_t>(fy);
+  this->rest_x_ = fx - mx;
+  this->rest_y_ = fy - my;
+  this->x_ = std::clamp<int32_t>(this->x_ + mx, 0, lv_display_get_horizontal_resolution(disp) - 1);
+  this->y_ = std::clamp<int32_t>(this->y_ + my, 0, lv_display_get_vertical_resolution(disp) - 1);
   this->pressed_ = (buttons & 0x01) != 0;
   if (wheel == 0 && pan == 0)
     return;
+  if (this->reverse_wheel_)
+    wheel = -wheel;
   lv_point_t point{this->x_, this->y_};
   for (lv_obj_t *obj = lv_indev_search_obj(lv_screen_active(), &point); obj != nullptr; obj = lv_obj_get_parent(obj)) {
     if (lv_obj_is_scrollable(obj)) {
-      // One wheel step scrolls about a line of text.
-      static constexpr int32_t STEP = 40;
-      lv_obj_scroll_by_bounded(obj, -pan * STEP, wheel * STEP, LV_ANIM_ON);
+      const int32_t step = WHEEL_LINE * this->wheel_lines_;
+      lv_obj_scroll_by_bounded(obj, -pan * step, wheel * step, LV_ANIM_ON);
       break;
     }
   }
