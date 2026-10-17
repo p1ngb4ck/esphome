@@ -34,7 +34,6 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 |---|---|---|
 | C1 | `file_speaker_` (audio queue resampler) is still stopped/finished/paused by the player (S:3194, 3230, 2942, 3086, 2861). Speaker rule. Open question to Olli: a resampler takes its input format only at start | CODE |
 | C2 | LVGL touched while paused, still to check in the code (2026-10-17): `prerender_controls_` for the next playlist item, the `pool_reclaim_req_` block in `pictures_loop_` before the held check (`picture_decoded_()` -> `show_page_`), `lv_image_set_src` in `handle_output_release_` / `release_media_`, `release_picture_buffers_`, the picture bar's `lv_obj_is_hidden` each loop | CODE (unchecked since) |
-| C5 | `vTaskDelay(1)` retry of the magic peek in the stream receiver (net task, `stream_receiver.cpp`) | CODE |
 
 ## D. Concurrency risks
 
