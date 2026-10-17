@@ -106,9 +106,9 @@ void USBHost::log_low_speed_hub_records_() {
     const usb_host_ls_hub_debug_entry_t e =
         usb_host_ls_hub_debug_entries[this->ls_hub_records_seen_ % USB_HOST_LS_HUB_DEBUG_ENTRIES];
     if (e.kind == 0) {
-      ESP_LOGW(TAG, "LS hub pipe: addr=%u ep=0x%02X type=%u mps=%u, PREamble on", e.dev_addr, e.ep, e.xfer_type, e.mps);
+      ESP_LOGV(TAG, "LS hub pipe: addr=%u ep=0x%02X type=%u mps=%u, PREamble on", e.dev_addr, e.ep, e.xfer_type, e.mps);
     } else {
-      ESP_LOGW(TAG,
+      ESP_LOGE(TAG,
                "LS hub error: addr=%u ep=0x%02X type=%u stage=%d err=%u retry=%u frame=%" PRIu32 " HCINT=0x%08" PRIX32
                " HCCHAR=0x%08" PRIX32 " HCTSIZ=0x%08" PRIX32 " QTD=0x%08" PRIX32,
                e.dev_addr, e.ep, e.xfer_type, e.stage, e.err, e.retry, e.frame, e.hcint, e.hcchar, e.hctsiz, e.qtd);
