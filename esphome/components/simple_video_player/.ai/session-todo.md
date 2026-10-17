@@ -25,7 +25,12 @@ sub-entries. b) Gamepads pages. c) Mice page. d) Remote controls page. e) Key bi
 input, hold-to-speed-up. f) Gestures and touch page.
 
 Status:
-- a) done (lvgl_media.yaml), awaiting Olli's test.
+- a) done (lvgl_media.yaml), awaiting Olli's test. The device lists under the sections are made by
+  settings_show (no empty containers in the YAML).
+- b) Gamepads pages (lvgl_media.yaml; hid: get_gamepad_state/get_gamepad_driver/device_input):
+  overview with a drawing per connected controller, one controller's page (drawing, sticks,
+  triggers, player light, light bar, Test rumble). Touchpad mode comes with item 10. Mice and
+  Remote controls pages list their devices; their settings are steps c and d. Awaiting Olli's test.
 
 ---
 

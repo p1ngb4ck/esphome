@@ -154,6 +154,8 @@ class BTPairing : public Component
   /// HIDDeviceKind bits a paired device announced: Classic in its Class of Device, LE in its appearance.
   static uint8_t record_kinds(const PairingRecord &record);
   void set_device_layout(const std::string &key, const hid::KeyboardLayout *layout) override;
+  /// The HID slot the device (bt:MAC) is connected to.
+  hid::HIDInput *device_input(const std::string &key) override;
   /// Pad outputs go to every slot's device.
   void rumble(uint8_t strong, uint8_t weak, uint32_t duration_ms) override {
     hid::HIDInput::rumble(strong, weak, 0);

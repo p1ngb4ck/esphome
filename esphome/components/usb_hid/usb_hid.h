@@ -46,6 +46,9 @@ class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
   /// The device connected, if one is.
   void list_devices(std::vector<hid::InputDevice> &out) const override;
   void set_device_layout(const std::string &key, const hid::KeyboardLayout *layout) override;
+  hid::HIDInput *device_input(const std::string &key) override {
+    return !this->device_key_.empty() && key == this->device_key_ ? this : nullptr;
+  }
 #ifdef USE_TEXT_SENSOR
   void register_device_name_sensor(text_sensor::TextSensor *sensor) { this->device_name_sensor_ = sensor; }
 #endif

@@ -144,6 +144,13 @@ class HIDInput : public key_provider::KeyProvider {
   virtual void set_player_led(uint8_t player);
   virtual void set_light_bar(uint8_t red, uint8_t green, uint8_t blue);
   const GamepadOutputs &get_gamepad_outputs() const { return this->pad_outputs_; }
+  /// The gamepad behind it as last reported: its axes (a pad read by its report descriptor
+  /// too); its buttons and D-pad are keys (is_key_down).
+  const GamepadState &get_gamepad_state() const { return this->pad_state_; }
+  /// The driver of the pad behind it, nullptr when it is read by its report descriptor.
+  const char *get_gamepad_driver() const { return this->pad_ != nullptr ? this->pad_->name() : nullptr; }
+  /// The input the device with this key (InputDevice::key) is connected to now, nullptr if none.
+  virtual HIDInput *device_input(const std::string &key) { return nullptr; }
 
   // For the gamepad drivers: the transport. Report ID first where the device numbers its reports.
   /// An output report on the interrupt channel (USB interrupt OUT, Bluetooth interrupt channel,

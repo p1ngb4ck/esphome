@@ -139,9 +139,14 @@ bool HIDInput::gamepad_axis_(const HIDReportItemValue &v) {
     return false;
   }
   const auto raw = static_cast<int32_t>(v.value);
-  this->control_cb_.call(page, usage,
-                         stick ? pad_stick(raw, v.logical_min, v.logical_max)
-                               : pad_trigger(raw, v.logical_min, v.logical_max));
+  const int32_t value = stick ? pad_stick(raw, v.logical_min, v.logical_max) : pad_trigger(raw, v.logical_min, v.logical_max);
+  if (gamepad && page == PAGE_GENERIC_DESKTOP) {
+    for (uint8_t i = 0; i < PAD_AXIS_COUNT; i++) {
+      if (AXIS_USAGES[i] == usage)
+        this->pad_state_.axes[i] = value;
+    }
+  }
+  this->control_cb_.call(page, usage, value);
   return true;
 }
 

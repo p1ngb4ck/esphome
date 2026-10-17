@@ -867,6 +867,21 @@ void BTPairing::list_devices(std::vector<hid::InputDevice> &out) const {
   }
 }
 
+hid::HIDInput *BTPairing::device_input(const std::string &key) {
+  uint8_t address[6];
+  if (key.rfind("bt:", 0) != 0 || !parse_address(key.substr(3), address))
+    return nullptr;
+  const PairingRecord *record = this->find_address(address);
+  if (record == nullptr)
+    return nullptr;
+  for (size_t i = 0; i < this->hid_targets_.size(); i++) {
+    const PairingTarget *target = this->hid_targets_[i];
+    if (target->pairing_slot() == record->slot && target->is_address_connected(address))
+      return this->hid_slots_[i];
+  }
+  return nullptr;
+}
+
 void BTPairing::set_device_layout(const std::string &key, const hid::KeyboardLayout *layout) {
   uint8_t address[6];
   if (key.rfind("bt:", 0) != 0 || !parse_address(key.substr(3), address))
