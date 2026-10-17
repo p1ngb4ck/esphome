@@ -179,12 +179,6 @@ bool USBStorageClient::parse_msc_endpoints_() {
   return true;
 }
 
-uint16_t USBStorageClient::max_chunk_for_mps_(uint16_t mps) const {
-  if (mps == 0)
-    return 0;
-  return static_cast<uint16_t>((this->transfer_capacity() / mps) * mps);
-}
-
 uint16_t USBStorageClient::round_up_to_in_mps_(uint16_t len) const {
   const uint16_t mps = this->bulk_in_mps_;
   if (mps == 0)
@@ -210,64 +204,6 @@ bool USBStorageClient::send_cbw_(uint32_t tag, uint32_t data_len, uint8_t flags,
   if (!this->transfer_out(this->bulk_out_ep_, cb, reinterpret_cast<const uint8_t *>(&cbw), sizeof(MscCbw)))
     return false;
   return this->wait_transfer_();
-}
-
-bool USBStorageClient::recv_data_(uint8_t *buf, uint16_t len) {
-  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb(s, this); };
-  if (!this->transfer_in(this->bulk_in_ep_, cb, this->round_up_to_in_mps_(len)))
-    return false;
-  return this->wait_transfer_();
-}
-
-bool USBStorageClient::send_data_(const uint8_t *buf, uint16_t len) {
-  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb(s, this); };
-  return this->transfer_out(this->bulk_out_ep_, cb, buf, len) && this->wait_transfer_();
-}
-
-bool USBStorageClient::recv_chunked_(uint8_t *buf, uint32_t len) {
-  const uint16_t chunk = max_chunk_for_mps_(this->bulk_in_mps_);
-  if (chunk == 0)
-    return false;
-
-  uint32_t done = 0;
-  while (done < len) {
-    const uint32_t want = std::min<uint32_t>(chunk, len - done);
-    uint8_t *dest = buf + done;
-    auto cb = [this, dest, want](const usb_host::TransferStatus &s) {
-      if (s.success && s.data_len > 0)
-        memcpy(dest, s.data, std::min<size_t>(s.data_len, want));
-      transfer_done_cb(s, this);
-    };
-    if (!this->transfer_in(this->bulk_in_ep_, cb, this->round_up_to_in_mps_(static_cast<uint16_t>(want))))
-      return false;
-    if (!this->wait_transfer_())
-      return false;
-    if (this->transfer_len_ < want) {
-      // The device ended the data phase early, so nothing useful follows. The caller
-      // treats this like any other transfer failure.
-      ESP_LOGE(TAG, "Short data-in: wanted %" PRIu32 " got %u at offset %" PRIu32, want, this->transfer_len_, done);
-      return false;
-    }
-    done += want;
-  }
-  return true;
-}
-
-bool USBStorageClient::send_chunked_(const uint8_t *buf, uint32_t len) {
-  const uint16_t chunk = max_chunk_for_mps_(this->bulk_out_mps_);
-  if (chunk == 0)
-    return false;
-
-  uint32_t done = 0;
-  while (done < len) {
-    // chunk is a whole number of packets, so every piece but the last is full length and
-    // the device does not see a short packet mid-phase and end the transfer early.
-    const uint32_t want = std::min<uint32_t>(chunk, len - done);
-    if (!this->send_data_(buf + done, static_cast<uint16_t>(want)))
-      return false;
-    done += want;
-  }
-  return true;
 }
 
 // Endpoint halted by a STALL: cleared on the host side, then on the device (CLEAR_FEATURE ENDPOINT_HALT),

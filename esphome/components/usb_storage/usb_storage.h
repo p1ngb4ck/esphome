@@ -160,19 +160,6 @@ class USBStorageClient : public usb_host::USBClient {
   bool data_command_(bool in, uint8_t *in_buf, const uint8_t *out_buf, uint32_t len, uint32_t tag);
 
   bool send_cbw_(uint32_t tag, uint32_t data_len, uint8_t flags, const uint8_t *cdb, uint8_t cdb_len, uint8_t lun = 0);
-  bool recv_data_(uint8_t *buf, uint16_t len);
-  bool send_data_(const uint8_t *buf, uint16_t len);
-  // Data phases larger than one host transfer buffer, split into whole-packet pieces.
-  // Splitting is what makes a 512 byte sector readable on a controller whose per-transfer
-  // buffer is smaller, instead of requiring usb_host max_packet_size >= sector_size.
-  bool recv_chunked_(uint8_t *buf, uint32_t len);
-  bool send_chunked_(const uint8_t *buf, uint32_t len);
-  // Largest whole number of mps-sized packets that still fits a single host transfer.
-  // Intermediate pieces of a data phase must be full packets: a short packet tells the
-  // device the phase has ended. The transfer size comes from the attached device, so this is
-  // a member and not a constant: the same driver serves a full-speed device on one
-  // controller and a high-speed device on the other.
-  uint16_t max_chunk_for_mps_(uint16_t mps) const;
   // check_condition_expected: a CHECK CONDITION status is an answer here (TEST UNIT READY), not logged
   bool recv_csw_(uint32_t expected_tag, bool check_condition_expected = false);
 
