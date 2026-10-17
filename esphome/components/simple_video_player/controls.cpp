@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cinttypes>
 #include <cstring>
+#include <utility>
 
 #include <esp_cache.h>
 
@@ -391,9 +392,18 @@ size_t SimpleVideoPlayer::controls_bytes_() {
   if (probe == nullptr)
     return 0;
   this->ctl_snap_bytes_ = (probe->data_size + 127) & ~static_cast<size_t>(127);
+  // The empty title and duration fields kept beside the bar: one text line across it at most each.
+  size_t fields = 0;
+  for (lv_obj_t *label : {this->ctl_video_.title_label, this->ctl_video_.duration_label}) {
+    if (label != nullptr)
+      fields += ((static_cast<size_t>(probe->header.w) *
+                      lv_font_get_line_height(lv_obj_get_style_text_font(label, LV_PART_MAIN)) * this->dsi_fb_bpp_ +
+                  15) &
+                 ~static_cast<size_t>(15));
+  }
   lv_draw_buf_destroy(probe);
   // The snapshot, the bar copied out of it, and the pieces (all inside the bar).
-  return 3 * this->ctl_snap_bytes_ + 4096;
+  return 3 * this->ctl_snap_bytes_ + fields + 4096;
 }
 
 //========================================================================
@@ -519,6 +529,16 @@ void SimpleVideoPlayer::prerender_controls_() {
   ControlsBar &bar = this->ctl_video_;
   if (bar.bar == nullptr || this->ctl_failed_ || this->ctl_mem_ == nullptr || this->is_network_session())
     return;
+  if (this->lvgl_component_->is_paused()) {
+    // The next file of a playlist, LVGL still paused: the bar as it stands, its title and duration
+    // written anew. Not rendered yet (its memory given back meanwhile): this file goes without.
+    if (this->ctl_prerendered_) {
+      this->ctl_draw_texts_();
+      this->ctl_ready_.store(true, std::memory_order_release);
+    }
+    return;
+  }
+  this->ctl_prerendered_ = false;
   this->ctl_mem_used_ = 0;
   this->ctl_rotation_ = this->lvgl_component_->get_rotation();
   for (auto &sprite : this->ctl_glyph_)
@@ -533,18 +553,12 @@ void SimpleVideoPlayer::prerender_controls_() {
   if (snap_mem == nullptr || lv_draw_buf_init(&snapshot, 1, 1, cf, 0, snap_mem, this->ctl_snap_bytes_) != LV_RESULT_OK)
     return;
 
-  // What stays the same for the file.
-  const float duration = this->get_duration();
-  const bool hours = duration >= 3600.0f;
-  if (bar.title_label != nullptr) {
-    const size_t slash = this->video_path_.rfind('/');
-    lv_label_set_text(bar.title_label, this->video_path_.c_str() + (slash == std::string::npos ? 0 : slash + 1));
-  }
-  if (bar.duration_label != nullptr) {
-    char text[24] = "/ ";
-    format_time(text + 2, sizeof(text) - 2, static_cast<uint32_t>(duration), hours);
-    lv_label_set_text(bar.duration_label, text);
-  }
+  // Title and duration are written per file into the bar (ctl_draw_texts_()): their fields empty
+  // here, the bar's layout the same for every file.
+  if (bar.title_label != nullptr)
+    lv_label_set_text(bar.title_label, " ");
+  if (bar.duration_label != nullptr)
+    lv_label_set_text(bar.duration_label, " ");
   // Buttons whose text changes keep the width of the widest.
   for (uint8_t id : {CTL_PLAY_PAUSE, CTL_REPEAT}) {
     lv_obj_t *label = bar.button_label[id];
@@ -593,6 +607,15 @@ void SimpleVideoPlayer::prerender_controls_() {
   if (bar.position_label != nullptr) {
     font = lv_obj_get_style_text_font(bar.position_label, LV_PART_MAIN);
     letter_space = lv_obj_get_style_text_letter_space(bar.position_label, LV_PART_MAIN);
+  }
+  for (auto [label, field] : {std::pair{bar.title_label, &this->ctl_title_text_},
+                              std::pair{bar.duration_label, &this->ctl_duration_text_}}) {
+    *field = ControlsText{};
+    if (label == nullptr)
+      continue;
+    field->font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+    field->color = lv_obj_get_style_text_color(label, LV_PART_MAIN);
+    field->letter_space = lv_obj_get_style_text_letter_space(label, LV_PART_MAIN);
   }
 
   // 1: play, repeat off, the seek bar full, every digit.
@@ -650,14 +673,35 @@ void SimpleVideoPlayer::prerender_controls_() {
     set_repeat(0);
     if (bar.seek != nullptr)
       lv_bar_set_value(bar.seek, 0, LV_ANIM_OFF);
+    // Time fields as wide as the longest time ("00:00:00"), for every file alike.
     if (bar.position_label != nullptr) {
-      const int digits = hours ? (duration >= 36000.0f ? 6 : 5) : (duration >= 600.0f ? 4 : 3);
-      lv_obj_set_width(bar.position_label, digits * this->ctl_cell_w_ + (hours ? 2 : 1) * colon_w +
+      lv_obj_set_width(bar.position_label, 6 * this->ctl_cell_w_ + 2 * colon_w +
                                                lv_obj_get_style_pad_left(bar.position_label, LV_PART_MAIN) +
                                                lv_obj_get_style_pad_right(bar.position_label, LV_PART_MAIN));
       lv_label_set_text(bar.position_label, "");
     }
+    if (bar.duration_label != nullptr && this->ctl_duration_text_.font != nullptr) {
+      const lv_font_t *dfont = this->ctl_duration_text_.font;
+      const int32_t space = this->ctl_duration_text_.letter_space;
+      int32_t cell = 0;
+      for (char c = '0'; c <= '9'; c++)
+        cell = std::max<int32_t>(cell, lv_font_get_glyph_width(dfont, c, 0));
+      const int32_t width = lv_font_get_glyph_width(dfont, '/', ' ') + lv_font_get_glyph_width(dfont, ' ', '0') +
+                            6 * cell + 2 * lv_font_get_glyph_width(dfont, ':', '0') + 9 * space;
+      lv_obj_set_width(bar.duration_label, width + lv_obj_get_style_pad_left(bar.duration_label, LV_PART_MAIN) +
+                                               lv_obj_get_style_pad_right(bar.duration_label, LV_PART_MAIN));
+    }
     ok = render(&snap_area) && this->ctl_take_(this->ctl_static_, &snapshot, snap_area, snap_area);
+    // The empty fields, kept to write each file's text over.
+    for (auto [label, field] : {std::pair{bar.title_label, &this->ctl_title_text_},
+                                std::pair{bar.duration_label, &this->ctl_duration_text_}}) {
+      if (!ok || label == nullptr)
+        continue;
+      lv_area_t area;
+      lv_obj_get_content_coords(label, &area);
+      ok = this->ctl_take_(field->background, &snapshot, snap_area, area);
+      field->area = field->background.area;  // as far as it lies in the bar
+    }
   }
   if (ok) {
     this->ctl_area_ = this->ctl_static_.area;
@@ -671,13 +715,197 @@ void SimpleVideoPlayer::prerender_controls_() {
     }
   }
   lv_obj_set_hidden(bar.bar, true);
+  // The snapshot's memory is free now: a glyph's coverage goes there.
+  ok = ok && lv_draw_buf_init(&this->ctl_glyph_buf_, 1, 1, LV_COLOR_FORMAT_A8, 0, snap_mem, this->ctl_snap_bytes_) ==
+                 LV_RESULT_OK;
   if (!ok) {
     ESP_LOGE(TAG, "Could not render the controls (%u bytes of the pool) -- disabled",
              static_cast<unsigned>(this->controls_reserve_));
     this->ctl_failed_ = true;
     return;
   }
+  this->ctl_prerendered_ = true;
+  this->ctl_draw_texts_();
   this->ctl_ready_.store(true, std::memory_order_release);
+}
+
+const char *SimpleVideoPlayer::video_title_() const {
+  if (this->avi_parser_ && this->avi_parser_->is_open() && this->avi_parser_->get_title()[0] != '\0')
+    return this->avi_parser_->get_title();
+  const size_t slash = this->video_path_.rfind('/');
+  return this->video_path_.c_str() + (slash == std::string::npos ? 0 : slash + 1);
+}
+
+// Where LVGL's (x, y) lies in ctl_static_ (the panel's orientation), nullptr outside it.
+uint8_t *SimpleVideoPlayer::ctl_static_px_(int32_t x, int32_t y) const {
+  const ControlsSprite &bar = this->ctl_static_;
+  if (bar.data == nullptr || !inside(bar.area, x, y))
+    return nullptr;
+  int32_t px, py, pw, ph;
+  this->ctl_panel_rect_(bar.area, &px, &py, &pw, &ph);
+  int32_t X, Y;
+  switch (this->ctl_rotation_) {
+    case display::DISPLAY_ROTATION_90_DEGREES:
+      X = this->dsi_out_w_ - 1 - y;
+      Y = x;
+      break;
+    case display::DISPLAY_ROTATION_180_DEGREES:
+      X = this->dsi_out_w_ - 1 - x;
+      Y = this->dsi_out_h_ - 1 - y;
+      break;
+    case display::DISPLAY_ROTATION_270_DEGREES:
+      X = y;
+      Y = this->dsi_out_h_ - 1 - x;
+      break;
+    default:
+      X = x;
+      Y = y;
+      break;
+  }
+  return bar.data + (static_cast<size_t>(Y - py) * bar.pw + (X - px)) * this->dsi_fb_bpp_;
+}
+
+void SimpleVideoPlayer::ctl_draw_texts_() {
+  // The empty fields back into the bar.
+  for (ControlsText *field : {&this->ctl_title_text_, &this->ctl_duration_text_}) {
+    const ControlsSprite &bg = field->background;
+    if (bg.data == nullptr)
+      continue;
+    int32_t bx, by, bw, bh, sx, sy, sw, sh;
+    this->ctl_panel_rect_(bg.area, &bx, &by, &bw, &bh);
+    this->ctl_panel_rect_(this->ctl_static_.area, &sx, &sy, &sw, &sh);
+    const size_t bpp = this->dsi_fb_bpp_;
+    for (int32_t r = 0; r < bh; r++)
+      memcpy(this->ctl_static_.data + (static_cast<size_t>(by - sy + r) * this->ctl_static_.pw + (bx - sx)) * bpp,
+             bg.data + static_cast<size_t>(r) * bg.pw * bpp, static_cast<size_t>(bw) * bpp);
+  }
+  this->ctl_draw_text_(this->ctl_title_text_, this->video_title_(), true);
+  char text[24] = "/ ";
+  const float duration = this->get_duration();
+  format_time(text + 2, sizeof(text) - 2, static_cast<uint32_t>(duration), duration >= 3600.0f);
+  this->ctl_draw_text_(this->ctl_duration_text_, text, false);
+}
+
+// One UTF-8 character; 0 at the end (or a broken one).
+static uint32_t next_letter(const char *&text) {
+  const auto *s = reinterpret_cast<const uint8_t *>(text);
+  uint32_t letter = s[0];
+  int more = 0;
+  if (letter == 0)
+    return 0;
+  if (letter >= 0xF0) {
+    letter &= 0x07;
+    more = 3;
+  } else if (letter >= 0xE0) {
+    letter &= 0x0F;
+    more = 2;
+  } else if (letter >= 0xC0) {
+    letter &= 0x1F;
+    more = 1;
+  } else if (letter >= 0x80) {
+    return 0;
+  }
+  for (int i = 1; i <= more; i++) {
+    if ((s[i] & 0xC0) != 0x80)
+      return 0;
+    letter = (letter << 6) | (s[i] & 0x3F);
+  }
+  text += more + 1;
+  return letter;
+}
+
+// As LVGL's label draws one line (lv_draw_label: a letter at x + ofs_x, line top + (line_height -
+// base_line) - box_h - ofs_y, then on by adv_w + letter_space); too long: cut with "..." as
+// LV_LABEL_LONG_MODE_DOTS does.
+void SimpleVideoPlayer::ctl_draw_text_(ControlsText &field, const char *text, bool dots) {
+  const lv_font_t *font = field.font;
+  if (font == nullptr || field.background.data == nullptr || text == nullptr)
+    return;
+  auto advance = [&](uint32_t letter, uint32_t next) -> int32_t {
+    lv_font_glyph_dsc_t g;
+    return lv_font_get_glyph_dsc(font, &g, letter, next) ? g.adv_w + field.letter_space : 0;
+  };
+  const int32_t room = area_w(field.area);
+  int32_t width = 0;
+  for (const char *p = text; *p != '\0';) {
+    const uint32_t letter = next_letter(p);
+    if (letter == 0)
+      break;
+    const char *q = p;
+    width += advance(letter, next_letter(q));
+  }
+  const char *stop = nullptr;  // where the dots go instead
+  if (dots && width > room) {
+    const int32_t dots_w = 3 * advance('.', '.');
+    int32_t used = 0;
+    stop = text;
+    for (const char *p = text; *p != '\0';) {
+      const uint32_t letter = next_letter(p);
+      if (letter == 0)
+        break;
+      const char *q = p;
+      const int32_t w = advance(letter, next_letter(q));
+      if (used + w + dots_w > room)
+        break;
+      used += w;
+      stop = p;
+    }
+  }
+  const lv_color_t c = field.color;
+  const bool rgb888 = this->dsi_fb_bpp_ == 3;
+  const int32_t top = field.area.y1 + (font->line_height - font->base_line);
+  int32_t x = field.area.x1;
+  auto draw = [&](uint32_t letter, uint32_t next) {
+    lv_font_glyph_dsc_t g;
+    if (!lv_font_get_glyph_dsc(font, &g, letter, next))
+      return;
+    const int32_t x1 = x + g.ofs_x;
+    const int32_t y1 = top - g.box_h - g.ofs_y;
+    x += g.adv_w + field.letter_space;
+    if (g.box_w == 0 || g.box_h == 0)
+      return;
+    const void *got = lv_font_get_glyph_bitmap(&g, &this->ctl_glyph_buf_);
+    if (got == nullptr)
+      return;
+    // A8 rows as the font wrote them (lv_font_get_bitmap_fmt_txt(), font::Font::get_glyph_bitmap()).
+    const uint8_t *cover = this->ctl_glyph_buf_.data;
+    const uint32_t stride = lv_draw_buf_width_to_stride(g.box_w, LV_COLOR_FORMAT_A8);
+    for (int32_t gy = 0; gy < g.box_h; gy++) {
+      for (int32_t gx = 0; gx < g.box_w; gx++) {
+        const uint32_t a = cover[gy * stride + gx];
+        if (a == 0 || !inside(field.area, x1 + gx, y1 + gy))
+          continue;
+        uint8_t *px = this->ctl_static_px_(x1 + gx, y1 + gy);
+        if (px == nullptr)
+          continue;
+        const uint32_t na = 255 - a;
+        if (rgb888) {  // LVGL's RGB888: blue, green, red
+          px[0] = static_cast<uint8_t>((c.blue * a + px[0] * na + 127) / 255);
+          px[1] = static_cast<uint8_t>((c.green * a + px[1] * na + 127) / 255);
+          px[2] = static_cast<uint8_t>((c.red * a + px[2] * na + 127) / 255);
+        } else {  // RGB565 as lv_color_to_u16()
+          uint16_t v;
+          memcpy(&v, px, 2);
+          const uint32_t r = ((c.red >> 3) * a + ((v >> 11) & 0x1F) * na + 127) / 255;
+          const uint32_t gr = ((c.green >> 2) * a + ((v >> 5) & 0x3F) * na + 127) / 255;
+          const uint32_t b = ((c.blue >> 3) * a + (v & 0x1F) * na + 127) / 255;
+          v = static_cast<uint16_t>((r << 11) | (gr << 5) | b);
+          memcpy(px, &v, 2);
+        }
+      }
+    }
+  };
+  for (const char *p = text; *p != '\0' && p != stop;) {
+    const uint32_t letter = next_letter(p);
+    if (letter == 0)
+      break;
+    const char *q = p;
+    draw(letter, stop != nullptr && p == stop ? '.' : next_letter(q));
+  }
+  if (stop != nullptr) {
+    for (int i = 0; i < 3; i++)
+      draw('.', i < 2 ? '.' : 0);
+  }
 }
 
 #else

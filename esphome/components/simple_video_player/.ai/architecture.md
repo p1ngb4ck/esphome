@@ -102,7 +102,7 @@ reports the media player's state instead while `state_` is STOPPED and `audio_re
 | Cover art | `svp_cover` service -> `cover_wanted_` | `cover_loop_` C:121 (main loop, not while LVGL paused) -> channel task (/cover) -> picture task | buffers given back on pool reclaim (C:87) |
 | Remote desktop | `spice_connect(_saved)` -> spice task | spice task; picture via relay udisp | `desktop_take_panel_` ends a video; SPICE (with sound) ends any session and the sound beside it (`sound_take_over_`: the queue's HA track, the media player's), VNC keeps an audio file unless the pool has no room for both (then it ends and the buffers are taken again); refuses media starts while `spice_on_` |
 | Dashboard (relay sender of its own) | relay | net task | at the sender's start an audio file ends and `sound_take_over_` runs (main loop), so its stream PCM plays. A local video (`play()`) runs `sound_take_over_` too |
-| Controls | video bar: pre-rendered at `start_req_==1`, composited by playback (DSI direct only, not for network AVI); picture/audio bars: LVGL | main loop / playback | – |
+| Controls | video bar: pre-rendered at `start_req_==1` while LVGL runs, composited by playback (DSI direct only, not for network AVI). Title (the AVI's INFO INAM, else the file name; one line, cut with "...") and duration are written into the bar per file from the label's font (`lv_font_get_glyph_dsc`/`_bitmap`: font data, no widget) over the empty fields kept beside it (`ctl_draw_texts_()`), so the next file of a playlist, LVGL still paused, needs no LVGL; the time fields are as wide as "00:00:00" for every file. Not rendered yet (its memory given back): that file goes without the bar. Picture/audio bars: LVGL | main loop / playback | – |
 
 ## 7. Output paths
 
@@ -170,7 +170,7 @@ what the room leaves (`max_prebuffer()`).
 | `frame_slots_[1]` | frame_bytes_ = clamp(pool/24, 256 KiB, 1 MiB) | first session, kept | compressed frame | yes |
 | `index_buf_` | clamp(pool/32, 128 KiB, 1 MiB) | first session, kept | AVI index (also allocated for streams) | yes |
 | `ring_buf_` | 4 MiB/s · (prebuffer + lead) (device: 2 MiB without BT delay) | first session, kept; taken anew when a session needs another size | compressed AVI/MJPEG | yes (ring room) |
-| `decode_target_` + `ctl_mem_` | panel w·h·bpp (2.05 MB) + 3 × bar snapshot + 4 KiB | first direct output, kept | decoded frame, controls | yes (max of direct/canvas) |
+| `decode_target_` + `ctl_mem_` | panel w·h·bpp (2.05 MB) + 3 × bar snapshot + the empty title/duration fields (bar width × line height each) + 4 KiB | first direct output, kept | decoded frame, controls | yes (max of direct/canvas) |
 | `output_buffers_[2]` | 2 × A16(cw)·A16(ch)·3 | first canvas output, kept | decoded RGB888 | yes (max of direct/canvas) |
 | `pic_pages_[2]` | 2 × stride565(max(disp, canvas)) · h | first picture, reclaim, `close_picture()` | the shown picture and the next one (no decode ahead; neighbours only read undecoded) | **no** |
 | `pic_decode_buf_` | the decode's size in 1 MiB steps | only while a picture larger than its target (or a thumbnail) is decoded | full native decode | **no** |

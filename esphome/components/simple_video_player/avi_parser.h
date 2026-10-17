@@ -118,6 +118,9 @@ class AVIParser {
    */
   const AVIStreamInfo *get_video_info() const;
 
+  /// The file's title (LIST INFO, INAM), "" when it has none.
+  const char *get_title() const { return this->title_; }
+
   /**
    * @brief Get audio stream information
    * @return Audio stream info, or nullptr if no audio stream
@@ -204,6 +207,11 @@ class AVIParser {
    * @brief Parse stream header (strh/strf chunks)
    */
   bool parse_stream_header_();
+  /// A LIST INFO's chunks (size: after its type): INAM kept, the rest skipped.
+  void parse_info_list_(uint32_t size);
+
+  static constexpr size_t TITLE_MAX = 128;
+  char title_[TITLE_MAX]{};
 
   // File reader
   BufferedFileReader *reader_{nullptr};

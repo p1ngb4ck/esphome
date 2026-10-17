@@ -2827,6 +2827,7 @@ bool SimpleVideoPlayer::release_outputs_(uint8_t groups) {
 #ifdef SVP_CONTROLS
     if (this->ctl_mem_ != nullptr) {
       this->ctl_ready_.store(false, std::memory_order_release);
+      this->ctl_prerendered_ = false;  // its sprites went with it
       this->pool_.free(this->ctl_mem_);
       this->ctl_mem_ = nullptr;
       released = true;

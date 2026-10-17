@@ -29,6 +29,8 @@ static constexpr uint32_t FOURCC_idx1 = 0x31786469;  // 'idx1'
 static constexpr uint32_t FOURCC_indx = 0x78646E69;  // 'indx': OpenDML index of the ix## indexes
 static constexpr uint32_t FOURCC_vids = 0x73646976;  // 'vids'
 static constexpr uint32_t FOURCC_auds = 0x73647561;  // 'auds'
+static constexpr uint32_t FOURCC_INFO = 0x4F464E49;  // 'INFO'
+static constexpr uint32_t FOURCC_INAM = 0x4D414E49;  // 'INAM': the title
 
 // Video stream chunk IDs
 static constexpr uint32_t FOURCC_00dc = 0x63643030;  // '00dc' - compressed video
@@ -38,6 +40,29 @@ static constexpr uint32_t FOURCC_00db = 0x62643030;  // '00db' - uncompressed vi
 static constexpr uint32_t FOURCC_01wb = 0x62773130;  // '01wb' - audio data
 
 AVIParser::AVIParser() {}
+
+void AVIParser::parse_info_list_(uint32_t size) {
+  const uint64_t end = this->reader_->tell() + size;
+  while (this->reader_->tell() + 8 <= end) {
+    uint32_t id, len;
+    if (!this->read_fourcc_(id) || !this->read_uint32_(len) || this->reader_->tell() + len > end)
+      break;
+    size_t used = 0;
+    if (id == FOURCC_INAM && len > 0) {
+      used = std::min<size_t>(len, TITLE_MAX - 1);
+      if (this->reader_->read(reinterpret_cast<uint8_t *>(this->title_), used) != static_cast<int>(used)) {
+        this->title_[0] = '\0';
+        break;
+      }
+      this->title_[used] = '\0';
+    }
+    if (!this->skip_bytes_(len - used + (len & 1)))
+      break;
+  }
+  // Whatever is left of the list (a broken chunk) skipped, the next chunk read where it starts.
+  if (this->reader_->tell() < end)
+    this->skip_bytes_(end - this->reader_->tell());
+}
 
 AVIParser::~AVIParser() { this->close(); }
 
@@ -60,6 +85,7 @@ bool AVIParser::open(BufferedFileReader *reader) {
   this->super_index_size_ = 0;
   this->recoveries_ = 0;
   this->damage_logged_ = 0;
+  this->title_[0] = '\0';
 
   // Parse AVI headers
   if (!this->parse_headers_()) {
@@ -199,6 +225,8 @@ bool AVIParser::parse_headers_() {
                 uint64_t bytes_remaining = (sub_size - 4) - bytes_consumed;
                 this->skip_bytes_(bytes_remaining);
               }
+            } else if (strl_type == FOURCC_INFO) {
+              this->parse_info_list_(sub_size - 4);
             } else {
               // Skip unknown list
               this->skip_bytes_(sub_size - 4);
@@ -224,6 +252,8 @@ bool AVIParser::parse_headers_() {
         // We're now positioned at the start of movi data - ready for read_next_frame()
         // Break immediately - if we continue the loop, it will read the first frame chunk as a fourcc!
         break;
+      } else if (list_type == FOURCC_INFO) {
+        this->parse_info_list_(chunk_size - 4);
       } else {
         // Skip unknown LIST
         this->skip_bytes_(chunk_size - 4);

@@ -1799,6 +1799,25 @@ class SimpleVideoPlayer : public Component
   lv_area_t ctl_time_area_{};      // the position label's text
   lv_area_t ctl_button_area_[CTL_BUTTON_COUNT]{};
   int32_t ctl_cell_w_{0};          // a digit, as wide as the widest
+  // Title and duration change per file: written into ctl_static_ without LVGL's widgets, straight
+  // from the label's font (glyph descriptors and bitmaps: font data only), over the empty field's
+  // background kept beside it; so the next file of a playlist needs no LVGL while it is paused.
+  struct ControlsText {
+    lv_area_t area{};  // the label's text (LVGL coordinates)
+    const lv_font_t *font{nullptr};
+    lv_color_t color{};
+    int32_t letter_space{0};
+    ControlsSprite background;  // the field without text
+  };
+  ControlsText ctl_title_text_, ctl_duration_text_;
+  lv_draw_buf_t ctl_glyph_buf_{};  // a glyph's coverage (A8), over the snapshot's memory
+  bool ctl_prerendered_{false};    // the sprites stand, ctl_mem_ held since
+  /// The file's title: its metadata's (AVI INFO INAM) when it has one, else its name.
+  const char *video_title_() const;
+  /// Main loop, no widget touched: the background back, then the text over it.
+  void ctl_draw_texts_();
+  void ctl_draw_text_(ControlsText &field, const char *text, bool dots);
+  uint8_t *ctl_static_px_(int32_t x, int32_t y) const;
   std::atomic<bool> ctl_ready_{false};  // rendered for this session
   std::atomic<bool> ctl_shown_{false};  // copied into each frame
   std::atomic<bool> ctl_dragging_{false};

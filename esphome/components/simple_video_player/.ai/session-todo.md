@@ -30,4 +30,17 @@ push origin testing_dev), docs updated in the same commit. Changed device YAMLs:
 No ESP_LOG in hot paths, no blocking waits there, no LVGL while paused, event-driven, PSRAM pool
 only, no buffer beyond the agreed one. Stop-hook messages: answer only ".".
 
+Olli's additions to item 1 (same night): "zur hintergrund kopie: die ist in PSRam ? der existierende
+verwaltete Puffer wird minimal größer ? - mach es so" / "nein kein Zeilenumbruch. achte eher darauf
+nicht den gesamten Pfad, sondern nur den Dateinamen - oder besser gar - wenn verfügbar - den Titel
+aus den Metadaten der Datei anzuzeigen" / "keine erlaubnisse abfragen ich bin jetzt abwesend".
+So: one line, cut with dots; the title from the file's metadata (AVI LIST INFO INAM) when it has
+one, else the file name only. Ask nothing, decide and note the decision here and in the summary.
+
+Found while doing item 1 (decision, to report): the bar's font on Olli's device is montserrat_16
+(LVGL's built-in fmt_txt font, not an esphome::font::Font), so the glyphs are read through LVGL's
+font functions (`lv_font_get_glyph_dsc`, `lv_font_get_glyph_bitmap`: font data only, no widget,
+no display), which serve both kinds of font.
+
 Status: (update as items finish)
+- 1 done (commit "svp: video bar title and duration without LVGL"), awaiting Olli's build/test.
