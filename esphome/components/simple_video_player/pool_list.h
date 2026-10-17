@@ -224,6 +224,11 @@ template<class T> class PoolList {
     while (this->size_ > 0)
       this->data_[--this->size_].~T();
   }
+  /// Place i past the entries (nullptr past the capacity): filled there by its own writer, taken in
+  /// by adopt() once that writer is done.
+  T *place(size_t i) { return i < this->capacity_ ? this->data_ + i : nullptr; }
+  /// The entries are the first n places (the ones past the size made in place()).
+  void adopt(size_t n) { this->size_ = std::min(n, this->capacity_); }
   /// Keeps the first n.
   void truncate(size_t n) {
     while (this->size_ > n)

@@ -76,8 +76,6 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 | E7 | Status JSON doesn't report a local video/playlist to the relay ("state" is the media player's) | CODE |
 | E8 | 'V' `still` is never 0 although the relay documents 0 = canvas/no stills; dashboard sender ignores 'V' changes (no `on_picture`) | CODE |
 | E9 | AVI sender sends no heartbeats: a live source stalling > 30 s gets dropped | CODE |
-| E10 | Panel always requests `/channels?refresh=1` (forces a full re-fetch) | CODE |
-| E12 | Folder listings run synchronously on the main loop (`load_folder_playlist_` S:610, `list_directory_` P:300) | CODE |
 
 ## F. Code hygiene
 

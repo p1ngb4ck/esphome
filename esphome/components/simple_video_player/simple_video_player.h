@@ -29,9 +29,9 @@
 #include "esphome/components/touchscreen/touchscreen.h"
 #endif
 
+#include "esphome/components/storage/storage_worker.h"
 #ifdef SVP_PICTURES
 #include "esphome/components/runtime_image/runtime_image.h"
-#include "esphome/components/storage/storage_worker.h"
 #endif
 
 #ifdef USE_SPEAKER
@@ -998,8 +998,28 @@ class SimpleVideoPlayer : public Component
   /// Reader task: back to the first frame (loop).
   bool reader_rewind_();
 
-  /// Main loop, no session running: the playlist becomes the videos of path's folder.
+  /// Main loop, no session running: the videos of path's folder (path is the playlist's one entry)
+  /// put round it, listed by the storage worker (playlist_listed_()); synchronously without one.
   void load_folder_playlist_(const std::string &path);
+  static bool playlist_entry_(const storage::FileStat *entry, void *ctx);
+  void playlist_listed_(storage::StorageError err);
+  // A local folder listed by the storage worker (async_list_dir) into a list's places past its
+  // entries: the entry callback on the worker's task, the list taking them in (adopt()) on the main
+  // loop at the completion. Nothing else writes those places meanwhile.
+  struct FolderListing {
+    SimpleVideoPlayer *player{nullptr};
+    SvpId dir;
+    size_t first{0};  // the first place written
+    size_t count{0};
+    uint32_t gen{0};
+    bool active{false};
+  };
+  struct FolderListings {
+    FolderListing pictures, playlist;
+  };
+  PsramPtr<FolderListings> listings_;  // a pool piece
+  uint32_t playlist_gen_{0};           // bumped with every new playlist
+  bool playlist_list_wanted_{false};   // the current playlist's folder, once the one on its way is done
   /// Main loop: playlist item `index` is to play (run_pending_start_()).
   void play_index_(size_t index);
 
@@ -1823,6 +1843,7 @@ class SimpleVideoPlayer : public Component
   PoolList<ImageEntry> images_;
   PoolList<uint16_t> images_order_;  // sorting images_ (sort_by_order)
   bool pic_list_failed_{false};  // the folder's listing failed: images_ empty
+  int pic_ha_show_{-1};           // ha_show_pictures() asked for while a folder is listed
   int current_image_{-1};
   int pic_wanted_{-1};                   // requested, not read yet
   PictureRead pic_read_;
@@ -1912,6 +1933,8 @@ class SimpleVideoPlayer : public Component
   void pictures_loop_();
   bool pictures_held_() const;
   void list_directory_();
+  static bool picture_entry_(const storage::FileStat *entry, void *ctx);
+  void pictures_listed_(storage::StorageError err);
   uint8_t *picture_alloc_(size_t size);
   bool reserve_decode_(size_t size);
   bool acquire_picture_buffers_();

@@ -204,9 +204,13 @@ entry moved once), thumbnail slots/queue per thumbnail; channel list (`url`, wit
 2 × 500 × (128 + 384) B, sources 32 + a ring of 3 × 32, listings asked 8, relay settings 32/16 (×2),
 8 sets; keyboard layouts: downloads 16 × 32 B, `keyboard_devices()` 32 (one list, made anew per
 call). The channel task writes the "new" list outside `channel_lock_` after clearing its flag under
-it; the main loop takes it only with the flag set, checked under the lock. A local picture folder is
-listed straight into `images_`: a failed listing leaves it empty (`picture_listing_failed()`, the
-device YAML shows "Listing failed"). Still on the PSRAM heap: the configuration's lists filled before
+it; the main loop takes it only with the flag set, checked under the lock. Local folders (a picture folder, a
+video's folder as its playlist) are listed by the storage worker (`async_list_dir`; synchronously
+without one or with its queue full): its entry callback writes the list's places past its entries
+(`PoolList::place`), the completion on the main loop takes them in (`adopt`), sorts and shows; a
+listing asked for meanwhile drops the one on its way and lists anew (`FolderListing`, a pool piece).
+The video plays at once, its folder's videos put round it when listed. A picture folder's failed
+listing leaves `images_` empty (`picture_listing_failed()`, the device YAML shows "Listing failed"). Still on the PSRAM heap: the configuration's lists filled before
 the pool exists (picture folders, controls buttons, keyboards). Stay outside by decision
 (Olli, 2026-10-17): the codec libraries' own working buffers (FLAC_MALLOC etc.) -- ESPHome's audio
 codecs as they are, in PSRAM.

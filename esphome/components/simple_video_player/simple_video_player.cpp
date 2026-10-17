@@ -92,8 +92,9 @@ void SimpleVideoPlayer::setup() {
     return;
   }
   // The lists, at the pool's end for good (plan_pool_()).
-  bool lists =
-      this->playlist_.reserve(this->pool_, MAX_PLAYLIST) && this->playlist_order_.reserve(this->pool_, MAX_PLAYLIST);
+  this->listings_ = psram_make<FolderListings>();
+  bool lists = this->listings_ && this->playlist_.reserve(this->pool_, MAX_PLAYLIST) &&
+               this->playlist_order_.reserve(this->pool_, MAX_PLAYLIST);
 #ifdef SVP_AUDIO_FILES
   if (this->file_speaker_ != nullptr)
     lists = lists && this->audio_queue_.reserve(this->pool_, MAX_PLAYLIST) &&
@@ -541,6 +542,12 @@ void SimpleVideoPlayer::play(const std::string &video_path, bool folder_playlist
 void SimpleVideoPlayer::play_list(std::vector<std::string> paths, size_t start) {
   if (paths.empty())
     return;
+  if (this->listings_->playlist.active) {
+    // The worker writes into playlist_ past its entry till then.
+    ESP_LOGW(TAG, "Playlist not taken: a folder is being listed for the last one");
+    return;
+  }
+  this->playlist_gen_++;
   this->playlist_.clear();
   for (const auto &path : paths) {
     if (this->playlist_.full())
@@ -616,14 +623,17 @@ void SimpleVideoPlayer::run_pending_start_() {
   this->start_pending_.store(false, std::memory_order_release);
   size_t index = this->start_index_;
   if (!this->start_path_.empty()) {
+    // The file first; its folder's videos put round it once listed (at once without the worker).
     this->playlist_.clear();
     this->playlist_index_ = 0;
-    if (this->start_folder_)
-      this->load_folder_playlist_(this->start_path_);
-    if (this->playlist_.empty() && SvpPath::fits(this->start_path_.size()))
+    this->playlist_gen_++;
+    if (SvpPath::fits(this->start_path_.size())) {
       this->playlist_.emplace_back(this->start_path_.c_str());
-    if (this->playlist_.empty())
+    } else {
       ESP_LOGW(TAG, "%s: its path is too long", this->start_path_.c_str());
+    }
+    if (this->start_folder_ && !this->playlist_.empty())
+      this->load_folder_playlist_(this->start_path_);
     index = this->playlist_index_;
     this->start_path_.clear();
   }
@@ -671,69 +681,109 @@ void SimpleVideoPlayer::previous() {
 }
 
 void SimpleVideoPlayer::load_folder_playlist_(const std::string &path) {
+  FolderListing &job = this->listings_->playlist;
+  if (job.active) {
+    this->playlist_list_wanted_ = true;  // after the one on its way (whose result is dropped)
+    return;
+  }
   const size_t slash = path.rfind('/');
   if (slash == std::string::npos || slash == 0 || storage::global_storage_registry == nullptr)
     return;
   const std::string dir = path.substr(0, slash);
   const char *rel = nullptr;
   storage::PathStorage *storage = storage::global_storage_registry->resolve_path(dir.c_str(), &rel);
-  if (storage == nullptr || (storage::global_storage_worker != nullptr &&
-                             storage::global_storage_worker->has_active_task_io(storage))) {
+  if (storage == nullptr) {
     ESP_LOGW(TAG, "Cannot list %s for the playlist", dir.c_str());
     return;
   }
-  // The names straight into playlist_ (one place left for the file itself), then the folder put
-  // before them; those whose path would not fit are left out.
-  struct Context {
-    PoolList<SvpPath> *names;
-    size_t dir_len;
-  } context{&this->playlist_, dir.size()};
-  const storage::StorageError err = storage->list_dir(
-      (rel == nullptr || rel[0] == '\0') ? "/" : rel,
-      [](const storage::FileStat *entry, void *ctx) -> bool {
-        auto *context = static_cast<Context *>(ctx);
-        if (entry->is_dir || entry->name[0] == '.')
-          return true;
-        const char *dot = strrchr(entry->name, '.');
-        if (dot == nullptr)
-          return true;
-        std::string extension(dot);
-        for (char &c : extension)
-          c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-        if (extension != ".avi" && extension != ".mjpeg" && extension != ".mjpg")
-          return true;
-        if (!SvpPath::fits(context->dir_len + 1 + std::strlen(entry->name))) {
-          ESP_LOGW(TAG, "%s left out of the playlist: its path is too long", entry->name);
-          return true;
-        }
-        context->names->emplace_back(entry->name);
-        return context->names->size() + 1 < context->names->capacity();
-      },
-      &context);
-  if (err != storage::StorageError::STORAGE_ERROR_OK) {
-    this->playlist_.clear();
-    ESP_LOGW(TAG, "Listing %s failed: %s", dir.c_str(), storage::error_to_string(err));
+  const char *at = (rel == nullptr || rel[0] == '\0') ? "/" : rel;
+  // The names into playlist_'s places after its entry (one place left for that entry to go back).
+  job.player = this;
+  job.dir = dir;
+  job.first = 1;
+  job.count = 0;
+  job.gen = this->playlist_gen_;
+  storage::StorageWorker *worker = storage::global_storage_worker;
+  if (worker != nullptr &&
+      worker->async_list_dir(storage, at, &SimpleVideoPlayer::playlist_entry_, &job,
+                             [this](storage::StorageError err) { this->playlist_listed_(err); }) ==
+          storage::StorageError::STORAGE_ERROR_OK) {
+    job.active = true;
     return;
   }
+  // No worker, or its queue full: read here, unless the worker reads from it on its task.
+  if (worker != nullptr && worker->has_active_task_io(storage)) {
+    ESP_LOGW(TAG, "Cannot list %s for the playlist", dir.c_str());
+    return;
+  }
+  job.active = true;
+  this->playlist_listed_(storage->list_dir(at, &SimpleVideoPlayer::playlist_entry_, &job));
+}
+
+// The worker's task (or here): one entry of the folder, a video's name into playlist_'s next place.
+bool SimpleVideoPlayer::playlist_entry_(const storage::FileStat *entry, void *ctx) {
+  auto *job = static_cast<FolderListing *>(ctx);
+  PoolList<SvpPath> &list = job->player->playlist_;
+  if (entry->is_dir || entry->name[0] == '.')
+    return true;
+  const char *dot = strrchr(entry->name, '.');
+  if (dot == nullptr)
+    return true;
+  if (strcasecmp(dot, ".avi") != 0 && strcasecmp(dot, ".mjpeg") != 0 && strcasecmp(dot, ".mjpg") != 0)
+    return true;
+  if (!SvpPath::fits(job->dir.size() + 1 + std::strlen(entry->name))) {
+    ESP_LOGW(TAG, "%s left out of the playlist: its path is too long", entry->name);
+    return true;
+  }
+  SvpPath *at = list.place(job->first + job->count);
+  if (at == nullptr)
+    return false;
+  ::new (at) SvpPath(entry->name);
+  job->count++;
+  return job->first + job->count < list.capacity();
+}
+
+// Main loop: the folder listed; the playlist becomes its videos, sorted, the one playing among them
+// (else first).
+void SimpleVideoPlayer::playlist_listed_(storage::StorageError err) {
+  FolderListing &job = this->listings_->playlist;
+  job.active = false;
+  const bool wanted = this->playlist_list_wanted_;
+  this->playlist_list_wanted_ = false;
+  if (job.gen != this->playlist_gen_ || this->playlist_.size() != 1) {
+    // Another playlist meanwhile: dropped; its folder now, if it asked for one.
+    if (wanted && this->playlist_.size() == 1)
+      this->load_folder_playlist_(this->playlist_[0].c_str());
+    return;
+  }
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGW(TAG, "Listing %s failed: %s", job.dir.c_str(), storage::error_to_string(err));
+    return;
+  }
+  const SvpPath file = this->playlist_[0];
+  this->playlist_.adopt(1 + job.count);
+  this->playlist_.erase(this->playlist_.begin());
   sort_by_order(this->playlist_, this->playlist_order_,
                 [](const SvpPath &a, const SvpPath &b) { return strcasecmp(a.c_str(), b.c_str()) < 0; });
-  const std::string file = path.substr(slash + 1);
+  const size_t slash = file.rfind('/');
+  const char *name = file.c_str() + (slash == std::string::npos ? 0 : slash + 1);
+  size_t found = SIZE_MAX;
   for (size_t i = 0; i < this->playlist_.size(); i++) {
     SvpPath &entry = this->playlist_[i];
-    if (file == entry.c_str())
-      this->playlist_index_ = i;
-    SvpPath full(dir.c_str());
+    if (found == SIZE_MAX && entry == name)
+      found = i;
+    SvpPath full(job.dir.c_str());
     full += '/';
     full += entry.c_str();
     entry = full;
   }
-  if (this->playlist_index_ >= this->playlist_.size() || path != this->playlist_[this->playlist_index_].c_str()) {
-    // The file itself is not among them (another extension, hidden): play it first, then the folder.
-    if (SvpPath::fits(path.size()))
-      this->playlist_.insert(this->playlist_.begin(), SvpPath(path.c_str()));
-    this->playlist_index_ = 0;
+  if (found == SIZE_MAX) {
+    // The file itself is not among them (another extension, hidden): it first, then the folder.
+    this->playlist_.insert(this->playlist_.begin(), file);
+    found = 0;
   }
-  ESP_LOGI(TAG, "Playlist: %u videos in %s", static_cast<unsigned>(this->playlist_.size()), dir.c_str());
+  this->playlist_index_ = found;
+  ESP_LOGI(TAG, "Playlist: %u videos in %s", static_cast<unsigned>(this->playlist_.size()), job.dir.c_str());
 }
 
 void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
@@ -2243,7 +2293,8 @@ bool SimpleVideoPlayer::plan_pool_() {
              this->thumb_slots_.bytes(this->thumb_count_) + this->thumb_queue_.bytes(this->thumb_count_);
 #endif
   // The lists (setup(), the features' setups).
-  fixed += this->playlist_.bytes(MAX_PLAYLIST) + this->playlist_order_.bytes(MAX_PLAYLIST);
+  fixed += this->playlist_.bytes(MAX_PLAYLIST) + this->playlist_order_.bytes(MAX_PLAYLIST) +
+           pool_round(sizeof(FolderListings));
 #ifdef SVP_AUDIO_FILES
   if (this->file_speaker_ != nullptr)
     fixed += this->audio_queue_.bytes(MAX_PLAYLIST) + this->audio_titles_.bytes(MAX_PLAYLIST) +

@@ -317,14 +317,14 @@ void SimpleVideoPlayer::refresh_images() {
 
 void SimpleVideoPlayer::list_directory_() {
   this->pic_list_retry_ms_ = millis();
-  if (storage::global_storage_registry == nullptr)
-    return;
+  FolderListing &job = this->listings_->pictures;
+  if (job.active || storage::global_storage_registry == nullptr)
+    return;  // the one on its way first (its result is dropped: pic_list_pending_)
   const char *rel = nullptr;
   storage::PathStorage *storage = storage::global_storage_registry->resolve_path(this->pic_dir_.c_str(), &rel);
-  // Not mounted yet, or the worker reads from it on its task: tried again.
-  if (storage == nullptr ||
-      (storage::global_storage_worker != nullptr && storage::global_storage_worker->has_active_task_io(storage)))
-    return;
+  if (storage == nullptr)
+    return;  // not mounted yet: tried again
+  const char *path = (rel == nullptr || rel[0] == '\0') ? "/" : rel;
 
   // Listed straight into images_ (the old list goes; a failed listing leaves none, pic_list_failed_).
   this->pic_generation_++;  // a read in flight belongs to the old list
@@ -335,31 +335,67 @@ void SimpleVideoPlayer::list_directory_() {
   }
   this->current_image_ = -1;
   this->pic_wanted_ = -1;
-  struct Context {
-    PoolList<ImageEntry> *found;
-    const std::string *dir;
-  } context{&this->images_, &this->pic_dir_};
-  const storage::StorageError err =
-      storage->list_dir((rel == nullptr || rel[0] == '\0') ? "/" : rel,
-                        [](const storage::FileStat *entry, void *ctx) -> bool {
-                          auto *context = static_cast<Context *>(ctx);
-                          runtime_image::ImageFormat format;
-                          if (entry->is_dir || entry->name[0] == '.' || !picture_format(entry->name, &format))
-                            return true;
-                          if (!SvpId::fits(context->dir->size() + 1 + std::strlen(entry->name))) {
-                            ESP_LOGW(TAG, "%s left out: its path is too long", entry->name);
-                            return true;
-                          }
-                          ImageEntry *image = context->found->emplace_back();
-                          image->path = *context->dir;
-                          image->path += '/';
-                          image->path += entry->name;
-                          image->filename = entry->name;
-                          image->size = entry->size;
-                          return !context->found->full();
-                        },
-                        &context);
+  job.player = this;
+  job.dir = this->pic_dir_;
+  job.first = 0;
+  job.count = 0;
+  storage::StorageWorker *worker = storage::global_storage_worker;
+  if (worker != nullptr &&
+      worker->async_list_dir(storage, path, &SimpleVideoPlayer::picture_entry_, &job,
+                             [this](storage::StorageError err) { this->pictures_listed_(err); }) ==
+          storage::StorageError::STORAGE_ERROR_OK) {
+    job.active = true;
+    this->pic_list_pending_ = false;
+    return;
+  }
+  // No worker, or its queue full: read here, unless the worker reads from it on its task.
+  if (worker != nullptr && worker->has_active_task_io(storage))
+    return;  // tried again
+  job.active = true;
   this->pic_list_pending_ = false;
+  this->pictures_listed_(storage->list_dir(path, &SimpleVideoPlayer::picture_entry_, &job));
+}
+
+// The worker's task (or here): one entry of the folder, into images_' next place.
+bool SimpleVideoPlayer::picture_entry_(const storage::FileStat *entry, void *ctx) {
+  auto *job = static_cast<FolderListing *>(ctx);
+  PoolList<ImageEntry> &list = job->player->images_;
+  runtime_image::ImageFormat format;
+  if (entry->is_dir || entry->name[0] == '.' || !picture_format(entry->name, &format))
+    return true;
+  if (!SvpId::fits(job->dir.size() + 1 + std::strlen(entry->name))) {
+    ESP_LOGW(TAG, "%s left out: its path is too long", entry->name);
+    return true;
+  }
+  ImageEntry *at = list.place(job->first + job->count);
+  if (at == nullptr)
+    return false;
+  ImageEntry *image = ::new (at) ImageEntry();
+  image->path = job->dir;
+  image->path += '/';
+  image->path += entry->name;
+  image->filename = entry->name;
+  image->size = entry->size;
+  job->count++;
+  return job->first + job->count < list.capacity();
+}
+
+// Main loop: the folder listed.
+void SimpleVideoPlayer::pictures_listed_(storage::StorageError err) {
+  FolderListing &job = this->listings_->pictures;
+  job.active = false;
+#ifdef SVP_CHANNEL_LIST
+  if (this->pic_ha_show_ >= 0) {
+    // Home Assistant's pictures were asked for meanwhile: they take the list.
+    const size_t index = static_cast<size_t>(this->pic_ha_show_);
+    this->pic_ha_show_ = -1;
+    this->ha_show_pictures(index);
+    return;
+  }
+#endif
+  if (this->pic_list_pending_)
+    return;  // another folder (or this one anew) asked for meanwhile: listed next
+  this->images_.adopt(job.count);
   this->pic_list_failed_ = err != storage::StorageError::STORAGE_ERROR_OK;
   if (this->pic_list_failed_) {
     this->images_.clear();
@@ -420,6 +456,11 @@ bool SimpleVideoPlayer::show_image(const std::string &path) {
 bool SimpleVideoPlayer::ha_show_pictures(size_t index) {
   if (!this->pic_ready_ || index >= this->ha_items_.size() || this->ha_items_[index].dir)
     return false;
+  if (this->listings_->pictures.active) {
+    // A local folder is listed into images_ meanwhile: these take it once that is done.
+    this->pic_ha_show_ = static_cast<int>(index);
+    return true;
+  }
   size_t before = 0;  // the pictures listed before it
   for (size_t i = 0; i < index; i++)
     before += this->ha_items_[i].dir ? 0 : 1;
