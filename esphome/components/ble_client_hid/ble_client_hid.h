@@ -261,7 +261,16 @@ class BLEClientHID : public Component,
   /// false: the link is not encrypted unless the device asks for it.
   void set_encryption(bool encryption) { this->encryption_ = encryption; }
 
+  // Gamepad driver transport: report characteristics by type and report ID.
+  bool send_output_report(const uint8_t *data, size_t len) override;
+  bool set_report(hid::HIDReportKind kind, const uint8_t *data, size_t len) override;
+  bool request_feature_report(uint8_t id, uint16_t len) override;
+  Component *hid_component() override { return this; }
+
  protected:
+  /// The characteristic of a report of this kind, and whether data[0] is its report ID.
+  uint16_t report_handle_(hid::HIDReportKind kind, const uint8_t *data, size_t len, bool &with_id) const;
+  bool write_report_(uint16_t handle, const uint8_t *data, size_t len);
   void write_leds_(uint8_t leds) override;
   void apply_io_capability_();
   void restore_io_capability_();
@@ -412,6 +421,12 @@ class BLEClientHID : public Component,
   bool encryption_{true};
   uint64_t plain_address_{0};
   bool hid_connected_{false};
+  // From the PnP ID; kept with the warm start cache, which does not read it again.
+  uint16_t pnp_vid_{0};
+  uint16_t pnp_pid_{0};
+  uint16_t pnp_version_{0};
+  uint16_t feature_read_handle_{0};
+  uint8_t feature_read_id_{0};
   bool io_cap_lowered_{false};
 
   OrderedEventBuffer sampled_events_{16};

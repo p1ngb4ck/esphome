@@ -1121,6 +1121,9 @@ void BLEClientHID::process_read_value_(const GattReadOperation &operation, const
         const uint16_t version = value[5] | (static_cast<uint16_t>(value[6]) << 8U);
         ESP_LOGD(TAG, "HID_DEVICE field=pnp_id source=%u vendor_id=0x%04X product_id=0x%04X version=0x%04X", value[0],
                  vendor_id, product_id, version);
+        this->pnp_vid_ = vendor_id;
+        this->pnp_pid_ = product_id;
+        this->pnp_version_ = version;
       } else {
         this->mark_degraded_("PnP ID has invalid length");
       }
@@ -1530,6 +1533,8 @@ void BLEClientHID::finalize_setup_() {
     this->status_clear_warning();
     this->transition_(SetupPhase::READY);
   }
+  this->gamepad_attach_(hid::HIDBus::BLE, this->pnp_vid_, this->pnp_pid_, this->pnp_version_);
+  this->gamepad_start_();
   this->end_pairing_(true, nullptr);
   // Cache the profile for the next connection, if every HID service has its report map.
   bool complete = !this->hid_services_.empty();
@@ -1734,6 +1739,60 @@ void BLEClientHID::write_leds_(uint8_t leds) {
   }
 }
 
+// -- Gamepad driver transport --------------------------------------------------------------
+
+uint16_t BLEClientHID::report_handle_(hid::HIDReportKind kind, const uint8_t *data, size_t len, bool &with_id) const {
+  if (len == 0)
+    return 0;
+  for (const auto &entry : this->handle_report_source_) {
+    const HIDReportSource &source = entry.second;
+    if (!source.has_report_type || source.report_type != static_cast<uint8_t>(kind))
+      continue;
+    const HIDServiceContext *context = this->find_hid_context_(source.service_instance);
+    with_id = context != nullptr && context->report_map != nullptr && context->report_map->uses_report_ids();
+    if (!with_id || (source.has_report_id && source.report_id == data[0]))
+      return entry.first;
+  }
+  return 0;
+}
+
+// HOGP leaves the report ID out of the value.
+bool BLEClientHID::write_report_(uint16_t handle, const uint8_t *data, size_t len) {
+  if (handle == 0 || (this->setup_phase_ != SetupPhase::READY && this->setup_phase_ != SetupPhase::DEGRADED))
+    return false;
+  const GattCharacteristicInfo *characteristic = this->find_characteristic_(handle);
+  const bool with_response =
+      characteristic == nullptr || (characteristic->properties & ESP_GATT_CHAR_PROP_BIT_WRITE) != 0;
+  return esp_ble_gattc_write_char(this->parent()->get_gattc_if(), this->parent()->get_conn_id(), handle, len,
+                                  const_cast<uint8_t *>(data),
+                                  with_response ? ESP_GATT_WRITE_TYPE_RSP : ESP_GATT_WRITE_TYPE_NO_RSP,
+                                  ESP_GATT_AUTH_REQ_NONE) == ESP_OK;
+}
+
+bool BLEClientHID::send_output_report(const uint8_t *data, size_t len) {
+  return this->set_report(hid::HIDReportKind::OUTPUT, data, len);
+}
+
+bool BLEClientHID::set_report(hid::HIDReportKind kind, const uint8_t *data, size_t len) {
+  bool with_id = false;
+  const uint16_t handle = this->report_handle_(kind, data, len, with_id);
+  return with_id ? this->write_report_(handle, data + 1, len - 1) : this->write_report_(handle, data, len);
+}
+
+bool BLEClientHID::request_feature_report(uint8_t id, uint16_t len) {
+  if (this->feature_read_handle_ != 0 ||
+      (this->setup_phase_ != SetupPhase::READY && this->setup_phase_ != SetupPhase::DEGRADED))
+    return false;
+  bool with_id = false;
+  const uint16_t handle = this->report_handle_(hid::HIDReportKind::FEATURE, &id, 1, with_id);
+  if (handle == 0 || esp_ble_gattc_read_char(this->parent()->get_gattc_if(), this->parent()->get_conn_id(), handle,
+                                             this->read_auth_()) != ESP_OK)
+    return false;
+  this->feature_read_handle_ = handle;
+  this->feature_read_id_ = id;
+  return true;
+}
+
 // -- GAP events --------------------------------------------------------------------------
 
 void BLEClientHID::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
@@ -1830,6 +1889,8 @@ void BLEClientHID::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
         ESP_LOGW(TAG, "HID_CONNECTION status=disconnected reason=%d", param->disconnect.reason);
         this->status_set_warning("Disconnected");
       }
+      this->feature_read_handle_ = 0;
+      this->gamepad_detach_();
       this->release_all_hid();
       this->reset_connection_state_();
       this->transition_(SetupPhase::DISCONNECTED);
@@ -1857,6 +1918,18 @@ void BLEClientHID::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
     case ESP_GATTC_READ_DESCR_EVT:
       if (param->read.conn_id != this->parent()->get_conn_id())
         break;
+      if (event == ESP_GATTC_READ_CHAR_EVT && this->feature_read_handle_ != 0 &&
+          param->read.handle == this->feature_read_handle_) {
+        // A gamepad driver's feature report, given to it with its report ID first.
+        this->feature_read_handle_ = 0;
+        std::vector<uint8_t> report;
+        if (param->read.status == ESP_GATT_OK) {
+          report.push_back(this->feature_read_id_);
+          report.insert(report.end(), param->read.value, param->read.value + param->read.value_len);
+        }
+        this->gamepad_feature_(this->feature_read_id_, report.data(), report.size());
+        break;
+      }
       if (this->active_read_ == nullptr || this->active_read_->handle != param->read.handle) {
         ESP_LOGV(TAG, "GATT_READ handle=%u status=unmatched_callback", param->read.handle);
         break;
@@ -2021,6 +2094,18 @@ void BLEClientHID::process_input_report_(const PendingHIDReport &report) {
     recognized = status == HIDDecodeStatus::EXACT || status == HIDDecodeStatus::LONG;
   } else {
     HIDServiceContext *context = this->find_hid_context_(source.service_instance);
+    // A gamepad driver reads the report as the device sends it over USB: report ID first.
+    if (context != nullptr && context->report_map != nullptr && context->report_map->uses_report_ids() &&
+        source.has_report_id) {
+      std::vector<uint8_t> numbered;
+      numbered.reserve(report.payload.size() + 1);
+      numbered.push_back(source.report_id);
+      numbered.insert(numbered.end(), report.payload.begin(), report.payload.end());
+      if (this->gamepad_report_(numbered.data(), numbered.size()))
+        return;
+    } else if (this->gamepad_report_(report.payload.data(), report.payload.size())) {
+      return;
+    }
     if (context != nullptr && context->report_map != nullptr)
       values = context->report_map->parse(source, report.payload.data(), report.payload.size(), &recognized, &status);
   }

@@ -22,6 +22,11 @@
 
 namespace esphome::bt_hid {
 
+// PIN modes for a Wii Remote: paired with 1+2 (its address backwards), or with its sync
+// button (this device's address backwards).
+static constexpr const char *PIN_WIIMOTE = "wiimote";
+static constexpr const char *PIN_WIIMOTE_SYNC = "wiimote_sync";
+
 class BTHIDDeviceSelect;
 
 /// A device the pairing scan found, offered by the select.
@@ -111,8 +116,15 @@ class BTHIDDevice : public Component,
   // Main loop, from the shared host.
   void on_open(uint8_t handle, bool success, int status);
   void on_close();
-  void on_descriptor(const std::vector<uint8_t> &descriptor);
+  void on_descriptor(const std::vector<uint8_t> &descriptor, uint16_t vid, uint16_t pid);
   void on_report(const std::vector<uint8_t> &report);
+  void on_feature(const std::vector<uint8_t> &report);
+
+  // Gamepad driver transport.
+  bool send_output_report(const uint8_t *data, size_t len) override;
+  bool set_report(hid::HIDReportKind kind, const uint8_t *data, size_t len) override;
+  bool request_feature_report(uint8_t id, uint16_t len) override;
+  Component *hid_component() override { return this; }
   void on_passkey(uint32_t passkey);
   void on_pin_request();
   uint8_t handle() const { return this->handle_; }
@@ -160,6 +172,7 @@ class BTHIDDevice : public Component,
   uint32_t slot_{0};
   uint32_t candidate_class_{0};
   uint8_t handle_{0xFF};
+  uint8_t feature_id_{0};  // the feature report asked for, 0 none
   bool connected_{false};
   bool auto_connect_{true};
   bool fixed_address_{false};

@@ -10,6 +10,7 @@
 #include "esphome/core/event_pool.h"
 #include "esphome/core/lock_free_queue.h"
 #include "hid_types.h"
+#include "xbox.h"
 
 #include <atomic>
 #include <memory>
@@ -25,8 +26,8 @@ class RawHIDDriver;
 
 // A USB HID device: every HID interface of it, each read through its own report descriptor
 // (keyboards, mice, remotes, gamepads, and receivers that put several of them on one
-// interface), into the shared hid::HIDInput. Xbox 360 pads, which are not HID, are decoded
-// as Linux xpad.c does.
+// interface), into the shared hid::HIDInput, and through the gamepad driver of the pads it
+// knows (hid/gamepad.h). Xbox 360 and Xbox One pads, which are not HID, have drivers here.
 class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
  public:
   USBHIDClient(uint16_t vid, uint16_t pid) : usb_host::USBClient(vid, pid) {}
@@ -46,21 +47,29 @@ class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
   void register_device_name_sensor(text_sensor::TextSensor *sensor) { this->device_name_sensor_ = sensor; }
 #endif
 
+  // Gamepad driver transport: the pad's interface.
+  bool send_output_report(const uint8_t *data, size_t len) override;
+  bool set_report(hid::HIDReportKind kind, const uint8_t *data, size_t len) override;
+  bool request_feature_report(uint8_t id, uint16_t len) override;
+  Component *hid_component() override { return this; }
+
  protected:
   static constexpr size_t MAX_INTERFACES = 4;
   static constexpr size_t REPORT_MAX = 64;
   static constexpr size_t QUEUE_SIZE = 32;
 
+  // Interfaces that are not HID: pads with a protocol of their own.
+  enum Vendor : uint8_t { VENDOR_NONE, VENDOR_XBOX360, VENDOR_XBOX360_WIRELESS, VENDOR_XBOXONE };
+
   struct Interface {
     uint8_t number{0};
+    uint8_t protocol{0};
     uint8_t in_ep{0};
     uint16_t in_mps{0};
     uint8_t out_ep{0};
     uint16_t descriptor_length{0};
-    bool xbox{false};
-    bool xbox_wireless{false};
+    Vendor vendor{VENDOR_NONE};
     std::unique_ptr<hid::HIDReportMap> map{};
-    uint8_t xbox_last[14]{};
   };
 
   // One interrupt IN report, from the USB task to the main loop.
@@ -81,8 +90,9 @@ class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
   void descriptor_done_(size_t index, const uint8_t *data, size_t length);
   void start_reading_();
   void read_(uint8_t index, uint8_t number, uint8_t ep, uint16_t mps, uint32_t generation);
-  void report_(Interface &intf, const uint8_t *data, size_t length);
-  void xbox360_(Interface &intf, const uint8_t *data, size_t length);
+  void report_(size_t index, const uint8_t *data, size_t length);
+  void attach_pad_();
+  void thrustmaster_();
 
   std::vector<Interface> interfaces_{};
   std::string device_key_;  // the device connected: "usb:vvvv:pppp[:serial]", "" none
@@ -91,6 +101,7 @@ class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
   LockFreeQueue<Report, QUEUE_SIZE> reports_{};
   EventPool<Report, QUEUE_SIZE - 1> report_pool_{};
   RawHIDDriver *raw_driver_{nullptr};
+  size_t pad_index_{0};  // the interface the gamepad driver talks to
 #ifdef USE_TEXT_SENSOR
   text_sensor::TextSensor *device_name_sensor_{nullptr};
 #endif

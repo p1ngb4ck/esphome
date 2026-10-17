@@ -9,6 +9,7 @@
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
+#include <esp_bt_device.h>
 #include <esp_bt_main.h>
 #include <esp_gap_bt_api.h>
 #include <esp_hidh_api.h>
@@ -32,7 +33,21 @@ namespace {
 
 // Bluedroid calls back on its BTC task; everything is handed to the main loop as one of these.
 struct HostEvent {
-  enum Type : uint8_t { INIT, OPEN, CLOSE, DESCRIPTOR, DATA, PIN, PASSKEY, ADOPTED, LISTED, AUTH, FOUND, SCAN_STATE };
+  enum Type : uint8_t {
+    INIT,
+    OPEN,
+    CLOSE,
+    DESCRIPTOR,
+    DATA,
+    FEATURE,
+    PIN,
+    PASSKEY,
+    ADOPTED,
+    LISTED,
+    AUTH,
+    FOUND,
+    SCAN_STATE
+  };
   Type type{INIT};
   uint8_t handle{0xFF};
   uint8_t conn{0};  // OPEN: esp_hidh_connection_state_t
@@ -179,8 +194,18 @@ bool gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void * /*
       if (dev == nullptr)
         return false;
       esp_bt_pin_code_t code{};
-      const uint8_t len = std::min<size_t>(dev->pin().size(), ESP_BT_PIN_CODE_LEN);
-      memcpy(code, dev->pin().data(), len);
+      uint8_t len;
+      if (dev->pin() == PIN_WIIMOTE || dev->pin() == PIN_WIIMOTE_SYNC) {
+        // A Wii Remote takes an address backwards: its own when paired with 1+2, this
+        // device's when paired with its sync button.
+        const uint8_t *bda = dev->pin() == PIN_WIIMOTE ? param->pin_req.bda : esp_bt_dev_get_address();
+        len = 6;
+        for (int i = 0; i < 6 && bda != nullptr; i++)
+          code[i] = bda[5 - i];
+      } else {
+        len = std::min<size_t>(dev->pin().size(), ESP_BT_PIN_CODE_LEN);
+        memcpy(code, dev->pin().data(), len);
+      }
       esp_bt_gap_pin_reply(param->pin_req.bda, true, len, code);
       HostEvent e;
       e.type = HostEvent::PIN;
@@ -296,6 +321,13 @@ void hh_cb(esp_hidh_cb_event_t event, esp_hidh_cb_param_t *param) {
       e.handle = param->data_ind.handle;
       e.data.assign(param->data_ind.data, param->data_ind.data + param->data_ind.len);
       break;
+    case ESP_HIDH_GET_RPT_EVT:
+      // A failed GET_REPORT arrives without data.
+      e.type = HostEvent::FEATURE;
+      e.handle = param->get_rpt.handle;
+      if (param->get_rpt.status == ESP_HIDH_OK && param->get_rpt.data != nullptr)
+        e.data.assign(param->get_rpt.data, param->get_rpt.data + param->get_rpt.len);
+      break;
     default:
       return;
   }
@@ -376,12 +408,16 @@ void handle_event(HostEvent &e) {
       if (BTHIDDevice *dev = find_by_handle(e.handle)) {
         ESP_LOGD(TAG, "Device %04" PRIX32 ":%04" PRIX32 ", report descriptor %u bytes", e.value >> 16, e.value & 0xFFFF,
                  static_cast<unsigned>(e.data.size()));
-        dev->on_descriptor(e.data);
+        dev->on_descriptor(e.data, e.value >> 16, e.value & 0xFFFF);
       }
       break;
     case HostEvent::DATA:
       if (BTHIDDevice *dev = find_by_handle(e.handle))
         dev->on_report(e.data);
+      break;
+    case HostEvent::FEATURE:
+      if (BTHIDDevice *dev = find_by_handle(e.handle))
+        dev->on_feature(e.data);
       break;
     case HostEvent::PIN:
       if (BTHIDDevice *dev = find_by_address(e.bda))
@@ -928,6 +964,7 @@ void BTHIDDevice::on_close() {
   this->connected_ = false;
   this->handle_ = 0xFF;
   this->map_.reset();
+  this->gamepad_detach_();
   this->release_all_hid();
   if (was_connected) {
     this->disconnect_cb_.call();
@@ -938,8 +975,10 @@ void BTHIDDevice::on_close() {
   }
 }
 
-void BTHIDDevice::on_descriptor(const std::vector<uint8_t> &descriptor) {
+void BTHIDDevice::on_descriptor(const std::vector<uint8_t> &descriptor, uint16_t vid, uint16_t pid) {
   this->map_.reset(hid::HIDReportMap::parse_report_map_data(descriptor.data(), descriptor.size()));
+  this->gamepad_attach_(hid::HIDBus::BT_CLASSIC, vid, pid, 0);
+  this->gamepad_start_();
   if (this->map_ == nullptr) {
     ESP_LOGW(TAG, "Report descriptor (%u bytes) not understood", static_cast<unsigned>(descriptor.size()));
     return;
@@ -947,8 +986,42 @@ void BTHIDDevice::on_descriptor(const std::vector<uint8_t> &descriptor) {
   this->write_leds_(this->leds_);
 }
 
+void BTHIDDevice::on_feature(const std::vector<uint8_t> &report) {
+  const uint8_t id = this->feature_id_;
+  this->feature_id_ = 0;
+  this->gamepad_feature_(id, report.data(), report.size());
+}
+
+// Output reports on the interrupt channel, report ID first where the device numbers them.
+bool BTHIDDevice::send_output_report(const uint8_t *data, size_t len) {
+  if (!this->connected_ || len == 0)
+    return false;
+  return esp_bt_hid_host_send_data(this->bda_, const_cast<uint8_t *>(data), len) == ESP_OK;
+}
+
+bool BTHIDDevice::set_report(hid::HIDReportKind kind, const uint8_t *data, size_t len) {
+  if (!this->connected_ || len == 0)
+    return false;
+  const auto type = kind == hid::HIDReportKind::FEATURE  ? ESP_HIDH_REPORT_TYPE_FEATURE
+                    : kind == hid::HIDReportKind::OUTPUT ? ESP_HIDH_REPORT_TYPE_OUTPUT
+                                                         : ESP_HIDH_REPORT_TYPE_INPUT;
+  return esp_bt_hid_host_set_report(this->bda_, type, const_cast<uint8_t *>(data), len) == ESP_OK;
+}
+
+// One at a time: the answer does not say which report it is.
+bool BTHIDDevice::request_feature_report(uint8_t id, uint16_t len) {
+  if (!this->connected_ || this->feature_id_ != 0)
+    return false;
+  if (esp_bt_hid_host_get_report(this->bda_, ESP_HIDH_REPORT_TYPE_FEATURE, id, len) != ESP_OK)
+    return false;
+  this->feature_id_ = id;
+  return true;
+}
+
 void BTHIDDevice::on_report(const std::vector<uint8_t> &report) {
-  if (this->map_ == nullptr || report.empty())
+  if (report.empty() || this->gamepad_report_(report.data(), report.size()))
+    return;
+  if (this->map_ == nullptr)
     return;
   const uint8_t *data = report.data();
   size_t length = report.size();
@@ -966,7 +1039,11 @@ void BTHIDDevice::on_report(const std::vector<uint8_t> &report) {
 void BTHIDDevice::on_pin_request() {
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(this->bda_, mac);
-  ESP_LOGI(TAG, "[%s] PIN requested: type %s and Enter on the device", mac, this->pin_.c_str());
+  if (this->pin_ == PIN_WIIMOTE || this->pin_ == PIN_WIIMOTE_SYNC) {
+    ESP_LOGI(TAG, "[%s] PIN requested: Wii Remote address sent", mac);
+  } else {
+    ESP_LOGI(TAG, "[%s] PIN requested: type %s and Enter on the device", mac, this->pin_.c_str());
+  }
   this->pin_cb_.call(this->pin_);
 #ifdef USE_BT_PAIRING
   if (this->pairing_ != nullptr)

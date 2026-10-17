@@ -534,7 +534,9 @@ std::vector<HIDReportItemValue> HIDReportMap::parse_input_(const HIDReportSchema
         if (!read_bits_(data, length, field.bit_offset + index * field.report_size, field.report_size,
                         field.logical.minimum < 0, &raw_value))
           continue;
-        if (raw_value < field.logical.minimum || raw_value > field.logical.maximum)
+        // Out of range is no value, except for a hat switch: that is centered (as Linux reads it).
+        if ((raw_value < field.logical.minimum || raw_value > field.logical.maximum) &&
+            !(field.usage_at(index, true) == HIDUsage(0x39, 0x01)))
           continue;
         if ((field.is_relative() && raw_value == 0) ||
             (!field.is_relative() && runtime.last_values[index] == raw_value))
@@ -548,6 +550,8 @@ std::vector<HIDReportItemValue> HIDReportMap::parse_input_(const HIDReportSchema
         value.application_usage = this->application_usage(field.collection_id);
         value.report_id = report.report_id;
         value.is_relative = field.is_relative();
+        value.logical_min = static_cast<int32_t>(field.logical.minimum);
+        value.logical_max = static_cast<int32_t>(field.logical.maximum);
         if (field.is_relative()) {
           value.aggregation = HIDReportItemValue::Aggregation::SUM;
         } else {

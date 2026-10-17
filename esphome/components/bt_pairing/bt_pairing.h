@@ -152,6 +152,22 @@ class BTPairing : public Component
   /// The paired devices of its HID slots ("bt:AA:BB:CC:DD:EE:FF"); each types with its own layout.
   void list_devices(std::vector<hid::InputDevice> &out) const override;
   void set_device_layout(const std::string &key, const hid::KeyboardLayout *layout) override;
+  /// Pad outputs go to every slot's device.
+  void rumble(uint8_t strong, uint8_t weak, uint32_t duration_ms) override {
+    hid::HIDInput::rumble(strong, weak, 0);
+    for (auto *input : this->hid_slots_)
+      input->rumble(strong, weak, duration_ms);
+  }
+  void set_player_led(uint8_t player) override {
+    hid::HIDInput::set_player_led(player);
+    for (auto *input : this->hid_slots_)
+      input->set_player_led(player);
+  }
+  void set_light_bar(uint8_t red, uint8_t green, uint8_t blue) override {
+    hid::HIDInput::set_light_bar(red, green, blue);
+    for (auto *input : this->hid_slots_)
+      input->set_light_bar(red, green, blue);
+  }
 #endif
   /// A slot's device: its name, else its address; "" when it has none.
   std::string device_label(const PairingTarget *target) const;

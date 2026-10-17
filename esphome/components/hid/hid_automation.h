@@ -3,6 +3,7 @@
 #include "esphome/core/automation.h"
 #include "hid_input.h"
 
+#include <algorithm>
 #include <string>
 
 namespace esphome::hid {
@@ -53,6 +54,53 @@ class ControlTrigger : public Trigger<std::string, int> {
     parent->add_on_control_callback(
         [this](uint16_t page, uint16_t usage, int32_t value) { this->trigger(key_name(page, usage), value); });
   }
+};
+
+static inline uint8_t output_level(float fraction) {
+  return static_cast<uint8_t>(std::clamp(fraction, 0.0f, 1.0f) * 255.0f + 0.5f);
+}
+
+/// hid.rumble: both motors, 0..1 each; duration 0 holds it until the next one.
+template<typename... Ts> class RumbleAction : public Action<Ts...> {
+ public:
+  explicit RumbleAction(HIDInput *parent) : parent_(parent) {}
+  TEMPLATABLE_VALUE(float, strong)
+  TEMPLATABLE_VALUE(float, weak)
+  TEMPLATABLE_VALUE(uint32_t, duration)
+  void play(const Ts &...x) override {
+    this->parent_->rumble(output_level(this->strong_.value(x...)), output_level(this->weak_.value(x...)),
+                          this->duration_.value(x...));
+  }
+
+ protected:
+  HIDInput *parent_;
+};
+
+/// hid.set_player_led: the player number the pad shows, 0 off.
+template<typename... Ts> class SetPlayerLedAction : public Action<Ts...> {
+ public:
+  explicit SetPlayerLedAction(HIDInput *parent) : parent_(parent) {}
+  TEMPLATABLE_VALUE(uint8_t, player)
+  void play(const Ts &...x) override { this->parent_->set_player_led(this->player_.value(x...)); }
+
+ protected:
+  HIDInput *parent_;
+};
+
+/// hid.set_light_bar: the light bar color, 0..1 per channel.
+template<typename... Ts> class SetLightBarAction : public Action<Ts...> {
+ public:
+  explicit SetLightBarAction(HIDInput *parent) : parent_(parent) {}
+  TEMPLATABLE_VALUE(float, red)
+  TEMPLATABLE_VALUE(float, green)
+  TEMPLATABLE_VALUE(float, blue)
+  void play(const Ts &...x) override {
+    this->parent_->set_light_bar(output_level(this->red_.value(x...)), output_level(this->green_.value(x...)),
+                                 output_level(this->blue_.value(x...)));
+  }
+
+ protected:
+  HIDInput *parent_;
 };
 
 }  // namespace esphome::hid

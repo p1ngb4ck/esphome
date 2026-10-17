@@ -17,15 +17,18 @@ static constexpr uint8_t USB_DESC_HID_REPORT = 0x22;
 static constexpr uint8_t USB_REQ_GET_DESCRIPTOR = 0x06;
 static constexpr uint8_t REQ_TYPE_STD_INTERFACE_IN = 0x81;
 // Xbox 360 pads: vendor class, subclass 0x5D; protocol 0x01 wired, 0x81 on the wireless receiver.
+// Xbox One and Series pads (GIP): subclass 0x47, protocol 0xD0. By class, so every vendor's.
 static constexpr uint8_t XBOX_SUBCLASS = 0x5D;
 static constexpr uint8_t XBOX_PROTOCOL_WIRED = 0x01;
 static constexpr uint8_t XBOX_PROTOCOL_WIRELESS = 0x81;
+static constexpr uint8_t XBOXONE_SUBCLASS = 0x47;
+static constexpr uint8_t XBOXONE_PROTOCOL = 0xD0;
 
 void USBHIDClient::setup() {
   this->add_class_match(USB_CLASS_HID);
-  this->add_vendor_match(XBOX360_VID, XBOX360_PID_WIRED, 0xFF, XBOX_SUBCLASS);
-  this->add_vendor_match(XBOX360_VID, XBOX360_PID_WIRELESS, 0xFF, XBOX_SUBCLASS);
-  this->add_vendor_match(BITDO_VID, BITDO_PID_XBOX, 0xFF, XBOX_SUBCLASS);
+  this->add_class_match(0xFF, XBOX_SUBCLASS, XBOX_PROTOCOL_WIRED);
+  this->add_class_match(0xFF, XBOX_SUBCLASS, XBOX_PROTOCOL_WIRELESS);
+  this->add_class_match(0xFF, XBOXONE_SUBCLASS, XBOXONE_PROTOCOL);
   // Which device it is, for a layout of its own (hid::InputDevice).
   this->add_on_connection_callback([this](bool connected) {
     this->device_key_.clear();
@@ -64,7 +67,7 @@ void USBHIDClient::loop() {
   Report *report;
   while ((report = this->reports_.pop()) != nullptr) {
     if (report->interface < this->interfaces_.size())
-      this->report_(this->interfaces_[report->interface], report->data, report->length);
+      this->report_(report->interface, report->data, report->length);
     this->report_pool_.release(report);
   }
   usb_host::USBClient::loop();
@@ -86,7 +89,50 @@ void USBHIDClient::on_connected() {
       intf.in_ep = 0;
     }
   }
+  this->attach_pad_();
   this->fetch_descriptor_(0);
+}
+
+// The gamepad driver of the device, and the interface it talks to: the vendor pad interface,
+// else the first HID interface that is not a boot keyboard or mouse.
+void USBHIDClient::attach_pad_() {
+  this->pad_index_ = 0;
+  bool found = false;
+  for (size_t i = 0; i < this->interfaces_.size() && !found; i++) {
+    if (this->interfaces_[i].vendor != VENDOR_NONE) {
+      this->pad_index_ = i;
+      found = true;
+    }
+  }
+  for (size_t i = 0; i < this->interfaces_.size() && !found; i++) {
+    if (this->interfaces_[i].protocol == HID_PROTO_NONE && this->interfaces_[i].in_ep != 0) {
+      this->pad_index_ = i;
+      found = true;
+    }
+  }
+  const usb_device_desc_t *dev = this->get_device_desc_();
+  if (dev == nullptr)
+    return;
+  switch (this->interfaces_[this->pad_index_].vendor) {
+    case VENDOR_XBOX360:
+      this->gamepad_attach_(hid::HIDBus::USB, std::make_unique<Xbox360Driver>(this, false));
+      break;
+    case VENDOR_XBOX360_WIRELESS:
+      this->gamepad_attach_(hid::HIDBus::USB, std::make_unique<Xbox360Driver>(this, true));
+      break;
+    case VENDOR_XBOXONE: {
+      this->gamepad_attach_(hid::HIDBus::USB,
+                            std::make_unique<XboxOneDriver>(this, dev->idVendor, dev->idProduct, dev->bcdDevice));
+      // The audio interface off: some pads (PowerA) only report the guide button then.
+      const usb_config_desc_t *cfg = this->get_config_desc_();
+      if (cfg != nullptr && cfg->bNumInterfaces > 1)
+        this->set_interface(1, 0, [](const usb_host::TransferStatus &) {});
+      break;
+    }
+    default:
+      this->gamepad_attach_(hid::HIDBus::USB, dev->idVendor, dev->idProduct, dev->bcdDevice);
+      break;
+  }
 }
 
 void USBHIDClient::on_disconnected() {
@@ -101,6 +147,7 @@ void USBHIDClient::on_disconnected() {
     this->release_interface(intf.number);
   }
   this->interfaces_.clear();
+  this->gamepad_detach_();
   this->release_all_hid();
 #ifdef USE_TEXT_SENSOR
   if (this->device_name_sensor_ != nullptr)
@@ -114,7 +161,7 @@ uint8_t USBHIDClient::get_device_kinds() const {
     return 0;
   uint8_t kinds = 0;
   for (const auto &intf : this->interfaces_) {
-    if (intf.xbox) {
+    if (intf.vendor != VENDOR_NONE) {
       kinds |= hid::HID_DEVICE_GAMEPAD;
     } else if (intf.map != nullptr) {
       kinds |= intf.map->device_kinds();
@@ -137,18 +184,26 @@ bool USBHIDClient::find_interfaces_() {
       if (intf->bAlternateSetting != 0 || !this->interface_routed_(intf->bInterfaceNumber) ||
           this->interfaces_.size() >= MAX_INTERFACES)
         continue;
-      const bool xbox =
-          intf->bInterfaceClass == 0xFF && intf->bInterfaceSubClass == XBOX_SUBCLASS &&
-          (intf->bInterfaceProtocol == XBOX_PROTOCOL_WIRED || intf->bInterfaceProtocol == XBOX_PROTOCOL_WIRELESS);
-      if (intf->bInterfaceClass != USB_CLASS_HID && !xbox)
+      Vendor vendor = VENDOR_NONE;
+      if (intf->bInterfaceClass == 0xFF && intf->bInterfaceSubClass == XBOX_SUBCLASS) {
+        if (intf->bInterfaceProtocol == XBOX_PROTOCOL_WIRED)
+          vendor = VENDOR_XBOX360;
+        if (intf->bInterfaceProtocol == XBOX_PROTOCOL_WIRELESS)
+          vendor = VENDOR_XBOX360_WIRELESS;
+      } else if (intf->bInterfaceClass == 0xFF && intf->bInterfaceSubClass == XBOXONE_SUBCLASS &&
+                 intf->bInterfaceProtocol == XBOXONE_PROTOCOL) {
+        vendor = VENDOR_XBOXONE;
+      }
+      if (intf->bInterfaceClass != USB_CLASS_HID && vendor == VENDOR_NONE)
         continue;
-      // The wireless receiver has a data and a headset interface per pad: the first pad only.
-      if (xbox && !this->interfaces_.empty())
+      // The wireless receiver has a data and a headset interface per pad, an Xbox One pad a
+      // data and an audio interface: the first one only.
+      if (vendor != VENDOR_NONE && !this->interfaces_.empty())
         continue;
       Interface entry;
       entry.number = intf->bInterfaceNumber;
-      entry.xbox = xbox;
-      entry.xbox_wireless = xbox && intf->bInterfaceProtocol == XBOX_PROTOCOL_WIRELESS;
+      entry.protocol = intf->bInterfaceProtocol;
+      entry.vendor = vendor;
       this->interfaces_.push_back(std::move(entry));
       current = &this->interfaces_.back();
       continue;
@@ -198,7 +253,7 @@ struct DescriptorRequest {
 
 void USBHIDClient::fetch_descriptor_(size_t index) {
   while (index < this->interfaces_.size() &&
-         (this->interfaces_[index].xbox || this->interfaces_[index].descriptor_length == 0 ||
+         (this->interfaces_[index].vendor != VENDOR_NONE || this->interfaces_[index].descriptor_length == 0 ||
           this->interfaces_[index].in_ep == 0))
     index++;
   if (index >= this->interfaces_.size()) {
@@ -277,16 +332,16 @@ void USBHIDClient::start_reading_() {
   }
   ESP_LOGI(TAG, "HID device ready (%u interfaces)", static_cast<unsigned>(this->interfaces_.size()));
   this->write_leds_(this->leds_);
+  this->report_connected_();
 #ifdef USE_TEXT_SENSOR
   if (this->device_name_sensor_ != nullptr) {
     usb_host::UsbDeviceInfo info;
-    this->report_connected_();
     if (this->get_device_info(info))
       this->device_name_sensor_->publish_state(info.product);
-    return;
   }
 #endif
-  this->report_connected_();
+  this->gamepad_start_();
+  this->thrustmaster_();
 }
 
 // USB task (and the main loop for the first read). Takes copies rather than reading
@@ -320,16 +375,17 @@ void USBHIDClient::read_(uint8_t index, uint8_t number, uint8_t ep, uint16_t mps
 
 // -- Reports (main loop) -------------------------------------------------------------------
 
-void USBHIDClient::report_(Interface &intf, const uint8_t *data, size_t length) {
+void USBHIDClient::report_(size_t index, const uint8_t *data, size_t length) {
+  Interface &intf = this->interfaces_[index];
 #ifdef USB_HID_ENABLE_RAW
   if (this->raw_driver_ != nullptr)
     this->raw_driver_->process_report(data, length);
 #endif
-  if (intf.xbox) {
-    this->xbox360_(intf, data, length);
+  if (this->gamepad_report_(data, length)) {
+    this->pad_index_ = index;
     return;
   }
-  if (intf.map == nullptr || length == 0)
+  if (intf.vendor != VENDOR_NONE || intf.map == nullptr || length == 0)
     return;
   hid::HIDReportSource source;
   source.characteristic_handle = intf.number;
@@ -342,68 +398,100 @@ void USBHIDClient::report_(Interface &intf, const uint8_t *data, size_t length) 
   this->process_hid_values(intf.map->parse(source, data, length));
 }
 
-// Linux xpad.c, xpad360_process_packet() and xpad360w_process_packet().
-void USBHIDClient::xbox360_(Interface &intf, const uint8_t *data, size_t length) {
-  if (intf.xbox_wireless) {
-    if (length < 4 + 14 || data[1] != 0x01)
-      return;
-    data += 4;
-    length -= 4;
-  }
-  if (length < 14 || data[0] != 0x00)
+// -- Gamepad driver transport --------------------------------------------------------------
+
+bool USBHIDClient::send_output_report(const uint8_t *data, size_t len) {
+  if (this->pad_index_ >= this->interfaces_.size() || this->interfaces_[this->pad_index_].out_ep == 0)
+    return false;
+  return this->transfer_out(this->interfaces_[this->pad_index_].out_ep, [](const usb_host::TransferStatus &) {},
+                            data, static_cast<uint16_t>(len));
+}
+
+bool USBHIDClient::set_report(hid::HIDReportKind kind, const uint8_t *data, size_t len) {
+  if (this->pad_index_ >= this->interfaces_.size() || len == 0)
+    return false;
+  const Interface &intf = this->interfaces_[this->pad_index_];
+  const uint8_t id = intf.map != nullptr && intf.map->uses_report_ids() ? data[0] : 0;
+  return this->control_transfer(HID_REQ_TYPE_HOST_TO_DEV, HID_REQ_SET_REPORT,
+                                static_cast<uint16_t>(static_cast<uint8_t>(kind) << 8 | id), intf.number,
+                                [](const usb_host::TransferStatus &) {}, std::vector<uint8_t>(data, data + len));
+}
+
+// The answer goes to the driver from the main loop; len 0 when the request failed.
+bool USBHIDClient::request_feature_report(uint8_t id, uint16_t len) {
+  const usb_device_desc_t *dev = this->get_device_desc_();
+  if (this->pad_index_ >= this->interfaces_.size() || dev == nullptr || len == 0)
+    return false;
+  // A control read takes whole packets of the control endpoint.
+  const uint16_t mps0 = dev->bMaxPacketSize0;
+  std::vector<uint8_t> buffer((len + mps0 - 1) / mps0 * mps0);
+  const uint32_t generation = this->generation_.load(std::memory_order_acquire);
+  const bool submitted = this->control_transfer(
+      HID_REQ_TYPE_DEV_TO_HOST, HID_REQ_GET_REPORT,
+      static_cast<uint16_t>(static_cast<uint8_t>(hid::HIDReportKind::FEATURE) << 8 | id),
+      this->interfaces_[this->pad_index_].number,
+      [this, id, generation](const usb_host::TransferStatus &status) {
+        std::vector<uint8_t> copy;
+        if (status.success)
+          copy.assign(status.data, status.data + status.data_len);
+        this->defer([this, id, generation, copy = std::move(copy)]() {
+          if (generation == this->generation_.load(std::memory_order_acquire))
+            this->gamepad_feature_(id, copy.data(), copy.size());
+        });
+      },
+      buffer, len);
+  if (!submitted)
+    this->gamepad_feature_(id, nullptr, 0);
+  return submitted;
+}
+
+// Thrustmaster wheels (T150, T300, T500) come up as a generic "FFB wheel" (044F:B65D) and
+// switch to their own mode on request, then enumerate again (Linux hid-thrustmaster.c).
+void USBHIDClient::thrustmaster_() {
+  const usb_device_desc_t *dev = this->get_device_desc_();
+  if (dev == nullptr || dev->idVendor != 0x044F || dev->idProduct != 0xB65D)
     return;
-  const hid::HIDUsage gamepad(0x05, hid::PAGE_GENERIC_DESKTOP);
-  std::vector<hid::HIDReportItemValue> values;
-  auto add = [&](uint16_t page, uint16_t usage, int64_t value) {
-    hid::HIDReportItemValue v(hid::HIDUsage(usage, page), value, value);
-    v.application_usage = gamepad;
-    values.push_back(v);
-  };
-  // Buttons: (byte, bit, page, usage). D-pad as the Generic Desktop D-pad usages.
-  static constexpr struct {
-    uint8_t byte, bit;
-    uint16_t page, usage;
-  } BUTTONS[] = {
-      {2, 0, hid::PAGE_GENERIC_DESKTOP, 0x90},
-      {2, 1, hid::PAGE_GENERIC_DESKTOP, 0x91},
-      {2, 2, hid::PAGE_GENERIC_DESKTOP, 0x93},
-      {2, 3, hid::PAGE_GENERIC_DESKTOP, 0x92},
-      {2, 4, hid::PAGE_BUTTON, 8},   // Start
-      {2, 5, hid::PAGE_BUTTON, 7},   // Back
-      {2, 6, hid::PAGE_BUTTON, 9},   // left stick
-      {2, 7, hid::PAGE_BUTTON, 10},  // right stick
-      {3, 0, hid::PAGE_BUTTON, 5},   // LB
-      {3, 1, hid::PAGE_BUTTON, 6},   // RB
-      {3, 2, hid::PAGE_BUTTON, 11},  // Guide
-      {3, 4, hid::PAGE_BUTTON, 1},   // A
-      {3, 5, hid::PAGE_BUTTON, 2},   // B
-      {3, 6, hid::PAGE_BUTTON, 3},   // X
-      {3, 7, hid::PAGE_BUTTON, 4},   // Y
-  };
-  for (const auto &b : BUTTONS) {
-    const bool now = (data[b.byte] >> b.bit) & 1;
-    if (now != ((intf.xbox_last[b.byte] >> b.bit) & 1))
-      add(b.page, b.usage, now ? 1 : 0);
-  }
-  auto s16 = [](const uint8_t *p) { return static_cast<int16_t>(p[0] | (p[1] << 8)); };
-  static constexpr struct {
-    uint8_t offset;
-    uint16_t usage;
-    bool invert;
-  } STICKS[] = {{6, 0x30, false}, {8, 0x31, true}, {10, 0x33, false}, {12, 0x34, true}};
-  for (const auto &s : STICKS) {
-    if (s16(data + s.offset) != s16(intf.xbox_last + s.offset)) {
-      const int16_t v = s16(data + s.offset);
-      add(hid::PAGE_GENERIC_DESKTOP, s.usage, s.invert ? ~v : v);
-    }
-  }
-  if (data[4] != intf.xbox_last[4])
-    add(hid::PAGE_GENERIC_DESKTOP, 0x32, data[4]);  // left trigger
-  if (data[5] != intf.xbox_last[5])
-    add(hid::PAGE_GENERIC_DESKTOP, 0x35, data[5]);  // right trigger
-  memcpy(intf.xbox_last, data, sizeof(intf.xbox_last));
-  if (!values.empty())
-    this->process_hid_values(values);
+  static const uint8_t SETUP0[] = {0x42, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  static const uint8_t SETUP1[] = {0x0a, 0x04, 0x90, 0x03, 0x00, 0x00, 0x00, 0x00};
+  static const uint8_t SETUP2[] = {0x0a, 0x04, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x00};
+  static const uint8_t SETUP3[] = {0x0a, 0x04, 0x12, 0x10, 0x00, 0x00, 0x00, 0x00};
+  static const uint8_t SETUP4[] = {0x0a, 0x04, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00};
+  this->send_output_report(SETUP0, sizeof(SETUP0));
+  this->send_output_report(SETUP1, sizeof(SETUP1));
+  this->send_output_report(SETUP2, sizeof(SETUP2));
+  this->send_output_report(SETUP3, sizeof(SETUP3));
+  this->send_output_report(SETUP4, sizeof(SETUP4));
+  // Model query (vendor, device to host, 73), 16 bytes: type 0x49 or 0x47, model at 6.
+  const uint16_t mps0 = dev->bMaxPacketSize0;
+  std::vector<uint8_t> buffer((16 + mps0 - 1) / mps0 * mps0);
+  const uint32_t generation = this->generation_.load(std::memory_order_acquire);
+  this->control_transfer(
+      0xC1, 73, 0, 0,
+      [this, generation](const usb_host::TransferStatus &status) {
+        uint16_t model = 0;
+        bool known = status.success && status.data_len >= 8 &&
+                     (status.data[0] == 0x49 || status.data[0] == 0x47) && status.data[1] == 0x00;
+        if (known)
+          model = static_cast<uint16_t>(status.data[6] | (status.data[7] << 8));
+        this->defer([this, generation, known, model]() {
+          if (generation != this->generation_.load(std::memory_order_acquire))
+            return;
+          static constexpr struct {
+            uint16_t model, mode;
+          } WHEELS[] = {{0x0306, 0x0006}, {0x0200, 0x0005}, {0x0206, 0x0005}, {0x0209, 0x0005},
+                        {0x020a, 0x0005}, {0x0204, 0x0005}, {0x0002, 0x0002}};
+          for (const auto &w : WHEELS) {
+            if (known && w.model == model) {
+              ESP_LOGI(TAG, "Thrustmaster wheel model 0x%04X: switching it to its own mode", model);
+              // The wheel goes away before it answers; whatever comes back is fine.
+              this->control_transfer(0x41, 83, w.mode, 0, [](const usb_host::TransferStatus &) {});
+              return;
+            }
+          }
+          ESP_LOGW(TAG, "Thrustmaster wheel: model 0x%04X unknown, left in generic mode", model);
+        });
+      },
+      buffer, 16);
 }
 
 // -- Lock LEDs -----------------------------------------------------------------------------

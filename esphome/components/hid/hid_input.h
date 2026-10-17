@@ -2,11 +2,17 @@
 
 #include "esphome/components/key_provider/key_provider.h"
 #include "esphome/core/helpers.h"
+#include "gamepad.h"
 #include "hid_parser.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
+
+namespace esphome {
+class Component;
+}
 
 namespace esphome::hid {
 
@@ -128,6 +134,30 @@ class HIDInput : public key_provider::KeyProvider {
   /// Main loop: a device behind it came or went, was paired or forgotten.
   template<typename F> void add_on_devices_callback(F &&cb) { this->devices_cb_.add(std::forward<F>(cb)); }
 
+  // -- Gamepads ----------------------------------------------------------------------------
+  /// Rumble, 0..255 per motor (strong: low frequency, weak: high frequency). Duration 0 holds
+  /// it until the next call.
+  virtual void rumble(uint8_t strong, uint8_t weak, uint32_t duration_ms);
+  /// Player number on the pad's LEDs, 0 off.
+  virtual void set_player_led(uint8_t player);
+  virtual void set_light_bar(uint8_t red, uint8_t green, uint8_t blue);
+  const GamepadOutputs &get_gamepad_outputs() const { return this->pad_outputs_; }
+
+  // For the gamepad drivers: the transport. Report ID first where the device numbers its reports.
+  /// An output report on the interrupt channel (USB interrupt OUT, Bluetooth interrupt channel,
+  /// BLE output report characteristic).
+  virtual bool send_output_report(const uint8_t *data, size_t len) { return false; }
+  /// SET_REPORT on the control channel (BLE: the report characteristic of that type).
+  virtual bool set_report(HIDReportKind kind, const uint8_t *data, size_t len) { return false; }
+  /// GET_REPORT of a feature report of len bytes (its ID included); answered through
+  /// GamepadDriver::feature().
+  virtual bool request_feature_report(uint8_t id, uint16_t len) { return false; }
+  /// The component the drivers' timeouts run on.
+  virtual Component *hid_component() { return nullptr; }
+  HIDBus get_bus() const { return this->bus_; }
+  /// A driver's decoded state; what changed is reported as keys and controls.
+  void gamepad_state(const GamepadState &state);
+
   uint8_t get_modifiers() const { return this->modifiers_; }
   uint8_t get_leds() const { return this->leds_; }
   uint8_t get_pointer_buttons() const { return this->buttons_; }
@@ -136,6 +166,19 @@ class HIDInput : public key_provider::KeyProvider {
  protected:
   /// A transport that can light the lock LEDs sends them to the keyboard.
   virtual void write_leds_(uint8_t leds) {}
+
+  /// Transport, main loop: the device is there, by bus and identity; picks its driver.
+  void gamepad_attach_(HIDBus bus, uint16_t vid, uint16_t pid, uint16_t version);
+  /// A transport's own driver, for pads that are not HID.
+  void gamepad_attach_(HIDBus bus, std::unique_ptr<GamepadDriver> driver);
+  /// Transport: it can send to the device now.
+  void gamepad_start_();
+  void gamepad_detach_();
+  /// True when the driver took the report (report ID first where the device numbers them).
+  bool gamepad_report_(const uint8_t *data, size_t len);
+  void gamepad_feature_(uint8_t id, const uint8_t *data, size_t len);
+  bool gamepad_axis_(const HIDReportItemValue &v);
+  void gamepad_hat_(const HIDReportItemValue &v);
 
   void key_(uint16_t page, uint16_t usage, bool pressed);
   void type_key_(uint16_t usage);
@@ -162,6 +205,10 @@ class HIDInput : public key_provider::KeyProvider {
   uint8_t modifiers_{0};
   uint8_t leds_{LED_NUM_LOCK};
   uint8_t buttons_{0};
+  std::unique_ptr<GamepadDriver> pad_;
+  GamepadState pad_state_;
+  GamepadOutputs pad_outputs_;
+  HIDBus bus_{HIDBus::USB};
 };
 
 }  // namespace esphome::hid

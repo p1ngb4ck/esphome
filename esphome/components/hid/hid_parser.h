@@ -130,6 +130,9 @@ struct HIDReportItemValue {
   uint8_t report_id{0};
   bool is_relative{false};
   Aggregation aggregation{Aggregation::PASSTHROUGH};
+  // The field's logical range; equal (0, 0) when the value is not a scalar from a descriptor.
+  int32_t logical_min{0};
+  int32_t logical_max{0};
 
   HIDReportItemValue() = default;
   HIDReportItemValue(HIDUsage usage, int64_t value, int64_t raw_value)

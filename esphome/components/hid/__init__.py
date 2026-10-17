@@ -14,7 +14,15 @@ from esphome import automation
 import esphome.codegen as cg
 from esphome.components import key_provider
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_KEY, CONF_TRIGGER_ID
+from esphome.const import (
+    CONF_BLUE,
+    CONF_DURATION,
+    CONF_GREEN,
+    CONF_ID,
+    CONF_KEY,
+    CONF_RED,
+    CONF_TRIGGER_ID,
+)
 from esphome.core import CORE
 
 from . import layouts
@@ -32,6 +40,11 @@ CONF_ON_KEY = "on_key"
 CONF_ON_TEXT = "on_text"
 CONF_ON_POINTER = "on_pointer"
 CONF_ON_CONTROL = "on_control"
+CONF_API_ACTIONS = "api_actions"
+CONF_STRONG = "strong"
+CONF_WEAK = "weak"
+CONF_PLAYER = "player"
+CONF_API_ACTIONS_ID = "api_actions_id"
 
 hid_ns = cg.esphome_ns.namespace("hid")
 HIDInput = hid_ns.class_("HIDInput", key_provider.KeyProvider)
@@ -46,6 +59,10 @@ PointerTrigger = hid_ns.class_(
 ControlTrigger = hid_ns.class_(
     "ControlTrigger", automation.Trigger.template(cg.std_string, cg.int_)
 )
+HIDAPIActions = hid_ns.class_("HIDAPIActions", cg.Component)
+RumbleAction = hid_ns.class_("RumbleAction", automation.Action)
+SetPlayerLedAction = hid_ns.class_("SetPlayerLedAction", automation.Action)
+SetLightBarAction = hid_ns.class_("SetLightBarAction", automation.Action)
 
 # Nothing to configure here; it lets the C++ API be used without a transport (tests).
 CONFIG_SCHEMA = cv.Schema({})
@@ -125,6 +142,11 @@ HID_INPUT_SCHEMA = cv.Schema(
         cv.Optional(CONF_ON_CONTROL): automation.validate_automation(
             {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(ControlTrigger)}
         ),
+        # The pad outputs (hid.rumble, hid.set_player_led, hid.set_light_bar) as Home
+        # Assistant actions named after this id: <id>_rumble(strong, weak, duration_ms),
+        # <id>_set_player_led(player), <id>_set_light_bar(red, green, blue).
+        cv.Optional(CONF_API_ACTIONS, default=False): cv.boolean,
+        cv.GenerateID(CONF_API_ACTIONS_ID): cv.declare_id(HIDAPIActions),
     }
 )
 
@@ -235,3 +257,86 @@ async def setup_hid_input(var, config) -> None:
         await automation.build_automation(
             trigger, [(cg.std_string, "control"), (cg.int_, "value")], conf
         )
+    if config.get(CONF_API_ACTIONS, False):
+        if "api" not in CORE.config:
+            raise cv.Invalid(f"{CONF_API_ACTIONS} needs the api component")
+        cg.add_define("USE_HID_API_ACTIONS")
+        cg.add_define("USE_API_USER_DEFINED_ACTIONS")
+        cg.add_define("USE_API_CUSTOM_SERVICES")
+        actions = cg.new_Pvariable(
+            config[CONF_API_ACTIONS_ID], var, str(config[CONF_ID])
+        )
+        await cg.register_component(actions, {})
+
+
+# Pad outputs. Values are fractions (percentages); a pad without that output ignores it.
+@automation.register_action(
+    "hid.rumble",
+    RumbleAction,
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.use_id(HIDInput),
+            cv.Optional(CONF_STRONG, default=1.0): cv.templatable(cv.percentage),
+            cv.Optional(CONF_WEAK, default=1.0): cv.templatable(cv.percentage),
+            # 0: until the next hid.rumble (strong and weak 0 stop it).
+            cv.Optional(CONF_DURATION, default="0ms"): cv.templatable(
+                cv.positive_time_period_milliseconds
+            ),
+        }
+    ),
+    synchronous=True,
+)
+async def rumble_action_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    cg.add(var.set_strong(await cg.templatable(config[CONF_STRONG], args, cg.float_)))
+    cg.add(var.set_weak(await cg.templatable(config[CONF_WEAK], args, cg.float_)))
+    duration = config[CONF_DURATION]
+    if not cg.is_template(duration):
+        duration = duration.total_milliseconds
+    cg.add(var.set_duration(await cg.templatable(duration, args, cg.uint32)))
+    return var
+
+
+@automation.register_action(
+    "hid.set_player_led",
+    SetPlayerLedAction,
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.use_id(HIDInput),
+            # 0 off; the pads have 4 (DualSense 5).
+            cv.Required(CONF_PLAYER): cv.templatable(cv.int_range(min=0, max=5)),
+        }
+    ),
+    synchronous=True,
+)
+async def set_player_led_action_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    cg.add(var.set_player(await cg.templatable(config[CONF_PLAYER], args, cg.uint8)))
+    return var
+
+
+@automation.register_action(
+    "hid.set_light_bar",
+    SetLightBarAction,
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.use_id(HIDInput),
+            cv.Required(CONF_RED): cv.templatable(cv.percentage),
+            cv.Required(CONF_GREEN): cv.templatable(cv.percentage),
+            cv.Required(CONF_BLUE): cv.templatable(cv.percentage),
+        }
+    ),
+    synchronous=True,
+)
+async def set_light_bar_action_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    for key, setter in (
+        (CONF_RED, var.set_red),
+        (CONF_GREEN, var.set_green),
+        (CONF_BLUE, var.set_blue),
+    ):
+        cg.add(setter(await cg.templatable(config[key], args, cg.float_)))
+    return var

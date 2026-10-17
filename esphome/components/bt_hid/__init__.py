@@ -60,8 +60,12 @@ PairAction = bt_hid_ns.class_("PairAction", automation.Action)
 
 def _validate_pin(value):
     value = cv.string_strict(value)
+    # A Wii Remote's PIN is an address, given by how it is paired: wiimote (1+2 held),
+    # wiimote_sync (its sync button).
+    if value.lower() in ("wiimote", "wiimote_sync"):
+        return value.lower()
     if not 1 <= len(value) <= 16 or not value.isdigit():
-        raise cv.Invalid("a PIN is 1 to 16 digits")
+        raise cv.Invalid("a PIN is 1 to 16 digits, or wiimote / wiimote_sync")
     return value
 
 

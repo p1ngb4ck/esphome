@@ -16,6 +16,12 @@ static constexpr uint16_t USAGE_X = 0x30;
 static constexpr uint16_t USAGE_Y = 0x31;
 static constexpr uint16_t USAGE_WHEEL = 0x38;
 static constexpr uint16_t USAGE_AC_PAN = 0x238;
+static constexpr uint16_t USAGE_HAT_SWITCH = 0x39;
+
+// Joystick, gamepad, multi-axis controller.
+static bool pad_application(const HIDUsage &app) {
+  return app.page == PAGE_GENERIC_DESKTOP && (app.usage == 0x04 || app.usage == 0x05 || app.usage == 0x08);
+}
 
 static constexpr uint16_t KEY_ENTER = 0x28;
 static constexpr uint16_t KEY_BACKSPACE = 0x2A;
@@ -135,8 +141,16 @@ void HIDInput::process_hid_values(const std::vector<HIDReportItemValue> &values)
         this->buttons_ = v.value != 0 ? (this->buttons_ | bit) : (this->buttons_ & ~bit);
         pointer = true;
       }
-      this->key_(page, usage, v.value != 0);
+      this->key_(page, this->pad_ != nullptr ? this->pad_->button(usage) : usage, v.value != 0);
       continue;
+    }
+    if (!v.is_relative && v.logical_min != v.logical_max) {
+      if (page == PAGE_GENERIC_DESKTOP && usage == USAGE_HAT_SWITCH && pad_application(v.application_usage)) {
+        this->gamepad_hat_(v);
+        continue;
+      }
+      if (this->gamepad_axis_(v))
+        continue;
     }
     if (page == PAGE_GENERIC_DESKTOP && in_pointer && v.is_relative &&
         (usage == USAGE_X || usage == USAGE_Y || usage == USAGE_WHEEL)) {
