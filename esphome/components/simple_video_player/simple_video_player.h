@@ -847,6 +847,9 @@ class SimpleVideoPlayer : public Component
   bool show_image(const std::string &path);
   bool next_image();
   bool previous_image();
+  /// No picture shown any more: the slideshow stops, the canvas empties, the pictures' buffers go back
+  /// to the pool (once nothing is read or decoded).
+  void close_picture();
   void start_slideshow();
   void stop_slideshow();
   void pause_slideshow();
@@ -1831,6 +1834,7 @@ class SimpleVideoPlayer : public Component
   bool pic_buffers_failed_{false};        // the pool had no room for them; tried again after a video
   lv_draw_buf_t *pic_lvgl_buf_{nullptr};  // the canvas' own buffer, shown while no page is; none: external_buffer
   bool pic_restore_{false};               // the pages went to a video: the picture decoded again after it
+  bool pic_close_req_{false};             // close_picture(): the buffers go once nothing is in flight
   int8_t pic_fullscreen_pending_{-1};     // set_fullscreen() while a picture is decoded
   int32_t pic_pending_w_{0}, pic_pending_h_{0};  // its size; 0: the widget's
   bool pic_shown_fullscreen_{false};      // the canvas has the full screen size

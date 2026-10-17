@@ -184,6 +184,23 @@ void SimpleVideoPlayer::pictures_loop_() {
     this->answer_alloc_();
   }
 
+  // Closed: what is in flight finishes and is dropped, then the canvas empties and the buffers go
+  // (LVGL running).
+  if (this->pic_close_req_ && lvgl_runs) {
+    if (this->pic_read_.active) {
+      const bool finished =
+          this->pic_read_.decoding ? this->pic_decoded_.load(std::memory_order_acquire) : this->pic_read_.done;
+      if (!finished)
+        return;
+      this->pic_read_ = PictureRead{};
+      this->pic_decoded_.store(false, std::memory_order_relaxed);
+    }
+    this->pic_close_req_ = false;
+    this->release_picture_buffers_();
+    this->pic_restore_ = false;
+    this->highlight_thumbnail_(false);
+  }
+
   // While a video plays nothing is read or decoded: the JPEG unit and the storage are its.
   if (this->pictures_held_())
     return;
@@ -425,6 +442,18 @@ bool SimpleVideoPlayer::next_image() {
   this->pic_direction_ = 1;
   const int base = this->pic_wanted_ >= 0 ? this->pic_wanted_ : this->current_image_;
   return this->show_image(static_cast<size_t>((base + 1) % static_cast<int>(this->images_.size())));
+}
+
+void SimpleVideoPlayer::close_picture() {
+  if (!this->pic_ready_)
+    return;
+  this->slideshow_mode_ = SlideshowMode::STOPPED;
+  this->overlay_visible_ = false;
+  this->pic_wanted_ = -1;
+  this->current_image_ = -1;
+  this->pic_restore_ = false;
+  this->pic_close_req_ = true;
+  this->picture_callbacks_.call();
 }
 
 bool SimpleVideoPlayer::previous_image() {

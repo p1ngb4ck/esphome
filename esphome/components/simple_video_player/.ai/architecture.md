@@ -173,9 +173,9 @@ what the room leaves (`max_prebuffer()`).
 | `ring_buf_` | 4 MiB/s · (prebuffer + lead) (device: 2 MiB without BT delay) | first session, kept; taken anew when a session needs another size | compressed AVI/MJPEG | yes (ring room) |
 | `decode_target_` + `ctl_mem_` | panel w·h·bpp (2.05 MB) + 3 × bar snapshot + 4 KiB | first direct output, kept | decoded frame, controls | yes (max of direct/canvas) |
 | `output_buffers_[2]` | 2 × A16(cw)·A16(ch)·3 | first canvas output, kept | decoded RGB888 | yes (max of direct/canvas) |
-| `pic_pages_[2]` | 2 × stride565(max(disp, canvas)) · h | first picture, reclaim | the shown picture and the next one (no decode ahead; neighbours only read undecoded) | **no** |
+| `pic_pages_[2]` | 2 × stride565(max(disp, canvas)) · h | first picture, reclaim, `close_picture()` | the shown picture and the next one (no decode ahead; neighbours only read undecoded) | **no** |
 | `pic_decode_buf_` | the decode's size in 1 MiB steps | only while a picture larger than its target (or a thumbnail) is decoded | full native decode | **no** |
-| `pic_files_[3]` | 1 MiB each, grows | first picture, reclaim | compressed files | **no** |
+| `pic_files_[3]` | 1 MiB each, grows | first picture, reclaim, `close_picture()` | compressed files | **no** |
 | `cover_views_[<=3]` + `cover_file_` | A16 w·h·2 each (device 25 K + 320 K + 1.28 MB) + 512 KiB | cover wanted, reclaim | decoded cover / JPEG | **no** |
 | desktop cursors | ~300 KiB | session start, `release_desktop_` | cursor shapes | no |
 | USB transfers per slot | ~550 KiB at link_open + ISO | link open, `release_buffers` | USB data | no |
