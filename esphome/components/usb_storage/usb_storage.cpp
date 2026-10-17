@@ -59,6 +59,7 @@ storage::StorageError fresult_to_storage_error(FRESULT res, bool for_rmdir, bool
 
 void USBStorageClient::transfer_done_cb(const usb_host::TransferStatus &status, USBStorageClient *client) {
   client->transfer_ok_ = status.success;
+  client->transfer_stalled_ = status.error_code == USB_TRANSFER_STATUS_STALL;
   client->transfer_len_ = static_cast<uint16_t>(status.data_len);
   xSemaphoreGive(client->transfer_sem_);
 }
@@ -237,17 +238,39 @@ bool USBStorageClient::send_chunked_(const uint8_t *buf, uint32_t len) {
   return true;
 }
 
-bool USBStorageClient::recv_csw_(uint32_t expected_tag) {
+// Endpoint halted by a STALL: cleared on the host side, then on the device (CLEAR_FEATURE ENDPOINT_HALT),
+// as the IDF's MSC host driver does.
+bool USBStorageClient::clear_halt_(uint8_t ep) {
+  static constexpr uint16_t FEATURE_ENDPOINT_HALT = 0;
+  if (usb_host_endpoint_halt(this->device_handle_, ep) != ESP_OK ||
+      usb_host_endpoint_flush(this->device_handle_, ep) != ESP_OK ||
+      usb_host_endpoint_clear(this->device_handle_, ep) != ESP_OK)
+    return false;
+  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb(s, this); };
+  if (!this->control_transfer(usb_host::USB_DIR_OUT | usb_host::USB_TYPE_STANDARD | usb_host::USB_RECIP_ENDPOINT,
+                              USB_B_REQUEST_CLEAR_FEATURE, FEATURE_ENDPOINT_HALT, ep, cb))
+    return false;
+  return this->wait_transfer_();
+}
+
+bool USBStorageClient::recv_csw_(uint32_t expected_tag, bool check_condition_expected) {
   MscCsw csw{};
   auto cb = [this, &csw](const usb_host::TransferStatus &s) {
     if (s.success && s.data_len >= sizeof(MscCsw))
       memcpy(&csw, s.data, sizeof(MscCsw));
     transfer_done_cb(s, this);
   };
+  this->transfer_stalled_ = false;
   if (!this->transfer_in(this->bulk_in_ep_, cb, this->round_up_to_in_mps_(sizeof(MscCsw))))
     return false;
-  if (!this->wait_transfer_())
-    return false;
+  if (!this->wait_transfer_()) {
+    // A stalled status phase: read the status once more after clearing the halt (BOT 5.3.3)
+    if (!this->transfer_stalled_ || !this->clear_halt_(this->bulk_in_ep_))
+      return false;
+    if (!this->transfer_in(this->bulk_in_ep_, cb, this->round_up_to_in_mps_(sizeof(MscCsw))) ||
+        !this->wait_transfer_())
+      return false;
+  }
   if (csw.signature != MSC_BOT_CSW_SIGNATURE) {
     ESP_LOGE(TAG, "Invalid CSW signature: 0x%08" PRIX32, csw.signature);
     return false;
@@ -257,7 +280,8 @@ bool USBStorageClient::recv_csw_(uint32_t expected_tag) {
     return false;
   }
   if (csw.status != MSC_BOT_CSW_STATUS_GOOD) {
-    ESP_LOGW(TAG, "CSW status: %d", csw.status);
+    if (!check_condition_expected || csw.status != MSC_BOT_CSW_STATUS_FAILED)
+      ESP_LOGW(TAG, "CSW status: %d", csw.status);
     return false;
   }
   return true;
@@ -270,7 +294,32 @@ bool USBStorageClient::recv_csw_(uint32_t expected_tag) {
 bool USBStorageClient::scsi_test_unit_ready_() {
   uint8_t cdb[6] = {SCSI_CMD_TEST_UNIT_READY, 0, 0, 0, 0, 0};
   uint32_t tag = this->cbw_tag_++;
-  return this->send_cbw_(tag, 0, MSC_BOT_CBW_FLAGS_OUT, cdb, sizeof(cdb)) && this->recv_csw_(tag);
+  return this->send_cbw_(tag, 0, MSC_BOT_CBW_FLAGS_OUT, cdb, sizeof(cdb)) && this->recv_csw_(tag, true);
+}
+
+bool USBStorageClient::scsi_request_sense_(uint8_t &key, uint8_t &asc) {
+  static constexpr uint8_t SENSE_LEN = 18;  // fixed format sense data
+  uint8_t cdb[6] = {SCSI_CMD_REQUEST_SENSE, 0, 0, 0, SENSE_LEN, 0};
+  uint32_t tag = this->cbw_tag_++;
+  uint8_t resp[SENSE_LEN]{};
+
+  auto cb = [this, &resp](const usb_host::TransferStatus &s) {
+    if (s.success && s.data_len > 0)
+      memcpy(resp, s.data, std::min<size_t>(s.data_len, SENSE_LEN));
+    transfer_done_cb(s, this);
+  };
+
+  if (!this->send_cbw_(tag, SENSE_LEN, MSC_BOT_CBW_FLAGS_IN, cdb, sizeof(cdb)))
+    return false;
+  if (!this->transfer_in(this->bulk_in_ep_, cb, this->round_up_to_in_mps_(SENSE_LEN)))
+    return false;
+  if (!this->wait_transfer_())
+    return false;
+  if (!this->recv_csw_(tag))
+    return false;
+  key = resp[2] & 0x0F;
+  asc = resp[12];
+  return true;
 }
 
 bool USBStorageClient::scsi_inquiry_() {
@@ -433,6 +482,47 @@ void USBStorageClient::on_connected() {
     return;
   }
 
+  this->ready_tries_ = 0;
+  this->check_ready_();
+}
+
+// Card readers (and some sticks) answer CHECK CONDITION until the medium is ready -- UNIT ATTENTION
+// after power-up or a media change, NOT READY while it comes up -- and hold that condition until
+// REQUEST SENSE has read it. As the IDF's MSC host driver does: TEST UNIT READY, REQUEST SENSE on
+// failure, every 100 ms for up to 5 s; here from the scheduler, so the main loop never waits for it.
+void USBStorageClient::check_ready_() {
+  static constexpr uint8_t SENSE_NO_SENSE = 0x0;
+  static constexpr uint8_t SENSE_NOT_READY = 0x2;
+  static constexpr uint8_t SENSE_UNIT_ATTENTION = 0x6;
+  static constexpr uint32_t READY_INTERVAL_MS = 100;
+  static constexpr uint8_t READY_TRIES = 50;
+
+  if (this->scsi_test_unit_ready_()) {
+    this->finish_connect_();
+    return;
+  }
+  uint8_t key = 0xFF;
+  uint8_t asc = 0;
+  if (!this->scsi_request_sense_(key, asc) ||
+      (key != SENSE_NO_SENSE && key != SENSE_NOT_READY && key != SENSE_UNIT_ATTENTION)) {
+    ESP_LOGE(TAG, "Unit not ready (sense key 0x%X, ASC 0x%02X)", key, asc);
+    this->disconnect();
+    return;
+  }
+  if (++this->ready_tries_ >= READY_TRIES) {
+    ESP_LOGE(TAG, "Unit not ready after %" PRIu32 " ms (sense key 0x%X, ASC 0x%02X)", READY_INTERVAL_MS * READY_TRIES,
+             key, asc);
+    this->disconnect();
+    return;
+  }
+  this->set_timeout("ready", READY_INTERVAL_MS, [this]() { this->check_ready_(); });
+}
+
+void USBStorageClient::finish_connect_() {
+  const usb_device_desc_t *dev = this->get_device_desc_();
+  uint16_t vid = dev ? dev->idVendor : 0;
+  uint16_t pid = dev ? dev->idProduct : 0;
+
   if (!this->scsi_read_capacity_()) {
     ESP_LOGE(TAG, "SCSI READ CAPACITY failed");
     this->disconnect();
@@ -503,6 +593,7 @@ void USBStorageClient::on_connected() {
   ESP_LOGI(TAG, "FAT filesystem mounted at '%s'", this->mount_path_);
 
   this->notify_connected_(vid, pid);
+  this->report_connected_();
 }
 
 void USBStorageClient::unmount_filesystem() {
@@ -524,6 +615,7 @@ void USBStorageClient::unmount_filesystem() {
 }
 
 void USBStorageClient::on_disconnected() {
+  this->cancel_timeout("ready");
   this->notify_disconnected_();
   this->disk_ready_ = false;
 

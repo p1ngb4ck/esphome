@@ -35,7 +35,8 @@ template<typename... Ts> class ListFilesAction;
 //
 // Lifecycle:
 //   setup()           -- register FATFS DISKIO driver, create transfer semaphore
-//   on_connected()    -- parse bulk endpoints, run SCSI INQUIRY + READ CAPACITY,
+//   on_connected()    -- parse bulk endpoints, run SCSI INQUIRY, wait for the unit to be
+//                       ready (TEST UNIT READY / REQUEST SENSE), then READ CAPACITY,
 //                       mount FAT filesystem, notify USBStorageDevice instances
 //   on_disconnected() -- unmount filesystem, reset drive slot
 // ─────────────────────────────────────────────────────────────────────────────
@@ -70,6 +71,10 @@ class USBStorageClient : public usb_host::USBClient {
 
  protected:
   void on_connected() override;
+  // Connected once the medium is ready and mounted (check_ready_() / finish_connect_())
+  bool reports_connection_itself() const override { return true; }
+  void check_ready_();
+  void finish_connect_();
   void on_disconnected() override;
   void on_removed(usb_device_handle_t handle) override;
   usb_host::MatchTier refine_match_(const usb_host::RoutedDevice &dev, usb_host::MatchTier tier) const override;
@@ -84,6 +89,8 @@ class USBStorageClient : public usb_host::USBClient {
   bool scsi_inquiry_();
   bool scsi_read_capacity_();
   bool scsi_test_unit_ready_();
+  bool scsi_request_sense_(uint8_t &key, uint8_t &asc);
+  bool clear_halt_(uint8_t ep);
 
   bool send_cbw_(uint32_t tag, uint32_t data_len, uint8_t flags, const uint8_t *cdb, uint8_t cdb_len);
   bool recv_data_(uint8_t *buf, uint16_t len);
@@ -99,7 +106,8 @@ class USBStorageClient : public usb_host::USBClient {
   // a member and not a constant: the same driver serves a full-speed device on one
   // controller and a high-speed device on the other.
   uint16_t max_chunk_for_mps_(uint16_t mps) const;
-  bool recv_csw_(uint32_t expected_tag);
+  // check_condition_expected: a CHECK CONDITION status is an answer here (TEST UNIT READY), not logged
+  bool recv_csw_(uint32_t expected_tag, bool check_condition_expected = false);
 
   bool wait_transfer_(uint32_t timeout_ms = 5000);
   static void transfer_done_cb(const usb_host::TransferStatus &status, USBStorageClient *client);
@@ -133,7 +141,9 @@ class USBStorageClient : public usb_host::USBClient {
 
   SemaphoreHandle_t transfer_sem_{nullptr};
   bool transfer_ok_{false};
+  bool transfer_stalled_{false};
   uint16_t transfer_len_{0};
+  uint8_t ready_tries_{0};
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
