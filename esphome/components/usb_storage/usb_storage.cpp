@@ -81,12 +81,11 @@ void USBStorageClient::setup() {
     this->mark_failed();
     return;
   }
-  this->io_lock_ = xSemaphoreCreateBinary();
+  this->io_lock_ = xSemaphoreCreateMutex();
   if (this->io_lock_ == nullptr) {
     this->mark_failed();
     return;
   }
-  xSemaphoreGive(this->io_lock_);
   for (auto &d : this->data_) {
     d.done = xSemaphoreCreateBinary();
     if (d.done == nullptr) {
@@ -95,27 +94,11 @@ void USBStorageClient::setup() {
     }
   }
 
-  // LUN 0 is the entry's own mount, the reader's other slots are the luns entries.
-  Lun first;
-  first.device = this->devices_.empty() ? nullptr : this->devices_[0];
-  first.mount_path = first.device != nullptr ? first.device->get_mount_path() : "/usb";
-  this->luns_.push_back(first);
-  for (const auto &extra : this->extra_luns_) {
-    Lun lun;
-    lun.number = extra.number;
-    lun.device = extra.device;
-    lun.mount_path = extra.device->get_mount_path();
-    this->luns_.push_back(lun);
-  }
-  for (size_t i = 0; i < this->luns_.size(); i++) {
-    this->luns_[i].drive = usb_diskio_register(this, static_cast<uint8_t>(i));
-    if (this->luns_[i].drive < 0) {
-      ESP_LOGE(TAG, "Failed to register FATFS DISKIO drive");
-      this->mark_failed();
-      return;
-    }
-    if (this->luns_[i].device != nullptr)
-      this->luns_[i].device->set_lun_index(static_cast<uint8_t>(i));
+  this->fatfs_drive_ = usb_diskio_register(this);
+  if (this->fatfs_drive_ < 0) {
+    ESP_LOGE(TAG, "Failed to register FATFS DISKIO drive");
+    this->mark_failed();
+    return;
   }
 
   USBClient::setup();
@@ -190,13 +173,12 @@ uint16_t USBStorageClient::round_up_to_in_mps_(uint16_t len) const {
 // BOT primitives
 // ─────────────────────────────────────────────────────────────────────────────
 
-bool USBStorageClient::send_cbw_(uint32_t tag, uint32_t data_len, uint8_t flags, const uint8_t *cdb, uint8_t cdb_len,
-                                 uint8_t lun) {
+bool USBStorageClient::send_cbw_(uint32_t tag, uint32_t data_len, uint8_t flags, const uint8_t *cdb, uint8_t cdb_len) {
   MscCbw cbw{};
   cbw.tag = tag;
   cbw.data_transfer_length = data_len;
   cbw.flags = flags;
-  cbw.lun = lun;
+  cbw.lun = 0;
   cbw.cb_length = cdb_len;
   memcpy(cbw.cb, cdb, cdb_len);
 
@@ -317,6 +299,33 @@ bool USBStorageClient::scsi_inquiry_() {
   ESP_LOGD(TAG, "SCSI INQUIRY: vendor='%s' product='%s' type=0x%02X", vendor, product,
            resp.peripheral_qualifier_type & 0x1F);
   return (resp.peripheral_qualifier_type & 0x1F) == 0x00;
+}
+
+bool USBStorageClient::scsi_read_capacity_() {
+  uint8_t cdb[10] = {SCSI_CMD_READ_CAPACITY_10, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  uint32_t tag = this->cbw_tag_++;
+  ScsiReadCapacity10Response resp{};
+
+  auto cb = [this, &resp](const usb_host::TransferStatus &s) {
+    if (s.success && s.data_len >= sizeof(ScsiReadCapacity10Response))
+      memcpy(&resp, s.data, sizeof(ScsiReadCapacity10Response));
+    transfer_done_cb(s, this);
+  };
+
+  if (!this->send_cbw_(tag, sizeof(ScsiReadCapacity10Response), MSC_BOT_CBW_FLAGS_IN, cdb, sizeof(cdb)))
+    return false;
+  if (!this->transfer_in(this->bulk_in_ep_, cb, this->round_up_to_in_mps_(sizeof(ScsiReadCapacity10Response))))
+    return false;
+  if (!this->wait_transfer_())
+    return false;
+  if (!this->recv_csw_(tag))
+    return false;
+
+  this->sector_count_ = __builtin_bswap32(resp.last_lba) + 1;
+  this->sector_size_ = __builtin_bswap32(resp.block_size);
+  ESP_LOGD(TAG, "SCSI READ CAPACITY: sectors=%" PRIu32 " sector_size=%" PRIu32 " (%.1f MB)", this->sector_count_,
+           this->sector_size_, static_cast<float>(this->sector_count_) * this->sector_size_ / (1024.0f * 1024.0f));
+  return this->sector_size_ > 0 && this->sector_count_ > 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -490,30 +499,22 @@ void USBStorageClient::free_data_() {
   xSemaphoreGive(this->io_lock_);
 }
 
-bool USBStorageClient::scsi_read(uint8_t index, uint32_t lba, uint8_t *buf, uint32_t count) {
-  if (index >= this->luns_.size())
-    return false;
-  const Lun &lun = this->luns_[index];
+bool USBStorageClient::scsi_read(uint32_t lba, uint8_t *buf, uint32_t count) {
   xSemaphoreTake(this->io_lock_, portMAX_DELAY);
-  const bool ok = this->data_[0].xfer != nullptr && lun.ready &&
-                  this->scsi_read_(lun.number, lba, buf, count, lun.sector_size);
+  const bool ok = this->data_[0].xfer != nullptr && this->scsi_read_(lba, buf, count);
   xSemaphoreGive(this->io_lock_);
   return ok;
 }
 
-bool USBStorageClient::scsi_write(uint8_t index, uint32_t lba, const uint8_t *buf, uint32_t count) {
-  if (index >= this->luns_.size())
-    return false;
-  const Lun &lun = this->luns_[index];
+bool USBStorageClient::scsi_write(uint32_t lba, const uint8_t *buf, uint32_t count) {
   xSemaphoreTake(this->io_lock_, portMAX_DELAY);
-  const bool ok = this->data_[0].xfer != nullptr && lun.ready &&
-                  this->scsi_write_(lun.number, lba, buf, count, lun.sector_size);
+  const bool ok = this->data_[0].xfer != nullptr && this->scsi_write_(lba, buf, count);
   xSemaphoreGive(this->io_lock_);
   return ok;
 }
 
 // One READ(10) / WRITE(10) for all sectors FATFS asks for at once (up to 65535 per command).
-bool USBStorageClient::scsi_read_(uint8_t lun, uint32_t lba, uint8_t *buf, uint32_t count, uint32_t sector_size) {
+bool USBStorageClient::scsi_read_(uint32_t lba, uint8_t *buf, uint32_t count) {
   while (count > 0) {
     const uint32_t n = std::min<uint32_t>(count, 0xFFFF);
     uint8_t cdb[10] = {
@@ -528,9 +529,9 @@ bool USBStorageClient::scsi_read_(uint8_t lun, uint32_t lba, uint8_t *buf, uint3
         static_cast<uint8_t>(n & 0xFF),
         0,
     };
-    const uint32_t bytes = n * sector_size;
+    const uint32_t bytes = n * this->sector_size_;
     const uint32_t tag = this->cbw_tag_++;
-    if (!this->send_cbw_(tag, bytes, MSC_BOT_CBW_FLAGS_IN, cdb, sizeof(cdb), lun) ||
+    if (!this->send_cbw_(tag, bytes, MSC_BOT_CBW_FLAGS_IN, cdb, sizeof(cdb)) ||
         !this->data_command_(true, buf, nullptr, bytes, tag))
       return false;
     lba += n;
@@ -540,8 +541,7 @@ bool USBStorageClient::scsi_read_(uint8_t lun, uint32_t lba, uint8_t *buf, uint3
   return true;
 }
 
-bool USBStorageClient::scsi_write_(uint8_t lun, uint32_t lba, const uint8_t *buf, uint32_t count,
-                                   uint32_t sector_size) {
+bool USBStorageClient::scsi_write_(uint32_t lba, const uint8_t *buf, uint32_t count) {
   while (count > 0) {
     const uint32_t n = std::min<uint32_t>(count, 0xFFFF);
     uint8_t cdb[10] = {
@@ -556,9 +556,9 @@ bool USBStorageClient::scsi_write_(uint8_t lun, uint32_t lba, const uint8_t *buf
         static_cast<uint8_t>(n & 0xFF),
         0,
     };
-    const uint32_t bytes = n * sector_size;
+    const uint32_t bytes = n * this->sector_size_;
     const uint32_t tag = this->cbw_tag_++;
-    if (!this->send_cbw_(tag, bytes, MSC_BOT_CBW_FLAGS_OUT, cdb, sizeof(cdb), lun) ||
+    if (!this->send_cbw_(tag, bytes, MSC_BOT_CBW_FLAGS_OUT, cdb, sizeof(cdb)) ||
         !this->data_command_(false, nullptr, buf, bytes, tag))
       return false;
     lba += n;
@@ -572,13 +572,41 @@ bool USBStorageClient::scsi_write_(uint8_t lun, uint32_t lba, const uint8_t *buf
 // Connect / disconnect
 // ─────────────────────────────────────────────────────────────────────────────
 
+// The entry naming this stick, else one without vid/pid: an entry that names it wins over
+// any wildcard listed before it.
+USBStorageDevice *USBStorageClient::find_device_(uint16_t vid, uint16_t pid) const {
+  for (auto *device : this->devices_) {
+    if (device->vid_ == vid && device->pid_ == pid && (vid != 0 || pid != 0) && !device->is_mounted())
+      return device;
+  }
+  for (auto *device : this->devices_) {
+    if (device->vid_ == 0 && device->pid_ == 0 && !device->is_mounted())
+      return device;
+  }
+  return nullptr;
+}
+
+void USBStorageClient::notify_connected_(uint16_t vid, uint16_t pid) {
+  if (USBStorageDevice *device = this->find_device_(vid, pid)) {
+    device->on_device_connected(this->mount_path_);
+    return;
+  }
+  ESP_LOGW(TAG, "No storage device configured for VID=0x%04X PID=0x%04X", vid, pid);
+}
+
+void USBStorageClient::notify_disconnected_() {
+  for (auto *device : this->devices_) {
+    if (device->is_mounted())
+      device->on_device_disconnected();
+  }
+}
+
 void USBStorageClient::on_connected() {
   const usb_device_desc_t *dev = this->get_device_desc_();
   uint16_t vid = dev ? dev->idVendor : 0;
   uint16_t pid = dev ? dev->idProduct : 0;
 
   ESP_LOGI(TAG, "MSC device connected VID=0x%04X PID=0x%04X", vid, pid);
-  this->connection_++;
   if (!this->alloc_data_()) {
     this->disconnect();
     return;
@@ -601,321 +629,103 @@ void USBStorageClient::on_connected() {
     return;
   }
 
-  if (!this->get_max_lun_(this->max_lun_))
-    this->max_lun_ = 0;
-  for (const auto &lun : this->luns_) {
-    if (lun.number > this->max_lun_)
-      ESP_LOGW(TAG, "LUN %u configured, the device has LUNs 0..%u", lun.number, this->max_lun_);
-  }
-  this->report_connected_();
-  // Every slot looked at now; a medium coming up after power-on is waited for (async_done_()).
-  this->check_card();
+  this->ready_tries_ = 0;
+  this->check_ready_();
 }
 
-// GET MAX LUN (BOT 3.2); a device with one LUN may stall it.
-bool USBStorageClient::get_max_lun_(uint8_t &max_lun) {
-  const uint16_t mps0 = this->get_device_desc_() != nullptr ? this->get_device_desc_()->bMaxPacketSize0 : 64;
-  uint8_t value = 0;
-  auto cb = [this, &value](const usb_host::TransferStatus &s) {
-    if (s.success && s.data_len >= 1)
-      value = s.data[0];
-    transfer_done_cb(s, this);
-  };
-  if (!this->control_transfer(usb_host::USB_DIR_IN | usb_host::USB_TYPE_CLASS | usb_host::USB_RECIP_INTERFACE,
-                              MSC_REQUEST_GET_MAX_LUN, 0, this->msc_interface_, cb, std::vector<uint8_t>(mps0), 1))
-    return false;
-  if (!this->wait_transfer_())
-    return false;
-  max_lun = value;
-  return true;
-}
-
-// -- Medium check --------------------------------------------------------------------------
-
-void USBStorageClient::check_card() {
-  for (auto &lun : this->luns_)
-    lun.ejected = false;
-  this->start_check_();
-}
-
-// One round over the slots; an ejected slot stays unmounted.
-void USBStorageClient::start_check_() {
-  if (!this->is_connected() || this->luns_.empty())
-    return;
-  if (this->checking_) {
-    this->check_again_ = true;
-    return;
-  }
-  this->cancel_timeout("card_check");
-  this->checking_ = true;
-  this->check_again_ = false;
-  this->check_index_ = 0;
-  this->luns_[0].tries = 0;
-  this->check_lun_(0);
-}
-
-void USBStorageClient::check_lun_(uint8_t index) {
-  Lun &lun = this->luns_[index];
-  if (lun.number > this->max_lun_) {
-    this->next_lun_();
-    return;
-  }
-  const uint8_t cdb[6] = {SCSI_CMD_TEST_UNIT_READY, 0, 0, 0, 0, 0};
-  // The storage worker has the pipes: the medium is in use, so it is there.
-  if (!this->async_command_(Step::TUR, cdb, sizeof(cdb), 0))
-    this->next_lun_();
-}
-
-void USBStorageClient::next_lun_() {
-  if (++this->check_index_ < this->luns_.size()) {
-    this->luns_[this->check_index_].tries = 0;
-    this->check_lun_(this->check_index_);
-    return;
-  }
-  this->checking_ = false;
-  if (this->check_again_) {
-    this->check_again_ = false;
-    this->start_check_();
-    return;
-  }
-  if (this->card_check_interval_ != SCHEDULER_DONT_RUN)
-    this->set_timeout("card_check", this->card_check_interval_, [this]() { this->start_check_(); });
-}
-
-bool USBStorageClient::async_command_(Step step, const uint8_t *cdb, uint8_t cdb_len, uint8_t data_len) {
-  if (xSemaphoreTake(this->io_lock_, 0) != pdTRUE)
-    return false;
-  MscCbw cbw{};
-  this->async_step_ = step;
-  this->async_tag_ = this->cbw_tag_++;
-  this->async_len_ = data_len;
-  memset(this->async_buf_, 0, sizeof(this->async_buf_));
-  cbw.tag = this->async_tag_;
-  cbw.data_transfer_length = data_len;
-  cbw.flags = data_len != 0 ? MSC_BOT_CBW_FLAGS_IN : MSC_BOT_CBW_FLAGS_OUT;
-  cbw.lun = this->luns_[this->check_index_].number;
-  cbw.cb_length = cdb_len;
-  memcpy(cbw.cb, cdb, cdb_len);
-  const bool sent = this->transfer_out(
-      this->bulk_out_ep_,
-      [this](const usb_host::TransferStatus &s) {
-        if (!s.success) {
-          this->async_finish_(0xFF);
-          return;
-        }
-        if (this->async_len_ == 0) {
-          this->async_csw_();
-          return;
-        }
-        const bool reading = this->transfer_in(
-            this->bulk_in_ep_,
-            [this](const usb_host::TransferStatus &d) {
-              if (!d.success) {
-                this->async_finish_(0xFF);
-                return;
-              }
-              memcpy(this->async_buf_, d.data, std::min<size_t>(d.data_len, sizeof(this->async_buf_)));
-              this->async_csw_();
-            },
-            this->round_up_to_in_mps_(this->async_len_));
-        if (!reading)
-          this->async_finish_(0xFF);
-      },
-      reinterpret_cast<const uint8_t *>(&cbw), sizeof(MscCbw));
-  if (!sent) {
-    xSemaphoreGive(this->io_lock_);
-    this->set_timeout("lun_retry", 0, [this]() { this->async_done_(this->async_step_, 0xFF); });
-  }
-  return true;
-}
-
-// USB task.
-void USBStorageClient::async_csw_() {
-  const bool reading = this->transfer_in(
-      this->bulk_in_ep_,
-      [this](const usb_host::TransferStatus &s) {
-        MscCsw csw{};
-        if (s.success && s.data_len >= sizeof(MscCsw))
-          memcpy(&csw, s.data, sizeof(MscCsw));
-        const bool valid = s.success && csw.signature == MSC_BOT_CSW_SIGNATURE && csw.tag == this->async_tag_;
-        this->async_finish_(valid ? csw.status : 0xFF);
-      },
-      this->round_up_to_in_mps_(sizeof(MscCsw)));
-  if (!reading)
-    this->async_finish_(0xFF);
-}
-
-// USB task: the pipes are free again; the answer goes to the main loop. 0xFF: the transport failed.
-void USBStorageClient::async_finish_(uint8_t status) {
-  xSemaphoreGive(this->io_lock_);
-  const uint32_t connection = this->connection_;
-  const Step step = this->async_step_;
-  this->defer([this, connection, step, status]() {
-    if (connection == this->connection_)
-      this->async_done_(step, status);
-  });
-}
-
-void USBStorageClient::async_done_(Step step, uint8_t status) {
+// Card readers (and some sticks) answer CHECK CONDITION until the medium is ready -- UNIT ATTENTION
+// after power-up or a media change, NOT READY while it comes up -- and hold that condition until
+// REQUEST SENSE has read it. As the IDF's MSC host driver does: TEST UNIT READY, REQUEST SENSE on
+// failure, every 100 ms for up to 5 s; here from the scheduler, so the main loop never waits for it.
+void USBStorageClient::check_ready_() {
   static constexpr uint8_t SENSE_NO_SENSE = 0x0;
   static constexpr uint8_t SENSE_NOT_READY = 0x2;
   static constexpr uint8_t SENSE_UNIT_ATTENTION = 0x6;
-  static constexpr uint8_t ASC_BECOMING_READY = 0x04;
-  static constexpr uint8_t ASC_MEDIUM_CHANGED = 0x28;
-  static constexpr uint8_t ASC_MEDIUM_NOT_PRESENT = 0x3A;
-  static constexpr uint32_t RETRY_MS = 100;
-  static constexpr uint8_t RETRIES = 50;
+  static constexpr uint32_t READY_INTERVAL_MS = 100;
+  static constexpr uint8_t READY_TRIES = 50;
 
-  const uint8_t index = this->check_index_;
-  Lun &lun = this->luns_[index];
-  if (status == 0xFF || status == MSC_BOT_CSW_STATUS_PHASE_ERROR) {
-    this->async_reset_();
-    this->next_lun_();
+  if (this->scsi_test_unit_ready_()) {
+    this->finish_connect_();
     return;
   }
-  switch (step) {
-    case Step::TUR: {
-      if (status == MSC_BOT_CSW_STATUS_GOOD) {
-        if (lun.mounted || lun.ejected) {
-          this->next_lun_();
-          return;
-        }
-        const uint8_t cdb[10] = {SCSI_CMD_READ_CAPACITY_10, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        if (!this->async_command_(Step::CAPACITY, cdb, sizeof(cdb), sizeof(ScsiReadCapacity10Response)))
-          this->next_lun_();
-        return;
-      }
-      // CHECK CONDITION: the reason is held until REQUEST SENSE has read it.
-      const uint8_t cdb[6] = {SCSI_CMD_REQUEST_SENSE, 0, 0, 0, 18, 0};
-      if (!this->async_command_(Step::SENSE, cdb, sizeof(cdb), 18))
-        this->next_lun_();
-      return;
-    }
-    case Step::SENSE: {
-      const uint8_t key = this->async_buf_[2] & 0x0F;
-      const uint8_t asc = this->async_buf_[12];
-      if (status != MSC_BOT_CSW_STATUS_GOOD || asc == ASC_MEDIUM_NOT_PRESENT) {
-        if (lun.mounted) {
-          ESP_LOGI(TAG, "Medium removed from '%s'", lun.mount_path);
-          this->unmount_lun_(index);
-        }
-        lun.ejected = false;
-        this->next_lun_();
-        return;
-      }
-      if (asc == ASC_MEDIUM_CHANGED && lun.mounted) {
-        ESP_LOGI(TAG, "Medium changed in '%s'", lun.mount_path);
-        this->unmount_lun_(index);
-      }
-      // A medium coming up (after power-on, after it was inserted): asked again shortly.
-      const bool coming = key == SENSE_UNIT_ATTENTION || key == SENSE_NO_SENSE ||
-                          (key == SENSE_NOT_READY && asc == ASC_BECOMING_READY);
-      if (coming && ++lun.tries < RETRIES) {
-        this->set_timeout("lun_retry", RETRY_MS, [this, index]() { this->check_lun_(index); });
-        return;
-      }
-      if (coming)
-        ESP_LOGW(TAG, "LUN %u not ready after %" PRIu32 " ms (sense key 0x%X, ASC 0x%02X)", lun.number,
-                 RETRY_MS * RETRIES, key, asc);
-      this->next_lun_();
-      return;
-    }
-    case Step::CAPACITY: {
-      ScsiReadCapacity10Response resp{};
-      memcpy(&resp, this->async_buf_, sizeof(resp));
-      if (status == MSC_BOT_CSW_STATUS_GOOD) {
-        lun.sector_count = __builtin_bswap32(resp.last_lba) + 1;
-        lun.sector_size = __builtin_bswap32(resp.block_size);
-        ESP_LOGD(TAG, "LUN %u: %" PRIu32 " sectors of %" PRIu32 " bytes", lun.number, lun.sector_count,
-                 lun.sector_size);
-        if (lun.sector_size != 0 && lun.sector_count != 0)
-          this->mount_lun_(index);
-      }
-      this->next_lun_();
-      return;
-    }
-  }
-}
-
-// BOT 5.3.4 reset recovery without waiting: Bulk-Only Mass Storage Reset, then both bulk
-// endpoints cleared, each request answered in its callback.
-void USBStorageClient::async_reset_() {
-  if (xSemaphoreTake(this->io_lock_, 0) != pdTRUE)
+  uint8_t key = 0xFF;
+  uint8_t asc = 0;
+  if (!this->scsi_request_sense_(key, asc) ||
+      (key != SENSE_NO_SENSE && key != SENSE_NOT_READY && key != SENSE_UNIT_ATTENTION)) {
+    ESP_LOGE(TAG, "Unit not ready (sense key 0x%X, ASC 0x%02X)", key, asc);
+    this->disconnect();
     return;
-  static constexpr uint16_t FEATURE_ENDPOINT_HALT = 0;
-  for (const uint8_t ep : {this->bulk_in_ep_, this->bulk_out_ep_}) {
-    if (usb_host_endpoint_halt(this->device_handle_, ep) == ESP_OK) {
-      usb_host_endpoint_flush(this->device_handle_, ep);
-      usb_host_endpoint_clear(this->device_handle_, ep);
-    }
   }
-  const uint8_t in_ep = this->bulk_in_ep_;
-  const uint8_t out_ep = this->bulk_out_ep_;
-  static constexpr uint8_t ENDPOINT = usb_host::USB_DIR_OUT | usb_host::USB_TYPE_STANDARD | usb_host::USB_RECIP_ENDPOINT;
-  const bool sent = this->control_transfer(
-      usb_host::USB_DIR_OUT | usb_host::USB_TYPE_CLASS | usb_host::USB_RECIP_INTERFACE, MSC_REQUEST_RESET, 0,
-      this->msc_interface_, [this, in_ep, out_ep](const usb_host::TransferStatus &) {
-        const bool in_sent = this->control_transfer(
-            ENDPOINT, USB_B_REQUEST_CLEAR_FEATURE, FEATURE_ENDPOINT_HALT, in_ep,
-            [this, out_ep](const usb_host::TransferStatus &) {
-              const bool out_sent =
-                  this->control_transfer(ENDPOINT, USB_B_REQUEST_CLEAR_FEATURE, FEATURE_ENDPOINT_HALT, out_ep,
-                                         [this](const usb_host::TransferStatus &) { xSemaphoreGive(this->io_lock_); });
-              if (!out_sent)
-                xSemaphoreGive(this->io_lock_);
-            });
-        if (!in_sent)
-          xSemaphoreGive(this->io_lock_);
-      });
-  if (!sent)
-    xSemaphoreGive(this->io_lock_);
+  if (++this->ready_tries_ >= READY_TRIES) {
+    ESP_LOGE(TAG, "Unit not ready after %" PRIu32 " ms (sense key 0x%X, ASC 0x%02X)", READY_INTERVAL_MS * READY_TRIES,
+             key, asc);
+    this->disconnect();
+    return;
+  }
+  this->set_timeout("ready", READY_INTERVAL_MS, [this]() { this->check_ready_(); });
 }
 
-// Main loop: FATFS mounts the slot's volume, reading its first sectors through the storage
-// I/O path (scsi_read()).
-bool USBStorageClient::mount_lun_(uint8_t index) {
-  Lun &lun = this->luns_[index];
+void USBStorageClient::finish_connect_() {
+  const usb_device_desc_t *dev = this->get_device_desc_();
+  uint16_t vid = dev ? dev->idVendor : 0;
+  uint16_t pid = dev ? dev->idProduct : 0;
+
+  if (!this->scsi_read_capacity_()) {
+    ESP_LOGE(TAG, "SCSI READ CAPACITY failed");
+    this->disconnect();
+    return;
+  }
+
+  this->disk_ready_ = true;
+
+  // Mount path of the entry for this stick, fall back to /usb
+  this->mount_path_ = "/usb";
+  if (const USBStorageDevice *device = this->find_device_(vid, pid))
+    this->mount_path_ = device->get_mount_path();
+
   char drive_path[8];
-  snprintf(drive_path, sizeof(drive_path), "%d:", lun.drive);
-  lun.ready = true;
+  snprintf(drive_path, sizeof(drive_path), "%d:", this->fatfs_drive_);
 
 #ifdef USE_STORAGE_FILE_SYSTEM_SELECT
   // Before the one and only f_mount below: probe the first sectors and, if a manually
   // requested filesystem mismatches what is on the medium, reformat first -- the mount then
   // happens on the correct filesystem from the start.
-  if (!storage::ensure_requested_filesystem(TAG, lun.drive, drive_path, this->requested_file_system_,
+  if (!storage::ensure_requested_filesystem(TAG, this->fatfs_drive_, drive_path, this->requested_file_system_,
                                             this->format_on_mismatch_)) {
-    lun.ready = false;
-    return false;
+    this->disk_ready_ = false;
+    this->disconnect();
+    return;
   }
 #endif
 
   FATFS *fs = nullptr;
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0)
   esp_vfs_fat_conf_t vfs_conf = {
-      .base_path = lun.mount_path,
+      .base_path = this->mount_path_,
       .fat_drive = drive_path,
       .max_files = 5,
   };
   esp_err_t err = esp_vfs_fat_register_cfg(&vfs_conf, &fs);
 #else
-  esp_err_t err = esp_vfs_fat_register(lun.mount_path, drive_path, 5, &fs);
+  esp_err_t err = esp_vfs_fat_register(this->mount_path_, drive_path, 5, &fs);
 #endif
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_vfs_fat_register failed: %s", esp_err_to_name(err));
-    lun.ready = false;
-    return false;
+    this->disk_ready_ = false;
+    this->disconnect();
+    return;
   }
 
   FRESULT res = f_mount(fs, drive_path, 1);
   if (res != FR_OK) {
     ESP_LOGE(TAG, "f_mount failed: %d", res);
-    esp_vfs_fat_unregister_path(lun.mount_path);
-    lun.ready = false;
-    return false;
+    esp_vfs_fat_unregister_path(this->mount_path_);
+    this->disk_ready_ = false;
+    this->disconnect();
+    return;
   }
 
-  lun.mounted = true;
+  this->mounted_ = true;
 #ifdef USE_STORAGE_CHANGE_FEED
   // Mount state is part of the roots listing: whoever flipped it (CD pin, hotplug, HTTP,
   // automation), the browser's change poll must see it -- including recovery after an error.
@@ -923,27 +733,20 @@ bool USBStorageClient::mount_lun_(uint8_t index) {
     storage::global_storage_registry->note_dir_changed("");
 #endif
 
-  ESP_LOGI(TAG, "FAT filesystem mounted at '%s'", lun.mount_path);
-  if (lun.device != nullptr) {
-    lun.device->on_device_connected(lun.mount_path, lun.drive);
-  } else if (index == 0) {
-    ESP_LOGW(TAG, "No storage device configured for this stick, mounted at '%s' only in the VFS", lun.mount_path);
-  }
-  return true;
+  ESP_LOGI(TAG, "FAT filesystem mounted at '%s'", this->mount_path_);
+
+  this->notify_connected_(vid, pid);
+  this->report_connected_();
 }
 
-void USBStorageClient::unmount_lun_(uint8_t index) {
-  Lun &lun = this->luns_[index];
-  if (lun.device != nullptr && lun.device->is_mounted())
-    lun.device->on_device_disconnected();
-  lun.ready = false;
-  if (!lun.mounted)
+void USBStorageClient::unmount_filesystem() {
+  if (!this->mounted_)
     return;
   char drive_path[8];
-  snprintf(drive_path, sizeof(drive_path), "%d:", lun.drive);
+  snprintf(drive_path, sizeof(drive_path), "%d:", this->fatfs_drive_);
   f_mount(nullptr, drive_path, 0);
-  esp_vfs_fat_unregister_path(lun.mount_path);
-  lun.mounted = false;
+  esp_vfs_fat_unregister_path(this->mount_path_);
+  this->mounted_ = false;
 #ifdef USE_STORAGE_CHANGE_FEED
   // Mount state is part of the roots listing: whoever flipped it (CD pin, hotplug, HTTP,
   // automation), the browser's change poll must see it -- including recovery after an error.
@@ -951,41 +754,30 @@ void USBStorageClient::unmount_lun_(uint8_t index) {
     storage::global_storage_registry->note_dir_changed("");
 #endif
 
-  ESP_LOGI(TAG, "FAT filesystem unmounted from '%s'", lun.mount_path);
-}
-
-void USBStorageClient::unmount_filesystem(uint8_t index) {
-  if (index >= this->luns_.size())
-    return;
-  this->unmount_lun_(index);
-  this->luns_[index].ejected = true;
+  ESP_LOGI(TAG, "FAT filesystem unmounted from '%s'", this->mount_path_);
 }
 
 void USBStorageClient::on_disconnected() {
-  this->connection_++;
   // Transfers still out on the bulk endpoints come back now, so a SCSI command of the storage
-  // worker or the medium check ends at once instead of on its timeouts (free_data_() waits for it).
+  // worker ends at once instead of on its timeouts (free_data_() waits for it).
   if (this->device_handle_ != nullptr) {
     for (const uint8_t ep : {this->bulk_in_ep_, this->bulk_out_ep_}) {
       if (ep != 0 && usb_host_endpoint_halt(this->device_handle_, ep) == ESP_OK)
         usb_host_endpoint_flush(this->device_handle_, ep);
     }
   }
-  this->cancel_timeout("card_check");
-  this->cancel_timeout("lun_retry");
-  this->checking_ = false;
-  this->check_again_ = false;
-  for (size_t i = 0; i < this->luns_.size(); i++) {
-    this->unmount_lun_(static_cast<uint8_t>(i));
-    this->luns_[i].sector_count = 0;
-    this->luns_[i].ejected = false;
-  }
+  this->cancel_timeout("ready");
+  this->notify_disconnected_();
+  this->disk_ready_ = false;
+
+  this->unmount_filesystem();
 
   if (this->msc_interface_ != 0xFF) {
     this->release_interface(this->msc_interface_);
     this->msc_interface_ = 0xFF;
   }
 
+  this->sector_count_ = 0;
   this->bulk_in_ep_ = 0;
   this->bulk_out_ep_ = 0;
   this->bulk_in_mps_ = 0;
@@ -1022,11 +814,11 @@ void USBStorageDevice::dump_config() {
   ESP_LOGCONFIG(TAG, "  VID: 0x%04X  PID: 0x%04X", this->vid_, this->pid_);
 }
 
-void USBStorageDevice::on_device_connected(const char *mount_path, int drive) {
+void USBStorageDevice::on_device_connected(const char *mount_path) {
   ESP_LOGI(TAG, "USB Storage Device connected (mount_path='%s')", mount_path);
   this->mount_path_ = mount_path;
   this->fs_mounted_ = true;
-  snprintf(this->fatfs_drive_, sizeof(this->fatfs_drive_), "%d:", drive);
+  snprintf(this->fatfs_drive_, sizeof(this->fatfs_drive_), "%d:", this->client_->get_fatfs_drive());
 
   this->on_mounted_.call(mount_path);
 
@@ -1063,7 +855,7 @@ void USBStorageDevice::unmount_device() {
   ESP_LOGI(TAG, "Device unmounted");
   this->on_device_disconnected();
   if (this->client_ != nullptr)
-    this->client_->unmount_filesystem(this->lun_index_);
+    this->client_->unmount_filesystem();
 }
 
 void USBStorageDevice::log_list_dir_start_(const char *path) const { ESP_LOGD(TAG, "Listing files in: %s", path); }
@@ -1128,7 +920,7 @@ storage::StorageError USBStorageDevice::get_info(storage::StorageInfo *info) {
   info->is_mounted = this->fs_mounted_;
   info->is_removable = true;
   info->is_read_only = false;
-  info->block_size = this->client_->get_sector_size(this->lun_index_);
+  info->block_size = this->client_->get_sector_size();
   info->total_bytes = 0;
   info->free_bytes = 0;
 
