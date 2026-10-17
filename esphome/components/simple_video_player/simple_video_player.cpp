@@ -286,6 +286,12 @@ void SimpleVideoPlayer::loop() {
   this->pool_service_();
   if (this->finished_pending_.exchange(false, std::memory_order_acq_rel))
     this->on_finished_callbacks_.call();
+#ifdef SVP_AUDIO_FILES
+  if (this->audio_started_pending_) {
+    this->audio_started_pending_ = false;  // an audio file's track started (start_audio_session_())
+    this->on_started_callbacks_.call();
+  }
+#endif
   const int16_t error = this->error_pending_.exchange(-1, std::memory_order_acq_rel);
   if (error >= 0)
     this->on_error_callbacks_.call(static_cast<uint8_t>(error));
@@ -947,9 +953,17 @@ float SimpleVideoPlayer::get_duration() const {
 
 void SimpleVideoPlayer::seek(float seconds) {
   if (!this->can_seek()) {
-    ESP_LOGW(TAG, "Seeking needs a local AVI file playing or paused");
+    ESP_LOGW(TAG, "Seeking needs a local AVI or audio file of known length playing or paused");
     return;
   }
+#ifdef SVP_AUDIO_FILES
+  if (this->audio_session_.load(std::memory_order_acquire)) {
+    const uint32_t duration = this->duration_frames_.load(std::memory_order_acquire);  // ms
+    const float ms = std::max(seconds, 0.0f) * 1000.0f;
+    this->audio_seek_(ms >= static_cast<float>(duration) ? duration - 1 : static_cast<uint32_t>(ms));
+    return;
+  }
+#endif
   const uint32_t frames = this->duration_frames_.load(std::memory_order_acquire);
   const float frame = std::max(seconds, 0.0f) * 1e6f / this->frame_duration_us_;
   const uint32_t target = frame >= static_cast<float>(frames - 1) ? frames - 1 : static_cast<uint32_t>(frame);
@@ -3460,6 +3474,9 @@ void SimpleVideoPlayer::audio_start_(size_t pos) {
   this->audio_pos_ = pos;
   this->audio_current_ = true;
   this->audio_halted_ = false;
+  this->audio_seek_ms_.store(0, std::memory_order_release);  // a new track from its start
+  this->audio_restart_ = false;
+  this->audio_seek_paused_ = false;
   this->start_pending_.store(false, std::memory_order_release);
 #ifdef SVP_CHANNEL_LIST
   const SvpId &track = this->audio_queue_[this->audio_order_[pos]];
@@ -3652,13 +3669,23 @@ void SimpleVideoPlayer::start_audio_session_() {
     this->set_error_(PlaybackError::DECODER_INIT_FAILED);
     return;
   }
+  // Position and duration in milliseconds; the reader learns the duration as it opens the file.
+  this->frame_duration_us_ = 1000.0f;
   this->duration_frames_.store(0, std::memory_order_relaxed);
-  this->position_frame_.store(0, std::memory_order_relaxed);
+  const uint32_t at = this->audio_seek_ms_.load(std::memory_order_acquire);
+  this->audio_position_base_ms_.store(at, std::memory_order_relaxed);
+  this->position_frame_.store(at, std::memory_order_relaxed);
   this->reader_task_stop_ = false;
   this->audio_task_stop_ = false;
   this->audio_file_eof_.store(false, std::memory_order_release);
   this->audio_track_started_ms_ = millis();
-  this->state_.store(PlayerState::PLAYING, std::memory_order_release);
+  // A seek's start stays paused when the seek came while paused; only a track's own start is an event.
+  const bool paused = this->audio_restart_ && this->audio_seek_paused_;
+  if (!this->audio_restart_)
+    this->audio_started_pending_ = true;
+  this->audio_restart_ = false;
+  this->audio_seek_paused_ = false;
+  this->state_.store(paused ? PlayerState::PAUSED : PlayerState::PLAYING, std::memory_order_release);
   this->note_state_();
   this->reader_busy_.store(true, std::memory_order_release);
   this->audio_busy_.store(true, std::memory_order_release);
@@ -3674,30 +3701,451 @@ void SimpleVideoPlayer::audio_file_feed_() {
     const PlayerState state = this->state_.load(std::memory_order_acquire);
     return !this->reader_task_stop_ && (state == PlayerState::PLAYING || state == PlayerState::PAUSED);
   };
+  auto feed = [&](const uint8_t *data, size_t len) {
+    size_t done = 0;
+    while (done < len && running())
+      done += this->audio_input_ring_buffer_->write_without_replacement(data + done, len - done, RING_WAIT);
+  };
   reader->set_abort_flag(&this->reader_task_stop_);
   if (!reader->open(this->video_path_.c_str())) {
     ESP_LOGE(TAG, "Failed to open %s", this->video_path_.c_str());
     if (running())
       this->set_error_(PlaybackError::FILE_NOT_FOUND);
   } else {
-    while (running()) {
+    // The file's layout first: its length, and where the audio (or the position asked for) starts.
+    uint8_t head[80];
+    uint64_t from = 0;
+    uint32_t base_ms = 0;
+    const size_t head_len =
+        this->audio_file_prepare_(reader, this->audio_seek_ms_.load(std::memory_order_acquire), head, &from, &base_ms);
+    this->audio_position_base_ms_.store(base_ms, std::memory_order_release);
+    this->duration_frames_.store(this->audio_layout_.duration_ms, std::memory_order_release);
+    feed(head, head_len);
+    bool ok = reader->seek(from);
+    while (ok && running()) {
       const int read = reader->read(this->audio_temp_buffer_, AUDIO_TEMP_BUFFER_SIZE);
       if (read <= 0) {
-        if (read < 0 && running()) {
-          ESP_LOGE(TAG, "Failed to read %s", this->video_path_.c_str());
-          this->set_error_(PlaybackError::FILE_READ_ERROR);
-        }
+        ok = read == 0;
         break;
       }
-      size_t done = 0;
-      while (done < static_cast<size_t>(read) && running())
-        done += this->audio_input_ring_buffer_->write_without_replacement(this->audio_temp_buffer_ + done,
-                                                                          read - done, RING_WAIT);
+      feed(this->audio_temp_buffer_, static_cast<size_t>(read));
+    }
+    if (!ok && running()) {
+      ESP_LOGE(TAG, "Failed to read %s", this->video_path_.c_str());
+      this->set_error_(PlaybackError::FILE_READ_ERROR);
     }
     reader->close();
   }
   this->audio_file_eof_.store(true, std::memory_order_release);
   this->audio_wait_.wake();
+}
+
+// Main loop: the track starts anew from `ms` (the decoder fresh, its header fed first).
+void SimpleVideoPlayer::audio_seek_(uint32_t ms) {
+  ESP_LOGI(TAG, "Seeking to %.1f s", ms / 1000.0f);
+  // A seek after a seek not started yet keeps whether the first came while paused.
+  if (!this->audio_restart_)
+    this->audio_seek_paused_ = this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED;
+  this->audio_seek_ms_.store(ms, std::memory_order_release);
+  this->audio_restart_ = true;
+  this->audio_start_pending_.store(true, std::memory_order_release);
+  this->audio_changed_.store(true, std::memory_order_release);
+  this->end_session_();
+  this->run_pending_start_();
+}
+
+static uint32_t le16(const uint8_t *p) { return p[0] | (p[1] << 8); }
+static uint32_t le32(const uint8_t *p) {
+  return p[0] | (p[1] << 8) | (p[2] << 16) | (static_cast<uint32_t>(p[3]) << 24);
+}
+static uint32_t be32(const uint8_t *p) {
+  return (static_cast<uint32_t>(p[0]) << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+}
+static void put_le32(uint8_t *p, uint32_t v) {
+  p[0] = v;
+  p[1] = v >> 8;
+  p[2] = v >> 16;
+  p[3] = v >> 24;
+}
+
+// The length of an ID3v2 tag at the start (header, size syncsafe, footer), 0 without one.
+static uint64_t id3v2_size(const uint8_t *p, size_t len) {
+  if (len < 10 || p[0] != 'I' || p[1] != 'D' || p[2] != '3')
+    return 0;
+  const uint64_t size = (static_cast<uint32_t>(p[6] & 0x7F) << 21) | ((p[7] & 0x7F) << 14) | ((p[8] & 0x7F) << 7) |
+                        (p[9] & 0x7F);
+  return size + 10 + ((p[5] & 0x10) != 0 ? 10 : 0);
+}
+
+// An MPEG audio frame header (ISO 11172-3 / 13818-3): samples per frame, rate, bitrate (kbit/s).
+struct MpegHeader {
+  uint32_t samples{0}, rate{0}, kbps{0};
+  bool mpeg1{false}, mono{false};
+};
+static bool mpeg_header(const uint8_t *h, MpegHeader *out) {
+  if (h[0] != 0xFF || (h[1] & 0xE0) != 0xE0)
+    return false;
+  const uint8_t version = (h[1] >> 3) & 3;  // 0 MPEG-2.5, 1 reserved, 2 MPEG-2, 3 MPEG-1
+  const uint8_t layer = (h[1] >> 1) & 3;    // 1 III, 2 II, 3 I, 0 reserved
+  const uint8_t bitrate = h[2] >> 4;
+  const uint8_t rate = (h[2] >> 2) & 3;
+  if (version == 1 || layer == 0 || bitrate == 0 || bitrate == 15 || rate == 3)
+    return false;
+  static const uint16_t RATES[3][3] = {{11025, 12000, 8000}, {22050, 24000, 16000}, {44100, 48000, 32000}};
+  static const uint16_t KBPS[5][15] = {
+      {0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448},  // MPEG-1 I
+      {0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384},     // MPEG-1 II
+      {0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320},      // MPEG-1 III
+      {0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256},     // MPEG-2/2.5 I
+      {0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160},          // MPEG-2/2.5 II, III
+  };
+  out->mpeg1 = version == 3;
+  out->mono = (h[3] >> 6) == 3;
+  out->rate = RATES[version == 3 ? 2 : (version == 2 ? 1 : 0)][rate];
+  const int table = out->mpeg1 ? 3 - layer : (layer == 3 ? 3 : 4);
+  out->kbps = KBPS[table][bitrate];
+  out->samples = layer == 3 ? 384 : (layer == 2 || out->mpeg1 ? 1152 : 576);
+  return true;
+}
+
+// A FLAC frame header at `h` (RFC 9639 9.1): its CRC-8 right, the coded number out (a frame's
+// number with a fixed block size, a sample's with a variable one).
+static bool flac_frame_header(const uint8_t *h, size_t avail, uint64_t *number, bool *variable) {
+  if (avail < 6 || h[0] != 0xFF || (h[1] & 0xFE) != 0xF8)
+    return false;
+  const uint8_t block = h[2] >> 4, rate = h[2] & 0x0F;
+  if (block == 0 || rate == 15 || (h[3] >> 4) > 10 || ((h[3] >> 1) & 7) == 3 || (h[3] & 1) != 0)
+    return false;
+  size_t len = 0;
+  uint64_t value = h[4];
+  if ((h[4] & 0x80) == 0) {
+    len = 1;
+  } else if ((h[4] & 0xE0) == 0xC0) {
+    len = 2, value &= 0x1F;
+  } else if ((h[4] & 0xF0) == 0xE0) {
+    len = 3, value &= 0x0F;
+  } else if ((h[4] & 0xF8) == 0xF0) {
+    len = 4, value &= 0x07;
+  } else if ((h[4] & 0xFC) == 0xF8) {
+    len = 5, value &= 0x03;
+  } else if ((h[4] & 0xFE) == 0xFC) {
+    len = 6, value &= 0x01;
+  } else if (h[4] == 0xFE) {
+    len = 7, value = 0;
+  } else {
+    return false;
+  }
+  size_t at = 4 + len;
+  if (avail < at + 5)
+    return false;
+  for (size_t i = 5; i < 4 + len; i++) {
+    if ((h[i] & 0xC0) != 0x80)
+      return false;
+    value = (value << 6) | (h[i] & 0x3F);
+  }
+  at += block == 6 ? 1 : (block == 7 ? 2 : 0);
+  at += rate == 12 ? 1 : (rate == 13 || rate == 14 ? 2 : 0);
+  uint8_t crc = 0;  // CRC-8, polynomial x^8 + x^2 + x + 1
+  for (size_t i = 0; i < at; i++) {
+    crc ^= h[i];
+    for (int b = 0; b < 8; b++)
+      crc = (crc & 0x80) != 0 ? static_cast<uint8_t>((crc << 1) ^ 0x07) : static_cast<uint8_t>(crc << 1);
+  }
+  if (crc != h[at])
+    return false;
+  *number = value;
+  *variable = (h[1] & 1) != 0;
+  return true;
+}
+
+size_t SimpleVideoPlayer::audio_file_prepare_(BufferedFileReader *reader, uint32_t seek_ms, uint8_t *head,
+                                              uint64_t *from, uint32_t *base_ms) {
+  AudioFileLayout &file = this->audio_layout_;
+  file = AudioFileLayout{};
+  *from = 0;
+  *base_ms = 0;
+  if (!reader->get_size(&file.size))
+    return 0;
+  // A window over the file in the temp buffer: bytes at a place, read there when not in it.
+  uint8_t *const buf = this->audio_temp_buffer_;
+  uint64_t win = 0;
+  size_t win_len = 0;
+  auto at = [&](uint64_t pos, size_t len) -> const uint8_t * {
+    if (len > AUDIO_TEMP_BUFFER_SIZE || pos + len > file.size)
+      return nullptr;
+    if (pos < win || pos + len > win + win_len) {
+      if (pos != win + win_len && !reader->seek(pos))
+        return nullptr;
+      const int n = reader->read(buf, AUDIO_TEMP_BUFFER_SIZE);
+      win = pos;
+      win_len = n > 0 ? static_cast<size_t>(n) : 0;
+      if (len > win_len)
+        return nullptr;
+    }
+    return buf + (pos - win);
+  };
+  const audio::AudioFileType type = audio::detect_audio_file_type(nullptr, this->video_path_.c_str());
+  size_t head_len = 0;
+  switch (type) {
+#ifdef USE_AUDIO_MP3_SUPPORT
+    case audio::AudioFileType::MP3: {
+      const uint8_t *p = at(0, 10);
+      if (p == nullptr)
+        break;
+      uint64_t pos = id3v2_size(p, 10);
+      // The first frame: its header right, and the next one where it says.
+      MpegHeader mh;
+      bool found = false;
+      for (size_t i = 0; i < 4096 && !found; i++, pos++) {
+        const uint8_t *h = at(pos, 4);
+        if (h == nullptr)
+          break;
+        found = mpeg_header(h, &mh);
+      }
+      if (!found)
+        break;
+      file.data_start = --pos;
+      file.data_end = file.size;
+      if (file.size >= 128) {
+        const uint8_t *tag = at(file.size - 128, 3);
+        if (tag != nullptr && tag[0] == 'T' && tag[1] == 'A' && tag[2] == 'G')
+          file.data_end = file.size - 128;  // ID3v1 at the end
+      }
+      // Xing/Info after the side information, VBRI 32 bytes in: the frame count, bytes and TOC.
+      const size_t xing = 4 + (mh.mpeg1 ? (mh.mono ? 17 : 32) : (mh.mono ? 9 : 17));
+      uint32_t frames = 0;
+      const uint8_t *x = at(file.data_start + xing, 120);
+      if (x == nullptr)
+        x = at(file.data_start + xing, 8);
+      if (x != nullptr && (memcmp(x, "Xing", 4) == 0 || memcmp(x, "Info", 4) == 0)) {
+        const uint32_t flags = be32(x + 4);
+        size_t field = 8;
+        const uint8_t *more = at(file.data_start + xing, 8 + 4 + 4 + 100);
+        if (more != nullptr) {
+          if ((flags & 1) != 0) {
+            frames = be32(more + field);
+            field += 4;
+          }
+          if ((flags & 2) != 0) {
+            file.xing_bytes = be32(more + field);
+            field += 4;
+          }
+          if ((flags & 4) != 0) {
+            memcpy(file.xing_toc, more + field, sizeof(file.xing_toc));
+            file.toc = true;
+          }
+        }
+      } else {
+        const uint8_t *v = at(file.data_start + 36, 18);
+        if (v != nullptr && memcmp(v, "VBRI", 4) == 0) {
+          file.xing_bytes = be32(v + 10);
+          frames = be32(v + 14);
+        }
+      }
+      if (frames != 0 && mh.rate != 0) {
+        file.duration_ms = static_cast<uint32_t>(static_cast<uint64_t>(frames) * mh.samples * 1000 / mh.rate);
+      } else if (mh.kbps != 0) {
+        file.duration_ms = static_cast<uint32_t>((file.data_end - file.data_start) * 8 / mh.kbps);  // CBR
+      }
+      *from = file.data_start;  // the decoder finds the frames' sync itself, past any tag
+      if (seek_ms != 0 && file.duration_ms != 0) {
+        const float part = std::min(static_cast<float>(seek_ms) / file.duration_ms, 1.0f);
+        const uint64_t bytes = file.xing_bytes != 0 ? file.xing_bytes : file.data_end - file.data_start;
+        float spot = part;
+        if (file.toc) {
+          const float percent = part * 100.0f;
+          const int i = std::min(static_cast<int>(percent), 99);
+          const float a = file.xing_toc[i];
+          const float b = i < 99 ? file.xing_toc[i + 1] : 256.0f;
+          spot = (a + (b - a) * (percent - i)) / 256.0f;
+        }
+        *from = std::min<uint64_t>(file.data_start + static_cast<uint64_t>(spot * bytes), file.data_end);
+        *base_ms = seek_ms;
+      }
+      break;
+    }
+#endif
+#ifdef USE_AUDIO_FLAC_SUPPORT
+    case audio::AudioFileType::FLAC: {
+      const uint8_t *p = at(0, 4);
+      if (p == nullptr || memcmp(p, "fLaC", 4) != 0)
+        break;
+      // The metadata blocks: STREAMINFO kept, the rest (pictures, tags) passed over.
+      uint64_t pos = 4;
+      bool last = false, info = false;
+      for (int blocks = 0; !last && blocks < 128; blocks++) {
+        const uint8_t *b = at(pos, 4);
+        if (b == nullptr)
+          break;
+        last = (b[0] & 0x80) != 0;
+        const uint32_t len = (b[1] << 16) | (b[2] << 8) | b[3];
+        if ((b[0] & 0x7F) == 0 && len >= 34) {
+          const uint8_t *si = at(pos + 4, 34);
+          if (si != nullptr) {
+            memcpy(file.streaminfo, si, sizeof(file.streaminfo));
+            info = true;
+          }
+        }
+        pos += 4 + len;
+      }
+      if (!last || !info || pos >= file.size)
+        break;
+      const uint8_t *si = file.streaminfo;
+      file.flac_rate = (static_cast<uint32_t>(si[10]) << 12) | (si[11] << 4) | (si[12] >> 4);
+      const uint64_t total = (static_cast<uint64_t>(si[13] & 0x0F) << 32) | be32(si + 14);
+      const uint16_t min_block = (si[0] << 8) | si[1], max_block = (si[2] << 8) | si[3];
+      file.flac_block = min_block == max_block ? min_block : 0;
+      file.data_start = pos;
+      file.data_end = file.size;
+      if (file.flac_rate == 0)
+        break;
+      if (total != 0)
+        file.duration_ms = static_cast<uint32_t>(total * 1000 / file.flac_rate);
+      // The decoder takes "fLaC" and STREAMINFO alone (the last block), then the frames.
+      memcpy(head, "fLaC", 4);
+      head[4] = 0x80;
+      head[5] = 0;
+      head[6] = 0;
+      head[7] = 34;
+      memcpy(head + 8, file.streaminfo, 34);
+      head_len = 42;
+      *from = file.data_start;
+      if (seek_ms != 0 && file.duration_ms != 0) {
+        // Near the place by the bytes, then the next frame (its header and CRC right) and its sample.
+        const float part = std::min(static_cast<float>(seek_ms) / file.duration_ms, 1.0f);
+        uint64_t scan = file.data_start + static_cast<uint64_t>(part * (file.data_end - file.data_start));
+        static constexpr uint64_t SCAN_LIMIT = 1024 * 1024;
+        const uint64_t scan_end = std::min(file.data_end, scan + SCAN_LIMIT);
+        bool found = false;
+        while (!found && scan + 16 < scan_end) {
+          const size_t len = static_cast<size_t>(std::min<uint64_t>(AUDIO_TEMP_BUFFER_SIZE, scan_end - scan));
+          const uint8_t *w = at(scan, len);
+          if (w == nullptr)
+            break;
+          for (size_t i = 0; i + 16 <= len && !found; i++) {
+            uint64_t number;
+            bool variable;
+            if (w[i] == 0xFF && flac_frame_header(w + i, len - i, &number, &variable) &&
+                (variable || file.flac_block != 0)) {
+              const uint64_t sample = variable ? number : number * file.flac_block;
+              if (sample < total || total == 0) {
+                *from = scan + i;
+                *base_ms = static_cast<uint32_t>(sample * 1000 / file.flac_rate);
+                found = true;
+              }
+            }
+          }
+          scan += len - 15;  // a header across the window's end is looked at again
+        }
+      }
+      break;
+    }
+#endif
+#ifdef USE_AUDIO_WAV_SUPPORT
+    case audio::AudioFileType::WAV: {
+      const uint8_t *p = at(0, 12);
+      if (p == nullptr || memcmp(p, "RIFF", 4) != 0 || memcmp(p + 8, "WAVE", 4) != 0)
+        break;
+      uint64_t pos = 12;
+      bool data = false;
+      for (int chunks = 0; !data && chunks < 64; chunks++) {
+        const uint8_t *c = at(pos, 8);
+        if (c == nullptr)
+          break;
+        const uint32_t len = le32(c + 4);
+        if (memcmp(c, "fmt ", 4) == 0) {
+          if (len < 16 || len > sizeof(file.fmt) || (len & 1) != 0)
+            break;
+          const uint8_t *f = at(pos + 8, len);
+          if (f == nullptr)
+            break;
+          memcpy(file.fmt, f, len);
+          file.fmt_len = static_cast<uint8_t>(len);
+          file.byte_rate = le32(f + 8);
+          file.block_align = static_cast<uint16_t>(le16(f + 12));
+        } else if (memcmp(c, "data", 4) == 0) {
+          file.data_start = pos + 8;
+          file.data_end =
+              len == 0 || len == 0xFFFFFFFFu || file.data_start + len > file.size ? file.size : file.data_start + len;
+          data = true;
+          break;
+        }
+        pos += 8 + len + (len & 1);
+      }
+      if (!data || file.fmt_len == 0 || file.byte_rate == 0 || file.block_align == 0)
+        break;
+      file.duration_ms = static_cast<uint32_t>((file.data_end - file.data_start) * 1000 / file.byte_rate);
+      // At the place asked for, on a whole block; the decoder takes a header saying what is left.
+      uint64_t offset = file.data_start;
+      if (seek_ms != 0) {
+        const uint64_t bytes = static_cast<uint64_t>(seek_ms) * file.byte_rate / 1000;
+        offset = std::min(file.data_start + bytes / file.block_align * file.block_align, file.data_end);
+      }
+      const uint32_t left = static_cast<uint32_t>(file.data_end - offset);
+      memcpy(head, "RIFF", 4);
+      put_le32(head + 4, 4 + 8 + file.fmt_len + 8 + left);
+      memcpy(head + 8, "WAVEfmt ", 8);
+      put_le32(head + 16, file.fmt_len);
+      memcpy(head + 20, file.fmt, file.fmt_len);
+      memcpy(head + 20 + file.fmt_len, "data", 4);
+      put_le32(head + 24 + file.fmt_len, left);
+      head_len = 28 + file.fmt_len;
+      *from = offset;
+      *base_ms = static_cast<uint32_t>((offset - file.data_start) * 1000 / file.byte_rate);
+      break;
+    }
+#endif
+#ifdef USE_AUDIO_AAC_SUPPORT
+    case audio::AudioFileType::AAC: {
+      // ADTS only (an .m4a's MP4 boxes have no frame sync): the frames' mean size in the first read.
+      const uint8_t *p = at(0, 10);
+      if (p == nullptr)
+        break;
+      const uint64_t start = id3v2_size(p, 10);
+      static const uint32_t ADTS_RATES[13] = {96000, 88200, 64000, 48000, 44100, 32000, 24000,
+                                              22050, 16000, 12000, 11025, 8000,  7350};
+      uint64_t pos = start;
+      uint64_t bytes = 0;
+      uint32_t frames = 0, rate = 0;
+      while (frames < 64) {
+        const uint8_t *h = at(pos, 7);
+        if (h == nullptr || h[0] != 0xFF || (h[1] & 0xF6) != 0xF0 || ((h[2] >> 2) & 0x0F) >= 13)
+          break;
+        const uint32_t len = ((h[3] & 3) << 11) | (h[4] << 3) | (h[5] >> 5);
+        if (len < 7)
+          break;
+        rate = ADTS_RATES[(h[2] >> 2) & 0x0F];
+        frames += (h[6] & 3) + 1;  // raw data blocks of 1024 samples each
+        bytes += len;
+        pos += len;
+      }
+      if (frames < 8 || rate == 0)
+        break;
+      file.data_start = start;
+      file.data_end = file.size;
+      const uint64_t per_second = bytes * rate / (static_cast<uint64_t>(frames) * 1024);
+      if (per_second != 0)
+        file.duration_ms = static_cast<uint32_t>((file.data_end - file.data_start) * 1000 / per_second);
+      *from = file.data_start;  // the decoder finds the next frame's sync itself
+      if (seek_ms != 0 && file.duration_ms != 0) {
+        const float part = std::min(static_cast<float>(seek_ms) / file.duration_ms, 1.0f);
+        *from = file.data_start + static_cast<uint64_t>(part * (file.data_end - file.data_start));
+        *base_ms = seek_ms;
+      }
+      break;
+    }
+#endif
+    default:
+      break;  // no layout read (Ogg Opus): played from its start, no duration, no seeking
+  }
+  if (file.duration_ms == 0) {
+    // Not read: the whole file from its start, as it is.
+    *from = 0;
+    *base_ms = 0;
+    head_len = 0;
+  }
+  ESP_LOGD(TAG, "%s: %" PRIu32 " ms, audio from byte %" PRIu64, this->video_path_.c_str(), file.duration_ms, *from);
+  return head_len;
 }
 
 // Audio task: decodes the track into the file speaker; its end (all of the file decoded and handed
@@ -3707,6 +4155,8 @@ void SimpleVideoPlayer::audio_file_loop_() {
   uint32_t failures = 0;
   bool linked = false;
   bool finished = false;
+  // The decoder's count goes on over the tracks: this one's from here.
+  const uint32_t played_before = this->audio_decoder_->get_playback_ms();
   esp_task_wdt_add(nullptr);
   while (!this->audio_task_stop_) {
     esp_task_wdt_reset();
@@ -3725,6 +4175,9 @@ void SimpleVideoPlayer::audio_file_loop_() {
       break;
     const audio::AudioDecoderState result =
         this->audio_decoder_->decode(this->audio_file_eof_.load(std::memory_order_acquire));
+    this->position_frame_.store(this->audio_position_base_ms_.load(std::memory_order_acquire) +
+                                    (this->audio_decoder_->get_playback_ms() - played_before),
+                                std::memory_order_relaxed);
     if (!linked && this->audio_decoder_->get_audio_stream_info().has_value()) {
       const audio::AudioStreamInfo &info = this->audio_decoder_->get_audio_stream_info().value();
       if (this->file_speaker_open_ && info != this->file_speaker_info_)
@@ -3760,6 +4213,7 @@ void SimpleVideoPlayer::audio_file_loop_() {
       if (expected == PlayerState::PAUSED)
         this->file_speaker_->set_pause_state(false);
       this->audio_advance_req_.store(true, std::memory_order_release);
+      this->finished_pending_.store(true, std::memory_order_release);  // on_playback_finished, from loop()
       this->note_state_();
       return;
     }

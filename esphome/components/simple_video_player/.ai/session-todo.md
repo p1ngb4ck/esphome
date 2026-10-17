@@ -45,3 +45,4 @@ no display), which serve both kinds of font.
 Status: (update as items finish)
 - 1 done (commit "svp: video bar title and duration without LVGL"), awaiting Olli's build/test.
 - 2 done (status "video", relay 0.9.46 zip sent), awaiting Olli's build/test.
+- 3 done (audio file duration/position/seek, started/finished events), awaiting Olli's build/test. All three items done: nothing else to do this session.

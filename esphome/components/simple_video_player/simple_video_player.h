@@ -1651,6 +1651,40 @@ class SimpleVideoPlayer : public Component
   void start_audio_session_();
   void audio_file_feed_();  // reader task
   void audio_file_loop_();  // audio task
+  // A track's length and a seek in it: the reader task reads the file's layout as it opens it
+  // (audio_file_prepare_()); position and duration in milliseconds through duration_frames_ /
+  // position_frame_ (frame_duration_us_ 1000 for an audio file). A seek starts the track anew from
+  // that place (the decoder fresh, its header fed first where the format has one).
+  struct AudioFileLayout {
+    uint64_t size{0};
+    uint64_t data_start{0};  // the first byte of audio, after tags and headers
+    uint64_t data_end{0};
+    uint32_t duration_ms{0};  // 0: not known, no seeking
+    // MP3: the Xing/Info header's
+    uint32_t xing_bytes{0};
+    bool toc{false};
+    uint8_t xing_toc[100]{};
+    // FLAC
+    uint8_t streaminfo[34]{};
+    uint32_t flac_rate{0};
+    uint16_t flac_block{0};  // the fixed block size (min == max), 0 variable
+    // WAV
+    uint8_t fmt[40]{};
+    uint8_t fmt_len{0};
+    uint32_t byte_rate{0};
+    uint16_t block_align{0};
+  };
+  AudioFileLayout audio_layout_;                     // reader task
+  std::atomic<uint32_t> audio_seek_ms_{0};           // where the track's next start begins (a seek)
+  std::atomic<uint32_t> audio_position_base_ms_{0};  // the position the decoder started at
+  bool audio_seek_paused_{false};                    // main loop: the seek came while paused
+  bool audio_restart_{false};                        // main loop: this start is a seek's (no started event)
+  bool audio_started_pending_{false};                // main loop: the track's started event, from loop()
+  void audio_seek_(uint32_t ms);
+  /// Reader task, the file open: its layout; where to feed from for `seek_ms` (`from`), the header
+  /// the decoder takes first there (into `head`, its length returned) and the position it starts at.
+  size_t audio_file_prepare_(BufferedFileReader *reader, uint32_t seek_ms, uint8_t *head, uint64_t *from,
+                             uint32_t *base_ms);
 #endif
   bool session_audio_{false};  // this session started the audio task and the speaker
   // PCM bytes of incomplete audio frames dropped (reader side), logged once at the session's end.
@@ -2587,8 +2621,8 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> reader_seek_ok_{false};
   std::atomic<uint32_t> frame_gen_{0};         // reader task: bumped by each seek
   uint32_t expected_gen_{0};                   // playback task: frames of an older gen are dropped
-  std::atomic<uint32_t> position_frame_{0};    // file frame shown last
-  std::atomic<uint32_t> duration_frames_{0};   // video frames of the file; 0 = no seeking
+  std::atomic<uint32_t> position_frame_{0};    // file frame shown last (an audio file: ms played)
+  std::atomic<uint32_t> duration_frames_{0};   // video frames of the file (an audio file: ms); 0 = no seeking
 
   // FreeRTOS task (decode/playback, Core 1 -- alongside the main loop/LVGL, see play()'s
   // xTaskCreatePinnedToCore comment for why decode specifically needs to share that core)
