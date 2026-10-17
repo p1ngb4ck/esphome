@@ -31,6 +31,7 @@ from esphome.components.usb_host import usb_host_ns
 import esphome.config_validation as cv
 import esphome.final_validate as fv
 from esphome.const import CONF_DEVICES, CONF_ID, CONF_TRIGGER_ID
+from esphome.core import ID
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32"]
@@ -155,13 +156,25 @@ async def to_code(config):
     include_builtin_idf_component("fatfs")
     include_builtin_idf_component("esp_vfs_fat")
 
-    var = cg.new_Pvariable(config[CONF_ID])
-    await cg.register_component(var, config)
-    await file_system_to_code(var, config)
-
-    for device in config.get(CONF_DEVICES) or ():
-        await register_usb_storage_device(device, var)
-        cg.add(var.set_format_on_mismatch(device[CONF_FORMAT_ON_MISMATCH]))
+    # One MSC client per device entry, so every stick is served at the same time; the
+    # entry's own id names the first one.
+    devices = config.get(CONF_DEVICES) or [None]
+    for index, device in enumerate(devices):
+        client_id = (
+            config[CONF_ID]
+            if index == 0
+            else ID(
+                f"{config[CONF_ID].id}_client_{index}",
+                is_declaration=True,
+                type=USBStorageClient,
+            )
+        )
+        var = cg.new_Pvariable(client_id)
+        await cg.register_component(var, config)
+        await file_system_to_code(var, config)
+        if device is not None:
+            await register_usb_storage_device(device, var)
+            cg.add(var.set_format_on_mismatch(device[CONF_FORMAT_ON_MISMATCH]))
 
     cg.add_define("USE_USB_BULK_TRANSFERS")
     cg.add_define("USE_USB_CONTROL_TRANSFERS")

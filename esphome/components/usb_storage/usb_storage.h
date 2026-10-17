@@ -79,6 +79,10 @@ class USBStorageClient : public usb_host::USBClient {
   void on_removed(usb_device_handle_t handle) override;
   usb_host::MatchTier refine_match_(const usb_host::RoutedDevice &dev, usb_host::MatchTier tier) const override;
 
+  bool alloc_data_();
+  void free_data_();
+  bool scsi_read_(uint32_t lba, uint8_t *buf, uint32_t count);
+  bool scsi_write_(uint32_t lba, const uint8_t *buf, uint32_t count);
   bool parse_msc_endpoints_();
   // Bulk IN transfers must ask for a whole number of max-size packets. The BOT/SCSI
   // responses are 8, 13 or 36 bytes, none of which is a multiple of any legal
@@ -172,6 +176,7 @@ class USBStorageClient : public usb_host::USBClient {
   uint16_t transfer_len_{0};
   uint8_t ready_tries_{0};
   DataXfer data_[DATA_XFERS]{};
+  SemaphoreHandle_t io_lock_{nullptr};  // SCSI commands of the storage worker against the transfers' lifetime
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

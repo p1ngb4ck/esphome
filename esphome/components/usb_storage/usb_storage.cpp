@@ -14,6 +14,8 @@
 #include "usb/usb_helpers.h"
 #include "usb/usb_types_ch9.h"
 
+#include <esp_heap_caps.h>
+
 #include <algorithm>
 #include <cstring>
 #include <cinttypes>
@@ -79,15 +81,17 @@ void USBStorageClient::setup() {
     this->mark_failed();
     return;
   }
+  this->io_lock_ = xSemaphoreCreateMutex();
+  if (this->io_lock_ == nullptr) {
+    this->mark_failed();
+    return;
+  }
   for (auto &d : this->data_) {
     d.done = xSemaphoreCreateBinary();
-    if (d.done == nullptr || usb_host_transfer_alloc(DATA_XFER_SIZE, 0, &d.xfer) != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to allocate the %u byte data transfers", static_cast<unsigned>(DATA_XFER_SIZE));
+    if (d.done == nullptr) {
       this->mark_failed();
       return;
     }
-    d.xfer->callback = data_done_cb;
-    d.xfer->context = &d;
   }
 
   this->fatfs_drive_ = usb_diskio_register(this);
@@ -514,8 +518,67 @@ bool USBStorageClient::data_command_(bool in, uint8_t *in_buf, const uint8_t *ou
   return this->recv_csw_(tag);
 }
 
-// One READ(10) / WRITE(10) for all sectors FATFS asks for at once (up to 65535 per command).
+// The data transfers exist while a stick is connected: allocated on connect, freed on
+// disconnect. On the P4 they are DMA buffers in PSRAM, never internal RAM; without room
+// there the stick stays unmounted.
+bool USBStorageClient::alloc_data_() {
+  if (this->data_[0].xfer != nullptr)
+    return true;
+#ifdef USE_ESP32_VARIANT_ESP32P4
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) < DATA_XFER_SIZE + 64) {
+    ESP_LOGE(TAG, "No %u bytes of PSRAM for a data transfer", static_cast<unsigned>(DATA_XFER_SIZE));
+    return false;
+  }
+#endif
+  xSemaphoreTake(this->io_lock_, portMAX_DELAY);
+  bool ok = true;
+  for (auto &d : this->data_) {
+    if (usb_host_transfer_alloc(DATA_XFER_SIZE, 0, &d.xfer) != ESP_OK) {
+      d.xfer = nullptr;
+      ok = false;
+      break;
+    }
+    d.xfer->callback = data_done_cb;
+    d.xfer->context = &d;
+    d.busy = false;
+  }
+  xSemaphoreGive(this->io_lock_);
+  if (!ok) {
+    ESP_LOGE(TAG, "Failed to allocate the %u byte data transfers", static_cast<unsigned>(DATA_XFER_SIZE));
+    this->free_data_();
+  }
+  return ok;
+}
+
+// Waits for a SCSI command of the storage worker in progress; the device is gone, so its
+// transfers come back at once.
+void USBStorageClient::free_data_() {
+  xSemaphoreTake(this->io_lock_, portMAX_DELAY);
+  for (auto &d : this->data_) {
+    if (d.xfer != nullptr)
+      usb_host_transfer_free(d.xfer);
+    d.xfer = nullptr;
+    d.busy = false;
+  }
+  xSemaphoreGive(this->io_lock_);
+}
+
 bool USBStorageClient::scsi_read(uint32_t lba, uint8_t *buf, uint32_t count) {
+  xSemaphoreTake(this->io_lock_, portMAX_DELAY);
+  const bool ok = this->data_[0].xfer != nullptr && this->scsi_read_(lba, buf, count);
+  xSemaphoreGive(this->io_lock_);
+  return ok;
+}
+
+bool USBStorageClient::scsi_write(uint32_t lba, const uint8_t *buf, uint32_t count) {
+  xSemaphoreTake(this->io_lock_, portMAX_DELAY);
+  const bool ok = this->data_[0].xfer != nullptr && this->scsi_write_(lba, buf, count);
+  xSemaphoreGive(this->io_lock_);
+  return ok;
+}
+
+// One READ(10) / WRITE(10) for all sectors FATFS asks for at once (up to 65535 per command).
+bool USBStorageClient::scsi_read_(uint32_t lba, uint8_t *buf, uint32_t count) {
   while (count > 0) {
     const uint32_t n = std::min<uint32_t>(count, 0xFFFF);
     uint8_t cdb[10] = {
@@ -542,7 +605,7 @@ bool USBStorageClient::scsi_read(uint32_t lba, uint8_t *buf, uint32_t count) {
   return true;
 }
 
-bool USBStorageClient::scsi_write(uint32_t lba, const uint8_t *buf, uint32_t count) {
+bool USBStorageClient::scsi_write_(uint32_t lba, const uint8_t *buf, uint32_t count) {
   while (count > 0) {
     const uint32_t n = std::min<uint32_t>(count, 0xFFFF);
     uint8_t cdb[10] = {
@@ -608,6 +671,10 @@ void USBStorageClient::on_connected() {
   uint16_t pid = dev ? dev->idProduct : 0;
 
   ESP_LOGI(TAG, "MSC device connected VID=0x%04X PID=0x%04X", vid, pid);
+  if (!this->alloc_data_()) {
+    this->disconnect();
+    return;
+  }
 
   if (!this->parse_msc_endpoints_()) {
     this->disconnect();
@@ -755,6 +822,14 @@ void USBStorageClient::unmount_filesystem() {
 }
 
 void USBStorageClient::on_disconnected() {
+  // Transfers still out on the bulk endpoints come back now, so a SCSI command of the storage
+  // worker ends at once instead of on its timeouts (free_data_() waits for it).
+  if (this->device_handle_ != nullptr) {
+    for (const uint8_t ep : {this->bulk_in_ep_, this->bulk_out_ep_}) {
+      if (ep != 0 && usb_host_endpoint_halt(this->device_handle_, ep) == ESP_OK)
+        usb_host_endpoint_flush(this->device_handle_, ep);
+    }
+  }
   this->cancel_timeout("ready");
   this->notify_disconnected_();
   this->disk_ready_ = false;
@@ -771,6 +846,7 @@ void USBStorageClient::on_disconnected() {
   this->bulk_out_ep_ = 0;
   this->bulk_in_mps_ = 0;
   this->bulk_out_mps_ = 0;
+  this->free_data_();
 }
 
 void USBStorageClient::on_removed(usb_device_handle_t handle) { USBClient::on_removed(handle); }
