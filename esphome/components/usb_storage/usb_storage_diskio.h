@@ -11,9 +11,9 @@ namespace esphome::usb_storage {
 
 class USBStorageClient;
 
-// Register/unregister one slot (LUN entry) of a USBStorageClient as a FATFS DISKIO drive.
+// Register/unregister a USBStorageClient as a FATFS DISKIO drive.
 // Returns the assigned drive number (0-based), or -1 on failure.
-int usb_diskio_register(USBStorageClient *client, uint8_t index);
+int usb_diskio_register(USBStorageClient *client);
 void usb_diskio_unregister(int drive);
 
 }  // namespace esphome::usb_storage
