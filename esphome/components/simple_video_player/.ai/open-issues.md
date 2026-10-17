@@ -22,7 +22,6 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 | A15 | On-screen keyboard settings, most important: "show the on-screen keyboard even if a physical keyboard is connected" (default no); in LVGL settings and reachable from HA. TODO 2026-10-16 | Scope with Olli first |
 | A19 | **HA audio in the queue: a track's end is not seen** (Olli, 2026-10-17): the first track stays on playing although it played to its end, the next one does not start; nothing about it in the log. REPORTED | Diagnostics in the audio pipeline (DEBUG: reader/decoder done, stopped, no progress for 5 s; 103cdb59eb), to come out after; waiting for Olli's log |
 | A18 | **svp_relay on the Pi 5: stability and performance** (Olli, 2026-10-17). TODO | Scope with Olli first |
-| A6 | TV regression 2026-10-15 fixed by 6a5877bba8 (cover on demand + reclaim before a video's buffers). Which of the two fixed it is not proven; likely the reclaim (no holes for the ring) | Keep in mind for B3 |
 
 ## B. Rule violations (memory / buffers)
 
