@@ -382,7 +382,10 @@ _LS_EXEC_ANCHOR = """    dma_buffer_block_t *buffer_to_exec = pipe->buffers[pipe
 _LS_EXEC_REPLACEMENT = """    dma_buffer_block_t *buffer_to_exec = pipe->buffers[pipe->multi_buffer_control.rd_idx];
     assert(buffer_to_exec->urb != NULL);
     pipe->ls_ctrl_retry_count = 0;
-    if (pipe->ls_first_launch_pending) {
+    // A control transfer's setup would otherwise follow the previous transfer's status stage in
+    // the same frame: two PRE-qualified transactions in one frame
+    if (pipe->ls_first_launch_pending ||
+            (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL)) {
         pipe->ls_first_launch_pending = false;
         _wait_next_preamble_frame(pipe);
     }
@@ -401,6 +404,80 @@ _LS_RETRY_HELPER_ANCHOR = """/**
 """
 
 _LS_RETRY_HELPER_REPLACEMENT = """#define LS_CTRL_RETRY_MAX 3
+
+/*
+ * The data stage of a control transfer to a low-speed device behind a full-speed hub, one packet
+ * per frame. The controller cannot issue two PRE-qualified transactions in one frame (see
+ * _buffer_check_done()), and a data stage of several packets in one channel activation is
+ * exactly that: the device descriptor is 3 packets, a HID report descriptor often more than 10.
+ * Each piece is one packet, launched after the frame counter moved on; bytes done are kept in
+ * the buffer's control flags (ls_done), which _buffer_parse_ctrl() then reports.
+ */
+static inline int _ls_ctrl_data_len(dma_buffer_block_t *buffer)
+{
+    usb_transfer_t *transfer = &buffer->urb->transfer;
+    const usb_setup_packet_t *setup = (const usb_setup_packet_t *)transfer->data_buffer;
+    const int len = transfer->num_bytes - (int)sizeof(usb_setup_packet_t);
+    return (setup->wLength < len) ? setup->wLength : len;
+}
+
+static inline int _ls_ctrl_data_piece(pipe_t *pipe, dma_buffer_block_t *buffer)
+{
+    const int mps = pipe->ep_char.mps;
+    const int rem = _ls_ctrl_data_len(buffer) - (int)buffer->flags.ctrl.ls_done;
+    // An IN piece asks for a whole packet: the buffer holds whole packets, a short one ends the stage
+    return (buffer->flags.ctrl.data_stg_in || rem > mps) ? mps : rem;
+}
+
+static inline int _ls_ctrl_data_pid(pipe_t *pipe, dma_buffer_block_t *buffer)
+{
+    // DATA1 first, then alternating
+    return ((buffer->flags.ctrl.ls_done / pipe->ep_char.mps) & 1) ? 0 : 1;
+}
+
+static inline void _ls_ctrl_data_fill(pipe_t *pipe, dma_buffer_block_t *buffer)
+{
+    usb_transfer_t *transfer = &buffer->urb->transfer;
+    usb_dwc_hal_xfer_desc_fill(buffer->xfer_desc_list, 1,
+                               transfer->data_buffer + sizeof(usb_setup_packet_t) + buffer->flags.ctrl.ls_done,
+                               _ls_ctrl_data_piece(pipe, buffer),
+                               (buffer->flags.ctrl.data_stg_in ? USB_DWC_HAL_XFER_DESC_FLAG_IN : 0) |
+                               USB_DWC_HAL_XFER_DESC_FLAG_HOC);
+    CACHE_SYNC_XFER_DESCRIPTOR_LIST_C2M(buffer);
+}
+
+static inline void _ls_ctrl_data_start(pipe_t *pipe, dma_buffer_block_t *buffer)
+{
+    buffer->flags.ctrl.ls_split = 1;
+    buffer->flags.ctrl.ls_done = 0;
+    _ls_ctrl_data_fill(pipe, buffer);
+}
+
+/**
+ * @brief A data stage piece completed: launch the next one
+ *
+ * @return true when another piece was launched, false when the data stage is done (a short
+ *         packet, or all bytes of it) and the status stage follows
+ */
+static inline bool _ls_ctrl_data_next(pipe_t *pipe, dma_buffer_block_t *buffer)
+{
+    const int asked = _ls_ctrl_data_piece(pipe, buffer);
+    int rem_len;
+    int desc_status;
+    CACHE_SYNC_XFER_DESCRIPTOR_LIST_M2C(buffer);
+    usb_dwc_hal_xfer_desc_parse(buffer->xfer_desc_list, 1, &rem_len, &desc_status);
+    const int got = asked - rem_len;
+    buffer->flags.ctrl.ls_done += got;
+    if (got < pipe->ep_char.mps || (int)buffer->flags.ctrl.ls_done >= _ls_ctrl_data_len(buffer)) {
+        return false;
+    }
+    pipe->ls_ctrl_retry_count = 0;
+    _ls_ctrl_data_fill(pipe, buffer);
+    usb_dwc_hal_chan_set_dir(pipe->chan_obj, buffer->flags.ctrl.data_stg_in);
+    usb_dwc_hal_chan_set_pid(pipe->chan_obj, _ls_ctrl_data_pid(pipe, buffer));
+    usb_dwc_hal_chan_activate(pipe->chan_obj, buffer->xfer_desc_list, XFER_LIST_LEN_CTRL, 1);
+    return true;
+}
 
 /**
  * @brief Run the current stage of a control transfer again, on a later frame
@@ -426,9 +503,9 @@ static inline void _ls_ctrl_retry(pipe_t *pipe)
         flags |= USB_DWC_HAL_XFER_DESC_FLAG_SETUP;
     } else if (stage == 1) {
         is_in = buffer->flags.ctrl.data_stg_in;
-        pid = 1;
-        data = transfer->data_buffer + sizeof(usb_setup_packet_t);
-        len = transfer->num_bytes - sizeof(usb_setup_packet_t);
+        pid = _ls_ctrl_data_pid(pipe, buffer);
+        data = transfer->data_buffer + sizeof(usb_setup_packet_t) + buffer->flags.ctrl.ls_done;
+        len = _ls_ctrl_data_piece(pipe, buffer);
     } else {
         is_in = !(buffer->flags.ctrl.data_stg_in && !buffer->flags.ctrl.data_stg_skip);
         pid = 1;
@@ -935,6 +1012,56 @@ _HUB_STATUS_CHANGE_REPLACEMENT = """        if (device_status == EXT_HUB_STATUS_
             ESP_LOGW(EXT_HUB_TAG, "Hub status change has not been implemented yet");
         }"""
 
+# Data stage of a low-speed control transfer behind a full-speed hub, one packet per frame (see
+# _ls_ctrl_data_next() in _LS_RETRY_HELPER_REPLACEMENT).
+_LS_SPLIT_FLAGS_ANCHOR = """            uint32_t cur_stg: 2;            // Index of the current stage (e.g., 0 is setup stage, 2 is status stage)
+            uint32_t reserved28: 28;"""
+
+_LS_SPLIT_FLAGS_REPLACEMENT = """            uint32_t cur_stg: 2;            // Index of the current stage (e.g., 0 is setup stage, 2 is status stage)
+            uint32_t ls_split: 1;           // Data stage run one packet at a time (LS via FS hub)
+            uint32_t ls_done: 16;           // Data stage bytes done so far, with ls_split
+            uint32_t reserved11: 11;"""
+
+_LS_SPLIT_FILL_ANCHOR = """    buffer->flags.ctrl.data_stg_skip = data_stg_skip;
+    buffer->flags.ctrl.cur_stg = 0;"""
+
+_LS_SPLIT_FILL_REPLACEMENT = """    buffer->flags.ctrl.data_stg_skip = data_stg_skip;
+    buffer->flags.ctrl.cur_stg = 0;
+    buffer->flags.ctrl.ls_split = 0;
+    buffer->flags.ctrl.ls_done = 0;"""
+
+_LS_SPLIT_CONT_ANCHOR = """    bool next_dir_is_in;
+    int next_pid;
+    assert(buffer_inflight->flags.ctrl.cur_stg != 2);"""
+
+_LS_SPLIT_CONT_REPLACEMENT = """    bool next_dir_is_in;
+    int next_pid;
+    assert(buffer_inflight->flags.ctrl.cur_stg != 2);
+    if (buffer_inflight->flags.ctrl.cur_stg == 1 && buffer_inflight->flags.ctrl.ls_split &&
+            _ls_ctrl_data_next(pipe, buffer_inflight)) {
+        return;
+    }"""
+
+_LS_SPLIT_DATA_ANCHOR = """            next_pid = 1;   // Data stage always starts with a PID of DATA1
+            buffer_inflight->flags.ctrl.cur_stg = 1;"""
+
+_LS_SPLIT_DATA_REPLACEMENT = """            next_pid = 1;   // Data stage always starts with a PID of DATA1
+            buffer_inflight->flags.ctrl.cur_stg = 1;
+            if (pipe->ep_char.ls_via_fs_hub) {
+                _ls_ctrl_data_start(pipe, buffer_inflight);
+            }"""
+
+_LS_SPLIT_PARSE_ANCHOR = """    } else {
+        // Parse the data stage for the remaining length
+        int rem_len;"""
+
+_LS_SPLIT_PARSE_REPLACEMENT = """    } else if (buffer->flags.ctrl.ls_split) {
+        // Data stage run one packet at a time: its bytes were counted as they came
+        transfer->actual_num_bytes = sizeof(usb_setup_packet_t) + buffer->flags.ctrl.ls_done;
+    } else {
+        // Parse the data stage for the remaining length
+        int rem_len;"""
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -992,6 +1119,11 @@ PATCHES = (
     ("src/ext_hub.c", _HUB_PORT_STATUS_ANCHOR, _HUB_PORT_STATUS_REPLACEMENT),
     ("src/ext_hub.c", _HUB_REQUEST_ANCHOR, _HUB_REQUEST_REPLACEMENT),
     ("src/ext_hub.c", _HUB_STATUS_CHANGE_ANCHOR, _HUB_STATUS_CHANGE_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_SPLIT_FLAGS_ANCHOR, _LS_SPLIT_FLAGS_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_SPLIT_FILL_ANCHOR, _LS_SPLIT_FILL_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_SPLIT_CONT_ANCHOR, _LS_SPLIT_CONT_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_SPLIT_DATA_ANCHOR, _LS_SPLIT_DATA_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_SPLIT_PARSE_ANCHOR, _LS_SPLIT_PARSE_REPLACEMENT),
 )
 
 # Identifies an existing patched copy. It has to change whenever anything about that copy
