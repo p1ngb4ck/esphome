@@ -31,7 +31,6 @@ from esphome.components.usb_host import usb_host_ns
 import esphome.config_validation as cv
 import esphome.final_validate as fv
 from esphome.const import CONF_DEVICES, CONF_ID, CONF_TRIGGER_ID
-from esphome.core import ID
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32"]
@@ -98,9 +97,13 @@ async def register_usb_storage_device(device_config, storage_client):
     return var
 
 
+CONF_CLIENT_ID = "client_id"
+
 DEVICE_SCHEMA = cv.COMPONENT_SCHEMA.extend(
     {
         cv.GenerateID(): cv.declare_id(USBStorageDevice),
+        # The MSC client serving this entry (the first entry is served by the usb_storage id).
+        cv.GenerateID(CONF_CLIENT_ID): cv.declare_id(USBStorageClient),
         cv.Required(CONF_MOUNT_PATH): validate_mount_path,
         cv.Optional(CONF_VID, default=0x0000): cv.hex_uint16_t,
         cv.Optional(CONF_PID, default=0x0000): cv.hex_uint16_t,
@@ -160,15 +163,7 @@ async def to_code(config):
     # entry's own id names the first one.
     devices = config.get(CONF_DEVICES) or [None]
     for index, device in enumerate(devices):
-        client_id = (
-            config[CONF_ID]
-            if index == 0
-            else ID(
-                f"{config[CONF_ID].id}_client_{index}",
-                is_declaration=True,
-                type=USBStorageClient,
-            )
-        )
+        client_id = config[CONF_ID] if index == 0 else device[CONF_CLIENT_ID]
         var = cg.new_Pvariable(client_id)
         await cg.register_component(var, config)
         await file_system_to_code(var, config)
