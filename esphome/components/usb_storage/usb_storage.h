@@ -47,11 +47,11 @@ class USBStorageClient : public usb_host::USBClient {
   // values from storage/__init__.py file_system_to_code().
   void set_requested_file_system(uint8_t fs) { this->requested_file_system_ = fs; }
 #endif
-  // Tear down the FAT mount + VFS registration without touching the USB level.
+  // Tear down the FAT mount + VFS registration of one slot without touching the USB level.
   // Used by USBStorageDevice::unmount_device() (safe eject): after this the mount
-  // path is gone from the VFS entirely; the next physical (re)insertion runs the
-  // normal connect flow and mounts again.
-  void unmount_filesystem();
+  // path is gone from the VFS entirely; the slot mounts again once its medium was out and
+  // back in, the device was (re)inserted, or check_card() asks for it.
+  void unmount_filesystem(uint8_t index);
   USBStorageClient() : usb_host::USBClient(0, 0) { this->add_class_match(USB_CLASS_MASS_STORAGE); }
 
   void setup() override;
@@ -59,30 +59,68 @@ class USBStorageClient : public usb_host::USBClient {
   float get_setup_priority() const override { return setup_priority::IO; }
 
   void add_device(USBStorageDevice *device) { this->devices_.push_back(device); }
+  /// Another slot of a card reader (LUN), mounted by its own device entry.
+  void add_lun(uint8_t lun, USBStorageDevice *device) { this->extra_luns_.push_back({lun, device}); }
+  /// Medium check while connected, ms; SCHEDULER_DONT_RUN: only on connect and check_card().
+  void set_card_check_interval(uint32_t ms) { this->card_check_interval_ = ms; }
+  /// Looks at every slot now: mounts a medium that came, unmounts one that went. Also mounts a
+  /// slot that was ejected.
+  void check_card();
 
-  // Called from DISKIO driver (FATFS context) -- blocking SCSI transfers
-  bool scsi_read(uint32_t lba, uint8_t *buf, uint32_t count);
-  bool scsi_write(uint32_t lba, const uint8_t *buf, uint32_t count);
-  uint32_t get_sector_count() const { return this->sector_count_; }
-  uint32_t get_sector_size() const { return this->sector_size_; }
-  bool is_disk_ready() const { return this->disk_ready_; }
-  int get_fatfs_drive() const { return this->fatfs_drive_; }
+  // Called from DISKIO driver (FATFS context) -- blocking SCSI transfers. index: the slot (LUN entry).
+  bool scsi_read(uint8_t index, uint32_t lba, uint8_t *buf, uint32_t count);
+  bool scsi_write(uint8_t index, uint32_t lba, const uint8_t *buf, uint32_t count);
+  uint32_t get_sector_count(uint8_t index) const { return this->luns_[index].sector_count; }
+  uint32_t get_sector_size(uint8_t index) const { return this->luns_[index].sector_size; }
+  bool is_disk_ready(uint8_t index) const { return this->luns_[index].ready; }
   void set_format_on_mismatch(bool format_on_mismatch) { this->format_on_mismatch_ = format_on_mismatch; }
 
  protected:
   void on_connected() override;
-  // Connected once the medium is ready and mounted (check_ready_() / finish_connect_())
+  // Connected once the reader answered INQUIRY; its slots are mounted when a medium is in.
   bool reports_connection_itself() const override { return true; }
-  void check_ready_();
-  void finish_connect_();
   void on_disconnected() override;
   void on_removed(usb_device_handle_t handle) override;
   usb_host::MatchTier refine_match_(const usb_host::RoutedDevice &dev, usb_host::MatchTier tier) const override;
 
+  // One slot of the device: a stick has LUN 0 only, a card reader one per slot.
+  struct Lun {
+    uint8_t number{0};
+    USBStorageDevice *device{nullptr};
+    const char *mount_path{nullptr};
+    int drive{-1};
+    uint32_t sector_count{0};
+    uint32_t sector_size{512};
+    bool ready{false};    // the FATFS drive may do I/O
+    bool mounted{false};
+    bool ejected{false};  // unmounted by request, medium still in
+    uint8_t tries{0};
+  };
+  struct ExtraLun {
+    uint8_t number;
+    USBStorageDevice *device;
+  };
+
+  // The medium check: TEST UNIT READY, REQUEST SENSE, READ CAPACITY of each slot in turn, each a
+  // command whose transfers are chained in their callbacks (USB task), so the main loop never
+  // waits for the device.
+  enum class Step : uint8_t { TUR, SENSE, CAPACITY };
+  bool async_command_(Step step, const uint8_t *cdb, uint8_t cdb_len, uint8_t data_len);
+  void async_csw_();
+  void async_finish_(uint8_t status);
+  void async_done_(Step step, uint8_t status);
+  void async_reset_();
+  void start_check_();
+  void check_lun_(uint8_t index);
+  void next_lun_();
+  bool mount_lun_(uint8_t index);
+  void unmount_lun_(uint8_t index);
+  bool get_max_lun_(uint8_t &max_lun);
+
   bool alloc_data_();
   void free_data_();
-  bool scsi_read_(uint32_t lba, uint8_t *buf, uint32_t count);
-  bool scsi_write_(uint32_t lba, const uint8_t *buf, uint32_t count);
+  bool scsi_read_(uint8_t lun, uint32_t lba, uint8_t *buf, uint32_t count, uint32_t sector_size);
+  bool scsi_write_(uint8_t lun, uint32_t lba, const uint8_t *buf, uint32_t count, uint32_t sector_size);
   bool parse_msc_endpoints_();
   // Bulk IN transfers must ask for a whole number of max-size packets. The BOT/SCSI
   // responses are 8, 13 or 36 bytes, none of which is a multiple of any legal
@@ -91,7 +129,6 @@ class USBStorageClient : public usb_host::USBClient {
   uint16_t round_up_to_in_mps_(uint16_t len) const;
 
   bool scsi_inquiry_();
-  bool scsi_read_capacity_();
   bool scsi_test_unit_ready_();
   bool scsi_request_sense_(uint8_t &key, uint8_t &asc);
   bool clear_halt_(uint8_t ep);
@@ -122,7 +159,7 @@ class USBStorageClient : public usb_host::USBClient {
   // Data phase and status of a command whose CBW went out; recovers the pipe on failure.
   bool data_command_(bool in, uint8_t *in_buf, const uint8_t *out_buf, uint32_t len, uint32_t tag);
 
-  bool send_cbw_(uint32_t tag, uint32_t data_len, uint8_t flags, const uint8_t *cdb, uint8_t cdb_len);
+  bool send_cbw_(uint32_t tag, uint32_t data_len, uint8_t flags, const uint8_t *cdb, uint8_t cdb_len, uint8_t lun = 0);
   bool recv_data_(uint8_t *buf, uint16_t len);
   bool send_data_(const uint8_t *buf, uint16_t len);
   // Data phases larger than one host transfer buffer, split into whole-packet pieces.
@@ -142,11 +179,9 @@ class USBStorageClient : public usb_host::USBClient {
   bool wait_transfer_(uint32_t timeout_ms = 5000);
   static void transfer_done_cb(const usb_host::TransferStatus &status, USBStorageClient *client);
 
-  USBStorageDevice *find_device_(uint16_t vid, uint16_t pid) const;
-  void notify_connected_(uint16_t vid, uint16_t pid);
-  void notify_disconnected_();
-
   std::vector<USBStorageDevice *> devices_{};
+  std::vector<ExtraLun> extra_luns_{};
+  std::vector<Lun> luns_{};
 
   uint8_t bulk_in_ep_{0};
   uint8_t bulk_out_ep_{0};
@@ -157,26 +192,33 @@ class USBStorageClient : public usb_host::USBClient {
   uint16_t bulk_out_mps_{0};
   uint8_t msc_interface_{0xFF};
 
-  uint32_t sector_count_{0};
-  uint32_t sector_size_{512};
   uint32_t cbw_tag_{1};
+  uint8_t max_lun_{0};
 
-  int fatfs_drive_{-1};
-  bool disk_ready_{false};
-  bool mounted_{false};
   bool format_on_mismatch_{false};
 #ifdef USE_STORAGE_FILE_SYSTEM_SELECT
   uint8_t requested_file_system_{0};  // FS_SELECT_AUTO
 #endif
-  const char *mount_path_{nullptr};
+
+  uint32_t card_check_interval_{10000};
+  uint32_t connection_{0};  // counts connects and disconnects: an answer of an earlier one is dropped
+  bool checking_{false};
+  bool check_again_{false};
+  uint8_t check_index_{0};
+  // The command in flight (USB task while it runs, main loop after)
+  Step async_step_{Step::TUR};
+  uint32_t async_tag_{0};
+  uint8_t async_len_{0};
+  uint8_t async_buf_[18]{};
 
   SemaphoreHandle_t transfer_sem_{nullptr};
   bool transfer_ok_{false};
   bool transfer_stalled_{false};
   uint16_t transfer_len_{0};
-  uint8_t ready_tries_{0};
   DataXfer data_[DATA_XFERS]{};
-  SemaphoreHandle_t io_lock_{nullptr};  // SCSI commands of the storage worker against the transfers' lifetime
+  // The bulk pipes and the data transfers: one command at a time, of the storage worker or the
+  // medium check. A binary semaphore: the check gives it back from a transfer callback.
+  SemaphoreHandle_t io_lock_{nullptr};
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -211,9 +253,10 @@ class USBStorageDevice : public esphome::storage::FilesystemStorage, public esph
   void set_pid(uint16_t pid) { this->pid_ = pid; }
   void set_storage_id(const char *id) { this->storage_id_ = id; }
 
-  // Called by USBStorageClient on connect/disconnect events
-  void on_device_connected(const char *mount_path);
+  // Called by USBStorageClient when its slot's medium is mounted / gone
+  void on_device_connected(const char *mount_path, int drive);
   void on_device_disconnected();
+  void set_lun_index(uint8_t index) { this->lun_index_ = index; }
 
   template<typename F> void add_on_mounted_callback(F &&cb) { this->on_mounted_.add(std::forward<F>(cb)); }
   bool is_mounted() const { return this->fs_mounted_; }
@@ -270,6 +313,7 @@ class USBStorageDevice : public esphome::storage::FilesystemStorage, public esph
   static bool log_list_dir_entry(const storage::FileStat *entry, void *ctx);
 
   USBStorageClient *client_{nullptr};
+  uint8_t lun_index_{0};  // the client's slot this device mounts
   uint16_t vid_{0};
   uint16_t pid_{0};
   const char *storage_id_{nullptr};
@@ -284,7 +328,7 @@ class USBStorageDevice : public esphome::storage::FilesystemStorage, public esph
   // (every transfer holds a handle open for its duration) plus this guard for the brief
   // windows around open/close. Open-handle count is derived from handle_pool_.
   bool has_open_handles_() const;
-  char fatfs_drive_[3]{};  // "N:" -- captured from client_->get_fatfs_drive() on connect
+  char fatfs_drive_[3]{};  // "N:" -- the slot's drive, given on connect
 
   USBFileHandle handle_pool_[MAX_OPEN_FILES]{};
   LazyCallbackManager<void(const char *)> on_mounted_;

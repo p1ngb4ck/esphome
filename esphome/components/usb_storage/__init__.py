@@ -67,7 +67,7 @@ DeviceMountedCondition = usb_storage_ns.class_(
 )
 
 
-async def register_usb_storage_device(device_config, storage_client):
+async def register_usb_storage_device(device_config, storage_client, vid=None, pid=None):
     var = cg.new_Pvariable(device_config[CONF_ID])
     await cg.register_component(var, device_config)
     cg.add(var.set_client(storage_client))
@@ -76,9 +76,14 @@ async def register_usb_storage_device(device_config, storage_client):
     # paths registered here.
     register_mount_path(device_config[CONF_MOUNT_PATH])
     cg.add(var.set_storage_id(str(device_config[CONF_ID])))
-    cg.add(var.set_vid(device_config[CONF_VID]))
-    cg.add(var.set_pid(device_config[CONF_PID]))
-    cg.add(storage_client.add_device(var))
+    if vid is None:
+        cg.add(var.set_vid(device_config[CONF_VID]))
+        cg.add(var.set_pid(device_config[CONF_PID]))
+        cg.add(storage_client.add_device(var))
+    else:
+        # Another slot of the entry's card reader: same device, no match of its own.
+        cg.add(var.set_vid(vid))
+        cg.add(var.set_pid(pid))
 
     request_storage_device()
     # Bounded by FATFS long filenames, i.e. by CONFIG_FATFS_MAX_LFN -- resolved at codegen
@@ -98,6 +103,34 @@ async def register_usb_storage_device(device_config, storage_client):
 
 
 CONF_CLIENT_ID = "client_id"
+CONF_LUNS = "luns"
+CONF_LUN = "lun"
+CONF_CARD_CHECK_INTERVAL = "card_check_interval"
+
+ON_MOUNTED_SCHEMA = automation.validate_automation(
+    {
+        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(DeviceMountedTrigger),
+    }
+)
+
+def _unique_luns(luns):
+    seen = set()
+    for lun in luns:
+        if lun[CONF_LUN] in seen:
+            raise cv.Invalid(f"LUN {lun[CONF_LUN]} is listed twice")
+        seen.add(lun[CONF_LUN])
+    return luns
+
+
+# A further slot of a card reader; LUN 0 is the entry's own mount_path.
+LUN_SCHEMA = cv.COMPONENT_SCHEMA.extend(
+    {
+        cv.GenerateID(): cv.declare_id(USBStorageDevice),
+        cv.Required(CONF_LUN): cv.int_range(min=1, max=15),
+        cv.Required(CONF_MOUNT_PATH): validate_mount_path,
+        cv.Optional(CONF_ON_MOUNTED): ON_MOUNTED_SCHEMA,
+    }
+)
 
 DEVICE_SCHEMA = cv.COMPONENT_SCHEMA.extend(
     {
@@ -108,11 +141,10 @@ DEVICE_SCHEMA = cv.COMPONENT_SCHEMA.extend(
         cv.Optional(CONF_VID, default=0x0000): cv.hex_uint16_t,
         cv.Optional(CONF_PID, default=0x0000): cv.hex_uint16_t,
         cv.Optional(CONF_FORMAT_ON_MISMATCH, default=False): cv.boolean,
-        cv.Optional(CONF_ON_MOUNTED): automation.validate_automation(
-            {
-                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(DeviceMountedTrigger),
-            }
-        ),
+        cv.Optional(CONF_ON_MOUNTED): ON_MOUNTED_SCHEMA,
+        # Medium check while connected; "never": only on connect and by check_card().
+        cv.Optional(CONF_CARD_CHECK_INTERVAL, default="10s"): cv.update_interval,
+        cv.Optional(CONF_LUNS): cv.All(cv.ensure_list(LUN_SCHEMA), _unique_luns),
     }
 )
 
@@ -170,6 +202,12 @@ async def to_code(config):
         if device is not None:
             await register_usb_storage_device(device, var)
             cg.add(var.set_format_on_mismatch(device[CONF_FORMAT_ON_MISMATCH]))
+            cg.add(var.set_card_check_interval(device[CONF_CARD_CHECK_INTERVAL]))
+            for lun in device.get(CONF_LUNS, []):
+                dev = await register_usb_storage_device(
+                    lun, var, device[CONF_VID], device[CONF_PID]
+                )
+                cg.add(var.add_lun(lun[CONF_LUN], dev))
 
     cg.add_define("USE_USB_BULK_TRANSFERS")
     cg.add_define("USE_USB_CONTROL_TRANSFERS")
