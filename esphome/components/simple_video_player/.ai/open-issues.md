@@ -30,32 +30,28 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 |---|---|---|
 | B3 | Pictures and cover are not in the pool plan; they live off whatever the ring leaves or by freeing all media buffers (`release_media_` is all-or-nothing, P:501, C:61). Fragmentation possible when pieces stay inside the free area | CODE / PLAUSIBLE |
 | B9 | Controls: 3 × bar snapshot reserved (CT:331-342); check need | CODE |
-| B10 | (partly changed 2026-10-16: `PsramPool`'s piece table is a fixed table of 128 at the pool block's start, no internal heap growth; a full table hands a free piece out whole) Allocations past the pool: `channel_http_` response buffer (PSRAM realloc up to 256 KiB per request, CL:578); PNG/BMP decode via RAMAllocator; `PsramPool::pieces_` grows on the internal heap past 32 pieces | CODE |
-| B11 | (partly changed 2026-10-16: an output request and the desktop's media request are taken back after the wait, the main loop clears only the output request it served; the pictures' reclaim request is not, two tasks may share it) `wait_alloc_answer_` expiry: after the 2 s timeout `pool_reclaim_req_`/`output_release_req_` stay set; the main loop frees later for nobody (H:2110-2117) | CODE |
+| B10 | `channel_http_` response buffer outside the pool: PSRAM heap, `heap_caps_realloc` up to 256 KiB per request (CL). Checked 2026-10-17 | CODE |
+| B11 | `pool_reclaim_req_` stays set after the 2 s `wait_alloc_answer_` timeout: the main loop frees the pictures/cover buffers later for nobody (the output request is taken back already). Checked 2026-10-17 | CODE |
 
 ## C. Rule violations (speakers, LVGL, hot path)
 
 | # | Issue | Status |
 |---|---|---|
 | C1 | `file_speaker_` (audio queue resampler) is still stopped/finished/paused by the player (S:3194, 3230, 2942, 3086, 2861). Speaker rule. Open question to Olli: a resampler takes its input format only at start | CODE |
-| C2 | (changed 2026-10-16: the thumbnail strip's auto-hide and the channel dropdown's new list (`channel_loop_`, `set_options`) wait until LVGL runs (a channel list that changes during a direct stream is applied after it; indexes from the relay's new list meanwhile meet the old one); awaiting Olli's test. Also found: the `pool_reclaim_req_` block in `pictures_loop_` runs before the held check and can call `picture_decoded_()` -> `show_page_` (canvas buffer, sizes, styles, invalidate) while LVGL is paused, e.g. a reclaim for the next playlist video or the desktop) LVGL touched while paused: `prerender_controls_` for the next playlist item while LVGL is still paused (S:294 vs 327); `slide_thumbnails_` auto-hide before the held check (P:141); `lv_obj_is_hidden` on the picture bar every loop (CT:904); pictures guarded only by `state_` (udisp/desktop sessions pause LVGL with state STOPPED); `set_options` (CL:207), `lv_image_set_src` in `handle_output_release_` (S:2311) / `release_media_` (S:2364), `release_picture_buffers_` (P:586) without a pause guard | CODE |
+| C2 | LVGL touched while paused, still to check in the code (2026-10-17): `prerender_controls_` for the next playlist item, the `pool_reclaim_req_` block in `pictures_loop_` before the held check (`picture_decoded_()` -> `show_page_`), `lv_image_set_src` in `handle_output_release_` / `release_media_`, `release_picture_buffers_`, the picture bar's `lv_obj_is_hidden` each loop | CODE (unchecked since) |
 | C3 | Two different "paused" guards in use: `lvgl_component_->is_paused()` vs `dsi_lvgl_paused_` | CODE |
-| C5 | (changed 2026-10-16: `desktop_take_panel_` waits on the spice wake fd, woken when the sender / the session's tasks let go, instead of a 20 ms loop) Polling: cover/picture completion flags polled every loop; `vTaskDelay(20)` loop in `desktop_take_panel_` (SP:1496); `vTaskDelay(1)` magic peek retry (R:448) | CODE |
-| C6 | Controls bar focus: was an outline (CT:116-120). Changed 2026-10-16: colour only, a white tint (`recolor` 30 %), no outline, no border; a `focus_style_id` goes over it; awaiting Olli's test. Highlights are colours only, never outlines or borders (Olli) | CODE |
+| C5 | `vTaskDelay(1)` retry of the magic peek in the stream receiver (net task, `stream_receiver.cpp`) | CODE |
 
 ## D. Concurrency risks
 
 | # | Issue | Status |
 |---|---|---|
-| D1 | (changed 2026-10-16: one waiter slot per task (`alloc_waiters_`), all woken; awaiting Olli's test) `alloc_waiter_` is one slot: two requesters (playback, draw, spice) overwrite each other; one waits the full 2 s | CODE |
 | D2 | Reclaim waits (2 s) are shorter than an HA picture fetch (15 s); a video start during one can fail with BUFFER_ALLOCATION_FAILED | CODE |
-| D3 | (changed 2026-10-16: `acquire_session_buffers_`/`output_alloc_` take pieces without `media_lock_` and set them under it; awaiting Olli's test) `media_lock_` held during the 2 s waits (up to 3 allocations = 6 s) | CODE |
 | D4 | `dev_lock_` held across blocking socket sends while the main loop waits portMAX on it (U:592-609, 1190-1205 vs 307, 331) | CODE |
 | D5 | `stream_play_audio_` reachable from net task and spice task without a lock | PLAUSIBLE. Analysed 2026-10-16: not concurrent as things are: `desktop_take_panel_()` waits until a stream sender has let go before the session's channels open, and during a desktop session only svp_relay's caster gets in (stream_net_task_), which sends pictures, no sound (relay `desktop/caster.py`); the SPICE sound comes on the playback channel only. The exclusion rests on the relay's behaviour, not on a lock. Not changed |
-| D6 | (changed 2026-10-16: `audio_enabled_` and `loop_` are `std::atomic<bool>`; `repeat_` (enum, main loop + controls) and `pic_read_` left) Plain fields shared across tasks without atomics: `audio_enabled_`, `loop_`, `repeat_`, `pic_read_` fields | CODE |
+| D6 | Plain fields shared across tasks without atomics: `repeat_` (enum, main loop + controls), `pic_read_` fields | CODE |
 | D7 | `start_req_` not reset when the playback ends early: loop may still prerender, pause LVGL, fire on_started | CODE (2026-10-16): the playback task sets 1 and waits for 2 while `playing()`, at most 2 s; a stop in that window, or a main loop blocked over 2 s (A2), leaves 1, and the next loop pass prerenders, pauses LVGL (DSI direct) and fires on_started for a session already stopped; the DSI block below gives LVGL back once the task is gone. Only `start_playback_` resets it. Not changed |
 | D8 | spice/net tasks prio 4 without affinity can preempt playback and loopTask (prio 1) on core 1 | CODE |
-| D11 | (changed 2026-10-16 per Olli; awaiting Olli's test) The playlist decides per item whether the output mode changes (display: LVGL paused, canvas: LVGL running) and switches only then, at the item's start handshake. Before, a canvas item after a display item kept LVGL paused (video not seen) | CODE |
 
 ## E. Functional gaps / inconsistencies
 
