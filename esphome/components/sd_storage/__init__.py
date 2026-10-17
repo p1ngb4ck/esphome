@@ -37,6 +37,8 @@ CODEOWNERS = ["@p1ngb4ck"]
 
 DEPENDENCIES = ["esp32"]
 AUTO_LOAD = ["storage"]
+# Several cards: the SDMMC host's two slots, and SPI cards on their own chip selects.
+MULTI_CONF = True
 
 sd_storage_ns = cg.esphome_ns.namespace("sd_storage")
 # MountableStorage parent makes SD ids valid targets for the generic storage.mount /
@@ -317,7 +319,25 @@ def _final_validate_assume_exclusive_bus(config):
             )
 
 
+def _final_validate_sdmmc_slot(config):
+    """Two SD_MMC cards cannot share one slot of the SDMMC host."""
+    if config[CONF_TYPE] != TYPE_SD_MMC:
+        return
+    for other in fv.full_config.get().get("sd_storage", []):
+        if (
+            other is not config
+            and other[CONF_ID] != config[CONF_ID]
+            and other[CONF_TYPE] == TYPE_SD_MMC
+            and other[CONF_SLOT] == config[CONF_SLOT]
+        ):
+            raise cv.Invalid(
+                f"SD card '{other[CONF_ID]}' already uses SDMMC slot {config[CONF_SLOT]}; "
+                f"the host has slots 0 and 1, one card each"
+            )
+
+
 def _final_validate(config):
+    _final_validate_sdmmc_slot(config)
     _final_validate_spi_interface(config)
     _final_validate_assume_exclusive_bus(config)
     final_validate_file_system(config)

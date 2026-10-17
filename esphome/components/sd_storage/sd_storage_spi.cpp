@@ -293,13 +293,9 @@ StorageError SdSpi::mount() {
 
   if (mount_error != ESP_OK) {
     ESP_LOGE(TAG_SPI, "Failed to mount FAT fs: %s", esp_err_to_name(mount_error));
-    // sdspi_host_init() above is otherwise only undone in unmount(), which early-returns
-    // while is_mounted_ is false -- so without this the driver stays initialised and every
-    // card-detect retry re-enters mount() on top of it. Idempotent: sdspi_host_deinit()
-    // walks its slot table and returns ESP_OK when the wrapper already tore the host down
-    // on its own failure path.
-    if (sdspi_host_deinit() != ESP_OK)
-      ESP_LOGW(TAG_SPI, "sdspi_host_deinit() after failed mount failed");
+    // This card's SPI device is already gone on both failure paths (the wrapper's
+    // call_host_deinit() is sdspi_host_remove_device(), the manual path removes it itself).
+    // sdspi_host_deinit() is not called: it removes every card's device, not only this one.
     this->init_error_ = (mount_error == ESP_FAIL || mount_error == ESP_ERR_INVALID_CRC) ? ErrorCode::ERROR_CODE_MOUNT
                                                                                         : ErrorCode::ERROR_CODE_NO_CARD;
     return StorageError::STORAGE_ERROR_NOT_READY;
@@ -392,11 +388,9 @@ StorageError SdSpi::unmount() {
     storage::global_storage_registry->note_dir_changed("");
 #endif
 
-  if (sdspi_host_deinit() != ESP_OK) {
-    ESP_LOGW(TAG_SPI, "sdspi_host_deinit() failed");
-    if (unmount_err == StorageError::STORAGE_ERROR_OK)
-      unmount_err = StorageError::STORAGE_ERROR_NOT_READY;
-  }
+  // The unmount removed this card's SPI device (esp_vfs_fat_sdcard_unmount() through
+  // sdspi_host_remove_device(), the manual path itself); sdspi_host_deinit() would remove the
+  // other cards' too.
 
   // Report the flush and teardown results so a failed unmount does not look clean.
   if (flush_err != StorageError::STORAGE_ERROR_OK)

@@ -116,7 +116,7 @@ esp_err_t SdMmc::mount_manual_(sdmmc_host_t &host, sdmmc_slot_config_t &slot_con
     if (pdrv != 0xFF)
       ff_diskio_register(pdrv, nullptr);
     if (host_up)
-      sdmmc_host_deinit();
+      sdmmc_host_deinit_slot(host.slot);  // this slot only; the host goes down with its last slot
     delete card;  // NOLINT(cppcoreguidelines-owning-memory)
   };
 
@@ -205,9 +205,9 @@ storage::StorageError SdMmc::unmount_manual_() {
   }
   if (esp_vfs_fat_unregister_path(this->mount_path_) != ESP_OK && err == storage::StorageError::STORAGE_ERROR_OK)
     err = storage::StorageError::STORAGE_ERROR_NOT_READY;
-  // Last step of esp_vfs_fat_sdcard_unmount(), which this mirrors: without it the SDMMC
-  // peripheral stays initialised and the slot clocked after every unmount.
-  if (sdmmc_host_deinit() != ESP_OK && err == storage::StorageError::STORAGE_ERROR_OK)
+  // Last step of esp_vfs_fat_sdcard_unmount(), which this mirrors (its deinit_p): this slot
+  // released, the SDMMC peripheral with the last one, so a card in the other slot stays up.
+  if (sdmmc_host_deinit_slot(this->slot_) != ESP_OK && err == storage::StorageError::STORAGE_ERROR_OK)
     err = storage::StorageError::STORAGE_ERROR_NOT_READY;
   delete this->card_;  // NOLINT(cppcoreguidelines-owning-memory)
   return err;
