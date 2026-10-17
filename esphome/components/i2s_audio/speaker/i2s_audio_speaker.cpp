@@ -28,6 +28,12 @@ static constexpr float SOFTWARE_VOLUME_MIN_DB = -49.0f;
 static constexpr uint32_t GAIN_RAMP_MS_PER_DB = 1;
 
 void I2SAudioSpeakerBase::setup() {
+  // An amplifier powered without I2S clocks can pass DC through the speaker: off until they run.
+  if (this->enable_pin_ != nullptr) {
+    this->enable_pin_->setup();
+    this->enable_pin_->digital_write(false);
+  }
+
   this->event_group_ = xEventGroupCreate();
 
   if (this->event_group_ == nullptr) {
@@ -58,6 +64,7 @@ void I2SAudioSpeakerBase::dump_config() {
                 "  Pin: %d\n"
                 "  Buffer duration: %" PRIu32,
                 static_cast<int8_t>(this->dout_pin_), this->buffer_duration_ms_);
+  LOG_PIN("  Enable Pin: ", this->enable_pin_);
   if (this->timeout_.has_value()) {
     ESP_LOGCONFIG(TAG, "  Timeout: %" PRIu32 " ms", this->timeout_.value());
   }
@@ -87,6 +94,7 @@ void I2SAudioSpeakerBase::loop() {
     ESP_LOGV(TAG, "Started");
     xEventGroupClearBits(this->event_group_, SpeakerEventGroupBits::TASK_RUNNING);
     this->state_ = speaker::STATE_RUNNING;
+    this->set_amplifier_(true);
 #ifdef USE_AUDIO_DAC
     // The task raises TASK_RUNNING only after enabling the channel, so the clocks are already running
     if (this->audio_dac_ != nullptr) {
@@ -97,10 +105,12 @@ void I2SAudioSpeakerBase::loop() {
   if (event_group_bits & SpeakerEventGroupBits::TASK_STOPPING) {
     ESP_LOGV(TAG, "Stopping");
     xEventGroupClearBits(this->event_group_, SpeakerEventGroupBits::TASK_STOPPING);
+    this->set_amplifier_(false);
     this->state_ = speaker::STATE_STOPPING;
   }
   if (event_group_bits & SpeakerEventGroupBits::TASK_STOPPED) {
     ESP_LOGD(TAG, "Stopped");
+    this->set_amplifier_(false);
 
     vTaskDelete(this->speaker_task_handle_);
     this->speaker_task_handle_ = nullptr;
@@ -123,6 +133,7 @@ void I2SAudioSpeakerBase::loop() {
 
   if (event_group_bits & SpeakerEventGroupBits::ERR_ESP_NO_MEM) {
     ESP_LOGE(TAG, "Speaker task setup failed (allocation, preload, or channel enable)");
+    this->set_amplifier_(false);
     xEventGroupClearBits(this->event_group_, SpeakerEventGroupBits::ERR_ESP_NO_MEM);
   }
 

@@ -7,6 +7,7 @@ from esphome.const import (
     CONF_BITS_PER_SAMPLE,
     CONF_BUFFER_DURATION,
     CONF_CHANNEL,
+    CONF_ENABLE_PIN,
     CONF_ID,
     CONF_MODE,
     CONF_NEVER,
@@ -173,6 +174,8 @@ BASE_SCHEMA = (
                 cv.positive_time_period_milliseconds,
                 cv.one_of(CONF_NEVER, lower=True),
             ),
+            # The amplifier's power or enable: active only while the I2S clocks run
+            cv.Optional(CONF_ENABLE_PIN): pins.internal_gpio_output_pin_schema,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -247,6 +250,8 @@ async def to_code(config: ConfigType) -> None:
     await speaker.register_speaker(var, config)
 
     cg.add(var.set_dout_pin(config[CONF_I2S_DOUT_PIN]))
+    if CONF_ENABLE_PIN in config:
+        cg.add(var.set_enable_pin(await cg.gpio_pin_expression(config[CONF_ENABLE_PIN])))
 
     is_spdif = config.get(CONF_SPDIF_MODE, False)
     if is_spdif:
