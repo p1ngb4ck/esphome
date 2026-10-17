@@ -10,6 +10,7 @@
 #include "esphome/core/event_pool.h"
 #include "esphome/core/lock_free_queue.h"
 #include "hid_types.h"
+#include "mce.h"
 #include "xbox.h"
 
 #include <atomic>
@@ -29,6 +30,8 @@ class RawHIDDriver;
 // interface), into the shared hid::HIDInput, and through the gamepad driver of the pads it
 // knows (hid/gamepad.h). Xbox 360 and Xbox One pads, which are not HID, have drivers here.
 class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
+  friend class MCEReceiverDriver;
+
  public:
   USBHIDClient(uint16_t vid, uint16_t pid) : usb_host::USBClient(vid, pid) {}
 
@@ -59,7 +62,7 @@ class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
   static constexpr size_t QUEUE_SIZE = 32;
 
   // Interfaces that are not HID: pads with a protocol of their own.
-  enum Vendor : uint8_t { VENDOR_NONE, VENDOR_XBOX360, VENDOR_XBOX360_WIRELESS, VENDOR_XBOXONE };
+  enum Vendor : uint8_t { VENDOR_NONE, VENDOR_XBOX360, VENDOR_XBOX360_WIRELESS, VENDOR_XBOXONE, VENDOR_MCE };
 
   struct Interface {
     uint8_t number{0};

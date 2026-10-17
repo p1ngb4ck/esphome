@@ -1005,6 +1005,20 @@ class XboxBluetoothDriver : public GamepadDriver {
   bool guide_{false};
 };
 
+// -- Logitech Unifying / Nano receivers -------------------------------------------------------
+// Keyboard and mouse come as plain HID reports; HID++ and DJ messages (reports 0x10, 0x11,
+// 0x20, 0x21 on the receiver's vendor interface) carry no input and are kept out of the
+// controls.
+
+class LogitechReceiverDriver : public GamepadDriver {
+ public:
+  using GamepadDriver::GamepadDriver;
+  const char *name() const override { return "Logitech receiver"; }
+  bool report(const uint8_t *data, size_t len) override {
+    return data[0] == 0x10 || data[0] == 0x11 || data[0] == 0x20 || data[0] == 0x21;
+  }
+};
+
 // -- Which driver ----------------------------------------------------------------------------
 
 std::unique_ptr<GamepadDriver> make_gamepad_driver(HIDInput *input, HIDBus bus, uint16_t vid, uint16_t pid,
@@ -1036,6 +1050,11 @@ std::unique_ptr<GamepadDriver> make_gamepad_driver(HIDInput *input, HIDBus bus, 
       if (bus != HIDBus::USB && (pid == 0x02E0 || pid == 0x02FD || pid == 0x0B05 || pid == 0x0B0C ||
                                  pid == 0x0B13 || pid == 0x0B20 || pid == 0x0B21 || pid == 0x0B22))
         return std::make_unique<XboxBluetoothDriver>(input, pid);
+      break;
+    case 0x046D:  // Logitech
+      if (pid == 0xC52B || pid == 0xC532 || pid == 0xC52F || pid == 0xC534 || pid == 0xC539 || pid == 0xC53F ||
+          pid == 0xC548 || pid == 0x4024 || pid == 0x4025)
+        return std::make_unique<LogitechReceiverDriver>(input);
       break;
     case 0x20D6:  // PowerA
       if (pid == 0xA713)

@@ -29,6 +29,11 @@ void USBHIDClient::setup() {
   this->add_class_match(0xFF, XBOX_SUBCLASS, XBOX_PROTOCOL_WIRED);
   this->add_class_match(0xFF, XBOX_SUBCLASS, XBOX_PROTOCOL_WIRELESS);
   this->add_class_match(0xFF, XBOXONE_SUBCLASS, XBOXONE_PROTOCOL);
+  // MCE IR receivers, by vendor and product as mceusb.c lists them; the multi-function one
+  // only for its vendor-class IR interface.
+  MCEReceiverDriver::for_each([this](const MCEReceiverModel &m) {
+    this->add_vendor_match(m.vid, m.pid, (m.flags & MCEReceiverDriver::INTERFACE_2) ? 0xFF : -1);
+  });
   // Which device it is, for a layout of its own (hid::InputDevice).
   this->add_on_connection_callback([this](bool connected) {
     this->device_key_.clear();
@@ -120,6 +125,10 @@ void USBHIDClient::attach_pad_() {
     case VENDOR_XBOX360_WIRELESS:
       this->gamepad_attach_(hid::HIDBus::USB, std::make_unique<Xbox360Driver>(this, true));
       break;
+    case VENDOR_MCE:
+      this->gamepad_attach_(hid::HIDBus::USB, std::make_unique<MCEReceiverDriver>(
+                                                  this, MCEReceiverDriver::model(dev->idVendor, dev->idProduct)));
+      break;
     case VENDOR_XBOXONE: {
       this->gamepad_attach_(hid::HIDBus::USB,
                             std::make_unique<XboxOneDriver>(this, dev->idVendor, dev->idProduct, dev->bcdDevice));
@@ -161,7 +170,9 @@ uint8_t USBHIDClient::get_device_kinds() const {
     return 0;
   uint8_t kinds = 0;
   for (const auto &intf : this->interfaces_) {
-    if (intf.vendor != VENDOR_NONE) {
+    if (intf.vendor == VENDOR_MCE) {
+      kinds |= hid::HID_DEVICE_REMOTE;
+    } else if (intf.vendor != VENDOR_NONE) {
       kinds |= hid::HID_DEVICE_GAMEPAD;
     } else if (intf.map != nullptr) {
       kinds |= intf.map->device_kinds();
@@ -172,8 +183,10 @@ uint8_t USBHIDClient::get_device_kinds() const {
 
 bool USBHIDClient::find_interfaces_() {
   const usb_config_desc_t *cfg = this->get_config_desc_();
-  if (cfg == nullptr)
+  const usb_device_desc_t *dev = this->get_device_desc_();
+  if (cfg == nullptr || dev == nullptr)
     return false;
+  const uint8_t mce = MCEReceiverDriver::model(dev->idVendor, dev->idProduct);
   Interface *current = nullptr;
   int offset = 0;
   const auto *desc = reinterpret_cast<const usb_standard_desc_t *>(cfg);
@@ -193,6 +206,12 @@ bool USBHIDClient::find_interfaces_() {
       } else if (intf->bInterfaceClass == 0xFF && intf->bInterfaceSubClass == XBOXONE_SUBCLASS &&
                  intf->bInterfaceProtocol == XBOXONE_PROTOCOL) {
         vendor = VENDOR_XBOXONE;
+      }
+      if (mce != 0) {
+        // The receiver's IR interface, whatever its class; none of its others.
+        if (intf->bInterfaceNumber != ((mce & MCEReceiverDriver::INTERFACE_2) ? 2 : 0))
+          continue;
+        vendor = VENDOR_MCE;
       }
       if (intf->bInterfaceClass != USB_CLASS_HID && vendor == VENDOR_NONE)
         continue;
@@ -224,10 +243,12 @@ bool USBHIDClient::find_interfaces_() {
     if (desc->bDescriptorType != USB_W_VALUE_DT_ENDPOINT)
       continue;
     const auto *ep = reinterpret_cast<const usb_ep_desc_t *>(desc);
-    if (USB_EP_DESC_GET_XFERTYPE(ep) != USB_BM_ATTRIBUTES_XFER_INT)
+    // Interrupt endpoints; an MCE receiver has bulk ones as often.
+    if (USB_EP_DESC_GET_XFERTYPE(ep) != USB_BM_ATTRIBUTES_XFER_INT &&
+        !(current->vendor == VENDOR_MCE && USB_EP_DESC_GET_XFERTYPE(ep) == USB_BM_ATTRIBUTES_XFER_BULK))
       continue;
     // bInterval 0 is not legal for an interrupt endpoint and the pipe is built from it.
-    if (ep->bInterval == 0) {
+    if (ep->bInterval == 0 && USB_EP_DESC_GET_XFERTYPE(ep) == USB_BM_ATTRIBUTES_XFER_INT) {
       ESP_LOGW(TAG, "Endpoint 0x%02X declares bInterval 0; using 1", ep->bEndpointAddress);
       const_cast<usb_ep_desc_t *>(ep)->bInterval = 1;
     }
@@ -381,7 +402,9 @@ void USBHIDClient::report_(size_t index, const uint8_t *data, size_t length) {
   if (this->raw_driver_ != nullptr)
     this->raw_driver_->process_report(data, length);
 #endif
-  if (this->gamepad_report_(data, length)) {
+  // The device's driver, for its vendor interface or a HID one that is not a boot keyboard or
+  // mouse (whose first byte is no report ID).
+  if ((intf.vendor != VENDOR_NONE || intf.protocol == HID_PROTO_NONE) && this->gamepad_report_(data, length)) {
     this->pad_index_ = index;
     return;
   }

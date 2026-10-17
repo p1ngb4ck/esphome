@@ -144,6 +144,8 @@ void HIDInput::process_hid_values(const std::vector<HIDReportItemValue> &values)
       this->key_(page, this->pad_ != nullptr ? this->pad_->button(usage) : usage, v.value != 0);
       continue;
     }
+    if (v.application_usage.page == PAGE_DIGITIZER && this->touch_(v))
+      continue;
     if (!v.is_relative && v.logical_min != v.logical_max) {
       if (page == PAGE_GENERIC_DESKTOP && usage == USAGE_HAT_SWITCH && pad_application(v.application_usage)) {
         this->gamepad_hat_(v);
@@ -166,10 +168,51 @@ void HIDInput::process_hid_values(const std::vector<HIDReportItemValue> &values)
     }
     this->control_cb_.call(page, usage, static_cast<int32_t>(v.value));
   }
+  if (this->touch_changed_) {
+    this->touch_changed_ = false;
+    if (this->touch_down_ && this->touch_was_down_) {
+      dx += this->touch_x_ - this->touch_last_x_;
+      dy += this->touch_y_ - this->touch_last_y_;
+    }
+    if (this->touch_down_ != this->touch_was_down_) {
+      this->buttons_ = this->touch_down_ ? (this->buttons_ | 0x01) : (this->buttons_ & ~0x01);
+      this->key_(PAGE_BUTTON, 1, this->touch_down_);
+    }
+    this->touch_was_down_ = this->touch_down_;
+    this->touch_last_x_ = this->touch_x_;
+    this->touch_last_y_ = this->touch_y_;
+    pointer = true;
+  }
   if (pointer) {
     auto clamp16 = [](int32_t x) { return static_cast<int16_t>(std::clamp<int32_t>(x, INT16_MIN, INT16_MAX)); };
     this->pointer_cb_.call(clamp16(dx), clamp16(dy), clamp16(wheel), clamp16(pan), this->buttons_);
   }
+}
+
+// Tip switch and absolute X/Y of the first contact (the first finger collection); the
+// other contacts' are not reported.
+bool HIDInput::touch_(const HIDReportItemValue &v) {
+  const uint16_t app = v.application_usage.usage;
+  if (app != 0x01 && app != 0x02 && app != 0x04 && app != 0x05)  // digitizer, pen, touch screen, touch pad
+    return false;
+  const bool tip = v.usage.page == PAGE_DIGITIZER && v.usage.usage == 0x42;
+  const bool axis = v.usage.page == PAGE_GENERIC_DESKTOP && !v.is_relative &&
+                    (v.usage.usage == USAGE_X || v.usage.usage == USAGE_Y);
+  if (!tip && !axis)
+    return false;
+  if (this->touch_collection_ == HIDCollectionSchema::NO_PARENT || v.collection_id < this->touch_collection_)
+    this->touch_collection_ = v.collection_id;
+  if (v.collection_id != this->touch_collection_)
+    return true;
+  if (tip) {
+    this->touch_down_ = v.value != 0;
+  } else if (v.usage.usage == USAGE_X) {
+    this->touch_x_ = static_cast<int32_t>(v.value);
+  } else {
+    this->touch_y_ = static_cast<int32_t>(v.value);
+  }
+  this->touch_changed_ = true;
+  return true;
 }
 
 void HIDInput::release_all_hid() {
@@ -182,6 +225,8 @@ void HIDInput::release_all_hid() {
   }
   this->modifiers_ = 0;
   this->dead_ = 0;
+  this->touch_down_ = this->touch_was_down_ = this->touch_changed_ = false;
+  this->touch_collection_ = HIDCollectionSchema::NO_PARENT;
 }
 
 void HIDInput::key_(uint16_t page, uint16_t usage, bool pressed) {

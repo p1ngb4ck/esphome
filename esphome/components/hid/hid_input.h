@@ -21,6 +21,7 @@ static constexpr uint16_t PAGE_KEYBOARD = 0x07;
 static constexpr uint16_t PAGE_LED = 0x08;
 static constexpr uint16_t PAGE_BUTTON = 0x09;
 static constexpr uint16_t PAGE_CONSUMER = 0x0C;
+static constexpr uint16_t PAGE_DIGITIZER = 0x0D;
 
 enum Modifier : uint8_t {
   MOD_LEFT_CTRL = 0x01,
@@ -157,6 +158,8 @@ class HIDInput : public key_provider::KeyProvider {
   HIDBus get_bus() const { return this->bus_; }
   /// A driver's decoded state; what changed is reported as keys and controls.
   void gamepad_state(const GamepadState &state);
+  /// A driver's key (remotes that are not HID).
+  void driver_key(uint16_t page, uint16_t usage, bool pressed) { this->key_(page, usage, pressed); }
 
   uint8_t get_modifiers() const { return this->modifiers_; }
   uint8_t get_leds() const { return this->leds_; }
@@ -178,6 +181,8 @@ class HIDInput : public key_provider::KeyProvider {
   bool gamepad_report_(const uint8_t *data, size_t len);
   void gamepad_feature_(uint8_t id, const uint8_t *data, size_t len);
   bool gamepad_axis_(const HIDReportItemValue &v);
+  /// Touch screens, pens, touch pads: the first contact as pointer motion with button 1 held.
+  bool touch_(const HIDReportItemValue &v);
   void gamepad_hat_(const HIDReportItemValue &v);
 
   void key_(uint16_t page, uint16_t usage, bool pressed);
@@ -205,6 +210,14 @@ class HIDInput : public key_provider::KeyProvider {
   uint8_t modifiers_{0};
   uint8_t leds_{LED_NUM_LOCK};
   uint8_t buttons_{0};
+  int32_t touch_x_{0};
+  int32_t touch_y_{0};
+  int32_t touch_last_x_{0};
+  int32_t touch_last_y_{0};
+  uint16_t touch_collection_{HIDCollectionSchema::NO_PARENT};
+  bool touch_down_{false};
+  bool touch_was_down_{false};
+  bool touch_changed_{false};
   std::unique_ptr<GamepadDriver> pad_;
   GamepadState pad_state_;
   GamepadOutputs pad_outputs_;
