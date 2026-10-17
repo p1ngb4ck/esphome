@@ -194,8 +194,9 @@ Objects of svp's own, a pool piece each from the pool's end (`alloc_top`: they n
 buffers' stretch), counted in `plan_pool_()` (`psram_make`, `PoolAllocator`):
 file readers, AVI parser, PNG/BMP decoder, the sound ring's object (with its shared_ptr block), the
 audio decoder with its source, transfer buffer (and its data) and codec objects (`audio::AudioHeap`).
-Not yet in the pool: the `PsramVector`/`PsramString` lists (PSRAM heap), the codec libraries' own
-working buffers (FLAC_MALLOC etc.).
+Not yet in the pool: the `PsramVector`/`PsramString` lists (PSRAM heap). Stay outside by decision
+(Olli, 2026-10-17): the codec libraries' own working buffers (FLAC_MALLOC etc.) -- ESPHome's audio
+codecs as they are, in PSRAM.
 Outside the pool (svp): `spice_scratch_` 20 KiB internal; per USB slot 4 KiB internal `stage_` +
 bookkeeping; task stacks 48 KiB PSRAM; PsramVector/PsramString lists (playlist, images, queue,
 HA items); `channel_http_` response buffer PSRAM 16-256 KiB per request; AudioDecoder internals;
