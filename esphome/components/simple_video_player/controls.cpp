@@ -1170,7 +1170,7 @@ void SimpleVideoPlayer::update_picture_controls_(bool force) {
       lv_label_set_text(bar.title_label,
                         image >= 0 && image < count ? this->images_[image].filename.c_str() : "");
     if (bar.position_label != nullptr) {
-      char text[24] = "";
+      char text[32] = "";  // two ints and " / ": up to 25 with the end
       if (image >= 0 && image < count)
         snprintf(text, sizeof(text), "%d / %d", image + 1, count);
       lv_label_set_text(bar.position_label, text);
