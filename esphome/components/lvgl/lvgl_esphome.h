@@ -165,6 +165,7 @@ template<typename T> void delete_lv_compound_on_delete(lv_event_t *e) {
 class LvglComponent;
 #ifdef USE_LVGL_HID
 class LVHIDKeypadListener;
+class LVHIDPointerListener;
 #endif
 
 class LvPageType : public Parented<LvglComponent> {
@@ -287,6 +288,10 @@ class LvglComponent final : public PollingComponent {
   };
   void set_paused_input(PausedInput *input) { this->paused_input_ = input; }
   PausedInput *get_paused_input() const { return this->paused_input_; }
+  /// The pointer the keypads' direction keys and Enter move and click in its key mode (the first
+  /// hid_pointers entry).
+  void set_key_pointer(LVHIDPointerListener *pointer) { this->key_pointer_ = pointer; }
+  LVHIDPointerListener *get_key_pointer() const { return this->key_pointer_; }
 #endif
   // If the display is paused and we have resume_on_input_ set to true, resume the display.
   void maybe_wakeup() {
@@ -430,6 +435,7 @@ class LvglComponent final : public PollingComponent {
 #ifdef USE_LVGL_HID
   std::vector<LVHIDKeypadListener *> hid_keypads_{};
   PausedInput *paused_input_{nullptr};
+  LVHIDPointerListener *key_pointer_{nullptr};
 #endif
   std::vector<LvPageType *> pages_{};
   size_t current_page_{0};
@@ -649,6 +655,20 @@ class LVHIDPointerListener final : public Parented<LvglComponent> {
   /// A wheel step scrolls this many lines (WHEEL_LINE each).
   void set_wheel_lines(uint8_t lines) { this->wheel_lines_ = lines; }
   void set_reverse_wheel(bool reverse) { this->reverse_wheel_ = reverse; }
+  /// Key mode (remote controls): the keypads' direction keys move the pointer, Enter clicks.
+  void set_key_mode(bool on);
+  bool is_key_mode() const { return this->key_mode_; }
+  /// Key mode: a step is this many pixels, every read while held.
+  void set_key_step(uint8_t pixels) { this->key_step_ = pixels; }
+  /// Key mode: held this long, the steps get faster, up to this many times after 2 s held.
+  void set_key_hold(uint32_t after_ms, uint8_t most) {
+    this->key_after_ms_ = after_ms;
+    this->key_most_ = most;
+  }
+  /// From a keypad (LVGL thread): its key code pressed as a direction (LV_KEY_UP..LEFT) or
+  /// LV_KEY_ENTER, or a key let go (any code; those not held are passed over).
+  void key_press(uint32_t code, uint32_t key);
+  void key_release(uint32_t code);
   lv_indev_t *get_drv() { return this->drv_; }
 
   static constexpr int32_t WHEEL_LINE = 40;
@@ -657,6 +677,20 @@ class LVHIDPointerListener final : public Parented<LvglComponent> {
   void move_(int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons);
   void set_cursor_(lv_obj_t *cursor);
 
+  void key_read_();
+
+  static constexpr uint8_t KEYS_HELD = 4;
+  struct KeyHeld {
+    uint32_t code;
+    uint32_t key;
+  };
+  KeyHeld keys_[KEYS_HELD]{};
+  uint32_t key_since_{0};
+  uint32_t key_after_ms_{400};
+  uint8_t key_step_{6};
+  uint8_t key_most_{8};
+  bool key_mode_{false};
+  bool key_pressed_{false};
   float speed_{1.0f};
   float rest_x_{0.0f};  // motion below a pixel, carried to the next report
   float rest_y_{0.0f};

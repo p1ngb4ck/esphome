@@ -1052,6 +1052,8 @@ void LVHIDKeypadListener::read_(lv_indev_data_t *data) {
         this->pressed_ = true;
         break;
       }
+      if (LVHIDPointerListener *pointer = this->parent_->get_key_pointer())
+        pointer->key_release(event.code);
       Held *held = nullptr;
       for (Held &h : this->held_) {
         if (h.code == event.code)
@@ -1117,6 +1119,14 @@ uint32_t LVHIDKeypadListener::press_(uint16_t page, uint16_t usage, uint8_t mods
   const int action = this->bindings_->resolve(page, usage, mods);
   if (action < 0)
     return 0;
+  LVHIDPointerListener *pointer = this->parent_->get_key_pointer();
+  if (pointer != nullptr && pointer->is_key_mode() &&
+      ((action >= KeyBindings::ACT_UP && action <= KeyBindings::ACT_RIGHT) || action == KeyBindings::ACT_ENTER)) {
+    static constexpr uint32_t KEYS[] = {LV_KEY_UP, LV_KEY_DOWN, LV_KEY_LEFT, LV_KEY_RIGHT};
+    pointer->key_press(static_cast<uint32_t>(page) << 16 | usage,
+                       action == KeyBindings::ACT_ENTER ? LV_KEY_ENTER : KEYS[action - KeyBindings::ACT_UP]);
+    return 0;
+  }
   const uint32_t key = action < KeyBindings::BUILTIN_COUNT ? this->builtin_(action, focused) : 0;
   this->bindings_->fire(action);
   return key;
@@ -1354,11 +1364,15 @@ LVHIDPointerListener::LVHIDPointerListener(hid::HIDInput *input, uint16_t long_p
   lv_indev_set_long_press_time(this->drv_, long_press_time);
   lv_indev_set_long_press_repeat_time(this->drv_, long_press_repeat_time);
   lv_indev_set_user_data(this->drv_, this);
+  if (parent->get_key_pointer() == nullptr)
+    parent->set_key_pointer(this);
   lv_indev_set_read_cb(this->drv_, [](lv_indev_t *d, lv_indev_data_t *data) {
     auto *l = static_cast<LVHIDPointerListener *>(lv_indev_get_user_data(d));
+    if (l->key_mode_)
+      l->key_read_();
     data->point.x = l->x_;
     data->point.y = l->y_;
-    data->state = l->pressed_ ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    data->state = l->pressed_ || l->key_pressed_ ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
     if (l->hide_after_ != 0 && l->cursor_ != nullptr && !l->pressed_ && millis() - l->last_motion_ > l->hide_after_ &&
         !lv_obj_is_hidden(l->cursor_))
       lv_obj_set_hidden(l->cursor_, true);
@@ -1366,6 +1380,74 @@ LVHIDPointerListener::LVHIDPointerListener(hid::HIDInput *input, uint16_t long_p
   input->add_on_pointer_callback([this](int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
     this->move_(dx, dy, wheel, pan, buttons);
   });
+}
+
+void LVHIDPointerListener::set_key_mode(bool on) {
+  this->key_mode_ = on;
+  for (KeyHeld &held : this->keys_)
+    held = {};
+  this->key_pressed_ = false;
+  if (on && this->cursor_ != nullptr && !this->parent_->is_paused()) {
+    this->last_motion_ = millis();
+    if (lv_obj_is_hidden(this->cursor_))
+      lv_obj_set_hidden(this->cursor_, false);
+  }
+}
+
+void LVHIDPointerListener::key_press(uint32_t code, uint32_t key) {
+  if (key == LV_KEY_ENTER) {
+    this->key_pressed_ = true;
+  } else {
+    bool any = false;
+    for (const KeyHeld &held : this->keys_)
+      any = any || (held.code != 0 && held.key != LV_KEY_ENTER);
+    if (!any)
+      this->key_since_ = millis();
+  }
+  for (KeyHeld &held : this->keys_) {
+    if (held.code == 0) {
+      held = {code, key};
+      break;
+    }
+  }
+  this->last_motion_ = millis();
+  if (this->cursor_ != nullptr && lv_obj_is_hidden(this->cursor_))
+    lv_obj_set_hidden(this->cursor_, false);
+}
+
+void LVHIDPointerListener::key_release(uint32_t code) {
+  for (KeyHeld &held : this->keys_) {
+    if (held.code == code) {
+      if (held.key == LV_KEY_ENTER)
+        this->key_pressed_ = false;
+      held = {};
+    }
+  }
+}
+
+// Every read while a direction is held: a step that way, faster once held long enough.
+void LVHIDPointerListener::key_read_() {
+  int32_t dx = 0;
+  int32_t dy = 0;
+  for (const KeyHeld &held : this->keys_) {
+    if (held.code == 0)
+      continue;
+    dx += held.key == LV_KEY_RIGHT ? 1 : held.key == LV_KEY_LEFT ? -1 : 0;
+    dy += held.key == LV_KEY_DOWN ? 1 : held.key == LV_KEY_UP ? -1 : 0;
+  }
+  if (dx == 0 && dy == 0)
+    return;
+  const uint32_t held_ms = millis() - this->key_since_;
+  float factor = 1.0f;
+  if (held_ms > this->key_after_ms_ && this->key_most_ > 1) {
+    const uint32_t ramp = this->key_after_ms_ < 2000 ? 2000 - this->key_after_ms_ : 1;
+    factor += (this->key_most_ - 1) * std::min(1.0f, static_cast<float>(held_ms - this->key_after_ms_) / ramp);
+  }
+  const auto step = static_cast<int32_t>(this->key_step_ * factor);
+  lv_display_t *disp = this->parent_->get_disp();
+  this->x_ = std::clamp<int32_t>(this->x_ + dx * step, 0, lv_display_get_horizontal_resolution(disp) - 1);
+  this->y_ = std::clamp<int32_t>(this->y_ + dy * step, 0, lv_display_get_vertical_resolution(disp) - 1);
+  this->last_motion_ = millis();
 }
 
 void LVHIDPointerListener::set_cursor_(lv_obj_t *cursor) {
