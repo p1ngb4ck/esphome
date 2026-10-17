@@ -569,8 +569,6 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
     memset(out + filled, 0, wanted - filled);
     if (producer)
       this->underrun_frames_.fetch_add((uint32_t) ((wanted - filled) / BYTES_PER_FRAME));
-    if (feeding)
-      this->priming_.store(true);  // run dry: full again before it goes on
   }
   return frame_count;
 }

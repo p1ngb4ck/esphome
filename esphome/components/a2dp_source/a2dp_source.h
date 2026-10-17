@@ -227,7 +227,7 @@ class A2DPSource : public Component
   size_t ring_bytes_{0};
   std::atomic<bool> speaker_active_{false};
   std::atomic<bool> speaker_finishing_{false};
-  std::atomic<bool> priming_{false};  // silence until the buffer is full (speaker started, or run dry)
+  std::atomic<bool> priming_{false};  // silence until the buffer is full (the speaker started)
   std::atomic<uint32_t> played_frames_{0};
 
   std::string local_name_{"ESPHome Audio"};
