@@ -2,6 +2,8 @@
 
 Read in this order before touching anything svp (or svp_relay):
 
+0. [`session-todo.md`](session-todo.md) when it exists: Olli's standing order for the current session, binding.
+
 1. This file: hardware/environment facts, goals, hard rules, change procedure.
 2. [`architecture.md`](architecture.md): how the code is built today (tasks, locks, sessions, buffers).
 3. [`open-issues.md`](open-issues.md): known violations, bug reports, the optimisation backlog.
