@@ -935,6 +935,55 @@ _HUB_STATUS_CHANGE_REPLACEMENT = """        if (device_status == EXT_HUB_STATUS_
             ESP_LOGW(EXT_HUB_TAG, "Hub status change has not been implemented yet");
         }"""
 
+# Low-speed behind a full-speed hub: the frames the periodic (interrupt) pipes of such devices
+# are scheduled in carry a PREamble transaction already, so a control stage of such a device
+# must not start in one of them. The port keeps which channels those pipes use; the frame list
+# says which frames they poll in.
+_LS_PERIODIC_PORT_FIELD_ANCHOR = """    usb_dwc_hal_context_t *hal;
+    void *frame_list;"""
+
+_LS_PERIODIC_PORT_FIELD_REPLACEMENT = """    usb_dwc_hal_context_t *hal;
+    void *frame_list;
+    uint32_t ls_pre_periodic_chans;     // Channels of periodic pipes with PREamble (LS via FS hub)"""
+
+_LS_PERIODIC_WAIT_ANCHOR = """    for (int waited_us = 0; waited_us < 3000; waited_us += 10) {
+        if (usb_dwc_hal_port_get_cur_frame_num(pipe->port->hal) != start_frame) {
+            return;
+        }"""
+
+_LS_PERIODIC_WAIT_REPLACEMENT = """    const uint32_t busy_chans = (pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL) ? pipe->port->ls_pre_periodic_chans : 0;
+    for (int waited_us = 0; waited_us < 3000; waited_us += 10) {
+        const uint32_t frame = usb_dwc_hal_port_get_cur_frame_num(pipe->port->hal);
+        if (frame != start_frame &&
+                !(pipe->port->hal->periodic_frame_list[frame % FRAME_LIST_LEN] & busy_chans)) {
+            return;
+        }"""
+
+_LS_PERIODIC_EXEC_ANCHOR = """    pipe->ls_ctrl_retry_count = 0;
+    if (pipe->ls_first_launch_pending) {"""
+
+_LS_PERIODIC_EXEC_REPLACEMENT = """    pipe->ls_ctrl_retry_count = 0;
+    if (pipe->ls_first_launch_pending ||
+            (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL &&
+             pipe->port->ls_pre_periodic_chans)) {"""
+
+_LS_PERIODIC_ALLOC_ANCHOR = """    usb_dwc_hal_chan_set_ep_char(port->hal, pipe->chan_obj, &pipe->ep_char);
+    CACHE_SYNC_FRAME_LIST(port->frame_list);"""
+
+_LS_PERIODIC_ALLOC_REPLACEMENT = """    usb_dwc_hal_chan_set_ep_char(port->hal, pipe->chan_obj, &pipe->ep_char);
+    if (pipe->ep_char.ls_via_fs_hub &&
+            (pipe->ep_char.type == USB_DWC_XFER_TYPE_INTR || pipe->ep_char.type == USB_DWC_XFER_TYPE_ISOCHRONOUS)) {
+        port->ls_pre_periodic_chans |= 1U << pipe->chan_obj->flags.chan_idx;
+    }
+    CACHE_SYNC_FRAME_LIST(port->frame_list);"""
+
+_LS_PERIODIC_FREE_ANCHOR = """    pipe->port->num_pipes_idle--;
+    usb_dwc_hal_chan_free(pipe->port->hal, pipe->chan_obj);"""
+
+_LS_PERIODIC_FREE_REPLACEMENT = """    pipe->port->num_pipes_idle--;
+    pipe->port->ls_pre_periodic_chans &= ~(1U << pipe->chan_obj->flags.chan_idx);
+    usb_dwc_hal_chan_free(pipe->port->hal, pipe->chan_obj);"""
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -992,6 +1041,11 @@ PATCHES = (
     ("src/ext_hub.c", _HUB_PORT_STATUS_ANCHOR, _HUB_PORT_STATUS_REPLACEMENT),
     ("src/ext_hub.c", _HUB_REQUEST_ANCHOR, _HUB_REQUEST_REPLACEMENT),
     ("src/ext_hub.c", _HUB_STATUS_CHANGE_ANCHOR, _HUB_STATUS_CHANGE_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_PERIODIC_PORT_FIELD_ANCHOR, _LS_PERIODIC_PORT_FIELD_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_PERIODIC_WAIT_ANCHOR, _LS_PERIODIC_WAIT_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_PERIODIC_EXEC_ANCHOR, _LS_PERIODIC_EXEC_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_PERIODIC_ALLOC_ANCHOR, _LS_PERIODIC_ALLOC_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_PERIODIC_FREE_ANCHOR, _LS_PERIODIC_FREE_REPLACEMENT),
 )
 
 # Identifies an existing patched copy. It has to change whenever anything about that copy
