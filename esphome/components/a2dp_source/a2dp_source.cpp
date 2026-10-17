@@ -9,6 +9,8 @@
 #include "esphome/components/bt_classic/bt_classic.h"
 #include "esphome/core/log.h"
 
+#include <esp_heap_caps.h>
+
 #include <nvs.h>
 #ifdef USE_BT_PERSISTENCE
 #include "osi/esphome_nvs_redirect.h"
@@ -117,9 +119,10 @@ void A2DPSource::setup() {
 
   size_t ring_bytes = (size_t) SAMPLE_RATE * BYTES_PER_FRAME * this->buffer_duration_ms_ / 1000;
   ring_bytes -= ring_bytes % BYTES_PER_FRAME;
-  this->ring_ = xRingbufferCreate(ring_bytes, RINGBUF_TYPE_BYTEBUF);
+  // PSRAM only: no fall-back into internal RAM.
+  this->ring_ = xRingbufferCreateWithCaps(ring_bytes, RINGBUF_TYPE_BYTEBUF, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (this->ring_ == nullptr) {
-    ESP_LOGE(TAG, "Could not allocate the %u byte buffer", (unsigned) ring_bytes);
+    ESP_LOGE(TAG, "Could not allocate the %u byte buffer in PSRAM", (unsigned) ring_bytes);
     this->mark_failed();
     return;
   }
