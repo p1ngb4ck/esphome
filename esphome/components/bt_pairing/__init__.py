@@ -10,7 +10,7 @@ import logging
 
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components import esp32_ble, esp32_ble_tracker, hid
+from esphome.components import esp32, esp32_ble, esp32_ble_tracker, hid
 from esphome.components.storage import request_storage_worker
 from esphome.components.globals import GlobalsComponent
 import esphome.config_validation as cv
@@ -245,6 +245,9 @@ async def to_code(config):
     await cg.register_component(var, config)
     cg.add_define("USE_BT_PAIRING")
     cg.add(var.set_max_devices(config[CONF_MAX_DEVICES]))
+    # Bluedroid keeps the bonds itself, CONFIG_BT_SMP_MAX_BONDS of them (15 by default, at most
+    # 32); beyond that it deletes one per new bond and the excess at boot (btc_storage.c).
+    esp32.set_idf_sdkconfig_default("CONFIG_BT_SMP_MAX_BONDS", config[CONF_MAX_DEVICES])
     cg.add(var.set_preference_key(fnv1_hash(f"bt_pairing:{config[CONF_ID]}")))
     if CONF_FILE in config:
         cg.add_define("USE_BT_PAIRING_STORAGE")
