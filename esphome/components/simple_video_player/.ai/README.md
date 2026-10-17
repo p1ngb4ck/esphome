@@ -75,6 +75,9 @@ round without Olli's go.
 - A running desktop session, video, stream or dashboard is never interrupted by a call from outside
   (HA, relay); a call made on the panel itself (opening the dashboard, another kind of media) ends
   what runs and takes over (Olli, 2026-10-17).
+- The kinds of media and the apps (dashboard, remote desktop) exclude each other; the buffer manager
+  hands the buffers over on a change of kind where needed. Only these run side by side: audio and
+  pictures; audio and a VNC desktop without sound, while the pool has room for both (Olli, 2026-10-17).
 
 ### LVGL / display
 - Never call LVGL (any widget, even hidden, even a read) while LVGL is paused or DSI-direct runs.

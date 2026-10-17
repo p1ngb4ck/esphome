@@ -307,6 +307,8 @@ void SimpleVideoPlayer::loop() {
     this->audio_advance_();
   }
 #endif
+  if (this->sound_takeover_req_.exchange(false, std::memory_order_acq_rel))
+    this->sound_take_over_();
 #ifdef SVP_SPICE
   if (this->media_release_req_.load(std::memory_order_acquire)) {
     this->release_media_();
@@ -529,6 +531,7 @@ void SimpleVideoPlayer::play(const std::string &video_path, bool folder_playlist
   if (this->spice_refuses_())
     return;
 #endif
+  this->sound_take_over_();  // a video plays alone
   this->start_path_ = video_path;
   this->start_folder_ = folder_playlist;
   this->start_pending_.store(true, std::memory_order_release);
@@ -897,6 +900,17 @@ void SimpleVideoPlayer::stop() {
 #endif
   this->start_pending_.store(false, std::memory_order_release);
   this->end_session_();
+}
+
+void SimpleVideoPlayer::sound_take_over_() {
+#if defined(SVP_AUDIO_FILES) && defined(SVP_MEDIA_PLAYER) && defined(SVP_CHANNEL_LIST)
+  this->audio_remote_command_(media_player::MEDIA_PLAYER_COMMAND_STOP);  // the queue's track
+#endif
+#ifdef SVP_MEDIA_PLAYER
+  if (this->media_player_ != nullptr && (this->media_player_->state == media_player::MEDIA_PLAYER_STATE_PLAYING ||
+                                         this->media_player_->state == media_player::MEDIA_PLAYER_STATE_PAUSED))
+    this->media_player_->make_call().set_command(media_player::MEDIA_PLAYER_COMMAND_STOP).perform();
+#endif
 }
 
 void SimpleVideoPlayer::end_session_() {

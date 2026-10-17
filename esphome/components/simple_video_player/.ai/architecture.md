@@ -102,7 +102,8 @@ reports the media player's state instead while `state_` is STOPPED and `audio_re
 | Audio queue, HA track | `audio_start_` HA branch S:2936: `audio_remote_ = ASKED`, POST /play | relay -> `svp_play_audio` -> media player | `audio_remote_player_` CL:89: ASKED+PLAYING -> PLAYING; PLAYING+IDLE (>=2 s) -> next. Any `start_playback_` sets NONE (S:669) |
 | Pictures | `show_image`, next/prev, slideshow, `ha_show_pictures` | main loop + picture task; HA reads on channel task (/image) | held while a video plays (`state_`) or a stream, dashboard or desktop session has the panel (`is_network_session()`): `pictures_held_`; covers too |
 | Cover art | `svp_cover` service -> `cover_wanted_` | `cover_loop_` C:121 (main loop, not while LVGL paused) -> channel task (/cover) -> picture task | buffers given back on pool reclaim (C:87) |
-| Remote desktop | `spice_connect(_saved)` -> spice task | spice task; picture via relay udisp | `desktop_take_panel_` SP:1481 ends media, takes buffers; refuses media starts while `spice_on_` |
+| Remote desktop | `spice_connect(_saved)` -> spice task | spice task; picture via relay udisp | `desktop_take_panel_` ends a video; SPICE (with sound) ends any session and the sound beside it (`sound_take_over_`: the queue's HA track, the media player's), VNC keeps an audio file unless the pool has no room for both (then it ends and the buffers are taken again); refuses media starts while `spice_on_` |
+| Dashboard (relay sender of its own) | relay | net task | at the sender's start an audio file ends and `sound_take_over_` runs (main loop), so its stream PCM plays. A local video (`play()`) runs `sound_take_over_` too |
 | Controls | video bar: pre-rendered at `start_req_==1`, composited by playback (DSI direct only, not for network AVI); picture/audio bars: LVGL | main loop / playback | – |
 
 ## 7. Output paths

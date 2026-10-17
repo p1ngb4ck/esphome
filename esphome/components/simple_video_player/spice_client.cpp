@@ -743,7 +743,7 @@ bool SpiceSession::open_display_() {
 // (spice_sound_take_()).
 bool SpiceSession::take_panel_() {
   SimpleVideoPlayer *p = this->p_;
-  if (!p->desktop_take_panel_(this->direct_, this->wifi_held_))
+  if (!p->desktop_take_panel_(this->direct_, this->wifi_held_, true))
     return false;
   for (uint8_t i = 0; i < SimpleVideoPlayer::SPICE_CURSOR_CACHE; i++)
     p->spice_cursor_cache_[i].valid = false;
@@ -1478,31 +1478,80 @@ void SimpleVideoPlayer::desktop_output_(bool &direct, uint32_t &w, uint32_t &h) 
 
 // A playing video ends, a stream sender is let go, and both are refused from then on
 // (spice_refuses_(), the network task).
-bool SimpleVideoPlayer::desktop_take_panel_(bool direct, bool &wifi_held) {
+bool SimpleVideoPlayer::desktop_take_panel_(bool direct, bool &wifi_held, bool with_sound) {
   // Under session_lock_: a video run_pending_start_() is starting either runs already (ended here)
-  // or does not start (start_pending_ cleared; it looks again under the lock).
+  // or does not start (start_pending_ cleared; it looks again under the lock). With sound (SPICE)
+  // nothing plays beside the session; without (VNC) an audio file plays on while the pool has room
+  // for both.
   if (xSemaphoreTake(this->session_lock_, pdMS_TO_TICKS(TAKEOVER_WAIT_MS)) != pdTRUE) {
     ESP_LOGE(TAG, "A starting session did not let go of the panel");
     return false;
   }
   this->spice_on_.store(true, std::memory_order_release);
   this->start_pending_.store(false, std::memory_order_release);
-  if (this->picture_session_busy_())
+#ifdef SVP_AUDIO_FILES
+  if (with_sound)
+    this->audio_start_pending_.store(false, std::memory_order_release);
+#endif
+  if (with_sound ? this->session_busy_() : this->picture_session_busy_())
     this->end_session_();
   xSemaphoreGive(this->session_lock_);
+  if (with_sound) {
+    this->sound_takeover_req_.store(true, std::memory_order_release);  // the queue's HA track, the media player's
+    App.wake_loop_threadsafe();
+  }
   this->stream_drop_sender_.store(true, std::memory_order_release);
   this->stream_wake_();
+  const bool free = this->desktop_wait_free_(with_sound);
+  this->stream_drop_sender_.store(false, std::memory_order_release);
+  if (!free) {
+    this->spice_on_.store(false, std::memory_order_release);
+    return false;
+  }
+  bool taken = this->desktop_buffers_take_();
+#ifdef SVP_AUDIO_FILES
+  if (!taken && !with_sound && this->audio_session_.load(std::memory_order_acquire)) {
+    // No room for both: the audio file ends, its room is the session's.
+    ESP_LOGI(TAG, "Audio file stopped: the pool has no room for it beside the desktop");
+    if (xSemaphoreTake(this->session_lock_, pdMS_TO_TICKS(TAKEOVER_WAIT_MS)) == pdTRUE) {
+      this->audio_start_pending_.store(false, std::memory_order_release);
+      this->end_session_();
+      xSemaphoreGive(this->session_lock_);
+    }
+    taken = this->desktop_wait_free_(true) && this->desktop_buffers_take_();
+  }
+#endif
+  if (!taken) {
+    this->spice_on_.store(false, std::memory_order_release);
+    return false;
+  }
+  // No cursor yet; the draw task holds nothing of one (it draws nothing of this session yet).
+  xSemaphoreTake(this->spice_cursor_lock_, portMAX_DELAY);
+  this->spice_cursor_->visible = false;
+  this->spice_cursor_->shape.valid = false;
+  xSemaphoreGive(this->spice_cursor_lock_);
+  this->spice_cursor_drawn_ = false;
+  this->spice_cursor_dirty_.store(false, std::memory_order_release);
+  this->spice_direct_out_.store(direct, std::memory_order_release);
+  this->stream_connected_.store(true, std::memory_order_release);
+  this->desktop_took_ = true;
+  this->spice_connecting_.store(false, std::memory_order_release);
+  hold_wifi_(wifi_held, true);
+  this->spice_changed_.store(true, std::memory_order_release);
+  App.wake_loop_threadsafe();
+  return true;
+}
+
+bool SimpleVideoPlayer::desktop_wait_free_(bool with_sound) {
   // Woken (spice_wake()) when the sender or the session's tasks let go. Wakes taken here for others
   // (requests, USB) are given again once done.
+  auto busy = [this, with_sound]() { return with_sound ? this->session_busy_() : this->picture_session_busy_(); };
   bool woken = false;
-  for (const uint32_t start = millis();
-       this->stream_sender_busy_.load(std::memory_order_acquire) || this->picture_session_busy_();) {
+  for (const uint32_t start = millis(); this->stream_sender_busy_.load(std::memory_order_acquire) || busy();) {
     const uint32_t waited = millis() - start;
     if (waited > TAKEOVER_WAIT_MS || this->spice_request_.load(std::memory_order_acquire) != 0) {
       if (waited > TAKEOVER_WAIT_MS)
         ESP_LOGE(TAG, "The playing video or stream sender did not let go of the panel");
-      this->stream_drop_sender_.store(false, std::memory_order_release);
-      this->spice_on_.store(false, std::memory_order_release);
       if (woken)
         this->spice_wake();
       return false;
@@ -1521,25 +1570,6 @@ bool SimpleVideoPlayer::desktop_take_panel_(bool direct, bool &wifi_held) {
   }
   if (woken)
     this->spice_wake();
-  this->stream_drop_sender_.store(false, std::memory_order_release);
-  if (!this->desktop_buffers_take_()) {
-    this->spice_on_.store(false, std::memory_order_release);
-    return false;
-  }
-  // No cursor yet; the draw task holds nothing of one (it draws nothing of this session yet).
-  xSemaphoreTake(this->spice_cursor_lock_, portMAX_DELAY);
-  this->spice_cursor_->visible = false;
-  this->spice_cursor_->shape.valid = false;
-  xSemaphoreGive(this->spice_cursor_lock_);
-  this->spice_cursor_drawn_ = false;
-  this->spice_cursor_dirty_.store(false, std::memory_order_release);
-  this->spice_direct_out_.store(direct, std::memory_order_release);
-  this->stream_connected_.store(true, std::memory_order_release);
-  this->desktop_took_ = true;
-  this->spice_connecting_.store(false, std::memory_order_release);
-  hold_wifi_(wifi_held, true);
-  this->spice_changed_.store(true, std::memory_order_release);
-  App.wake_loop_threadsafe();
   return true;
 }
 
@@ -1777,7 +1807,7 @@ void SimpleVideoPlayer::desktop_vnc_(const char *host, uint16_t port, const char
   bool direct = true, wifi_held = false;
   uint32_t out_w = 0, out_h = 0;
   this->desktop_output_(direct, out_w, out_h);
-  if (!this->desktop_take_panel_(direct, wifi_held))
+  if (!this->desktop_take_panel_(direct, wifi_held, false))
     return;
   bool panel_held = true;
   // Keys, mouse and touches go to the relay's sender; what came before the session is not its.

@@ -499,6 +499,25 @@ void SimpleVideoPlayer::stream_net_loop_() {
             this->stream_connected_.store(false, std::memory_order_release);
             continue;
           }
+          // A picture sender of its own (the dashboard, not a desktop session's): no sound plays beside
+          // it, its own does (stream PCM).
+          bool own_sender = true;
+#ifdef SVP_SPICE
+          own_sender = !this->stream_desktop_sender_;
+#endif
+          if (own_sender) {
+#ifdef SVP_AUDIO_FILES
+            if (this->audio_session_.load(std::memory_order_acquire) &&
+                xSemaphoreTake(this->session_lock_, pdMS_TO_TICKS(SESSION_END_WAIT_MS)) == pdTRUE) {
+              this->audio_start_pending_.store(false, std::memory_order_release);
+              if (this->audio_session_.load(std::memory_order_acquire))
+                this->end_session_();
+              xSemaphoreGive(this->session_lock_);
+            }
+#endif
+            this->sound_takeover_req_.store(true, std::memory_order_release);  // the queue's HA track, the media player's
+            App.wake_loop_threadsafe();
+          }
         }
         const int received = ::recv(client, buffer, STREAM_RECV_BYTES, 0);
         if (received == 0 && sink != nullptr) {

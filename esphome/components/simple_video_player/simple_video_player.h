@@ -981,6 +981,10 @@ class SimpleVideoPlayer : public Component
   void run_pending_start_();
   /// The current session is told to end (play(), next() and the like start another after it).
   void end_session_();
+  /// Main loop: the queue's Home Assistant track and what the media player plays (not an
+  /// announcement) stop.
+  void sound_take_over_();
+  std::atomic<bool> sound_takeover_req_{false};  // sound_take_over_() asked for by another task
 
   /// Main playback loop (runs in task)
   void playback_loop_();
@@ -1088,9 +1092,13 @@ class SimpleVideoPlayer : public Component
   // A desktop session's share of the panel (SPICE, VNC), spice task.
   /// The output the session draws on: the display, else the canvas, and its size.
   void desktop_output_(bool &direct, uint32_t &w, uint32_t &h);
-  /// The panel to the session: a playing video ends, a stream sender is let go, no cursor yet.
-  /// false: they did not let go in time.
-  bool desktop_take_panel_(bool direct, bool &wifi_held);
+  /// The panel to the session: a playing video ends, a stream sender is let go, no cursor yet; with
+  /// sound (SPICE) the sound playing ends too (an audio file here, the queue's Home Assistant track
+  /// and the media player's on the main loop). false: they did not let go in time.
+  bool desktop_take_panel_(bool direct, bool &wifi_held, bool with_sound);
+  /// Spice task: until the video (with sound: any session) and the stream sender let go, woken by
+  /// spice_wake(); false past TAKEOVER_WAIT_MS or when a new request came.
+  bool desktop_wait_free_(bool with_sound);
   /// Spice task, as the session takes the panel: pictures' and a video's buffers back to the pool (main
   /// loop), the session's cursor buffers from it.
   bool desktop_buffers_take_();
