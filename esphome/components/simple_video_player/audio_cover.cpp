@@ -56,12 +56,7 @@ size_t SimpleVideoPlayer::cover_bytes_() {
 }
 
 // From the pool; when it is full, the video's idle buffers make room (taken again by the next video).
-uint8_t *SimpleVideoPlayer::cover_alloc_(size_t size) {
-  uint8_t *piece = this->pool_.alloc(size);
-  if (piece == nullptr && this->release_media_())
-    piece = this->pool_.alloc(size);
-  return piece;
-}
+uint8_t *SimpleVideoPlayer::cover_alloc_(size_t size) { return this->pool_take_(size, POOL_USER_PICTURES); }
 
 // Main loop, no video: the buffers from the pool while cover art is wanted (a video takes them back,
 // release_cover_buffers_()).
@@ -134,7 +129,7 @@ void SimpleVideoPlayer::cover_loop_() {
     case CoverStep::IDLE:
       if (this->cover_wanted_) {
         // Not while a video plays or takes the pool: the buffers are its then.
-        if (this->pictures_held_() || this->pool_reclaim_req_.load(std::memory_order_acquire))
+        if (this->pictures_held_() || this->pool_wanted_(POOL_PICTURES))
           return;
         if (!this->cover_buffers_()) {
           this->cover_wanted_ = false;
@@ -166,8 +161,7 @@ void SimpleVideoPlayer::cover_loop_() {
       this->cover_wanted_ = false;
       this->cover_fetch_w_ = this->cover_current_().w;
       this->cover_fetch_h_ = this->cover_current_().h;
-      this->cover_fetched_.store(false, std::memory_order_relaxed);
-      if (!this->channel_request_(CHANNEL_CMD_COVER, 0)) {
+      if (!this->fetch_start_(this->cover_fetch_, CHANNEL_CMD_COVER, this->cover_file_, COVER_FILE_MAX + 1)) {
         this->cover_wanted_ = this->cover_view_ == 0;  // the task's queue is full: again next loop
         return;
       }
@@ -175,8 +169,10 @@ void SimpleVideoPlayer::cover_loop_() {
       return;
 
     case CoverStep::FETCHING: {
-      if (!this->cover_fetched_.load(std::memory_order_acquire))
+      if (!this->fetch_done_(this->cover_fetch_))
         return;
+      this->cover_fetch_ok_ = this->cover_fetch_.ok && this->cover_fetch_.len <= COVER_FILE_MAX;
+      this->cover_len_ = this->cover_fetch_ok_ ? this->cover_fetch_.len : 0;
       if (this->cover_wanted_ || this->cover_clear_) {
         this->cover_step_ = CoverStep::IDLE;  // newer: from the first view again, or none
         return;
@@ -205,8 +201,7 @@ void SimpleVideoPlayer::cover_loop_() {
         return;
       }
       // The JPEG unit: not while a video plays or takes the pool, nor while a picture decodes.
-      if (this->pictures_held_() || this->pool_reclaim_req_.load(std::memory_order_acquire) ||
-          this->pic_read_.decoding)
+      if (this->pictures_held_() || this->pool_wanted_(POOL_PICTURES) || this->pic_read_.decoding)
         return;
       this->cover_detach_(view);  // LVGL lets go of the buffer before it is written
       this->cover_decoded_.store(false, std::memory_order_relaxed);
@@ -234,17 +229,19 @@ void SimpleVideoPlayer::cover_loop_() {
   }
 }
 
-// Channel task: the cover art for the view asked for, into cover_file_; empty: none.
-void SimpleVideoPlayer::cover_task_() {
+// Channel task: the cover art for the view asked for, into cover_file_ (cover_fetch_); empty: none.
+void SimpleVideoPlayer::cover_task_(uint16_t gen) {
+  uint8_t *into = nullptr;
+  size_t cap = 0;
+  if (!fetch_begin_(this->cover_fetch_, gen, &into, &cap))
+    return;  // dropped while queued
   char path[96];
   snprintf(path, sizeof(path), "/cover?port=%u&w=%d&h=%d&max=%u", static_cast<unsigned>(this->stream_port_),
            static_cast<int>(this->cover_fetch_w_), static_cast<int>(this->cover_fetch_h_),
            static_cast<unsigned>(COVER_FILE_MAX));
   size_t len = 0;
-  const bool ok = this->channel_http_(path, nullptr, nullptr, &len, this->cover_file_, COVER_FILE_MAX + 1);
-  this->cover_fetch_ok_ = ok && len <= COVER_FILE_MAX;
-  this->cover_len_ = this->cover_fetch_ok_ ? len : 0;
-  this->cover_fetched_.store(true, std::memory_order_release);
+  const bool ok = this->channel_http_(path, nullptr, nullptr, &len, into, cap, 0, &this->cover_fetch_, gen);
+  fetch_end_(this->cover_fetch_, gen, ok, len);
 }
 
 // Picture task: cover_file_ into the view's buffer at the JPEG's own size.

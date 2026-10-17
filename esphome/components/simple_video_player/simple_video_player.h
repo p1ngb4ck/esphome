@@ -1099,13 +1099,12 @@ class SimpleVideoPlayer : public Component
   /// Spice task: until the video (with sound: any session) and the stream sender let go, woken by
   /// spice_wake(); false past TAKEOVER_WAIT_MS or when a new request came.
   bool desktop_wait_free_(bool with_sound);
-  /// Spice task, as the session takes the panel: pictures' and a video's buffers back to the pool (main
-  /// loop), the session's cursor buffers from it.
+  /// Spice task, as the session takes the panel: the session's cursor buffers from the pool (only when
+  /// they do not fit, other users' idle buffers come back: desktop_alloc()).
   bool desktop_buffers_take_();
   /// The desktop's buffers back to the pool while no session runs (media wants the room); any task.
   bool release_desktop_();
   SemaphoreHandle_t desktop_lock_{nullptr};  // its buffers: taken, or given back
-  std::atomic<bool> media_release_req_{false};  // main loop: release_media_() for a desktop session
   /// The panel back (panel_held: what desktop_take_panel_() took).
   void desktop_release_panel_(bool &panel_held, bool &wifi_held);
   /// The probe of spice_connect(): a VNC server greets first, a SPICE server waits for the client.
@@ -1188,9 +1187,36 @@ class SimpleVideoPlayer : public Component
   void ha_loop_();
   static void channel_task_entry_(void *param);
   void channel_task_loop_();
-  /// Blocking HTTP to the relay (channel task only). response: PSRAM buffer, caller frees.
+  /// Blocking HTTP to the relay (channel task only). response: PSRAM buffer, caller frees. fetch: a
+  /// fetch into a buffer of the main loop's (into), written only while it is still asked for.
+  struct ChannelFetch;
   bool channel_http_(const char *path, const char *body, char **response, size_t *response_len,
-                     uint8_t *into = nullptr, size_t into_cap = 0, uint32_t timeout_ms = 0);
+                     uint8_t *into = nullptr, size_t into_cap = 0, uint32_t timeout_ms = 0,
+                     ChannelFetch *fetch = nullptr, uint16_t gen = 0);
+  // A fetch of the channel task into a pool buffer of the main loop's (an HA picture, cover art). The
+  // main loop may want the buffer back meanwhile (a video starts): a fetch not writing yet is dropped
+  // at once (it never writes), one writing stops after the block it reads. state: the request's
+  // generation (never 0) << 3 | FETCH_*.
+  enum : uint8_t { FETCH_IDLE, FETCH_QUEUED, FETCH_WRITING, FETCH_STOP, FETCH_DONE };
+  struct ChannelFetch {
+    std::atomic<uint32_t> state{0};
+    std::atomic<uint8_t *> into{nullptr};  // set by the main loop before the request
+    std::atomic<size_t> cap{0};
+    uint16_t gen{0};  // main loop: the last asked for
+    size_t len{0};    // channel task, read by the main loop at FETCH_DONE
+    bool ok{false};
+  };
+  /// Main loop: asks the channel task for the fetch (false: the last one still stops, or the queue is full).
+  bool fetch_start_(ChannelFetch &fetch, uint8_t cmd, uint8_t *into, size_t cap);
+  /// Main loop: the fetch asked for last has ended (len, ok); it is idle again.
+  bool fetch_done_(ChannelFetch &fetch);
+  /// Main loop: true once the channel task no longer writes into the fetch's buffer (and never will
+  /// for this request); false while it stops (asked to here), next loop again.
+  bool fetch_drop_(ChannelFetch &fetch);
+  /// Channel task: still asked for? Then its buffer.
+  static bool fetch_begin_(ChannelFetch &fetch, uint16_t gen, uint8_t **into, size_t *cap);
+  /// Channel task: the result, given to the main loop only while still asked for.
+  static void fetch_end_(ChannelFetch &fetch, uint16_t gen, bool ok, size_t len);
   void ha_browse_task_();
   void ha_play_request_(const std::string &id);
 #ifdef SVP_KEYBOARD
@@ -1203,7 +1229,7 @@ class SimpleVideoPlayer : public Component
   // Its track asked to stop, pause or play on.
   bool audio_remote_command_(media_player::MediaPlayerCommand command);
 #endif
-  void image_task_();
+  void image_task_(uint16_t gen);
   void options_get_task_();
   void options_set_task_();
   static bool remote_image_(const ImageEntry &entry);
@@ -1236,12 +1262,12 @@ class SimpleVideoPlayer : public Component
   bool cover_shown_{false};
   bool cover_detach_pending_{false};  // given back while LVGL was paused: the canvases let go once it runs
   uint8_t *cover_file_{nullptr};
-  // The channel task fetches into cover_file_ (cover_fetch_w_ x cover_fetch_h_), the picture task
-  // decodes it; each hands over with its flag (release / acquire).
+  // The channel task fetches into cover_file_ (cover_fetch_w_ x cover_fetch_h_; cover_fetch_), the
+  // picture task decodes it (its flags, release / acquire).
   int32_t cover_fetch_w_{0}, cover_fetch_h_{0};
   size_t cover_len_{0};
   bool cover_fetch_ok_{false};
-  std::atomic<bool> cover_fetched_{false};
+  ChannelFetch cover_fetch_;
   std::atomic<bool> cover_job_{false};
   std::atomic<bool> cover_decoded_{false};
   bool cover_decode_ok_{false};
@@ -1251,7 +1277,7 @@ class SimpleVideoPlayer : public Component
   bool cover_buffers_();
   void release_cover_buffers_();
   void cover_loop_();
-  void cover_task_();     // channel task
+  void cover_task_(uint16_t gen);  // channel task
   void cover_decode_();   // picture task
   void cover_detach_(CoverView &view);
   void cover_clear_views_();
@@ -1333,24 +1359,70 @@ class SimpleVideoPlayer : public Component
   // video session takes its frame slot, outputs, controls and index, and the read-ahead ring as much
   // as the prebuffer and the sound's lead need. Session ("media") buffers are kept after a video; the
   // pictures' are kept after a picture. Only when one side's request does not fit are the other
-  // side's idle buffers handed back.
+  // side's idle buffers handed back (the owner table below).
   bool plan_pool_();
-  /// From any task but the main loop: a piece for the media side; asks the main loop for the
-  /// pictures' if needed.
+  // The owner table of the pool's buffers taken on demand (the plan's fixed ones aside). A user takes
+  // from the pool; only when a piece does not fit are other users' idle buffers handed back, one
+  // group after the other in its row's order, and only while it still does not fit.
+  enum : uint8_t {
+    POOL_PICTURES = 1 << 0,  // the pictures' pages, files, decode buffer and the cover art's (main loop)
+    POOL_VIDEO = 1 << 1,     // read-ahead ring, compressed-frame slot, index (main loop, no video session)
+    POOL_DIRECT = 1 << 2,    // the display's decode buffer and the controls (main loop)
+    POOL_CANVAS = 1 << 3,    // the canvas output pair (main loop)
+    POOL_DESKTOP = 1 << 4,   // the desktop's cursors and USB transfers (release_desktop_(), no session)
+  };
+  enum : uint8_t {
+    POOL_USER_VIDEO,          // playback task: ring, sound block, frame slot, index
+    POOL_USER_DIRECT,         // playback task: the display's decode buffer
+    POOL_USER_CANVAS,         // playback task: the canvas pair
+    POOL_USER_STREAM_DIRECT,  // stream draw task (dashboard, desktop picture): the display's decode buffer
+    POOL_USER_STREAM_CANVAS,  // stream draw task: the canvas pair
+    POOL_USER_PICTURES,       // main loop: pictures and cover art
+    POOL_USER_DESKTOP,        // spice task: cursors, USB transfers
+    POOL_USERS,
+  };
+  static constexpr size_t POOL_STEPS = 4;
+  static constexpr uint8_t POOL_OWNERS[POOL_USERS][POOL_STEPS] = {
+      {POOL_PICTURES, POOL_DESKTOP, 0, 0},
+      {POOL_CANVAS, POOL_PICTURES, POOL_DESKTOP, 0},
+      {POOL_DIRECT, POOL_PICTURES, POOL_DESKTOP, 0},
+      {POOL_CANVAS, POOL_PICTURES, POOL_VIDEO, POOL_DESKTOP},
+      {POOL_DIRECT, POOL_PICTURES, POOL_VIDEO, POOL_DESKTOP},
+      {POOL_DIRECT | POOL_CANVAS, POOL_VIDEO, POOL_DESKTOP, 0},
+      {POOL_PICTURES, POOL_VIDEO, 0, 0},
+  };
+  /// A piece for this user: from the pool, else after its row's groups were handed back step by step.
+  uint8_t *pool_take_(size_t size, uint8_t user);
+  /// One step of the user's row: true when it was answered (worth trying the pool again).
+  bool pool_give_back_(uint8_t groups, uint8_t user);
+  /// Any task but the main loop: asks the main loop for the groups, waits at most 2 s; not answered by
+  /// then, the request is taken back (the main loop frees nothing for nobody).
+  bool pool_request_(uint8_t groups, uint8_t user);
+  /// Main loop: a waiting request for one of the groups; answered (the requester woken).
+  bool pool_wanted_(uint8_t groups) const;
+  void pool_answer_(uint8_t groups);
+  /// Main loop: the requests for the outputs and the video's buffers, each as soon as it can go.
+  void pool_service_();
+  /// Main loop: no video session uses the video's buffers (also none starting).
+  bool video_session_() const;
+  /// Main loop, the media lock held: the groups' outputs / the video's buffers back to the pool.
+  bool release_outputs_(uint8_t groups);
+  bool release_video_buffers_();
+  /// Main loop, for pictures and cover art: a step of their row, when nothing plays or streams.
+  bool give_back_media_(uint8_t groups);
+  /// From any task but the main loop: a piece for the video (the owner table's video row).
   uint8_t *media_alloc_(size_t size);
   /// Playback task: the read-ahead ring, the sound block and the compressed-frame slot of a session
   /// (the index is taken in open_file_(), only for a file's AVI). Ring and sound block are taken
   /// anew only when the size this session needs differs from the kept one's.
   bool acquire_session_buffers_();
+  /// One try from the pool alone; what it took goes back when one does not fit.
+  bool take_session_buffers_(uint32_t lead_ms, size_t ring_len);
   /// The display's decode buffer (and the controls) / the canvas output pair, kept once taken. Only
-  /// when it does not fit beside the other output, the main loop gives that back first.
+  /// when it does not fit, the owner table's row hands back (the other output first).
   bool ensure_direct_target_(bool with_target);
   bool ensure_canvas_outputs_();
-  uint8_t *output_alloc_(size_t size, uint8_t other);
-  /// Main loop: the media side's buffers back to the pool, when nothing plays or streams.
-  bool release_media_();
-  /// Main loop: what output_alloc_() asked for (an idle output back to the pool).
-  void handle_output_release_();
+  uint8_t *output_alloc_(size_t size, bool direct);
   size_t canvas_output_size_() const;
 
   //========================================================================
@@ -1375,14 +1447,6 @@ class SimpleVideoPlayer : public Component
   SemaphoreHandle_t media_lock_{nullptr};      // taking or giving back media buffers
   uint8_t *ring_buf_{nullptr};                 // the read-ahead ring (pool)
   uint32_t *index_buf_{nullptr};               // a file's index (pool), kept with the ring
-  std::atomic<bool> pool_reclaim_req_{false};  // media side waits for the pictures' buffers
-  /// Any task but the main loop: the pictures' buffers back to the pool, waited for at most 2 s.
-  void reclaim_pictures_();
-  enum : uint8_t { RELEASE_CANVAS = 1, RELEASE_DIRECT = 2 };
-  std::atomic<uint8_t> output_release_req_{0};  // an output waits for the other one's memory
-#ifdef SVP_STREAM
-  std::atomic<bool> output_release_stream_{false};  // the stream's draw task asked for it
-#endif
   // The shares of the pool (plan_pool_()).
   size_t ring_room_{0};         // what is left for the read-ahead ring and the sound block together
   size_t ring_size_{0};         // the read-ahead ring taken: prebuffer + the session's lead
@@ -1504,7 +1568,8 @@ class SimpleVideoPlayer : public Component
   size_t sound_block_len_{0};
   uint32_t sound_lead_ms_{0};  // the lead the block and its ring are sized for
   size_t sound_ring_len_{0};   // the ring made over it
-  bool sound_block_for_(uint32_t lead_ms);
+  /// From the pool alone (the session start hands back when it does not fit); taken: newly taken.
+  bool sound_block_for_(uint32_t lead_ms, bool *taken);
   bool sound_ring_for_(bool compressed);
   uint8_t source_audio_channels_{0};              // Fixed source channel count (mirrors AUDIO_SOURCE_CHANNELS)
   uint8_t speaker_audio_channels_{1};             // Number of channels speaker expects
@@ -1814,6 +1879,7 @@ class SimpleVideoPlayer : public Component
     size_t length{0};
     size_t chunk{0};
     bool decoding{false};  // handed to the picture task
+    bool remote{false};    // Home Assistant's, fetched by the channel task (pic_fetch_)
   };
   // What the picture task decodes, and into what.
   struct PictureJob {
@@ -1855,6 +1921,9 @@ class SimpleVideoPlayer : public Component
   int current_image_{-1};
   int pic_wanted_{-1};                   // requested, not read yet
   PictureRead pic_read_;
+#ifdef SVP_CHANNEL_LIST
+  ChannelFetch pic_fetch_;  // a picture of Home Assistant's into its file (pic_read_.remote)
+#endif
   PicFile pic_files_[PIC_FILE_COUNT];
   int pic_direction_{1};        // of the last step: the next picture read ahead
   uint8_t pic_preload_tries_{0};  // neighbours of the shown picture tried (each once)
@@ -2539,32 +2608,19 @@ class SimpleVideoPlayer : public Component
   }
   Waiter reader_wait_;
   Waiter audio_wait_;
-  // The tasks waiting in media_alloc_()/output_alloc_()/desktop_buffers_take_() for the main loop to
-  // free pool memory (playback, stream draw, spice): each one is woken.
-  static constexpr size_t ALLOC_WAITERS = 4;
-  std::atomic<TaskHandle_t> alloc_waiters_[ALLOC_WAITERS]{};
-  /// The requesting task blocks until the main loop has answered (done() true), at most 2 s.
-  template<typename F> void wait_alloc_answer_(F done) {
-    const TaskHandle_t self = xTaskGetCurrentTaskHandle();
-    std::atomic<TaskHandle_t> *slot = nullptr;
-    for (auto &waiter : this->alloc_waiters_) {
-      TaskHandle_t none = nullptr;
-      if (waiter.compare_exchange_strong(none, self, std::memory_order_acq_rel)) {
-        slot = &waiter;
-        break;
-      }
-    }
-    App.wake_loop_threadsafe();
-    const uint32_t start = millis();
-    for (uint32_t waited = 0; !done() && waited < 2000; waited = millis() - start)
-      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000 - waited));
-    if (slot != nullptr)
-      slot->store(nullptr, std::memory_order_release);
-  }
-  /// Main loop: a pool request answered.
-  void answer_alloc_() {
-    for (auto &waiter : this->alloc_waiters_) {
-      if (TaskHandle_t task = waiter.load(std::memory_order_acquire))
+  // The tasks waiting in pool_request_() for the main loop to hand back pool memory (playback, stream
+  // draw, spice), a slot each: the groups asked for, 0 once answered or taken back.
+  struct PoolRequest {
+    std::atomic<TaskHandle_t> task{nullptr};
+    std::atomic<uint8_t> user{0};
+    std::atomic<uint8_t> groups{0};
+  };
+  static constexpr size_t POOL_REQUESTS = 4;
+  PoolRequest pool_requests_[POOL_REQUESTS];
+  /// Main loop: this request answered, if it still asks for these groups.
+  static void pool_answered_(PoolRequest &request, uint8_t groups) {
+    if (request.groups.compare_exchange_strong(groups, 0, std::memory_order_acq_rel)) {
+      if (TaskHandle_t task = request.task.load(std::memory_order_acquire))
         xTaskNotifyGive(task);
     }
   }

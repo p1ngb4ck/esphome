@@ -79,6 +79,78 @@ bool SimpleVideoPlayer::channel_request_(uint8_t cmd, uint16_t index) {
   return xQueueSend(this->channel_q_, &request, 0) == pdTRUE;
 }
 
+bool SimpleVideoPlayer::fetch_start_(ChannelFetch &fetch, uint8_t cmd, uint8_t *into, size_t cap) {
+  if ((fetch.state.load(std::memory_order_acquire) & 7) != FETCH_IDLE)
+    return false;
+  if (++fetch.gen == 0)
+    fetch.gen = 1;
+  const uint32_t base = static_cast<uint32_t>(fetch.gen) << 3;
+  fetch.into.store(into, std::memory_order_relaxed);
+  fetch.cap.store(cap, std::memory_order_relaxed);
+  fetch.state.store(base | FETCH_QUEUED, std::memory_order_release);
+  if (this->channel_request_(cmd, fetch.gen))
+    return true;
+  fetch.state.store(base | FETCH_IDLE, std::memory_order_release);
+  return false;
+}
+
+bool SimpleVideoPlayer::fetch_done_(ChannelFetch &fetch) {
+  const uint32_t done = static_cast<uint32_t>(fetch.gen) << 3 | FETCH_DONE;
+  if (fetch.state.load(std::memory_order_acquire) != done)
+    return false;
+  fetch.state.store(done & ~7u, std::memory_order_release);  // idle
+  return true;
+}
+
+bool SimpleVideoPlayer::fetch_drop_(ChannelFetch &fetch) {
+  uint32_t state = fetch.state.load(std::memory_order_acquire);
+  while (true) {
+    const uint32_t base = state & ~7u;
+    switch (state & 7) {
+      case FETCH_QUEUED:
+        // Not writing yet: it never will (fetch_end_() and the write's start see the change).
+        if (fetch.state.compare_exchange_weak(state, base | FETCH_IDLE, std::memory_order_acq_rel))
+          return true;
+        continue;
+      case FETCH_WRITING:
+        if (fetch.state.compare_exchange_weak(state, base | FETCH_STOP, std::memory_order_acq_rel))
+          return false;
+        continue;
+      case FETCH_STOP:
+        return false;  // the channel task stops after its block
+      case FETCH_DONE:
+        fetch.state.store(base | FETCH_IDLE, std::memory_order_release);  // its result unused
+        return true;
+      default:
+        return true;
+    }
+  }
+}
+
+bool SimpleVideoPlayer::fetch_begin_(ChannelFetch &fetch, uint16_t gen, uint8_t **into, size_t *cap) {
+  if (fetch.state.load(std::memory_order_acquire) != (static_cast<uint32_t>(gen) << 3 | FETCH_QUEUED))
+    return false;
+  *into = fetch.into.load(std::memory_order_relaxed);
+  *cap = fetch.cap.load(std::memory_order_relaxed);
+  return true;
+}
+
+void SimpleVideoPlayer::fetch_end_(ChannelFetch &fetch, uint16_t gen, bool ok, size_t len) {
+  const uint32_t base = static_cast<uint32_t>(gen) << 3;
+  uint32_t state = fetch.state.load(std::memory_order_acquire);
+  if (state != (base | FETCH_QUEUED) && state != (base | FETCH_WRITING)) {
+    if (state == (base | FETCH_STOP))
+      fetch.state.store(base | FETCH_IDLE, std::memory_order_release);  // stopped: the buffer is the main loop's
+    return;  // dropped
+  }
+  // Read by the main loop only at FETCH_DONE; a later request of the same fetch runs on this task after.
+  fetch.len = len;
+  fetch.ok = ok;
+  if (!fetch.state.compare_exchange_strong(state, base | FETCH_DONE, std::memory_order_acq_rel) &&
+      state == (base | FETCH_STOP))
+    fetch.state.store(base | FETCH_IDLE, std::memory_order_release);
+}
+
 // For a query string: everything but unreserved characters percent-encoded.
 static std::string url_encoded(const char *text) {
   static const char *const HEX = "0123456789ABCDEF";
@@ -413,7 +485,7 @@ void SimpleVideoPlayer::channel_task_loop_() {
       this->channel_http_("/play", payload.c_str(), nullptr, nullptr);
 #ifdef SVP_PICTURES
     } else if (request.cmd == CHANNEL_CMD_IMAGE) {
-      this->image_task_();
+      this->image_task_(request.index);
 #endif
     } else if (request.cmd == CHANNEL_CMD_OPTIONS_GET) {
       this->options_get_task_();
@@ -421,7 +493,7 @@ void SimpleVideoPlayer::channel_task_loop_() {
       this->options_set_task_();
 #ifdef SVP_AUDIO_COVER
     } else if (request.cmd == CHANNEL_CMD_COVER) {
-      this->cover_task_();
+      this->cover_task_(request.index);
 #endif
 #ifdef SVP_KEYBOARD
     } else if (request.cmd == CHANNEL_CMD_KEYBOARD_LIST) {
@@ -519,24 +591,24 @@ void SimpleVideoPlayer::ha_browse_task_() {
 #ifdef SVP_PICTURES
 bool SimpleVideoPlayer::remote_image_(const ImageEntry &entry) { return entry.path.starts_with("media-source://"); }
 
-// Channel task: the picture of pic_read_ into its file, fitted by the relay to the display and to the
-// file's room; pic_read_ stays the main loop's but for what is set here before done.
-void SimpleVideoPlayer::image_task_() {
+// Channel task: the picture asked for (pic_fetch_) into its file, fitted by the relay to the display
+// and to the file's room; the result goes to the main loop through pic_fetch_ (pic_read_ is its).
+void SimpleVideoPlayer::image_task_(uint16_t gen) {
+  uint8_t *into = nullptr;
+  size_t cap = 0;
+  if (!fetch_begin_(this->pic_fetch_, gen, &into, &cap))
+    return;  // dropped while queued
   xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
   const std::string id = this->ha_texts_->picture_id.c_str();
   xSemaphoreGive(this->channel_lock_);
-  PictureRead &read = this->pic_read_;
   char query[64];
   snprintf(query, sizeof(query), "&w=%d&h=%d&max=%u", static_cast<int>(this->pic_remote_w_),
-           static_cast<int>(this->pic_remote_h_), static_cast<unsigned>(read.limit - 1));
+           static_cast<int>(this->pic_remote_h_), static_cast<unsigned>(cap - 1));
   const std::string path = "/image?id=" + url_encoded(id.c_str()) + query;
   size_t len = 0;
-  const bool ok =
-      this->channel_http_(path.c_str(), nullptr, nullptr, &len, read.file->data, read.limit, RELAY_SLOW_TIMEOUT_MS);
-  read.length = ok ? len : 0;
-  read.failed = !ok || len == 0 || len >= read.limit;
-  std::atomic_thread_fence(std::memory_order_release);
-  read.done = true;
+  const bool ok = this->channel_http_(path.c_str(), nullptr, nullptr, &len, into, cap, RELAY_SLOW_TIMEOUT_MS,
+                                      &this->pic_fetch_, gen);
+  fetch_end_(this->pic_fetch_, gen, ok, len);
 }
 #endif
 
@@ -707,7 +779,8 @@ void SimpleVideoPlayer::desktop_relay_stop_() {
 #endif
 
 bool SimpleVideoPlayer::channel_http_(const char *path, const char *body, char **response, size_t *response_len,
-                                      uint8_t *into, size_t into_cap, uint32_t timeout_ms) {
+                                      uint8_t *into, size_t into_cap, uint32_t timeout_ms, ChannelFetch *fetch,
+                                      uint16_t gen) {
   if (this->channel_http_request_ == nullptr)
     return false;
   const uint32_t timeout = timeout_ms != 0 ? timeout_ms : this->channel_http_request_->get_timeout();
@@ -728,10 +801,25 @@ bool SimpleVideoPlayer::channel_http_(const char *path, const char *body, char *
   bool ok = status == 200;
   char *buf = nullptr;
   size_t used = 0;
+  // A fetch writes only while it is still asked for: dropped meanwhile, nothing is written; asked to
+  // stop, it ends after the block it read.
+  const uint32_t writing = static_cast<uint32_t>(gen) << 3 | FETCH_WRITING;
+  bool dropped = false;
+  if (ok && into != nullptr && fetch != nullptr) {
+    uint32_t queued = static_cast<uint32_t>(gen) << 3 | FETCH_QUEUED;
+    dropped = !fetch->state.compare_exchange_strong(queued, writing, std::memory_order_acq_rel);
+    ok = !dropped;
+  }
+  auto stopped = [&]() {
+    dropped = dropped || (fetch != nullptr && fetch->state.load(std::memory_order_acquire) != writing);
+    return dropped;
+  };
   // Read till the whole answer is there; what does not fit fails.
   auto read_into = [&](uint8_t *dst, size_t room) -> int {
     uint32_t last = millis();
     while (true) {
+      if (stopped())
+        return -1;
       const int n = container->read(dst, room);
       switch (http_request::http_read_loop_result(n, last, timeout, container->is_read_complete())) {
         case http_request::HttpReadLoopResult::DATA:
@@ -788,7 +876,8 @@ bool SimpleVideoPlayer::channel_http_(const char *path, const char *body, char *
   container->end();
 
   if (!ok) {
-    ESP_LOGW(TAG, "%s%s failed (HTTP %d)", this->channel_url_.c_str(), path, status);
+    if (!dropped)
+      ESP_LOGW(TAG, "%s%s failed (HTTP %d)", this->channel_url_.c_str(), path, status);
     heap_caps_free(buf);
     return false;
   }

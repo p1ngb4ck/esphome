@@ -27,7 +27,7 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 | # | Issue | Status |
 |---|---|---|
 | B10 | `channel_http_` response buffer outside the pool: PSRAM heap, `heap_caps_realloc` up to 256 KiB per request (CL). Checked 2026-10-17 | CODE |
-| B11 | `pool_reclaim_req_` stays set after the 2 s `wait_alloc_answer_` timeout: the main loop frees the pictures/cover buffers later for nobody (the output request is taken back already). Checked 2026-10-17 | CODE |
+| B11 | `pool_reclaim_req_` stays set after the 2 s `wait_alloc_answer_` timeout: the main loop frees the pictures/cover buffers later for nobody (the output request is taken back already). Checked 2026-10-17 | TO TEST: owner table, a request not answered in 2 s is taken back by the requester (2026-10-17) |
 
 ## C. Rule violations (speakers, LVGL, hot path)
 
@@ -41,7 +41,7 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 
 | # | Issue | Status |
 |---|---|---|
-| D2 | Reclaim waits (2 s) are shorter than an HA picture fetch (15 s); a video start during one can fail with BUFFER_ALLOCATION_FAILED | CODE |
+| D2 | Reclaim waits (2 s) are shorter than an HA picture fetch (15 s); a video start during one can fail with BUFFER_ALLOCATION_FAILED | TO TEST: the fetch is dropped (not writing yet) or stopped after its block, the video starts (Olli, 2026-10-17) |
 | D4 | `dev_lock_` held across blocking socket sends while the main loop waits portMAX on it (U:592-609, 1190-1205 vs 307, 331) | CODE |
 | D6 | Plain fields shared across tasks without atomics: `repeat_` (enum, main loop + controls), `pic_read_` fields | CODE |
 | D7 | `start_req_` not reset when the playback ends early: loop may still prerender, pause LVGL, fire on_started | CODE (2026-10-16): the playback task sets 1 and waits for 2 while `playing()`, at most 2 s; a stop in that window, or a main loop blocked over 2 s (A2), leaves 1, and the next loop pass prerenders, pauses LVGL (DSI direct) and fires on_started for a session already stopped; the DSI block below gives LVGL back once the task is gone. Only `start_playback_` resets it. Not changed |
@@ -70,5 +70,7 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 Items 1-5 (ring by need, pictures with 2 pages, cover on demand, one sound block, DSI direct) are
 implemented and wait for Olli's test; the controls snapshots item is struck (Olli, 2026-10-17).
 
-1. Buffer manager: one owner table (who holds what, by mode), handover by mode switch only, no
-   all-or-nothing `release_media_`; fix B11 and D2 there.
+1. Buffer manager: one owner table, handover only when room is missing (Olli: always the first
+   rule), no all-or-nothing `release_media_`; fix B11 and D2 there. TO TEST: implemented 2026-10-17
+   (architecture.md section 9). The desktop no longer gives back pictures and video at its start
+   when its buffers fit.

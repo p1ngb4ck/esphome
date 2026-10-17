@@ -66,21 +66,19 @@ deadlock); draw task `output_lock_` -> `spice_cursor_lock_`; `output_lock_` -> `
 
 | Flag | Set by | Serviced by (main loop unless noted) | Wait |
 |---|---|---|---|
-| `pool_reclaim_req_` | `media_alloc_` S:2155, `acquire_session_buffers_` S:2177, `desktop_buffers_take_` SP:1533 | `pictures_loop_` P:151-173: in-flight read/decode or cover fetch finishes, then `release_cover_buffers_` + `release_picture_buffers_`, `answer_alloc_` | `wait_alloc_answer_` <=2 s |
-| `output_release_req_` | `output_alloc_` S:2214-2217 | `handle_output_release_` S:2292 | <=2 s |
-| `media_release_req_` | `desktop_buffers_take_` SP:1537 | loop S:257-261 -> `release_media_` | <=2 s |
-| `alloc_waiter_` | `wait_alloc_answer_` H:2110 (single slot) | `answer_alloc_` H:2119 | – |
+| `pool_requests_[4]` (task, user, groups) | `pool_request_()`: a task's step of the owner table (`pool_take_()`, section 9) | `pool_service_()` (loop step 2: video's buffers, outputs) and `pictures_loop_` (pictures + cover: in-flight read/decode finishes, an HA fetch is dropped or stopped, then `release_cover_buffers_` + `release_picture_buffers_`); `pool_answered_()` sets 0 and wakes | <=2 s, then taken back (set 0 by the requester: nothing freed for nobody) |
+| `pic_fetch_` / `cover_fetch_` (`ChannelFetch`: generation << 3, IDLE/QUEUED/WRITING/STOP/DONE) | main loop `fetch_start_()` (QUEUED, the generation as the request's index) | channel task: QUEUED -> WRITING after the relay answered, before the first block; result -> DONE; main loop `fetch_done_()` takes it. `fetch_drop_()`: QUEUED -> IDLE (never written), WRITING -> STOP (the task ends after its block, -> IDLE) | – |
 | `start_req_` 0/1/2 | playback S:1190 | loop S:291-306: prerender controls, pause LVGL, on_started, ->2 | <=2 s |
 | `advance_req_` | playback EOF S:1315 | loop S:279-287 | – |
 | `audio_advance_req_` | audio task S:3225, media player callback CL:101 | loop S:249-254 | – |
-| `cover_job_`/`cover_decoded_`, `cover_fetched_` | `cover_loop_` / channel task | picture task / `cover_loop_` (polled) | – |
+| `cover_job_`/`cover_decoded_` | `cover_loop_` | picture task / `cover_loop_` (polled) | – |
 | `pic_decoded_`, `pic_read_.done` | picture task / channel task / storage callbacks | `pictures_loop_` (polled) | – |
 | `stream_drop_sender_` | spice SP:1486 | net task R:390 | spice polls 20 ms, <=3 s |
 
 ## 5. Main loop order (`loop()` S:225-443)
 
-1 file readers `service()` · 2 `handle_output_release_` · 3 finished/error/state callbacks ·
-4 audio callbacks + `audio_advance_` · 5 `media_release_req_`, SPICE sound claim/callbacks ·
+1 file readers `service()` · 2 `pool_service_` · 3 finished/error/state callbacks ·
+4 audio callbacks + `audio_advance_` · 5 SPICE sound claim/callbacks ·
 6 `run_pending_start_` · 7 `channel_loop_`/`ha_loop_` · 8 `pictures_loop_` · 9 `cover_loop_` ·
 10 `advance_req_` · 11 `controls_loop_` · 12 `start_req_==1` (prerender, pause LVGL) ·
 13 DSI pause/unpause, paused UI, stream audio timeout, `stream_output_ok_` ·
@@ -181,15 +179,26 @@ what the room leaves (`max_prebuffer()`).
 | desktop cursors | ~300 KiB | session start, `release_desktop_` | cursor shapes | no |
 | USB transfers per slot | ~550 KiB at link_open + ISO | link open, `release_buffers` | USB data | no |
 
-Reclaim/handover (as coded):
-- `media_alloc_` (S:2150, tasks only): pool -> pictures/cover reclaim (main loop) -> `release_desktop_`.
-- `acquire_session_buffers_` (S:2170): requests the pictures/cover reclaim first when a media buffer is
-  missing (one free stretch for the ring), then slot -> index -> ring.
-- `output_alloc_` (S:2207): pool -> main loop frees the other output (`handle_output_release_`) ->
-  `media_alloc_`.
-- `release_media_` (S:2344, main loop): frees ring/slot/index/outputs/controls when no video runs;
-  then `release_desktop_`. Called by `picture_alloc_` P:494 and `cover_alloc_` C:59.
-- `desktop_buffers_take_` (SP:1528): pictures/cover reclaim + `media_release_req_`, then cursors.
+Handover: the owner table (`POOL_OWNERS`, H). Every user takes from the pool; only when a piece does
+not fit are other users' idle buffers handed back, group by group in its row's order, and only while
+it still does not fit (`pool_take_()`). Groups: pictures (+ cover art), video (ring, slot, index),
+direct (decode buffer + controls), canvas (pair), desktop (cursors, USB).
+
+| User | Steps |
+|---|---|
+| video (playback: ring, sound block, slot, index) | pictures, desktop |
+| direct / canvas output (playback) | the other output, pictures, desktop |
+| direct / canvas output (stream draw: dashboard, desktop picture) | the other output, pictures, video, desktop |
+| pictures and cover art (main loop) | outputs, video, desktop; only when nothing plays or streams |
+| desktop (spice task: cursors, USB) | pictures, video |
+
+The video's buffers go only while no video session runs or starts (`video_session_()`); the stream
+never takes a file's output. A task's step is a request to the main loop (`pool_request_()`); the
+desktop's own buffers are given back by `release_desktop_()` on the asking task. The session start
+takes ring, sound block and slot in one try from the pool (`take_session_buffers_()`); one not
+fitting, what the try took goes back before the step, so the ring finds one free stretch. An HA
+picture or cover fetch in flight is dropped (not writing yet) or stopped after its block
+(`fetch_drop_()`), so a video start never waits for it.
 
 Objects of svp's own, a pool piece each from the pool's end (`alloc_top`: they never split the media
 buffers' stretch), counted in `plan_pool_()` (`psram_make`, `PoolAllocator`):

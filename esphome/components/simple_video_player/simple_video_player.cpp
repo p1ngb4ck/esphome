@@ -283,7 +283,7 @@ void SimpleVideoPlayer::loop() {
   if (this->audio_file_reader_)
     this->audio_file_reader_->service();
 #endif
-  this->handle_output_release_();
+  this->pool_service_();
   if (this->finished_pending_.exchange(false, std::memory_order_acq_rel))
     this->on_finished_callbacks_.call();
   const int16_t error = this->error_pending_.exchange(-1, std::memory_order_acq_rel);
@@ -310,11 +310,6 @@ void SimpleVideoPlayer::loop() {
   if (this->sound_takeover_req_.exchange(false, std::memory_order_acq_rel))
     this->sound_take_over_();
 #ifdef SVP_SPICE
-  if (this->media_release_req_.load(std::memory_order_acquire)) {
-    this->release_media_();
-    this->media_release_req_.store(false, std::memory_order_release);
-    this->answer_alloc_();
-  }
   if (this->spice_sound_claim_.exchange(false, std::memory_order_acq_rel))
     this->spice_sound_take_();
   if (this->spice_changed_.exchange(false, std::memory_order_acq_rel))
@@ -1590,9 +1585,8 @@ void SimpleVideoPlayer::playback_loop_() {
 
   // Release any in-flight BufferedFileReader wait before close_file_() tears the reader down.
   this->close_file_();
-  // The session's buffers are not freed here: they stay for the next playback, until a reclaim
-  // (release_media_()) gives them back to the pool; an output also when the other one needs its
-  // room (handle_output_release_()).
+  // The session's buffers are not freed here: they stay for the next playback, until another user
+  // lacks room and the owner table hands them back (pool_take_()).
 
 #ifdef USE_AUDIO
   this->end_session_audio_();
@@ -2421,24 +2415,170 @@ void SimpleVideoPlayer::set_prebuffer(uint32_t ms) {
   this->max_audio_latency_ms_ = this->latency_limit_ms_(ms);
 }
 
-void SimpleVideoPlayer::reclaim_pictures_() {
-  this->pool_reclaim_req_.store(true, std::memory_order_release);
-  this->wait_alloc_answer_([this]() { return !this->pool_reclaim_req_.load(std::memory_order_acquire); });
+uint8_t *SimpleVideoPlayer::pool_take_(size_t size, uint8_t user) {
+  uint8_t *piece = this->pool_.alloc(size);
+  for (size_t step = 0; piece == nullptr && step < POOL_STEPS && POOL_OWNERS[user][step] != 0; step++) {
+    if (this->pool_give_back_(POOL_OWNERS[user][step], user))
+      piece = this->pool_.alloc(size);
+  }
+  return piece;
+}
+
+bool SimpleVideoPlayer::pool_give_back_(uint8_t groups, uint8_t user) {
+  if (user == POOL_USER_PICTURES)
+    return this->give_back_media_(groups);  // main loop
+  if (groups == POOL_DESKTOP) {
+#ifdef SVP_SPICE
+    return this->release_desktop_();  // any task, under its own locks
+#else
+    return false;
+#endif
+  }
+  if (groups == POOL_PICTURES) {
+#ifdef SVP_PICTURES
+    if (!this->pic_ready_)
+      return false;
+#else
+    return false;
+#endif
+  }
+  return this->pool_request_(groups, user);
+}
+
+bool SimpleVideoPlayer::pool_request_(uint8_t groups, uint8_t user) {
+  const TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  PoolRequest *request = nullptr;
+  for (auto &slot : this->pool_requests_) {
+    TaskHandle_t none = nullptr;
+    if (slot.task.compare_exchange_strong(none, self, std::memory_order_acq_rel)) {
+      request = &slot;
+      break;
+    }
+  }
+  if (request == nullptr)
+    return false;
+  ulTaskNotifyTake(pdTRUE, 0);  // a stale wake of an earlier answer
+  request->user.store(user, std::memory_order_relaxed);
+  request->groups.store(groups, std::memory_order_release);
+  App.wake_loop_threadsafe();
+  const uint32_t start = millis();
+  for (uint32_t waited = 0; request->groups.load(std::memory_order_acquire) != 0 && waited < 2000;
+       waited = millis() - start)
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000 - waited));
+  // Not answered in time: taken back, the main loop frees nothing for nobody.
+  const bool answered = request->groups.exchange(0, std::memory_order_acq_rel) == 0;
+  request->task.store(nullptr, std::memory_order_release);
+  return answered;
+}
+
+bool SimpleVideoPlayer::pool_wanted_(uint8_t groups) const {
+  for (const auto &request : this->pool_requests_) {
+    if ((request.groups.load(std::memory_order_acquire) & groups) != 0)
+      return true;
+  }
+  return false;
+}
+
+void SimpleVideoPlayer::pool_answer_(uint8_t groups) {
+  for (auto &request : this->pool_requests_) {
+    const uint8_t asked = request.groups.load(std::memory_order_acquire);
+    if ((asked & groups) != 0)
+      pool_answered_(request, asked);
+  }
+}
+
+bool SimpleVideoPlayer::video_session_() const {
+  const PlayerState state = this->state_.load(std::memory_order_acquire);
+  bool audio_file = false;
+#ifdef SVP_AUDIO_FILES
+  audio_file = this->audio_session_.load(std::memory_order_acquire);
+#endif
+  if ((!audio_file && (state == PlayerState::PLAYING || state == PlayerState::PAUSED)) ||
+      this->picture_session_busy_() || this->start_pending_.load(std::memory_order_acquire))
+    return true;
+#ifdef SVP_STREAM
+  if (this->stream_avi_.load(std::memory_order_acquire))
+    return true;
+#endif
+  return false;
+}
+
+// Main loop. An output only when nothing draws into it: the stream draws under output_lock_.
+void SimpleVideoPlayer::pool_service_() {
+  for (auto &request : this->pool_requests_) {
+    const uint8_t groups = request.groups.load(std::memory_order_acquire);
+    if ((groups & (POOL_VIDEO | POOL_DIRECT | POOL_CANVAS)) == 0)
+      continue;
+    if ((groups & POOL_VIDEO) != 0) {
+      // In use by a video session (also one starting): not handed back.
+      if (!this->video_session_()) {
+        if (xSemaphoreTake(this->media_lock_, 0) != pdTRUE)
+          continue;  // next loop
+        this->release_video_buffers_();
+        xSemaphoreGive(this->media_lock_);
+      }
+      pool_answered_(request, groups);
+      continue;
+    }
+#ifdef SVP_STREAM
+    // The stream never takes a file's output, also not while its session starts or ends: it goes
+    // without (its alloc fails, the frame is dropped).
+    const uint8_t user = request.user.load(std::memory_order_relaxed);
+    if ((user == POOL_USER_STREAM_DIRECT || user == POOL_USER_STREAM_CANVAS) &&
+        (this->picture_session_busy_() || this->start_pending_.load(std::memory_order_acquire))) {
+      pool_answered_(request, groups);
+      continue;
+    }
+    if (this->output_lock_ != nullptr && xSemaphoreTake(this->output_lock_, 0) != pdTRUE)
+      continue;  // next loop
+#endif
+    if (xSemaphoreTake(this->media_lock_, 0) == pdTRUE) {
+      this->release_outputs_(groups);
+      xSemaphoreGive(this->media_lock_);
+      pool_answered_(request, groups);
+    }
+#ifdef SVP_STREAM
+    if (this->output_lock_ != nullptr)
+      xSemaphoreGive(this->output_lock_);
+#endif
+  }
+}
+
+// Main loop, for pictures and cover art: only when nothing plays or streams.
+bool SimpleVideoPlayer::give_back_media_(uint8_t groups) {
+  if (this->video_session_())
+    return false;
+#ifdef SVP_STREAM
+  if (this->stream_connected_.load(std::memory_order_acquire))
+    return false;
+#endif
+  if (groups == POOL_DESKTOP) {
+#ifdef SVP_SPICE
+    return this->release_desktop_();
+#else
+    return false;
+#endif
+  }
+#ifdef SVP_STREAM
+  if (this->output_lock_ != nullptr && xSemaphoreTake(this->output_lock_, 0) != pdTRUE)
+    return false;  // a rectangle is being drawn
+#endif
+  bool released = false;
+  if (xSemaphoreTake(this->media_lock_, 0) == pdTRUE) {
+    released = (groups & POOL_VIDEO) != 0 ? this->release_video_buffers_() : this->release_outputs_(groups);
+    xSemaphoreGive(this->media_lock_);
+  }
+#ifdef SVP_STREAM
+  if (this->output_lock_ != nullptr)
+    xSemaphoreGive(this->output_lock_);
+#endif
+  if (released)
+    ESP_LOGI(TAG, "Video buffers handed back to the pool for pictures");
+  return released;
 }
 
 uint8_t *SimpleVideoPlayer::media_alloc_(size_t size) {
-  uint8_t *piece = this->pool_.alloc(size);
-#ifdef SVP_PICTURES
-  if (piece == nullptr && this->pic_ready_) {
-    // The pictures' buffers, handed back by the main loop once nothing of theirs is in flight.
-    this->reclaim_pictures_();
-    piece = this->pool_.alloc(size);
-  }
-#endif
-#ifdef SVP_SPICE
-  if (piece == nullptr && this->release_desktop_())
-    piece = this->pool_.alloc(size);
-#endif
+  uint8_t *piece = this->pool_take_(size, POOL_USER_VIDEO);
   if (piece == nullptr)
     ESP_LOGE(TAG, "PSRAM pool: no room for %zu bytes (%zu of %zu used, largest free %zu)", size, this->pool_.used(),
              this->pool_.size(), this->pool_.largest_free());
@@ -2452,17 +2592,6 @@ bool SimpleVideoPlayer::acquire_session_buffers_() {
   lead_ms = this->audio_lead_us_ / 1000;
 #endif
   const size_t ring_len = ring_bytes_(this->prebuffer_ms_.load(std::memory_order_relaxed) + lead_ms);
-#ifdef SVP_PICTURES
-  // Pictures and cover art give their buffers back first: the video's come from one free stretch.
-  bool missing = this->ring_buf_ == nullptr || this->ring_size_ != ring_len;
-  for (auto &slot : this->frame_slots_)
-    missing = missing || slot.data == nullptr;
-#ifdef USE_AUDIO
-  missing = missing || this->sound_block_len_ != this->sound_bytes_(lead_ms);
-#endif
-  if (missing && this->pic_ready_)
-    this->reclaim_pictures_();
-#endif
   if (this->ring_buf_ != nullptr && this->ring_size_ != ring_len) {
     // Another size than the kept ring's: given back before the new one is taken (no file is open).
     xSemaphoreTake(this->media_lock_, portMAX_DELAY);
@@ -2473,18 +2602,58 @@ bool SimpleVideoPlayer::acquire_session_buffers_() {
     this->ring_size_ = 0;
     xSemaphoreGive(this->media_lock_);
   }
+  // From the pool; only when it does not fit, what this start took goes back and the owner table's
+  // video row hands back step by step: the video's buffers come from one free stretch.
+  bool ok = this->take_session_buffers_(lead_ms, ring_len);
+  for (size_t step = 0; !ok && step < POOL_STEPS && POOL_OWNERS[POOL_USER_VIDEO][step] != 0; step++) {
+    if (this->pool_give_back_(POOL_OWNERS[POOL_USER_VIDEO][step], POOL_USER_VIDEO))
+      ok = this->take_session_buffers_(lead_ms, ring_len);
+  }
+  if (!ok) {
+    ESP_LOGE(TAG, "PSRAM pool: no room for the video's buffers (%zu of %zu used, largest free %zu)",
+             this->pool_.used(), this->pool_.size(), this->pool_.largest_free());
+    return false;
+  }
+  if (!this->file_reader_)
+    this->file_reader_ = psram_make<BufferedFileReader>();
+  if (!this->file_reader_)
+    return false;
+  if (!this->file_reader_->has_ring())
+    this->file_reader_->set_ring(this->ring_buf_, this->ring_size_);
+  return true;
+}
+
+bool SimpleVideoPlayer::take_session_buffers_(uint32_t lead_ms, size_t ring_len) {
+  bool sound_taken = false;
 #ifdef USE_AUDIO
-  if (!this->sound_block_for_(lead_ms))
+  if (!this->sound_block_for_(lead_ms, &sound_taken))
     return false;
 #endif
-  // Taken without media_lock_ (media_alloc_() may wait for the main loop, which needs the lock to
-  // give an output back), set under it. Nothing else sets these while this session starts.
+  // Taken without media_lock_, set under it. Nothing else sets these while this session starts.
   uint8_t *slots[FRAME_SLOT_COUNT]{};
+  bool ok = true;
   for (size_t i = 0; i < FRAME_SLOT_COUNT; i++) {
-    if (this->frame_slots_[i].data == nullptr)
-      slots[i] = this->media_alloc_(this->frame_bytes_);
+    if (ok && this->frame_slots_[i].data == nullptr) {
+      slots[i] = this->pool_.alloc(this->frame_bytes_);
+      ok = slots[i] != nullptr;
+    }
   }
-  uint8_t *ring = this->ring_buf_ == nullptr ? this->media_alloc_(ring_len) : nullptr;
+  uint8_t *ring = ok && this->ring_buf_ == nullptr ? this->pool_.alloc(ring_len) : nullptr;
+  ok = ok && (this->ring_buf_ != nullptr || ring != nullptr);
+  if (!ok) {
+    // One did not fit: what this try took goes back (the next try takes it after the others).
+    for (auto *slot : slots)
+      this->pool_.free(slot);
+    this->pool_.free(ring);
+#ifdef USE_AUDIO
+    if (sound_taken) {
+      this->pool_.free(this->sound_block_);
+      this->sound_block_ = nullptr;
+      this->sound_block_len_ = 0;
+    }
+#endif
+    return false;
+  }
   xSemaphoreTake(this->media_lock_, portMAX_DELAY);
   for (size_t i = 0; i < FRAME_SLOT_COUNT; i++) {
     if (slots[i] != nullptr) {
@@ -2496,39 +2665,23 @@ bool SimpleVideoPlayer::acquire_session_buffers_() {
     this->ring_buf_ = ring;
     this->ring_size_ = ring_len;
   }
-  bool ok = this->ring_buf_ != nullptr;
-  for (auto &slot : this->frame_slots_)
-    ok = ok && slot.data != nullptr;
   xSemaphoreGive(this->media_lock_);
-  if (!ok)
-    return false;
-  if (!this->file_reader_)
-    this->file_reader_ = psram_make<BufferedFileReader>();
-  if (!this->file_reader_)
-    return false;
-  if (!this->file_reader_->has_ring())
-    this->file_reader_->set_ring(this->ring_buf_, this->ring_size_);
   return true;
 }
 
-// Playback or stream task, media lock not held. When the other output's memory is needed, the main
-// loop gives it back (handle_output_release_()); then the pictures' if still short.
-uint8_t *SimpleVideoPlayer::output_alloc_(size_t size, uint8_t other) {
-  xSemaphoreTake(this->media_lock_, portMAX_DELAY);
-  uint8_t *piece = this->pool_.alloc(size);
-  xSemaphoreGive(this->media_lock_);
-  if (piece != nullptr)
-    return piece;
+// Playback or stream task, media lock not held. Only when it does not fit, the owner table's row
+// hands back: the other output first (main loop), then the pictures', ...
+uint8_t *SimpleVideoPlayer::output_alloc_(size_t size, bool direct) {
+  uint8_t user = direct ? POOL_USER_DIRECT : POOL_USER_CANVAS;
 #ifdef SVP_STREAM
-  this->output_release_stream_.store(xTaskGetCurrentTaskHandle() == this->stream_draw_task_,
-                                     std::memory_order_relaxed);
+  if (xTaskGetCurrentTaskHandle() == this->stream_draw_task_)
+    user = direct ? POOL_USER_STREAM_DIRECT : POOL_USER_STREAM_CANVAS;
 #endif
-  this->output_release_req_.store(other, std::memory_order_release);
-  this->wait_alloc_answer_([this]() { return this->output_release_req_.load(std::memory_order_acquire) == 0; });
-  // Not answered in time: the request is taken back (the main loop frees nothing for nobody).
-  uint8_t asked = other;
-  this->output_release_req_.compare_exchange_strong(asked, 0, std::memory_order_acq_rel);
-  return this->media_alloc_(size);  // without media_lock_: it may wait for the main loop
+  uint8_t *piece = this->pool_take_(size, user);
+  if (piece == nullptr)
+    ESP_LOGE(TAG, "PSRAM pool: no room for %zu bytes (%zu of %zu used, largest free %zu)", size, this->pool_.used(),
+             this->pool_.size(), this->pool_.largest_free());
+  return piece;
 }
 
 #ifdef SVP_DSI_OUTPUT
@@ -2547,7 +2700,7 @@ bool SimpleVideoPlayer::ensure_direct_target_(bool with_target) {
   }
   // Whole cache lines, as the JPEG unit writes it by DMA.
   const size_t size = pool_round(static_cast<size_t>(this->dsi_out_w_) * this->dsi_out_h_ * this->dsi_fb_bpp_);
-  uint8_t *target = this->output_alloc_(size, RELEASE_CANVAS);
+  uint8_t *target = this->output_alloc_(size, true);
   if (target == nullptr)
     return false;
   xSemaphoreTake(this->media_lock_, portMAX_DELAY);
@@ -2614,7 +2767,7 @@ bool SimpleVideoPlayer::ensure_canvas_outputs_() {
   uint8_t *buffers[2] = {this->output_buffers_[0], nullptr};
   for (auto *&buf : buffers) {
     if (buf == nullptr)
-      buf = this->output_alloc_(size, RELEASE_DIRECT);
+      buf = this->output_alloc_(size, false);
   }
   if (buffers[0] == nullptr || buffers[1] == nullptr) {
     xSemaphoreTake(this->media_lock_, portMAX_DELAY);
@@ -2643,94 +2796,26 @@ bool SimpleVideoPlayer::ensure_canvas_outputs_() {
 }
 #endif
 
-// Main loop. Only when nothing draws into the output given back: the stream draws under output_lock_.
-void SimpleVideoPlayer::handle_output_release_() {
-  uint8_t which = this->output_release_req_.load(std::memory_order_acquire);
-  if (which == 0)
-    return;
-#ifdef SVP_STREAM
-  // The stream never takes a file's output, also not while its session starts or ends: it goes
-  // without (its alloc fails, the frame is dropped).
-  if (this->output_release_stream_.load(std::memory_order_relaxed) &&
-      (this->picture_session_busy_() || this->start_pending_.load(std::memory_order_acquire))) {
-    this->output_release_req_.compare_exchange_strong(which, 0, std::memory_order_acq_rel);  // a newer one stays
-    this->answer_alloc_();
-    return;
-  }
-  if (this->output_lock_ != nullptr && xSemaphoreTake(this->output_lock_, 0) != pdTRUE)
-    return;  // next loop
-#endif
-  if (xSemaphoreTake(this->media_lock_, 0) == pdTRUE) {
-#ifdef SVP_CANVAS_OUTPUT
-    if (which == RELEASE_CANVAS && this->output_buffers_[0] != nullptr) {
-      lv_image_set_src(this->canvas_, nullptr);
-      std::memset(&this->canvas_draw_buf_, 0, sizeof(this->canvas_draw_buf_));
-      this->display_buffer_.store(nullptr, std::memory_order_release);
-      this->frame_ready_.store(false, std::memory_order_release);
-      for (auto *&buf : this->output_buffers_) {
-        this->pool_.free(buf);
-        buf = nullptr;
-      }
-      this->output_buffer_size_ = 0;
-    }
-#endif
-#ifdef SVP_DSI_OUTPUT
-    if (which == RELEASE_DIRECT && this->decode_target_ != nullptr) {
-      this->pool_.free(this->decode_target_);
-      if (this->direct_frame_ == this->decode_target_)
-        this->direct_frame_ = nullptr;
-      this->decode_target_ = nullptr;
-      this->decode_target_len_ = 0;
-#ifdef SVP_CONTROLS
-      this->ctl_ready_.store(false, std::memory_order_release);
-      this->pool_.free(this->ctl_mem_);
-      this->ctl_mem_ = nullptr;
-#endif
-    }
-#endif
-    xSemaphoreGive(this->media_lock_);
-    this->output_release_req_.compare_exchange_strong(which, 0, std::memory_order_acq_rel);  // a newer one stays
-    this->answer_alloc_();
-  }
-#ifdef SVP_STREAM
-  if (this->output_lock_ != nullptr)
-    xSemaphoreGive(this->output_lock_);
-#endif
-}
-
-bool SimpleVideoPlayer::release_media_() {
-  const PlayerState state = this->state_.load(std::memory_order_acquire);
-  bool audio_file = false;
-#ifdef SVP_AUDIO_FILES
-  audio_file = this->audio_session_.load(std::memory_order_acquire);
-#endif
-  if ((!audio_file && (state == PlayerState::PLAYING || state == PlayerState::PAUSED)) ||
-      this->picture_session_busy_())
-    return false;
-#ifdef SVP_STREAM
-  if (this->stream_connected_.load(std::memory_order_acquire) || this->stream_avi_.load(std::memory_order_acquire))
-    return false;
-  if (this->output_lock_ != nullptr && xSemaphoreTake(this->output_lock_, 0) != pdTRUE)
-    return false;  // a rectangle is being drawn
-#endif
+// Main loop, the media lock held (and output_lock_, with a stream): nothing draws into them.
+bool SimpleVideoPlayer::release_outputs_(uint8_t groups) {
   bool released = false;
-  if (xSemaphoreTake(this->media_lock_, 0) == pdTRUE) {
 #ifdef SVP_CANVAS_OUTPUT
-    if (this->output_buffers_[0] != nullptr) {
-      // LVGL lets go of it first: no source, and the next frame sets the canvas up anew.
-      lv_image_set_src(this->canvas_, nullptr);
-      std::memset(&this->canvas_draw_buf_, 0, sizeof(this->canvas_draw_buf_));
-      this->display_buffer_.store(nullptr, std::memory_order_release);
-      this->frame_ready_.store(false, std::memory_order_release);
-      for (auto *&buf : this->output_buffers_) {
-        this->pool_.free(buf);
-        buf = nullptr;
-      }
-      this->output_buffer_size_ = 0;
-      released = true;
+  if ((groups & POOL_CANVAS) != 0 && this->output_buffers_[0] != nullptr) {
+    // LVGL lets go of it first: no source, and the next frame sets the canvas up anew.
+    lv_image_set_src(this->canvas_, nullptr);
+    std::memset(&this->canvas_draw_buf_, 0, sizeof(this->canvas_draw_buf_));
+    this->display_buffer_.store(nullptr, std::memory_order_release);
+    this->frame_ready_.store(false, std::memory_order_release);
+    for (auto *&buf : this->output_buffers_) {
+      this->pool_.free(buf);
+      buf = nullptr;
     }
+    this->output_buffer_size_ = 0;
+    released = true;
+  }
 #endif
 #ifdef SVP_DSI_OUTPUT
+  if ((groups & POOL_DIRECT) != 0) {
     if (this->decode_target_ != nullptr) {
       this->pool_.free(this->decode_target_);
       if (this->direct_frame_ == this->decode_target_)
@@ -2740,43 +2825,44 @@ bool SimpleVideoPlayer::release_media_() {
       released = true;
     }
 #ifdef SVP_CONTROLS
-    this->ctl_ready_.store(false, std::memory_order_release);
-    this->pool_.free(this->ctl_mem_);
-    this->ctl_mem_ = nullptr;
-#endif
-#endif
-    if (this->ring_buf_ != nullptr) {
-      if (this->file_reader_)
-        this->file_reader_->set_ring(nullptr, 0);
-      this->pool_.free(this->ring_buf_);
-      this->ring_buf_ = nullptr;
-      this->ring_size_ = 0;
+    if (this->ctl_mem_ != nullptr) {
+      this->ctl_ready_.store(false, std::memory_order_release);
+      this->pool_.free(this->ctl_mem_);
+      this->ctl_mem_ = nullptr;
       released = true;
     }
-    for (auto &slot : this->frame_slots_) {
-      if (slot.data != nullptr) {
-        this->pool_.free(slot.data);
-        slot.data = nullptr;
-        slot.capacity = 0;
-        released = true;
-      }
-    }
-    if (this->index_buf_ != nullptr) {
-      if (this->avi_parser_)
-        this->avi_parser_->set_index_memory(nullptr, 0);
-      this->pool_.free(reinterpret_cast<uint8_t *>(this->index_buf_));
-      this->index_buf_ = nullptr;
-      released = true;
-    }
-    xSemaphoreGive(this->media_lock_);
+#endif
   }
-#ifdef SVP_STREAM
-  if (this->output_lock_ != nullptr)
-    xSemaphoreGive(this->output_lock_);
 #endif
-#ifdef SVP_SPICE
-  released = this->release_desktop_() || released;
-#endif
+  return released;
+}
+
+// Main loop, the media lock held, no video session.
+bool SimpleVideoPlayer::release_video_buffers_() {
+  bool released = false;
+  if (this->ring_buf_ != nullptr) {
+    if (this->file_reader_)
+      this->file_reader_->set_ring(nullptr, 0);
+    this->pool_.free(this->ring_buf_);
+    this->ring_buf_ = nullptr;
+    this->ring_size_ = 0;
+    released = true;
+  }
+  for (auto &slot : this->frame_slots_) {
+    if (slot.data != nullptr) {
+      this->pool_.free(slot.data);
+      slot.data = nullptr;
+      slot.capacity = 0;
+      released = true;
+    }
+  }
+  if (this->index_buf_ != nullptr) {
+    if (this->avi_parser_)
+      this->avi_parser_->set_index_memory(nullptr, 0);
+    this->pool_.free(reinterpret_cast<uint8_t *>(this->index_buf_));
+    this->index_buf_ = nullptr;
+    released = true;
+  }
   return released;
 }
 
@@ -2981,7 +3067,8 @@ std::shared_ptr<ring_buffer::RingBuffer> PoolRingBuffer::create(uint8_t *storage
 // Playback task, video session start, no sound task running: the sound block for this lead. Kept when
 // its size is the same; else the rings over it and the decoder's hold on them go first, then the
 // block is taken anew.
-bool SimpleVideoPlayer::sound_block_for_(uint32_t lead_ms) {
+bool SimpleVideoPlayer::sound_block_for_(uint32_t lead_ms, bool *taken) {
+  *taken = false;
   const size_t len = this->sound_bytes_(lead_ms);
   if (len == 0 || (this->sound_block_ != nullptr && this->sound_block_len_ == len)) {
     this->sound_lead_ms_ = lead_ms;
@@ -2996,14 +3083,13 @@ bool SimpleVideoPlayer::sound_block_for_(uint32_t lead_ms) {
   this->pool_.free(this->sound_block_);
   this->sound_block_ = nullptr;
   this->sound_block_len_ = 0;
-  uint8_t *block = this->media_alloc_(len);
-  if (block == nullptr) {
-    ESP_LOGE(TAG, "No room in the PSRAM pool for the sound of a %" PRIu32 " ms lead", lead_ms);
+  uint8_t *block = this->pool_.alloc(len);
+  if (block == nullptr)
     return false;
-  }
   this->sound_block_ = block;
   this->sound_block_len_ = len;
   this->sound_lead_ms_ = lead_ms;
+  *taken = true;
   return true;
 }
 

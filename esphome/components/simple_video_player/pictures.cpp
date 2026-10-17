@@ -161,15 +161,33 @@ void SimpleVideoPlayer::pictures_loop_() {
   if (lvgl_runs && this->thumb_auto_hide_ms_ > 0 && this->thumbs_visible_ && this->thumb_slide_enabled_ &&
       now - this->thumb_touched_ms_ >= this->thumb_auto_hide_ms_)
     this->slide_thumbnails_(false);
+#ifdef SVP_CHANNEL_LIST
+  // Home Assistant's picture fetched (or not): the read is done.
+  if (this->pic_read_.active && this->pic_read_.remote && !this->pic_read_.done &&
+      this->fetch_done_(this->pic_fetch_)) {
+    PictureRead &read = this->pic_read_;
+    read.length = this->pic_fetch_.ok ? this->pic_fetch_.len : 0;
+    read.failed = !this->pic_fetch_.ok || read.length == 0 || read.length >= read.limit;
+    read.done = true;
+  }
+#endif
 
 #ifdef SVP_AUDIO_COVER
   // The picture task decodes cover art: no picture meanwhile, and the video waits for it.
   if (this->cover_step_ == CoverStep::DECODING)
     return;
 #endif
-  // A starting video needs the pool: what is in flight finishes, then the pictures' buffers go.
-  if (this->pool_reclaim_req_.load(std::memory_order_acquire)) {
+  // Another user lacks room (the owner table): what is in flight finishes, a fetch of Home
+  // Assistant's is dropped or stopped, then the pictures' and the cover art's buffers go.
+  if (this->pool_wanted_(POOL_PICTURES)) {
     if (this->pic_read_.active) {
+#ifdef SVP_CHANNEL_LIST
+      if (this->pic_read_.remote && !this->pic_read_.decoding) {
+        if (!this->fetch_drop_(this->pic_fetch_))
+          return;  // stops after its block
+        this->pic_read_.done = true;  // dropped below
+      }
+#endif
       const bool finished =
           this->pic_read_.decoding ? this->pic_decoded_.load(std::memory_order_acquire) : this->pic_read_.done;
       if (!finished)
@@ -182,14 +200,13 @@ void SimpleVideoPlayer::pictures_loop_() {
       }
     }
 #ifdef SVP_AUDIO_COVER
-    // Cover art being fetched into its buffer: that ends first.
-    if (this->cover_step_ == CoverStep::FETCHING && !this->cover_fetched_.load(std::memory_order_acquire))
+    // Cover art being fetched into its buffer: dropped, or stopped after its block.
+    if (this->cover_step_ == CoverStep::FETCHING && !this->fetch_drop_(this->cover_fetch_))
       return;
     this->release_cover_buffers_();
 #endif
     this->release_picture_buffers_();
-    this->pool_reclaim_req_.store(false, std::memory_order_release);
-    this->answer_alloc_();
+    this->pool_answer_(POOL_PICTURES);
   }
 
   // Closed: what is in flight finishes and is dropped, then the canvas empties and the buffers go
@@ -628,14 +645,7 @@ SimpleVideoPlayer::PicFile *SimpleVideoPlayer::free_file_() {
 }
 
 // From the pool; when it is full, the video's idle buffers make room (taken again by the next video).
-uint8_t *SimpleVideoPlayer::picture_alloc_(size_t size) {
-  uint8_t *piece = this->pool_.alloc(size);
-  if (piece == nullptr && this->release_media_()) {
-    ESP_LOGI(TAG, "Video buffers handed back to the pool for pictures");
-    piece = this->pool_.alloc(size);
-  }
-  return piece;
-}
+uint8_t *SimpleVideoPlayer::picture_alloc_(size_t size) { return this->pool_take_(size, POOL_USER_PICTURES); }
 
 // The pictures' buffers, all at once when pictures are first wanted (after boot or a video): the
 // pages and the files (undecoded). A larger file takes more when it comes; the decode buffer for a
@@ -766,11 +776,12 @@ void SimpleVideoPlayer::start_read_(bool thumbnail, size_t index, size_t slot, b
     read.slot = slot;
     read.generation = this->pic_generation_;
     read.file = file;
+    read.remote = true;
     read.limit = file->capacity - 16;  // room past it for the decoder, as with a file
     xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
     this->ha_texts_->picture_id = entry.path;
     xSemaphoreGive(this->channel_lock_);
-    if (!this->channel_request_(CHANNEL_CMD_IMAGE, 0)) {
+    if (!this->fetch_start_(this->pic_fetch_, CHANNEL_CMD_IMAGE, file->data, read.limit)) {
       read.failed = true;  // the task's queue is full: not read this time
       read.done = true;
     }

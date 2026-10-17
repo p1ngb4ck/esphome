@@ -1574,7 +1574,10 @@ bool SimpleVideoPlayer::desktop_wait_free_(bool with_sound) {
 }
 
 uint8_t *SimpleVideoPlayer::desktop_alloc(size_t size) {
-  uint8_t *piece = this->pool_.alloc(size);
+  // On the spice task the owner table's desktop row hands back when it does not fit (the main loop
+  // answers); elsewhere the pool alone.
+  uint8_t *piece = xTaskGetCurrentTaskHandle() == this->spice_task_ ? this->pool_take_(size, POOL_USER_DESKTOP)
+                                                                     : this->pool_.alloc(size);
   if (piece == nullptr)
     ESP_LOGE(TAG, "PSRAM pool: no room for the desktop's %zu bytes (%zu of %zu used, largest free %zu)", size,
              this->pool_.used(), this->pool_.size(), this->pool_.largest_free());
@@ -1582,25 +1585,24 @@ uint8_t *SimpleVideoPlayer::desktop_alloc(size_t size) {
 }
 
 bool SimpleVideoPlayer::desktop_buffers_take_() {
-  // Media and the desktop exclude each other: what pictures and a video keep goes back to the pool
-  // first (main loop), for the session's cursors now and its USB transfers later.
-#ifdef SVP_PICTURES
-  if (this->pic_ready_)
-    this->reclaim_pictures_();
-#endif
-  this->media_release_req_.store(true, std::memory_order_release);
-  this->wait_alloc_answer_([this]() { return !this->media_release_req_.load(std::memory_order_acquire); });
-  this->media_release_req_.store(false, std::memory_order_release);  // not answered in time: taken back
+  // From the pool; only when they do not fit, pictures' and an idle video's buffers come back
+  // (desktop_alloc()). Taken without desktop_lock_ (the main loop answering may want it in
+  // release_desktop_()), set under it; release_desktop_() leaves them be while spice_on_.
+  auto *cursor = this->spice_cursor_ != nullptr
+                     ? this->spice_cursor_
+                     : reinterpret_cast<SpiceCursor *>(this->desktop_alloc(sizeof(SpiceCursor)));
+  auto *cache = this->spice_cursor_cache_ != nullptr ? this->spice_cursor_cache_
+                                                     : reinterpret_cast<SpiceCursorShape *>(this->desktop_alloc(
+                                                           SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape)));
+  uint8_t *under = this->spice_cursor_under_ != nullptr ? this->spice_cursor_under_
+                                                        : this->desktop_alloc(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3);
+  uint8_t *patch = this->spice_cursor_patch_ != nullptr ? this->spice_cursor_patch_
+                                                        : this->desktop_alloc(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3);
   xSemaphoreTake(this->desktop_lock_, portMAX_DELAY);
-  if (this->spice_cursor_ == nullptr)
-    this->spice_cursor_ = reinterpret_cast<SpiceCursor *>(this->desktop_alloc(sizeof(SpiceCursor)));
-  if (this->spice_cursor_cache_ == nullptr)
-    this->spice_cursor_cache_ =
-        reinterpret_cast<SpiceCursorShape *>(this->desktop_alloc(SPICE_CURSOR_CACHE * sizeof(SpiceCursorShape)));
-  if (this->spice_cursor_under_ == nullptr)
-    this->spice_cursor_under_ = this->desktop_alloc(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3);
-  if (this->spice_cursor_patch_ == nullptr)
-    this->spice_cursor_patch_ = this->desktop_alloc(SPICE_CURSOR_MAX * SPICE_CURSOR_MAX * 3);
+  this->spice_cursor_ = cursor;
+  this->spice_cursor_cache_ = cache;
+  this->spice_cursor_under_ = under;
+  this->spice_cursor_patch_ = patch;
   const bool ok = this->spice_cursor_ != nullptr && this->spice_cursor_cache_ != nullptr &&
                   this->spice_cursor_under_ != nullptr && this->spice_cursor_patch_ != nullptr;
   if (ok) {
