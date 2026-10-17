@@ -178,7 +178,6 @@ class USBStorageClient : public usb_host::USBClient {
   uint16_t bulk_in_mps_{0};
   uint16_t bulk_out_mps_{0};
   uint8_t msc_interface_{0xFF};
-  bool interface_claimed_{false};
 
   uint32_t cbw_tag_{1};
   uint8_t max_lun_{0};
