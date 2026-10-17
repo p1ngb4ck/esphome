@@ -48,7 +48,7 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 | C3 | Two different "paused" guards in use: `lvgl_component_->is_paused()` vs `dsi_lvgl_paused_` | CODE |
 | C4 | (changed 2026-10-16: "Dropped ... incomplete audio frame" counted in `audio_dropped_bytes_`, one log at the session's end in `end_session_audio_()`; awaiting Olli's test) Logs in hot paths: `ESP_LOGW "Dropped %zu bytes"` per audio chunk unlimited (S:2628); audio decode error repeats (S:2823, bounded by `AUDIO_MAX_CONSECUTIVE_DECODE_FAILURES`); `ESP_LOGE` pool no-room per stream frame + 2 s wait per frame when the output can't be had (S:2165, R:1037/1049; part of the buffer manager, G7, not changed); usbredir skip per packet (U:678, only for non-data packets over `STAGE_BYTES`, rare; not changed) | CODE |
 | C5 | (changed 2026-10-16: `desktop_take_panel_` waits on the spice wake fd, woken when the sender / the session's tasks let go, instead of a 20 ms loop) Polling: cover/picture completion flags polled every loop; `vTaskDelay(20)` loop in `desktop_take_panel_` (SP:1496); `vTaskDelay(1)` magic peek retry (R:448) | CODE |
-| C6 | (changed 2026-10-16: the default is a white tint, `recolor` 30 %; a `focus_style_id` still goes over it; awaiting Olli's test) Focus style uses an outline (CT:116-120): highlights must be colours only | CODE |
+| C6 | Controls bar focus: was an outline (CT:116-120). Changed 2026-10-16: colour only, a white tint (`recolor` 30 %), no outline, no border; a `focus_style_id` goes over it; awaiting Olli's test. Highlights are colours only, never outlines or borders (Olli) | CODE |
 
 ## D. Concurrency risks
 
