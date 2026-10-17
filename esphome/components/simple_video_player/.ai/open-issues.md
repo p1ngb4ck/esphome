@@ -25,6 +25,7 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 | A13 | Header icons: rework; already very good, not yet perfect (Olli, 2026-10-16). TODO | Details from Olli; design first |
 | A14 | **BT audio: reconnect initiated by the device does not work correctly** (everything else does). REPORTED 2026-10-16 | a2dp_source; do not act alone: analyse, then scope with Olli |
 | A15 | On-screen keyboard settings, most important: "show the on-screen keyboard even if a physical keyboard is connected" (default no); in LVGL settings and reachable from HA. TODO 2026-10-16 | Scope with Olli first |
+| A17 | Pictures page: the picture's close button ("Close", `close_picture()`) only an X like the other close buttons, and it must not stick out of its area on the right. Small item (Olli, 2026-10-17) | TODO |
 | A6 | TV regression 2026-10-15 fixed by 6a5877bba8 (cover on demand + reclaim before a video's buffers). Which of the two fixed it is not proven; likely the reclaim (no holes for the ring) | Keep in mind for B3 |
 
 ## B. Rule violations (memory / buffers)
