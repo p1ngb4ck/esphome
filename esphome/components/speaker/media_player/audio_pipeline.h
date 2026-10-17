@@ -110,6 +110,10 @@ class AudioPipeline final {
 
   bool hard_stop_{false};
   bool is_playing_{false};
+  // Diagnosis of a file that does not end: the last progress seen (main loop).
+  uint32_t progress_ms_{0};
+  uint32_t progress_at_{0};
+  bool stall_logged_{false};
   bool pause_state_{false};
   bool task_stack_in_psram_;
 
