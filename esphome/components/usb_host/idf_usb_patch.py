@@ -668,6 +668,257 @@ _LS_DEBUG_RING_ALLOC_REPLACEMENT = """    pipe->ls_first_launch_pending = pipe->
     }
     pipe->state = HCD_PIPE_STATE_ACTIVE;"""
 
+# External hub ports. A hub has a single control transfer, shared by all of its ports, and the
+# port driver handles one port at a time for that reason. Three paths let a port leave or redo
+# its handling while one of its requests was still in flight, so the next request on that hub
+# failed to submit (ESP_ERR_INVALID_STATE) and the whole hub was dropped:
+# - port_active() completed the port no matter what it was doing;
+# - a recycle submitted the port's next request while the last one was still running;
+# - a status read was submitted while a request was in flight.
+# A request in flight is tracked per port, a port finishes or recycles once it is done, and a
+# status read waits for it (the completion reads the status again). With that, a status read of
+# an enumerated port must not be reported as a reset completion, so a reset in progress is
+# tracked too. Ports of a hub that is being released are not handled any more: a late completion
+# would put them back into the pending list, and finishing them asks their hub, which may be
+# freed by then.
+_PORT_FLAGS_ANCHOR = """            uint32_t waiting_free: 1;       /**< Port is waiting to be freed */
+            uint32_t reserved25: 25;        /**< Reserved */"""
+
+_PORT_FLAGS_REPLACEMENT = """            uint32_t waiting_free: 1;       /**< Port is waiting to be freed */
+            uint32_t req_in_flight: 1;      /**< A request to the parent Hub (status or feature) has not completed yet */
+            uint32_t reset_pending: 1;      /**< A port reset was issued and its completion has not been reported yet */
+            uint32_t recycle_deferred: 1;   /**< A recycle waits for the request in flight to complete */
+            uint32_t reserved22: 22;        /**< Reserved */"""
+
+_PORT_STATUS_REQ_ANCHOR = """    // Port is requesting status, lock the status
+    ext_port->flags.status_lock = 1;
+    return ESP_OK;"""
+
+_PORT_STATUS_REQ_REPLACEMENT = """    // Port is requesting status, lock the status
+    ext_port->flags.status_lock = 1;
+    ext_port->flags.req_in_flight = 1;
+    return ESP_OK;"""
+
+_PORT_SET_FEATURE_ANCHOR = """    // Every set feature requires status update
+    ext_port->flags.status_outdated = 1;
+    switch (feature) {"""
+
+_PORT_SET_FEATURE_REPLACEMENT = """    // Every set feature requires status update
+    ext_port->flags.status_outdated = 1;
+    ext_port->flags.req_in_flight = 1;
+    if (feature == USB_FEATURE_PORT_RESET) {
+        ext_port->flags.reset_pending = 1;
+    }
+    switch (feature) {"""
+
+_PORT_CLEAR_FEATURE_ANCHOR = """    // Every clearing feature requires status update
+    ext_port->flags.status_outdated = 1;
+    return ret;"""
+
+_PORT_CLEAR_FEATURE_REPLACEMENT = """    // Every clearing feature requires status update
+    ext_port->flags.status_outdated = 1;
+    ext_port->flags.req_in_flight = 1;
+    return ret;"""
+
+_PORT_COMPLETE_ANCHOR = """             (ext_port->dev_state == PORT_DEV_PRESENT) ? "active" : "idle");
+
+    assert(ext_port->flags.is_gone == 0);"""
+
+_PORT_COMPLETE_REPLACEMENT = """             (ext_port->dev_state == PORT_DEV_PRESENT) ? "active" : "idle");
+
+    if (ext_port->flags.is_gone) {
+        // The parent Hub is being released and may already be freed: nothing to tell it
+        port_stop_handling(ext_port);
+        return ESP_OK;
+    }
+
+    assert(ext_port->flags.is_gone == 0);"""
+
+_PORT_RESETTING_ANCHOR = """                assert(port_is_enabled(ext_port)); // Port should be enabled
+                port_event(ext_port, EXT_PORT_RESET_COMPLETED);"""
+
+_PORT_RESETTING_REPLACEMENT = """                assert(port_is_enabled(ext_port)); // Port should be enabled
+                ext_port->flags.reset_pending = 0;
+                port_event(ext_port, EXT_PORT_RESET_COMPLETED);"""
+
+_PORT_ENABLED_ANCHOR = """                    ext_port->dev_state = PORT_DEV_PRESENT;
+                    port_event(ext_port, EXT_PORT_CONNECTED);
+                } else {
+                    // Port enabled, device present, reset completed
+                    ext_port->dev_reset_attempts = 0;
+                    port_event(ext_port, EXT_PORT_RESET_COMPLETED);
+                }
+                need_handling = true;"""
+
+_PORT_ENABLED_REPLACEMENT = """                    ext_port->flags.reset_pending = 0;
+                    ext_port->dev_state = PORT_DEV_PRESENT;
+                    port_event(ext_port, EXT_PORT_CONNECTED);
+                    need_handling = true;
+                } else if (ext_port->flags.reset_pending) {
+                    // Port enabled, device present, reset completed
+                    ext_port->flags.reset_pending = 0;
+                    ext_port->dev_reset_attempts = 0;
+                    port_event(ext_port, EXT_PORT_RESET_COMPLETED);
+                    need_handling = true;
+                } else if (!ext_port->flags.has_enum_device) {
+                    // A status read during the enumeration: the port finishes in port_active()
+                    need_handling = true;
+                }
+                // Otherwise the device is enumerated and nothing changed: the port is done"""
+
+_PORT_RECYCLE_ANCHOR = """    ext_port->flags.waiting_recycle = 0;
+
+    if (ext_port->flags.status_lock) {
+        // Port is awaiting the status
+        return;
+    }
+
+    // Port should not have any changes
+    assert(ext_port->status.wPortChange.val == 0);
+    switch (ext_port->state) {"""
+
+_PORT_RECYCLE_REPLACEMENT = """    if (ext_port->flags.req_in_flight || ext_port->flags.status_outdated) {
+        // A request is in flight, or the status it outdated is still to be read: recycle from the
+        // status that comes next (port_set_status() / port_req_process())
+        ext_port->flags.recycle_deferred = 1;
+        return;
+    }
+
+    ext_port->flags.waiting_recycle = 0;
+
+    if (ext_port->status.wPortChange.val != 0) {
+        // The port changed again while its device was being freed: handle the changes from a
+        // disconnected port instead of recycling from a stale state
+        if (ext_port->state != USB_PORT_STATE_DISABLED) {
+            ext_port->state = USB_PORT_STATE_DISCONNECTED;
+        }
+        if (ext_port->flags.is_gone) {
+            handle_complete(ext_port);
+        } else {
+            handle_port(ext_port);
+        }
+        return;
+    }
+    switch (ext_port->state) {"""
+
+_PORT_ACTIVE_ANCHOR = """    ext_port->flags.has_enum_device = 1;
+
+    return handle_complete(ext_port);"""
+
+_PORT_ACTIVE_REPLACEMENT = """    ext_port->flags.has_enum_device = 1;
+
+    if (!ext_port->flags.in_pending_list || ext_port->flags.waiting_recycle) {
+        // Port is not waiting for its device to become active
+        return ESP_OK;
+    }
+    if (ext_port->flags.req_in_flight || ext_port->flags.status_outdated || ext_port->action_flags != 0) {
+        // Still busy with the parent Hub: the port finishes once that is done (handle_port_state())
+        return ESP_OK;
+    }
+    return handle_complete(ext_port);"""
+
+_PORT_GET_STATUS_ANCHOR = """    ext_port_t *ext_port = (ext_port_t *)port_hdl;
+
+    port_set_actions(ext_port, PORT_ACTION_GET_STATUS);
+    return ESP_OK;"""
+
+_PORT_GET_STATUS_REPLACEMENT = """    ext_port_t *ext_port = (ext_port_t *)port_hdl;
+
+    if (ext_port->flags.is_gone) {
+        return ESP_OK;
+    }
+    port_set_actions(ext_port, PORT_ACTION_GET_STATUS);
+    return ESP_OK;"""
+
+_PORT_SET_STATUS_ANCHOR = """    // Remove status lock
+    ext_port->flags.status_lock = 0;
+    // Request port handling
+    port_set_actions(ext_port, PORT_ACTION_HANDLE);
+    return ESP_OK;"""
+
+_PORT_SET_STATUS_REPLACEMENT = """    // Remove status lock
+    ext_port->flags.status_lock = 0;
+    ext_port->flags.req_in_flight = 0;
+    if (ext_port->flags.is_gone) {
+        return ESP_OK;
+    }
+    if (ext_port->flags.recycle_deferred) {
+        ext_port->flags.recycle_deferred = 0;
+        port_set_actions(ext_port, PORT_ACTION_RECYCLE);
+        return ESP_OK;
+    }
+    // Request port handling
+    port_set_actions(ext_port, PORT_ACTION_HANDLE);
+    return ESP_OK;"""
+
+_PORT_REQ_PROCESS_ANCHOR = """    ext_port_t *ext_port = (ext_port_t *)port_hdl;
+
+    if (ext_port->flags.status_outdated) {
+        port_set_actions(ext_port, PORT_ACTION_GET_STATUS);
+    } else {
+        port_set_actions(ext_port, PORT_ACTION_HANDLE);
+    }"""
+
+_PORT_REQ_PROCESS_REPLACEMENT = """    ext_port_t *ext_port = (ext_port_t *)port_hdl;
+
+    ext_port->flags.req_in_flight = 0;
+    if (ext_port->flags.is_gone) {
+        return ESP_OK;
+    }
+    if (ext_port->flags.status_outdated) {
+        port_set_actions(ext_port, PORT_ACTION_GET_STATUS);
+    } else if (ext_port->flags.recycle_deferred) {
+        ext_port->flags.recycle_deferred = 0;
+        port_set_actions(ext_port, PORT_ACTION_RECYCLE);
+    } else {
+        port_set_actions(ext_port, PORT_ACTION_HANDLE);
+    }"""
+
+_PORT_PROCESS_STATUS_ANCHOR = """        if (action_flags & PORT_ACTION_GET_STATUS) {
+            port_request_status(ext_port);
+        } else if (action_flags & PORT_ACTION_RESET) {"""
+
+_PORT_PROCESS_STATUS_REPLACEMENT = """        if (action_flags & PORT_ACTION_GET_STATUS) {
+            // With a request in flight its completion reads the status again
+            if (!ext_port->flags.req_in_flight) {
+                port_request_status(ext_port);
+            }
+        } else if (action_flags & PORT_ACTION_RESET) {"""
+
+_HUB_PORT_FEATURE_ANCHOR = """    // [TODO: IDF-12174] Revisit the External Hub Driver to ensure consistent error handling.
+    ESP_ERROR_CHECK(p_ext_hub_driver->constant.port_driver->req_process(ext_hub_dev->constant.ports[port_idx]));"""
+
+_HUB_PORT_FEATURE_REPLACEMENT = """    if (ext_hub_dev->constant.ports[port_idx] == NULL) {
+        return;  // Port freed while its request was in flight (Hub released)
+    }
+    // [TODO: IDF-12174] Revisit the External Hub Driver to ensure consistent error handling.
+    ESP_ERROR_CHECK(p_ext_hub_driver->constant.port_driver->req_process(ext_hub_dev->constant.ports[port_idx]));"""
+
+_HUB_PORT_STATUS_ANCHOR = """    // [TODO: IDF-12174] Revisit the External Hub Driver to ensure consistent error handling.
+    ESP_ERROR_CHECK(p_ext_hub_driver->constant.port_driver->set_status(ext_hub_dev->constant.ports[port_idx], new_status));"""
+
+_HUB_PORT_STATUS_REPLACEMENT = """    if (ext_hub_dev->constant.ports[port_idx] == NULL) {
+        return;  // Port freed while its request was in flight (Hub released)
+    }
+    // [TODO: IDF-12174] Revisit the External Hub Driver to ensure consistent error handling.
+    ESP_ERROR_CHECK(p_ext_hub_driver->constant.port_driver->set_status(ext_hub_dev->constant.ports[port_idx], new_status));"""
+
+_HUB_REQUEST_ANCHOR = """    switch (data->type) {
+    case EXT_PORT_PARENT_REQ_CONTROL:
+        return ext_hub_control_request(ext_hub_dev, port1, data->control.req, data->control.feature);"""
+
+_HUB_REQUEST_REPLACEMENT = """    EXT_HUB_ENTER_CRITICAL();
+    const bool releasing = ext_hub_dev->dynamic.flags.waiting_release;
+    EXT_HUB_EXIT_CRITICAL();
+
+    switch (data->type) {
+    case EXT_PORT_PARENT_REQ_CONTROL:
+        if (releasing) {
+            // Hub already failed and is being released: its ports follow it
+            return ESP_ERR_INVALID_STATE;
+        }
+        return ext_hub_control_request(ext_hub_dev, port1, data->control.req, data->control.feature);"""
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -708,6 +959,22 @@ PATCHES = (
     ("src/hcd_dwc.c", _LS_DEBUG_RING_DEF_ANCHOR, _LS_DEBUG_RING_DEF_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_DEBUG_RING_LOG_ANCHOR, _LS_DEBUG_RING_LOG_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_DEBUG_RING_ALLOC_ANCHOR, _LS_DEBUG_RING_ALLOC_REPLACEMENT),
+    ("src/ext_port.c", _PORT_FLAGS_ANCHOR, _PORT_FLAGS_REPLACEMENT),
+    ("src/ext_port.c", _PORT_STATUS_REQ_ANCHOR, _PORT_STATUS_REQ_REPLACEMENT),
+    ("src/ext_port.c", _PORT_SET_FEATURE_ANCHOR, _PORT_SET_FEATURE_REPLACEMENT),
+    ("src/ext_port.c", _PORT_CLEAR_FEATURE_ANCHOR, _PORT_CLEAR_FEATURE_REPLACEMENT),
+    ("src/ext_port.c", _PORT_COMPLETE_ANCHOR, _PORT_COMPLETE_REPLACEMENT),
+    ("src/ext_port.c", _PORT_RESETTING_ANCHOR, _PORT_RESETTING_REPLACEMENT),
+    ("src/ext_port.c", _PORT_ENABLED_ANCHOR, _PORT_ENABLED_REPLACEMENT),
+    ("src/ext_port.c", _PORT_RECYCLE_ANCHOR, _PORT_RECYCLE_REPLACEMENT),
+    ("src/ext_port.c", _PORT_ACTIVE_ANCHOR, _PORT_ACTIVE_REPLACEMENT),
+    ("src/ext_port.c", _PORT_GET_STATUS_ANCHOR, _PORT_GET_STATUS_REPLACEMENT),
+    ("src/ext_port.c", _PORT_SET_STATUS_ANCHOR, _PORT_SET_STATUS_REPLACEMENT),
+    ("src/ext_port.c", _PORT_REQ_PROCESS_ANCHOR, _PORT_REQ_PROCESS_REPLACEMENT),
+    ("src/ext_port.c", _PORT_PROCESS_STATUS_ANCHOR, _PORT_PROCESS_STATUS_REPLACEMENT),
+    ("src/ext_hub.c", _HUB_PORT_FEATURE_ANCHOR, _HUB_PORT_FEATURE_REPLACEMENT),
+    ("src/ext_hub.c", _HUB_PORT_STATUS_ANCHOR, _HUB_PORT_STATUS_REPLACEMENT),
+    ("src/ext_hub.c", _HUB_REQUEST_ANCHOR, _HUB_REQUEST_REPLACEMENT),
 )
 
 # Identifies an existing patched copy. It has to change whenever anything about that copy
