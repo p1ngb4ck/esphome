@@ -66,9 +66,6 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 
 ## G. Buffer plan backlog (each step needs Olli's go, one commit each)
 
-Items 1-5 (ring by need, pictures with 2 pages, cover on demand, one sound block, DSI direct) are
-implemented and wait for Olli's test; the controls snapshots item is struck (Olli, 2026-10-17).
-
 1. Buffer manager: one owner table, handover only when room is missing (Olli: always the first
    rule), no all-or-nothing `release_media_`; fix B11 and D2 there. TO TEST: implemented 2026-10-17
    (architecture.md section 9). The desktop no longer gives back pictures and video at its start
