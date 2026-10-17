@@ -30,7 +30,7 @@ round without Olli's go.
 | Storage | SD (sd_storage), USB mass storage, NFS, via the storage subsystem (`storage` component) |
 | Other users of PSRAM/RAM | LVGL, mipi_dsi framebuffer(s), storage `psram_transfer_buffer_size: 2MB`, speaker media player `buffer_size: 1000000`, BT/A2DP, micro_wake_word, voice_assistant, USB host, task stacks |
 | Frame budget | 25 fps = 40 ms per frame for decode + present + audio + storage (perf-notes). Device YAML has `target_fps: 30`; the stream fps is a relay option, set at runtime |
-| Relay | svp_relay: Home Assistant custom component (HACS), not in this repo; delivered as a zip (current 0.9.36). Optional svp-relay worker on another machine (out of scope for now) |
+| Relay | svp_relay: Home Assistant custom component (HACS), not in this repo; delivered as a zip (current 0.9.45). Optional svp-relay worker on another machine (out of scope for now) |
 | Build/test | Olli compiles and tests. Never compile, run config checks or tests yourself |
 
 ## 2. Goals (Olli's requirements)
