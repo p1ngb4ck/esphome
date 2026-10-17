@@ -1534,9 +1534,10 @@ bool SimpleVideoPlayer::setup_thumbnails_() {
   lv_style_set_pad_all(&this->thumb_default_style_, 0);
   lv_style_set_border_width(&this->thumb_default_style_, 0);
   lv_style_set_radius(&this->thumb_default_style_, 0);
+  // The shown picture's thumbnail: a colour over it (recolor reaches the canvas inside), no border.
   lv_style_init(&this->thumb_default_active_style_);
-  lv_style_set_border_width(&this->thumb_default_active_style_, 2);
-  lv_style_set_border_color(&this->thumb_default_active_style_, lv_color_hex(0x00FF00));
+  lv_style_set_recolor(&this->thumb_default_active_style_, lv_color_hex(0x00FF00));
+  lv_style_set_recolor_opa(&this->thumb_default_active_style_, LV_OPA_30);
 
   lv_obj_t *box = this->thumb_container_;
   if (this->thumb_container_style_ != nullptr)
