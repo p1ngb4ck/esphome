@@ -138,6 +138,7 @@ class USBStorageClient : public usb_host::USBClient {
   bool wait_transfer_(uint32_t timeout_ms = 5000);
   static void transfer_done_cb(const usb_host::TransferStatus &status, USBStorageClient *client);
 
+  USBStorageDevice *find_device_(uint16_t vid, uint16_t pid) const;
   void notify_connected_(uint16_t vid, uint16_t pid);
   void notify_disconnected_();
 

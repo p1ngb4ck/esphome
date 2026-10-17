@@ -573,14 +573,24 @@ bool USBStorageClient::scsi_write(uint32_t lba, const uint8_t *buf, uint32_t cou
 // Connect / disconnect
 // ─────────────────────────────────────────────────────────────────────────────
 
-void USBStorageClient::notify_connected_(uint16_t vid, uint16_t pid) {
+// The entry naming this stick, else one without vid/pid: an entry that names it wins over
+// any wildcard listed before it.
+USBStorageDevice *USBStorageClient::find_device_(uint16_t vid, uint16_t pid) const {
   for (auto *device : this->devices_) {
-    if ((device->vid_ == 0 && device->pid_ == 0) || (device->vid_ == vid && device->pid_ == pid)) {
-      if (!device->is_mounted()) {
-        device->on_device_connected(this->mount_path_);
-        return;
-      }
-    }
+    if (device->vid_ == vid && device->pid_ == pid && (vid != 0 || pid != 0) && !device->is_mounted())
+      return device;
+  }
+  for (auto *device : this->devices_) {
+    if (device->vid_ == 0 && device->pid_ == 0 && !device->is_mounted())
+      return device;
+  }
+  return nullptr;
+}
+
+void USBStorageClient::notify_connected_(uint16_t vid, uint16_t pid) {
+  if (USBStorageDevice *device = this->find_device_(vid, pid)) {
+    device->on_device_connected(this->mount_path_);
+    return;
   }
   ESP_LOGW(TAG, "No storage device configured for VID=0x%04X PID=0x%04X", vid, pid);
 }
@@ -665,14 +675,10 @@ void USBStorageClient::finish_connect_() {
 
   this->disk_ready_ = true;
 
-  // Pick mount path from first matching device, fall back to /usb
+  // Mount path of the entry for this stick, fall back to /usb
   this->mount_path_ = "/usb";
-  for (auto *device : this->devices_) {
-    if ((device->vid_ == 0 && device->pid_ == 0) || (device->vid_ == vid && device->pid_ == pid)) {
-      this->mount_path_ = device->get_mount_path();
-      break;
-    }
-  }
+  if (const USBStorageDevice *device = this->find_device_(vid, pid))
+    this->mount_path_ = device->get_mount_path();
 
   char drive_path[8];
   snprintf(drive_path, sizeof(drive_path), "%d:", this->fatfs_drive_);
