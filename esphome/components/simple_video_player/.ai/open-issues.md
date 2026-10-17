@@ -58,9 +58,8 @@ Only what Olli names goes on this list (Olli, 2026-10-16). REPORTED issues alway
 | # | Issue | Status |
 |---|---|---|
 | E1 | `audio_session_` is only reset by `start_playback_` (S:667): stays true after a track/queue ends | CODE. Analysed 2026-10-16, not changed: between tracks it must stay true (`audio_advance_` keeps the file speaker open). After the queue's end (state STOPPED, `audio_current_` false) the stale flag only makes `stop()` set `audio_halted_`, `spice_sound_take_()` / a relay AVI call `end_session_()` on a stopped player (log "Audio file stopped" without one playing), `release_media_`/`picture_session_busy_` skip checks that a stopped player passes anyway. No functional fault found; a reset would belong at the queue's end in `audio_advance_` after the speaker finish, untested, so left |
-| E2 | Audio duration/seek is dead: `duration_frames_` always 0 for audio files (S:3118); audio bar time/seek never shown | CODE |
-| E6 | No on_playback_started/finished for audio-file sessions | CODE |
-| E7 | Status JSON doesn't report a local video/playlist to the relay ("state" is the media player's) | CODE |
+| E2 | Audio files: no duration/seek (`duration_frames_` is set only from a video's info: the audio bar's time and seek never show) and no on_playback_started/finished for their sessions (was E6). One piece of work (Olli, 2026-10-17) | CODE |
+| E7 | Status JSON doesn't report a local video/playlist to the relay ("state" is the media player's) | CODE. A real gap (Olli, 2026-10-17) |
 | E8 | 'V' `still` is never 0 although the relay documents 0 = canvas/no stills; dashboard sender ignores 'V' changes (no `on_picture`) | CODE |
 | E9 | AVI sender sends no heartbeats: a live source stalling > 30 s gets dropped | CODE |
 
