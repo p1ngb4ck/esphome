@@ -366,6 +366,7 @@ _LS_PIPE_FIELDS_REPLACEMENT = """    usb_dwc_hal_ep_char_t ep_char;
     uint8_t ls_ctrl_retry_count;            // Retries of the current control stage (LS via FS hub)
     uint8_t ls_intr_retry_count;            // Interrupt transfer retries in the current run (LS via FS hub)
     uint16_t ls_intr_retry_frame;           // Frame of the last interrupt transfer retry
+    bool ls_ctrl_holding;                   // A control transfer of this pipe holds the low-speed bus
     bool ls_first_launch_pending;           // First PRE-qualified launch waits for a frame boundary
     // Port related"""
 
@@ -580,6 +581,82 @@ static inline bool _ls_intr_retry(pipe_t *pipe)
     return true;
 }
 
+// A periodic pipe's interval in the frame list: rounded down to a power of two, as the HAL schedules it
+static inline unsigned int _ls_periodic_interval(const usb_dwc_hal_ep_char_t *ep_char)
+{
+    unsigned int interval = FRAME_LIST_LEN;
+    while (interval > 1 && interval > ep_char->periodic.interval) {
+        interval >>= 1;
+    }
+    return interval;
+}
+
+// The frames (a bit each) the low-speed periodic pipes poll in; with chan >= 0 only that channel's
+static inline uint32_t _ls_periodic_frames(port_t *port, int only_chan)
+{
+    _Static_assert(FRAME_LIST_LEN <= 32, "one bit per frame");
+    uint32_t frames = 0;
+    for (int chan = 0; chan < 32; chan++) {
+        usb_dwc_hal_chan_t *chan_obj = (port->ls_pre_periodic_chans & (1U << chan)) && (only_chan < 0 || only_chan == chan)
+                                       ? port->hal->channels.hdls[chan] : NULL;
+        if (chan_obj == NULL) {
+            continue;
+        }
+        const pipe_t *periodic = (const pipe_t *)usb_dwc_hal_chan_get_context(chan_obj);
+        const unsigned int interval = _ls_periodic_interval(&periodic->ep_char);
+        for (unsigned int i = periodic->ep_char.periodic.offset % interval; i < FRAME_LIST_LEN; i += interval) {
+            frames |= 1U << i;
+        }
+    }
+    return frames;
+}
+
+/**
+ * @brief A control transfer to a low-speed device behind a full-speed hub holds the bus
+ *
+ * From its first stage to its end. The descriptor DMA runs a NAKed stage again by itself, frame
+ * after frame, so where a stage starts says nothing about where it runs. The low-speed periodic
+ * pipes leave the frame list meanwhile (their channels stay enabled, they are just not polled)
+ * and return when the last such control transfer ends.
+ */
+static inline void _ls_ctrl_hold(pipe_t *pipe)
+{
+    port_t *port = pipe->port;
+    if (pipe->ls_ctrl_holding) {
+        return;
+    }
+    pipe->ls_ctrl_holding = true;
+    if (port->ls_ctrl_holds++ == 0 && port->ls_pre_periodic_chans) {
+        for (int i = 0; i < FRAME_LIST_LEN; i++) {
+            port->hal->periodic_frame_list[i] &= ~port->ls_pre_periodic_chans;
+        }
+        CACHE_SYNC_FRAME_LIST(port->frame_list);
+    }
+}
+
+static inline void _ls_ctrl_release(pipe_t *pipe)
+{
+    port_t *port = pipe->port;
+    if (!pipe->ls_ctrl_holding) {
+        return;
+    }
+    pipe->ls_ctrl_holding = false;
+    if (--port->ls_ctrl_holds == 0 && port->ls_pre_periodic_chans) {
+        for (int chan = 0; chan < 32; chan++) {
+            if (!(port->ls_pre_periodic_chans & (1U << chan))) {
+                continue;
+            }
+            const uint32_t frames = _ls_periodic_frames(port, chan);
+            for (int i = 0; i < FRAME_LIST_LEN; i++) {
+                if (frames & (1U << i)) {
+                    port->hal->periodic_frame_list[i] |= 1U << chan;
+                }
+            }
+        }
+        CACHE_SYNC_FRAME_LIST(port->frame_list);
+    }
+}
+
 /**
  * @brief Give a low-speed periodic pipe behind a full-speed hub frames of its own
  *
@@ -588,15 +665,13 @@ static inline bool _ls_intr_retry(pipe_t *pipe)
  */
 static inline void _ls_periodic_set_offset(port_t *port, usb_dwc_hal_ep_char_t *ep_char)
 {
-    unsigned int interval = FRAME_LIST_LEN;     // Rounded down to a power of two, as the HAL schedules it
-    while (interval > 1 && interval > ep_char->periodic.interval) {
-        interval >>= 1;
-    }
+    const unsigned int interval = _ls_periodic_interval(ep_char);
+    const uint32_t polled = _ls_periodic_frames(port, -1);
     for (unsigned int k = 0; k < interval; k++) {
         const unsigned int offset = (ep_char->periodic.offset + k) % interval;
         bool taken = false;
         for (unsigned int i = offset; i < FRAME_LIST_LEN && !taken; i += interval) {
-            taken = (port->hal->periodic_frame_list[i] & port->ls_pre_periodic_chans) != 0;
+            taken = (polled & (1U << i)) != 0;
         }
         if (!taken) {
             ep_char->periodic.offset = offset;
@@ -627,6 +702,7 @@ _LS_RETRY_REPLACEMENT = """        // Get and store the pipe error event
                 pipe->port->flags.conn_dev_ena && !pipe->cs_flags.waiting_halt && _ls_intr_retry(pipe)) {
             break;
         }
+        _ls_ctrl_release(pipe);
         pipe->last_event = pipe_decode_error_event(chan_error);"""
 
 # The high-speed controller as a full/low-speed host: HCFG.FSLSSupp set before every port
@@ -1109,7 +1185,8 @@ _LS_PERIODIC_PORT_FIELD_ANCHOR = """    usb_dwc_hal_context_t *hal;
 
 _LS_PERIODIC_PORT_FIELD_REPLACEMENT = """    usb_dwc_hal_context_t *hal;
     void *frame_list;
-    uint32_t ls_pre_periodic_chans;     // Channels of periodic pipes with PREamble (LS via FS hub)"""
+    uint32_t ls_pre_periodic_chans;     // Channels of periodic pipes with PREamble (LS via FS hub)
+    uint8_t ls_ctrl_holds;              // Control transfers holding the low-speed bus (LS via FS hub)"""
 
 _LS_PERIODIC_WAIT_ANCHOR = """    for (int waited_us = 0; waited_us < 3000; waited_us += 10) {
         if (usb_dwc_hal_port_get_cur_frame_num(pipe->port->hal) != start_frame) {
@@ -1129,6 +1206,9 @@ _LS_PERIODIC_EXEC_ANCHOR = """    pipe->ls_ctrl_retry_count = 0;
     if (pipe->ls_first_launch_pending) {"""
 
 _LS_PERIODIC_EXEC_REPLACEMENT = """    pipe->ls_ctrl_retry_count = 0;
+    if (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL) {
+        _ls_ctrl_hold(pipe);
+    }
     if (pipe->ls_first_launch_pending ||
             (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL &&
              pipe->port->ls_pre_periodic_chans)) {"""
@@ -1143,6 +1223,12 @@ _LS_PERIODIC_ALLOC_REPLACEMENT = """    if (pipe->ep_char.ls_via_fs_hub && pipe-
     if (pipe->ep_char.ls_via_fs_hub &&
             (pipe->ep_char.type == USB_DWC_XFER_TYPE_INTR || pipe->ep_char.type == USB_DWC_XFER_TYPE_ISOCHRONOUS)) {
         port->ls_pre_periodic_chans |= 1U << pipe->chan_obj->flags.chan_idx;
+        if (port->ls_ctrl_holds) {
+            // A control transfer holds the bus: polled from its end on
+            for (int i = 0; i < FRAME_LIST_LEN; i++) {
+                port->hal->periodic_frame_list[i] &= ~(1U << pipe->chan_obj->flags.chan_idx);
+            }
+        }
     }
     CACHE_SYNC_FRAME_LIST(port->frame_list);"""
 
@@ -1150,8 +1236,31 @@ _LS_PERIODIC_FREE_ANCHOR = """    pipe->port->num_pipes_idle--;
     usb_dwc_hal_chan_free(pipe->port->hal, pipe->chan_obj);"""
 
 _LS_PERIODIC_FREE_REPLACEMENT = """    pipe->port->num_pipes_idle--;
+    _ls_ctrl_release(pipe);
     pipe->port->ls_pre_periodic_chans &= ~(1U << pipe->chan_obj->flags.chan_idx);
     usb_dwc_hal_chan_free(pipe->port->hal, pipe->chan_obj);"""
+
+# The end of a control transfer to a low-speed device behind a full-speed hub, done or halted on
+# request, gives the bus back to the low-speed periodic pipes (see _ls_ctrl_hold()).
+_LS_HOLD_DONE_ANCHOR = """        if (!_buffer_check_done(pipe)) {
+            _buffer_exec_cont(pipe);
+            break;
+        }
+        pipe->last_event = HCD_PIPE_EVENT_URB_DONE;"""
+
+_LS_HOLD_DONE_REPLACEMENT = """        if (!_buffer_check_done(pipe)) {
+            _buffer_exec_cont(pipe);
+            break;
+        }
+        _ls_ctrl_release(pipe);
+        pipe->last_event = HCD_PIPE_EVENT_URB_DONE;"""
+
+_LS_HOLD_HALT_ANCHOR = """        assert(pipe->cs_flags.waiting_halt);
+        // We've halted a transfer, so we need to trigger the pipe callback"""
+
+_LS_HOLD_HALT_REPLACEMENT = """        assert(pipe->cs_flags.waiting_halt);
+        _ls_ctrl_release(pipe);
+        // We've halted a transfer, so we need to trigger the pipe callback"""
 
 # Data stage of a low-speed control transfer behind a full-speed hub, one packet per frame (see
 # _ls_ctrl_data_next() in _LS_RETRY_HELPER_REPLACEMENT).
@@ -1265,6 +1374,8 @@ PATCHES = (
     ("src/hcd_dwc.c", _LS_PERIODIC_EXEC_ANCHOR, _LS_PERIODIC_EXEC_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_PERIODIC_ALLOC_ANCHOR, _LS_PERIODIC_ALLOC_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_PERIODIC_FREE_ANCHOR, _LS_PERIODIC_FREE_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_HOLD_DONE_ANCHOR, _LS_HOLD_DONE_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_HOLD_HALT_ANCHOR, _LS_HOLD_HALT_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_SPLIT_FLAGS_ANCHOR, _LS_SPLIT_FLAGS_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_SPLIT_FILL_ANCHOR, _LS_SPLIT_FILL_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_SPLIT_CONT_ANCHOR, _LS_SPLIT_CONT_REPLACEMENT),
