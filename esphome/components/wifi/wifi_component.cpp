@@ -689,8 +689,8 @@ void WiFiComponent::setup() {
   const uint32_t saved_hash = fnv1_hash("wifi_networks");
   this->saved_header_pref_ = global_preferences->make_preference<SavedWifiNetworksHeader>(saved_hash, true);
   for (size_t i = 0; i < WIFI_SAVED_NETWORKS_MAX; i++) {
-    this->saved_network_prefs_[i] = global_preferences->make_preference<SavedWifiNetwork>(
-        fnv1_hash_extend(saved_hash, static_cast<uint32_t>(i)), true);
+    this->saved_network_prefs_[i] =
+        global_preferences->make_preference<SavedWifiNetwork>(saved_hash + 1 + static_cast<uint32_t>(i), true);
   }
   SavedWifiNetworksHeader header{};
   if (this->saved_header_pref_.load(&header) && header.version == SAVED_WIFI_NETWORKS_VERSION)
