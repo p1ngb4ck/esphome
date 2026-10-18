@@ -13,6 +13,7 @@
 #include <freertos/task.h>
 #include "esphome/core/lock_free_queue.h"
 #include "esphome/core/event_pool.h"
+#include "esphome/core/log.h"
 #include <atomic>
 #include <span>
 
@@ -46,7 +47,7 @@ namespace esphome::usb_host {
 //   it has consumed the data
 // The atomic bitmask makes that safe without taking a mutex on either side.
 
-static const char *const TAG = "usb_host";
+ESPHOME_LOG_TAG(TAG, "usb_host");
 
 // Forward declarations
 struct TransferRequest;

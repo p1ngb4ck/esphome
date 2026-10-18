@@ -1,8 +1,8 @@
 #pragma once
-
 #include "image_decoder.h"
 #include "runtime_image.h"
 #include "esphome/core/defines.h"
+#include "esphome/core/helpers.h"
 #ifdef USE_RUNTIME_IMAGE_JPEG
 
 #if defined(USE_HWJPG)
@@ -47,6 +47,9 @@ class JpegDecoder : public ImageDecoder {
 
   int HOT decode(uint8_t *buffer, size_t size) override;
 
+  bool uses_direct_rgb565() const { return this->direct_rgb565_; }
+  void draw_rgb565(int x, int y, int w, int h, const uint8_t *pixels);
+
  protected:
   // Backend-specific decode. JPEG_BACKEND selects which explicit
   // specialization is instantiated at the call site in decode(); only one
@@ -60,8 +63,15 @@ class JpegDecoder : public ImageDecoder {
   // walks it pixel-by-pixel into the RuntimeImage via draw().
   void draw_rgb888_buffer_(const uint8_t *rgb, uint32_t width, uint32_t height);
 #else
+  bool prepare_rgb565_scaling_(int width, int height);
+
   JPEGDEC jpeg_{};
+  FixedVector<uint16_t> x_boundaries_{};
+  FixedVector<uint16_t> y_boundaries_{};
+  int source_width_{0};
+  int source_height_{0};
 #endif
+  bool direct_rgb565_{false};
 };
 
 }  // namespace esphome::runtime_image

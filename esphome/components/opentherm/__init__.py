@@ -75,6 +75,11 @@ CONFIG_SCHEMA = cv.All(
 
 
 async def to_code(config: dict[str, Any]) -> None:
+    if CORE.is_esp8266:
+        from esphome.components.esp8266.const import use_timer1
+
+        # Per hub: every hub programs the timer and the interrupt has one instance pointer
+        use_timer1(f"{DOMAIN} {config[CONF_ID]}")
     if CORE.is_esp32:
         include_builtin_idf_component("esp_driver_gptimer")
 
@@ -82,11 +87,8 @@ async def to_code(config: dict[str, Any]) -> None:
     await cg.register_component(var, config)
 
     # Set pins
-    in_pin = await cg.gpio_pin_expression(config[CONF_IN_PIN])
-    cg.add(var.set_in_pin(in_pin))
-
-    out_pin = await cg.gpio_pin_expression(config[CONF_OUT_PIN])
-    cg.add(var.set_out_pin(out_pin))
+    await cg.add_pin(var.set_in_pin, config[CONF_IN_PIN])
+    await cg.add_pin(var.set_out_pin, config[CONF_OUT_PIN])
 
     non_sensors = {
         CONF_ID,
