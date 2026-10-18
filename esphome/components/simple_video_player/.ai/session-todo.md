@@ -13,8 +13,9 @@ Status: (update as work finishes)
 - usb_host e654bab510: LS control transfer picks its frame before taking the hold (the hold had
   emptied the frame list the check reads).
 - Finding, not changed (Olli decides): both root port losses in the last log happen while usb_hid
-  reads interface 1's report descriptor and the hub's own port request for its next port is on
-  the bus. ext_port handles one port at a time and starts the next one when the keyboard's
+  reads interface 1's report descriptor and the hub's own requests for its next port run (first
+  loss: its port feature request in flight, ended NO_DEVICE; second: its port status read just
+  done, the port feature request after it found the port down). ext_port handles one port at a time and starts the next one when the keyboard's
   enumeration ends, which is exactly when usb_hid starts its control transfers. Options: the
   hold also keeps the hub's control requests back while an LS control transfer holds the bus;
   or all hub ports powered at hub configuration before any port is handled.
