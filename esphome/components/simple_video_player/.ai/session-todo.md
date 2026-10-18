@@ -31,6 +31,11 @@ Status:
   ~3.9 KB stack record buffer (all records at once, P4 + C6); on_scan_results ran net_changed /
   net_show (HA publish, LVGL) nested in it on the 8 KB loopTask stack. Fixed: on_scan_results runs
   from the next main loop pass (defer), once for scans that came meanwhile. Awaiting Olli's test.
+- Olli: the real fault: too much stack used ("we are on a MCU"); the rules (memory, README) were not
+  read first. lvgl_media.yaml: net_click, cap_click, wifi_edit_save and the WiFi forget (new script
+  wifi_forget from confirm_yes) start with delay: 0ms, so the WiFi/Ethernet calls (scan start over
+  ESP-Hosted, disable/enable, saving) run from the next main loop pass instead of nested inside
+  LVGL's click handling.
 
 ---
 
