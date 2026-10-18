@@ -1,3 +1,26 @@
+# Session order (Olli, 2026-10-18, before he went to sleep) — binding
+
+Olli: "only that fs/ls issue suxx really. while I go to sleep. please stick on that issue - it is
+absolutely for sure the fs/ls translation if device is on a hub". His facts, never questioned: not
+power (USB audio speaker works fine); not the USB SD card reader with its single hub port; keyboards
+work fine; NonaSuomy did not use a hub; the issue is precisely the LS-FS translation in the hub layer.
+Only this issue; no compiles/tests; commits as usual.
+
+Status: (update as work finishes)
+- usb_host 45997a9633: a pipe halt that ends in a channel error now wakes its waiter (was: the task
+  halting the pipe waited for good; an unplugged LS device behind the hub hits it through the
+  interrupt retry; usb_hid halts its IN endpoints on the main loop). waiting_halt is cleared too.
+- usb_host e654bab510: LS control transfer picks its frame before taking the hold (the hold had
+  emptied the frame list the check reads).
+- Finding, not changed (Olli decides): both root port losses in the last log happen while usb_hid
+  reads interface 1's report descriptor and the hub's own port request for its next port is on
+  the bus. ext_port handles one port at a time and starts the next one when the keyboard's
+  enumeration ends, which is exactly when usb_hid starts its control transfers. Options: the
+  hold also keeps the hub's control requests back while an LS control transfer holds the bus;
+  or all hub ports powered at hub configuration before any port is handled.
+
+---
+
 # Session order (Olli, 2026-10-17, evening) — binding
 
 Inputs and settings, in short steps Olli tests one by one; design approved in the design artifact
