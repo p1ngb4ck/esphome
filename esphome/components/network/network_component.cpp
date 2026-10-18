@@ -9,8 +9,10 @@
 #include "lwip/opt.h"
 
 #ifdef USE_NETWORK_DEFAULT_ROUTE
+#include <algorithm>
 #include "esphome/core/application.h"
 #include "esphome/core/helpers.h"
+#include "esphome/core/preferences.h"
 #include "esp_netif_net_stack.h"
 #include "lwip/netif.h"
 #ifdef USE_ETHERNET
@@ -24,6 +26,17 @@
 namespace esphome::network {
 
 ESPHOME_LOG_TAG(TAG, "network");
+
+NetworkComponent *global_network_component = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
+NetworkComponent::NetworkComponent() { global_network_component = this; }
+
+#ifdef USE_NETWORK_DEFAULT_ROUTE
+struct SavedNetworkOrder {
+  uint8_t count;
+  uint8_t order[NETWORK_INTERFACE_COUNT];
+} PACKED;
+#endif
 
 void NetworkComponent::setup() {
   // Initialize ESP-IDF network interfaces and ensure the default event loop exists
@@ -42,6 +55,23 @@ void NetworkComponent::setup() {
     this->mark_failed();
     return;
   }
+#ifdef USE_NETWORK_DEFAULT_ROUTE
+  // A saved order is taken only when it holds exactly the configured interfaces
+  this->order_pref_ = global_preferences->make_preference<SavedNetworkOrder>(fnv1_hash("network_order"), true);
+  SavedNetworkOrder saved{};
+  if (this->order_pref_.load(&saved) && saved.count == this->order_.size()) {
+    StaticVector<NetworkInterface, NETWORK_INTERFACE_COUNT> order;
+    for (size_t i = 0; i < saved.count; i++) {
+      auto interface = static_cast<NetworkInterface>(saved.order[i]);
+      if (std::find(this->order_.begin(), this->order_.end(), interface) == this->order_.end() ||
+          std::find(order.begin(), order.end(), interface) != order.end())
+        break;
+      order.push_back(interface);
+    }
+    if (order.size() == this->order_.size())
+      this->order_ = order;
+  }
+#endif
 }
 
 void NetworkComponent::dump_config() {
@@ -72,22 +102,48 @@ static esp_netif_t *connected_ethernet_netif() {
   return nullptr;
 }
 
+static esp_netif_t *connected_netif(NetworkInterface interface) {
+  switch (interface) {
+    case NetworkInterface::NETWORK_INTERFACE_ETHERNET:
+      return connected_ethernet_netif();
+    case NetworkInterface::NETWORK_INTERFACE_WIFI:
+      return connected_wifi_netif();
+    default:
+      return nullptr;
+  }
+}
+
+bool NetworkComponent::move_interface(NetworkInterface interface, int delta) {
+  auto it = std::find(this->order_.begin(), this->order_.end(), interface);
+  if (it == this->order_.end())
+    return false;
+  const int from = static_cast<int>(it - this->order_.begin());
+  const int to = from + delta;
+  if (delta == 0 || to < 0 || to >= static_cast<int>(this->order_.size()))
+    return false;
+  this->order_[from] = this->order_[to];
+  this->order_[to] = interface;
+  SavedNetworkOrder saved{};
+  saved.count = static_cast<uint8_t>(this->order_.size());
+  for (size_t i = 0; i < this->order_.size(); i++)
+    saved.order[i] = static_cast<uint8_t>(this->order_[i]);
+  this->order_pref_.save(&saved);
+  global_preferences->sync();
+  ESP_LOGI(TAG, "Interface priority changed");
+  return true;
+}
+
 void NetworkComponent::loop() {
-  // Pin the default route to the first connected interface in the user's priority
-  // order; ESP-IDF's own route_prio selection would always favor WiFi.
-  // USE_NETWORK_PRIMARY_INTERFACE_WIFI is emitted for a wifi-first priority list;
-  // it selects the reported address in util.cpp and doubles as the route-order
-  // pivot here — the two uses must stay in sync.
-  esp_netif_t *wifi = connected_wifi_netif();
-  esp_netif_t *ethernet = connected_ethernet_netif();
-#ifdef USE_NETWORK_PRIMARY_INTERFACE_WIFI
-  esp_netif_t *best = wifi != nullptr ? wifi : ethernet;
-#else
-  esp_netif_t *best = ethernet != nullptr ? ethernet : wifi;
-#endif
+  // Pin the default route to the first connected interface in the priority order
+  // (order_); ESP-IDF's own route_prio selection would always favor WiFi.
+  esp_netif_t *best = nullptr;
   NetworkInterface active = NetworkInterface::NETWORK_INTERFACE_NONE;
-  if (best != nullptr) {
-    active = best == ethernet ? NetworkInterface::NETWORK_INTERFACE_ETHERNET : NetworkInterface::NETWORK_INTERFACE_WIFI;
+  for (NetworkInterface interface : this->order_) {
+    best = connected_netif(interface);
+    if (best != nullptr) {
+      active = interface;
+      break;
+    }
   }
   if (active != this->active_interface_) {
     this->active_interface_ = active;
