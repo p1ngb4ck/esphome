@@ -1,3 +1,23 @@
+# Session order (Olli, 2026-10-18, network) — binding
+
+Olli: a proper LVGL settings screen for networking: every connected adapter configured (Ethernet and
+WiFi, WiFi with its networks); check whether upstream's multi-interface design generalizes to
+usb_ethernet / usb_wifi (check only, done: ethernet + wifi only today, a netif registry would
+generalize it); no messages interrupting DSI/fullscreen, a short notification icon top right is fine;
+settings export/import later (keep in mind only).
+
+Olli's decisions (2026-10-18): 1. the priority order is changeable on the device (fork change in
+network: runtime order, saved); 2. WiFi keeps a list of saved networks, each with its priority and
+own address settings (own preference store); 3. Ethernet switches DHCP / manual at runtime (a setter
+back to DHCP, manual IP code always compiled); 4. no notice during DSI-direct for now, only in LVGL
+mode.
+
+Status:
+- Mockup in the design artifact (version 28: SetNetwork, SetNetWifi, SetNetEthernet, NetWifiEdit,
+  NetNotice), waiting for Olli's approval. Nothing implemented yet.
+
+---
+
 # Session order (Olli, 2026-10-18, before he left the PC) — binding
 
 Olli: screenshot and screencast for the panel. Screencast must do no encoding of its own (MCU):
