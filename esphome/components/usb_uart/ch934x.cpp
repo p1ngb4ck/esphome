@@ -253,6 +253,20 @@ bool USBUartTypeCH934X::config_step(USBUartChannelBase *channel, uint8_t step, b
   return false;
 }
 
+// As WCH's driver (ch9344.c, ch9344_set_control()): DTR and RTS one write each to the port's R_C4,
+// DTR 0x01 / 0x00, RTS 0x11 / 0x10. Counted like an init round, so the config machine waits for both.
+void USBUartTypeCH934X::modem_control_transfer(USBUartChannelBase *channel) {
+  const uint8_t rgadd = this->get_reg_address_(channel->index_);
+  const uint8_t writes[2][3] = {
+      {CMD_W_BR, static_cast<uint8_t>(rgadd + R_C4), static_cast<uint8_t>(channel->dtr_ ? 0x01 : 0x00)},
+      {CMD_W_BR, static_cast<uint8_t>(rgadd + R_C4), static_cast<uint8_t>(channel->rts_ ? 0x11 : 0x10)},
+  };
+  ESP_LOGD(TAG, "MODEM_CTRL port %u: DTR=%s RTS=%s", channel->index_, ONOFF(channel->dtr_), ONOFF(channel->rts_));
+  this->init_pending_.store(2, std::memory_order_release);
+  for (const auto &write : writes)
+    this->config_bulk_write_(channel, write, sizeof(write));
+}
+
 bool USBUartTypeCH934X::config_bulk_write_(USBUartChannelBase *channel, const uint8_t *data, uint16_t len) {
   uint8_t port = (channel != nullptr) ? channel->index_ : 0xFF;
   usb_host::transfer_cb_t callback = [this, port](const usb_host::TransferStatus &status) {

@@ -527,6 +527,8 @@ class USBUartTypeCH934X : public USBUartComponent {
   // per-channel settings for load_settings().
   bool config_device_step(uint8_t step, bool ok, const uint8_t *response) override;
   bool config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok, const uint8_t *response) override;
+  // DTR and RTS as two command writes (not a control transfer); the second one's completion ends the step.
+  void modem_control_transfer(USBUartChannelBase *channel) override;
 
   bool parse_descriptors_(usb_device_handle_t dev_hdl);
   // Build the idx-th init register write for a channel into a stack buffer. Stateless and
