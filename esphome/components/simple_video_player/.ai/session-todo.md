@@ -50,8 +50,13 @@ Status:
   triggers, schema; svp_relay 0.9.47 (/cast, cast.py, options cast_dir/cast_name/cast_format); device
   YAML (screen_capture:, max_streams 4, HA entities, key bindings PRINT_SCREEN / SHIFT+PRINT_SCREEN,
   the end notice, no dashboard on idle while casting). Awaiting Olli's build and test.
-- Open: the Settings page section (Screen capture; the folders in Media folders; the screencast
-  options in SVP Relay) waits for the mockup's approval.
+- Settings > Screen capture (Olli, 2026-10-18: "implement proper settings subpage for
+  screenshot/screencast and the keybindings options" -- the keys: only the capture keys): section 17
+  in Media, a static page (lvgl_media.yaml): screenshot folder (folder chooser types 5 and 6), JPEG
+  quality, Take a screenshot, the last one; the screencast's state (since, file, target, sound),
+  Start/Stop, where it goes, its folder, the microphone's sound, pictures per second; the screenshot
+  and screencast keys with Change (learn) / Cancel. svp f48d7aaf68: get_screencast_path(). Awaiting
+  Olli's build and test. Not done: the Screencasts group in Settings > SVP Relay (not asked now).
 
 # Session order (Olli, 2026-10-18, before he went to sleep) — binding
 
