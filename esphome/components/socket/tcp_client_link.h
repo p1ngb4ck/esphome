@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 
 namespace esphome::socket {
 
@@ -31,6 +32,11 @@ class TcpClientLink {
   uint16_t port() const { return this->port_; }
   uint32_t reconnect_interval() const { return this->reconnect_interval_ms_; }
   uint32_t idle_timeout() const { return this->idle_timeout_ms_; }
+  /// The peer's address as text into buf; 0, buf empty, while not connected.
+  size_t peer_address(std::span<char, SOCKADDR_STR_LEN> buf) const {
+    buf[0] = '\0';
+    return this->connected_ && this->sock_ != nullptr ? this->sock_->getpeername_to(buf) : 0;
+  }
 
   /// Call from setup(). tag names this link's log lines.
   void begin(const char *tag);
