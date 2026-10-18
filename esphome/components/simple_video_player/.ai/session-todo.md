@@ -1,3 +1,17 @@
+# Session order (Olli, 2026-10-18, before he left the PC) — binding
+
+Olli: screenshot and screencast for the panel. Screencast must do no encoding of its own (MCU):
+an svp "service" that asks the buffer manager for PSRAM pool memory and runs only when the pool has
+room; not with video, remote desktop or dashboard (it is for the LVGL UI). Frames: the framebuffer,
+ideally without copying, linked non-blocking to the HW JPEG encoder, into an MJPEG stream (or file);
+sound from the microphone, PCM only (no audio encoding). With it: the relay's part, config settings
+(screenshot folder, JPEG quality) and the screencast options on the settings page. "Build a version
+that properly keeps the arch in mind."
+
+Status:
+- Design proposal written (scope, buffers, decisions open); awaiting Olli's decisions and the
+  settings mockup's approval before any code (README rules: design first, buffers planned with Olli).
+
 # Session order (Olli, 2026-10-18, before he went to sleep) — binding
 
 Olli: "only that fs/ls issue suxx really. while I go to sleep. please stick on that issue - it is
