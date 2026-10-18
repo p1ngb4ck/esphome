@@ -13,8 +13,19 @@ back to DHCP, manual IP code always compiled); 4. no notice during DSI-direct fo
 mode.
 
 Status:
-- Mockup in the design artifact (version 28: SetNetwork, SetNetWifi, SetNetEthernet, NetWifiEdit,
-  NetNotice), waiting for Olli's approval. Nothing implemented yet.
+- Mockup approved (design artifact version 28: SetNetwork, SetNetWifi, SetNetEthernet, NetWifiEdit,
+  NetNotice); Olli: "implement it".
+- Implemented: network 10794e98f8 (runtime priority order, saved; on_active_interface;
+  get_ip_addresses() follows the default route), ethernet fd3b6adae4 (apply_manual_ip, set_enabled,
+  saved; manual IP code always on ESP32), wifi 345618e6e5 + e370d271e1 (saved_networks: list with
+  order, BSSID, channel, hidden, manual address; replace/forget/move; browse_scan; on_scan_results;
+  set_enabled saved). Device YAML: ethernet in external_components, wifi saved_networks: 8 and its
+  triggers, ethernet/network triggers, api actions wifi_network_save/forget/move. lvgl_media.yaml:
+  Settings > Network (section 16) with its adapters under it, the WiFi and Ethernet pages, the WiFi
+  network popup, the notice top right (LVGL only), HA entities (Network priority, WiFi, Ethernet,
+  Ethernet address + manual texts + apply, WiFi scan, WiFi networks, WiFi networks around). Static
+  YAML pages as the Mice/Remote pages. Ethernet's sixth fact is the link, not the adapter type (not
+  known at runtime). Awaiting Olli's build and test.
 
 ---
 
