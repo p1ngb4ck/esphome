@@ -88,6 +88,33 @@ struct SavedWifiSettings {
   char password[65];
 } PACKED;  // NOLINT
 
+#ifdef USE_WIFI_SAVED_NETWORKS
+// The saved network list (saved_networks:): a header, then one preference per network
+static constexpr uint8_t SAVED_WIFI_NETWORKS_VERSION = 1;
+static constexpr uint8_t SAVED_WIFI_NETWORKS_DISABLED = 1 << 0;
+static constexpr uint8_t SAVED_WIFI_NETWORK_HIDDEN = 1 << 0;
+static constexpr uint8_t SAVED_WIFI_NETWORK_MANUAL_IP = 1 << 1;
+
+struct SavedWifiNetworksHeader {
+  uint8_t version;
+  uint8_t count;
+  uint8_t flags;
+} PACKED;  // NOLINT
+
+struct SavedWifiNetwork {
+  char ssid[33];
+  char password[65];
+  uint8_t bssid[6];
+  uint8_t channel;
+  uint8_t flags;
+  uint32_t static_ip;
+  uint32_t gateway;
+  uint32_t subnet;
+  uint32_t dns1;
+  uint32_t dns2;
+} PACKED;  // NOLINT
+#endif
+
 struct SavedWifiFastConnectSettings {
   uint8_t bssid[6];
   uint8_t channel;
@@ -548,6 +575,26 @@ class WiFiComponent final : public Component {
   void save_wifi_sta(const char *ssid, const char *password);
   void save_wifi_sta(StringRef ssid, StringRef password) { this->save_wifi_sta(ssid.c_str(), password.c_str()); }
 
+#ifdef USE_WIFI_SAVED_NETWORKS
+  /// The networks tried, in this order: the configured ones until the list is changed, then the saved list (the
+  /// configuration's EAP networks after it). Changes are saved and win from the next boot on.
+  size_t network_count() const { return this->sta_.size(); }
+  const WiFiAP &network_at(size_t index) const { return this->sta_[index]; }
+  /// Replaces the network with the same SSID, else adds it (at the end, or first); false when the list is full.
+  bool put_network(const WiFiAP &ap, bool first = false);
+  /// The network at index (network_at()) replaced, in its place; false for an EAP network.
+  bool replace_network(size_t index, const WiFiAP &ap);
+  bool forget_network(size_t index);
+  /// Moves a network one place earlier (delta < 0) or later (delta > 0).
+  bool move_network(size_t index, int delta);
+  /// A scan while connected, for the list of networks around (get_scan_result(), on_scan_results); false when
+  /// not connected or a scan runs (the connecting cycle's own scans report as well).
+  bool browse_scan();
+  bool is_browse_scanning() const { return this->browse_scan_; }
+  /// enable() / disable(), saved.
+  void set_enabled(bool enabled);
+#endif
+
   // ========== INTERNAL METHODS ==========
   // (In most use cases you won't need these)
   /// Setup WiFi interface.
@@ -991,6 +1038,17 @@ class WiFiComponent final : public Component {
   StaticVector<WiFiPowerSaveListener *, ESPHOME_WIFI_POWER_SAVE_LISTENERS> power_save_listeners_;
 #endif
   ESPPreferenceObject pref_;
+#ifdef USE_WIFI_SAVED_NETWORKS
+  void load_saved_networks_();
+  bool store_networks_(const std::vector<WiFiAP> &networks, bool disabled);
+  void use_networks_(const std::vector<WiFiAP> &networks);
+  bool change_networks_(const std::vector<WiFiAP> &networks);
+  std::vector<WiFiAP> saveable_networks_() const;
+  ESPPreferenceObject saved_header_pref_;
+  ESPPreferenceObject saved_network_prefs_[WIFI_SAVED_NETWORKS_MAX];
+  uint32_t browse_started_{0};
+  bool browse_scan_{false};
+#endif
 #ifdef USE_WIFI_FAST_CONNECT
   ESPPreferenceObject fast_connect_pref_;
 #endif

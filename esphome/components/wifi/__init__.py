@@ -61,6 +61,7 @@ from esphome.const import (
     CONF_STORAGE,
     CONF_SUBNET,
     CONF_TIMEOUT,
+    CONF_TRIGGER_ID,
     CONF_TTLS_PHASE_2,
     CONF_USE_ADDRESS,
     CONF_USERNAME,
@@ -169,6 +170,8 @@ CONF_POST_CONNECT_ROAMING = "post_connect_roaming"
 CONF_PRIVATE_KEY = "private_key"
 CONF_AP_MODE = "ap_mode"
 CONF_DNS_SERVERS = "dns_servers"
+CONF_SAVED_NETWORKS = "saved_networks"
+CONF_ON_SCAN_RESULTS = "on_scan_results"
 
 # Maximum number of WiFi networks that can be configured
 # Limited to 127 because selected_sta_index_ is int8_t in C++
@@ -248,6 +251,7 @@ WiFiAPActiveCondition = wifi_ns.class_("WiFiAPActiveCondition", Condition)
 WiFiEnableAction = wifi_ns.class_("WiFiEnableAction", automation.Action)
 WiFiDisableAction = wifi_ns.class_("WiFiDisableAction", automation.Action)
 WiFiRoamAction = wifi_ns.class_("WiFiRoamAction", automation.Action)
+ScanResultsTrigger = wifi_ns.class_("ScanResultsTrigger", automation.Trigger.template())
 WiFiConfigureAction = wifi_ns.class_(
     "WiFiConfigureAction", automation.Action, cg.Component
 )
@@ -706,6 +710,15 @@ CONFIG_SCHEMA = cv.All(
                 single=True
             ),
             cv.Optional(CONF_ON_DPP_URI): automation.validate_automation(single=True),
+            # Networks changed at runtime (put_network() ...), saved: up to this many
+            cv.Optional(CONF_SAVED_NETWORKS): cv.All(
+                cv.int_range(min=1, max=16), cv.only_on_esp32
+            ),
+            cv.Optional(CONF_ON_SCAN_RESULTS): automation.validate_automation(
+                {
+                    cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(ScanResultsTrigger),
+                }
+            ),
             cv.Optional(CONF_USE_PSRAM): cv.All(
                 cv.only_on_esp32, cv.requires_component("psram"), cv.boolean
             ),
@@ -874,6 +887,14 @@ async def to_code(config):
             require_mbedtls_tls()
             require_mbedtls_tls_extras()
 
+    if (saved_networks := config.get(CONF_SAVED_NETWORKS)) is not None:
+        cg.add_define("USE_WIFI_SAVED_NETWORKS")
+        cg.add_define("WIFI_SAVED_NETWORKS_MAX", saved_networks)
+        # Several networks and a manual address each, at runtime; the networks around stay for the list
+        cg.add_define("USE_WIFI_MULTI_SSID")
+        has_manual_ip = True
+        request_wifi_scan_results()
+
     # Only define USE_WIFI_MANUAL_IP if any AP uses manual IP
     if has_manual_ip:
         cg.add_define("USE_WIFI_MANUAL_IP")
@@ -1037,6 +1058,15 @@ async def to_code(config):
         await automation.build_automation(
             var.get_disconnect_trigger(), [], on_disconnect_config
         )
+
+    if on_scan_results := config.get(CONF_ON_SCAN_RESULTS):
+        cg.add_define("USE_WIFI_SCAN_RESULTS_TRIGGER")
+        request_wifi_scan_results()
+        for conf in on_scan_results:
+            trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
+            request_wifi_scan_results_listener()
+            cg.add(var.add_scan_results_listener(trigger))
+            await automation.build_automation(trigger, [], conf)
 
     if (on_dpp_uri := config.get(CONF_ON_DPP_URI)) is not None:
         cg.add_define("USE_WIFI_DPP_URI_TRIGGER")

@@ -31,6 +31,14 @@ template<typename... Ts> class WiFiDisableAction final : public Action<Ts...> {
   void play(const Ts &...x) override { global_wifi_component->disable(); }
 };
 
+#ifdef USE_WIFI_SCAN_RESULTS_TRIGGER
+/// on_scan_results: a scan finished (main loop); get_scan_result() holds what it found.
+class ScanResultsTrigger final : public Trigger<>, public WiFiScanResultsListener {
+ public:
+  void on_wifi_scan_results(const wifi_scan_vector_t<WiFiScanResult> &results) override { this->trigger(); }
+};
+#endif
+
 template<typename... Ts> class WiFiRoamAction final : public Action<Ts...> {
  public:
   void play(const Ts &...x) override { global_wifi_component->force_roam_check(); }

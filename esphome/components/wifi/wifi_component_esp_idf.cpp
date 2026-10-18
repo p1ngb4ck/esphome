@@ -1381,7 +1381,11 @@ bool WiFiComponent::wifi_scan_start_(bool passive) {
   // When scanning while connected (roaming), return to home channel between
   // each scanned channel to maintain the connection (helps with BLE/WiFi coexistence)
 #ifdef CONFIG_SOC_WIFI_SUPPORTED
-  if (this->is_roaming_scan_active()) {
+  if (this->is_roaming_scan_active()
+#ifdef USE_WIFI_SAVED_NETWORKS
+      || this->browse_scan_
+#endif
+  ) {
     config.coex_background_scan = true;
   }
 #endif
