@@ -17,6 +17,7 @@ from esphome.const import (
     CONF_UART_ID,
 )
 import esphome.final_validate as fv
+from esphome.helpers import fnv1_hash
 from esphome.types import ConfigType
 
 CODEOWNERS = ["@Bascht74"]
@@ -57,7 +58,9 @@ CONFIG_SCHEMA = cv.All(
         default_type="client",
         lower=True,
     ),
-    socket.consume_role_sockets("uart_tcp"),
+    # The role can change at runtime, so every entry holds a listen socket.
+    socket.consume_sockets(1, DOMAIN, socket.SocketType.TCP_LISTEN),
+    socket.consume_sockets(1, DOMAIN),
 )
 
 
@@ -96,14 +99,16 @@ FINAL_VALIDATE_SCHEMA = cv.All(
 
 async def to_code(config: ConfigType) -> None:
     var = await uart.new_uart_component(config)
+    # Both roles and the allow list are compiled; the runtime settings switch them.
+    socket.require_tcp_listener()
+    cg.add_define("USE_SOCKET_IPV4_ALLOW")
     if config[CONF_ROLE] == "server":
-        socket.require_tcp_listener()
         cg.add(var.set_server(True))
         socket.add_ipv4_allow(
             var.set_allow, config.get(CONF_ALLOWED_IPS), config[CONF_ID]
         )
-    else:
-        socket.require_tcp_client_link()
+    settings_key = fnv1_hash(f"uart_tcp_settings:{config[CONF_ID].id}")
+    cg.add(var.set_settings_key(settings_key))
     cg.add(var.set_port(config[CONF_PORT]))
     cg.add(var.set_reconnect_interval(config[CONF_RECONNECT_INTERVAL]))
     if (timeout := config[CONF_TIMEOUT]).total_milliseconds > 0:

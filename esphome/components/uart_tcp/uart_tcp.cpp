@@ -1,17 +1,119 @@
 #include "uart_tcp.h"
 
 #include "esphome/core/application.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
+#include "esphome/core/progmem.h"
 
 #include <algorithm>
 #include <cerrno>
 #include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 namespace esphome::uart_tcp {
 
 ESPHOME_LOG_TAG(TAG, "uart_tcp");
 
+/// The 4 bytes of a dotted quad in network order, as Ipv4AllowEntry holds them.
+static bool parse_ipv4(const char *&p, uint8_t out[4]) {
+  for (int i = 0; i < 4; i++) {
+    if (i != 0 && *p++ != '.') {
+      return false;
+    }
+    if (*p < '0' || *p > '9') {
+      return false;
+    }
+    char *end;
+    unsigned long value = strtoul(p, &end, 10);
+    if (value > 255 || end - p > 3) {
+      return false;
+    }
+    out[i] = static_cast<uint8_t>(value);
+    p = end;
+  }
+  return true;
+}
+
+static bool parse_allow_entry(const char *&p, socket::Ipv4AllowEntry &entry) {
+  uint8_t addr[4];
+  if (!parse_ipv4(p, addr)) {
+    return false;
+  }
+  unsigned long prefix = 32;
+  if (*p == '/') {
+    p++;
+    if (*p < '0' || *p > '9') {
+      return false;
+    }
+    char *end;
+    prefix = strtoul(p, &end, 10);
+    if (prefix > 32) {
+      return false;
+    }
+    p = end;
+  }
+  uint32_t mask_be = prefix == 0 ? 0 : 0xFFFFFFFFu << (32 - prefix);
+  uint8_t mask[4] = {static_cast<uint8_t>(mask_be >> 24), static_cast<uint8_t>(mask_be >> 16),
+                     static_cast<uint8_t>(mask_be >> 8), static_cast<uint8_t>(mask_be)};
+  for (int i = 0; i < 4; i++) {
+    addr[i] &= mask[i];
+  }
+  std::memcpy(&entry.addr, addr, 4);
+  std::memcpy(&entry.mask, mask, 4);
+  return true;
+}
+
+/// Entries of a comma separated list into out (nullptr only checks); SIZE_MAX when invalid or longer than max.
+static size_t parse_allow_list(const char *p, socket::Ipv4AllowEntry *out, size_t max) {
+  size_t count = 0;
+  socket::Ipv4AllowEntry entry;
+  while (*p == ' ') {
+    p++;
+  }
+  while (*p != '\0') {
+    if (count == max || !parse_allow_entry(p, entry)) {
+      return SIZE_MAX;
+    }
+    if (out != nullptr) {
+      out[count] = entry;
+    }
+    count++;
+    while (*p == ' ') {
+      p++;
+    }
+    if (*p == ',') {
+      p++;
+      while (*p == ' ') {
+        p++;
+      }
+      if (*p == '\0') {
+        return SIZE_MAX;
+      }
+    } else if (*p != '\0') {
+      return SIZE_MAX;
+    }
+  }
+  return count;
+}
+
 void UartTcp::setup() {
+  RAMAllocator<Settings> allocator(RAMAllocator<Settings>::ALLOC_EXTERNAL);
+  this->settings_ = allocator.allocate(1);
+  if (this->settings_ == nullptr) {
+    ESP_LOGE(TAG, "No PSRAM for the settings");
+    this->mark_failed();
+    return;
+  }
+  this->pref_ = global_preferences->make_preference<Settings>(this->settings_key_, true);
+  if (!this->pref_.load(this->settings_) || this->settings_->port == 0 ||
+      this->settings_->allow_count > MAX_ALLOWED_IPS) {
+    this->default_settings_();
+  }
+  this->settings_->host[HOST_MAX] = '\0';
+  this->use_settings_();
+  this->use_role_();
   this->link_.begin(TAG);
 #ifdef USE_NOISE_STREAM
   if (this->noise_ != nullptr) {
@@ -24,9 +126,10 @@ void UartTcp::setup() {
 #endif
   }
 #endif
-#ifdef USE_SOCKET_TCP_LISTENER
   this->listener_.begin(TAG);
-#endif
+  if (!this->is_enabled()) {
+    this->disable_loop();
+  }
 #ifdef USE_BINARY_SENSOR
   if (this->connected_sensor_ != nullptr) {
     this->connected_sensor_->publish_state(false);
@@ -47,6 +150,9 @@ void UartTcp::dump_config() {
                 this->server_ ? LOG_STR_LITERAL("Listen") : LOG_STR_LITERAL("Host"),
                 this->server_ ? LOG_STR_LITERAL("*") : this->link_.host(), this->link_.port(),
                 this->link_.reconnect_interval());
+  if (!this->is_enabled()) {
+    ESP_LOGCONFIG(TAG, "  Disabled");
+  }
   if (this->link_.idle_timeout() != 0) {
     ESP_LOGCONFIG(TAG, "  Timeout: %" PRIu32 "ms", this->link_.idle_timeout());
   }
@@ -172,7 +278,8 @@ void UartTcp::loop() {
     // link_was_up_ holds the accept until the previous drop's edge has run,
     // so the sensor and the stale UART discard always see the disconnect.
     this->listener_.poll(this->link_, !this->link_was_up_);
-  } else {
+  } else if (this->settings_->host[0] != '\0') {
+    // A server made a client at runtime has no host until one is set
     this->link_.poll();
   }
 #else
@@ -193,6 +300,184 @@ void UartTcp::loop() {
   this->read_uart_();
   this->flush_link_();
   this->link_.check_idle();
+}
+
+void UartTcp::default_settings_() {
+  Settings &s = *this->settings_;
+  std::memset(&s, 0, sizeof(s));
+  s.timeout_ms = this->link_.idle_timeout();
+  s.reconnect_ms = this->link_.reconnect_interval();
+  s.port = this->link_.port();
+  s.flags = this->server_ ? FLAG_SERVER : 0;
+  const char *host = this->link_.host();
+  if (host != nullptr) {
+    std::strncpy(s.host, host, HOST_MAX);
+  }
+  s.allow_count = static_cast<uint8_t>(std::min(this->yaml_allow_count_, MAX_ALLOWED_IPS));
+  for (size_t i = 0; i < s.allow_count; i++) {
+    progmem_memcpy(&s.allow[i], &this->yaml_allow_[i], sizeof(socket::Ipv4AllowEntry));
+  }
+}
+
+void UartTcp::use_settings_() {
+  const Settings &s = *this->settings_;
+  this->link_.set_idle_timeout(s.timeout_ms);
+  this->link_.set_reconnect_interval(s.reconnect_ms);
+  this->link_.set_port(s.port);
+  this->link_.set_host(s.host);
+  this->listener_.set_allow(s.allow, s.allow_count);
+  this->server_ = (s.flags & FLAG_SERVER) != 0;
+}
+
+void UartTcp::use_role_() {
+#ifdef USE_NOISE_STREAM
+  if (this->noise_ != nullptr) {
+    // The TCP client starts the handshake
+    this->noise_->set_initiator(!this->server_);
+  }
+#endif
+}
+
+void UartTcp::restart_link_() {
+  this->link_.close();
+  this->listener_.close();
+#ifdef USE_NOISE_STREAM
+  if (this->noise_ != nullptr) {
+    this->noise_->reset();
+  }
+#endif
+  if (this->link_was_up_) {
+    this->sync_link_(false);
+  }
+}
+
+void UartTcp::save_settings_() {
+  if (!this->pref_.save(this->settings_)) {
+    ESP_LOGW(TAG, "Settings not saved");
+    return;
+  }
+  global_preferences->sync();
+}
+
+void UartTcp::set_enabled(bool enabled) {
+  if (this->settings_ == nullptr || enabled == this->is_enabled()) {
+    return;
+  }
+  if (enabled) {
+    this->settings_->flags &= ~FLAG_DISABLED;
+#ifdef USE_NOISE_STREAM_RUNTIME_KEY
+    // Without a key the link stays closed, as at boot
+    if (this->noise_ == nullptr || this->noise_->has_key()) {
+      this->enable_loop();
+    }
+#else
+    this->enable_loop();
+#endif
+  } else {
+    this->settings_->flags |= FLAG_DISABLED;
+    this->restart_link_();
+    this->disable_loop();
+  }
+  this->save_settings_();
+}
+
+void UartTcp::apply_port(uint16_t port) {
+  if (this->settings_ == nullptr || port == 0) {
+    return;
+  }
+  this->settings_->port = port;
+  this->use_settings_();
+  this->restart_link_();
+  this->save_settings_();
+}
+
+void UartTcp::apply_server(bool server) {
+  if (this->settings_ == nullptr) {
+    return;
+  }
+  if (server) {
+    this->settings_->flags |= FLAG_SERVER;
+  } else {
+    this->settings_->flags &= ~FLAG_SERVER;
+  }
+  this->restart_link_();
+  this->use_settings_();
+  this->use_role_();
+  this->save_settings_();
+}
+
+bool UartTcp::apply_host(const std::string &host) {
+  if (this->settings_ == nullptr || host.size() > HOST_MAX) {
+    return false;
+  }
+  std::memcpy(this->settings_->host, host.c_str(), host.size() + 1);
+  this->use_settings_();
+  if (!this->server_) {
+    this->restart_link_();
+  }
+  this->save_settings_();
+  return true;
+}
+
+void UartTcp::apply_timeout(uint32_t ms) {
+  if (this->settings_ == nullptr) {
+    return;
+  }
+  this->settings_->timeout_ms = ms;
+  this->use_settings_();
+  this->save_settings_();
+}
+
+void UartTcp::apply_reconnect_interval(uint32_t ms) {
+  if (this->settings_ == nullptr) {
+    return;
+  }
+  this->settings_->reconnect_ms = ms;
+  this->use_settings_();
+  this->save_settings_();
+}
+
+bool UartTcp::apply_allowed_ips(const std::string &list) {
+  if (this->settings_ == nullptr) {
+    return false;
+  }
+  // The first pass checks the list, the second writes it, so a refused list leaves the old one
+  if (parse_allow_list(list.c_str(), nullptr, MAX_ALLOWED_IPS) == SIZE_MAX) {
+    ESP_LOGW(TAG, "Invalid allow list");
+    return false;
+  }
+  this->settings_->allow_count =
+      static_cast<uint8_t>(parse_allow_list(list.c_str(), this->settings_->allow, MAX_ALLOWED_IPS));
+  this->use_settings_();
+  // A connected peer the new list refuses is dropped
+  if (this->server_) {
+    this->restart_link_();
+  }
+  this->save_settings_();
+  return true;
+}
+
+void UartTcp::format_allowed_ips(char *out, size_t len) const {
+  if (len == 0) {
+    return;
+  }
+  out[0] = '\0';
+  if (this->settings_ == nullptr) {
+    return;
+  }
+  size_t pos = 0;
+  for (size_t i = 0; i < this->settings_->allow_count && pos < len; i++) {
+    const socket::Ipv4AllowEntry &e = this->settings_->allow[i];
+    uint8_t addr[4];
+    std::memcpy(addr, &e.addr, 4);
+    int prefix = __builtin_popcount(e.mask);
+    int n = snprintf(out + pos, len - pos, "%s%u.%u.%u.%u/%d", i == 0 ? "" : ",", addr[0], addr[1], addr[2], addr[3],
+                     prefix);
+    if (n < 0) {
+      return;
+    }
+    pos += static_cast<size_t>(n);
+  }
 }
 
 }  // namespace esphome::uart_tcp
