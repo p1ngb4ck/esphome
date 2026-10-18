@@ -5,6 +5,7 @@ from typing import Any
 from esphome import automation
 from esphome.automation import LambdaAction, StatelessLambdaAction
 import esphome.codegen as cg
+from esphome.components import uart
 from esphome.components.esp32 import (
     VARIANT_ESP32,
     VARIANT_ESP32C2,
@@ -61,11 +62,30 @@ from esphome.const import (
 )
 from esphome.core import CORE, ID, CoroPriority, Lambda, coroutine_with_priority
 from esphome.cpp_generator import MockObj, TemplateArgsType
+from esphome.helpers import fnv1_hash
 from esphome.types import ConfigType
 
 _LOGGER = logging.getLogger(__name__)
 
 CODEOWNERS = ["@esphome/core"]
+
+CONF_UART = "uart"
+CONF_BOOT_BUFFER_SIZE = "boot_buffer_size"
+CONF_LIVE_BUFFER_SIZE = "live_buffer_size"
+CONF_BOOT_HOLD = "boot_hold"
+
+
+def _auto_load() -> list[str]:
+    # The log UART derives from uart's virtual UART. The raw config, because an
+    # AUTO_LOAD that takes the config runs after the DEPENDENCIES checks.
+    raw = (CORE.raw_config or {}).get("logger")
+    if CORE.raw_config is None or (isinstance(raw, dict) and CONF_UART in raw):
+        return ["uart"]
+    return []
+
+
+AUTO_LOAD = _auto_load
+
 logger_ns = cg.esphome_ns.namespace("logger")
 LOG_LEVELS = {
     "NONE": cg.global_ns.ESPHOME_LOG_LEVEL_NONE,
@@ -250,6 +270,7 @@ def validate_wait_for_cdc(config: ConfigType) -> ConfigType:
 
 
 Logger = logger_ns.class_("Logger", cg.Component)
+LogUART = logger_ns.class_("LogUART", uart.VirtualUARTComponent, cg.Component)
 LoggerMessageTrigger = logger_ns.class_(
     "LoggerMessageTrigger",
     automation.Trigger.template(cg.uint8, cg.const_char_ptr, cg.const_char_ptr),
@@ -341,6 +362,25 @@ CONFIG_SCHEMA = cv.All(
                     cv.Optional(CONF_LEVEL, default="WARN"): is_log_level,
                 }
             ),
+            cv.Optional(CONF_UART): cv.Schema(
+                {
+                    cv.GenerateID(): cv.All(
+                        cv.declare_id(LogUART), uart.mark_unclocked
+                    ),
+                    # In PSRAM; 0 keeps no boot log.
+                    cv.Optional(CONF_BOOT_BUFFER_SIZE, default="128kB"): cv.All(
+                        cv.validate_bytes, cv.int_range(min=0, max=1048576)
+                    ),
+                    cv.Optional(CONF_LIVE_BUFFER_SIZE, default="16kB"): cv.All(
+                        cv.validate_bytes, cv.int_range(min=0, max=1048576)
+                    ),
+                    cv.Optional(CONF_BOOT_HOLD, default="10s"): cv.All(
+                        cv.positive_time_period_milliseconds,
+                        cv.Range(max=cv.TimePeriod(seconds=60)),
+                    ),
+                    cv.Optional(CONF_LEVEL): is_log_level,
+                }
+            ).extend(cv.COMPONENT_SCHEMA),
             cv.SplitDefault(
                 CONF_ESP8266_STORE_LOG_STRINGS_IN_FLASH, esp8266=True
             ): cv.All(cv.only_on_esp8266, cv.boolean),
@@ -407,6 +447,21 @@ async def to_code(config: ConfigType) -> None:
         hardware_uart := config.get(CONF_HARDWARE_UART)
     ) is not None and hardware_uart != cpp_default_uart:
         cg.add(log.set_uart_selection(HARDWARE_UART_TO_UART_SELECTION[hardware_uart]))
+    if (uart_conf := config.get(CONF_UART)) is not None:
+        # Made and attached before pre_setup(), so the boot ring keeps the logger's first line
+        uart.require_virtual_uart()
+        cg.add_define("USE_LOGGER_UART")
+        request_log_listener()
+        log_uart = cg.new_Pvariable(
+            uart_conf[CONF_ID],
+            uart_conf[CONF_BOOT_BUFFER_SIZE],
+            uart_conf[CONF_LIVE_BUFFER_SIZE],
+        )
+        cg.add(log_uart.set_level(LOG_LEVELS[uart_conf.get(CONF_LEVEL, level)]))
+        cg.add(log_uart.set_boot_hold_default(uart_conf[CONF_BOOT_HOLD]))
+        settings_key = fnv1_hash(f"logger_uart:{uart_conf[CONF_ID].id}")
+        cg.add(log_uart.set_settings_key(settings_key))
+        cg.add(log_uart.attach(log))
     # pre_setup() sets global_logger and must run before any other code
     # that may call ESP_LOG* (e.g. setup_preferences contains ESP_LOGVV).
     cg.add(log.pre_setup())
@@ -424,6 +479,9 @@ async def _late_logger_init(config: ConfigType) -> None:
     log = await cg.get_variable(config[CONF_ID])
     level = config[CONF_LEVEL]
     baud_rate: int = config[CONF_BAUD_RATE]
+    if (uart_conf := config.get(CONF_UART)) is not None:
+        log_uart = await cg.get_variable(uart_conf[CONF_ID])
+        await cg.register_component(log_uart, uart_conf)
     if CORE.using_zephyr:
         task_log_buffer_size = config.get(CONF_TASK_LOG_BUFFER_SIZE, 0)
         if task_log_buffer_size > 0:
