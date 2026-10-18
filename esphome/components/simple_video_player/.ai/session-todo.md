@@ -19,6 +19,9 @@ Status: (update as work finishes)
   enumeration ends, which is exactly when usb_hid starts its control transfers. Options: the
   hold also keeps the hub's control requests back while an LS control transfer holds the bus;
   or all hub ports powered at hub configuration before any port is handled.
+- Olli chose B: usb_host, ext_port: a port with a device waits (back to the end of the pending
+  list, fresh status on its turn) while a port of its hub is not powered yet, so all ports are
+  powered before any device is reset and enumerated. Awaiting Olli's test.
 
 ---
 

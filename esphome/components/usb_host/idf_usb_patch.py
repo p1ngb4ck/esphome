@@ -1357,6 +1357,60 @@ _HALT_DONE_REPLACEMENT = """        // Notify the task waiting for the pipe halt
         pipe->cs_flags.waiting_halt = 0;
         *yield |= _internal_pipe_event_notify(pipe, true);"""
 
+# Every port of a hub is powered before a device on one of them is reset and enumerated. The
+# ports are handled one at a time, each to its end, so a later port was powered only once the
+# device on an earlier one was enumerated: right when its class driver starts talking to it,
+# with the port's power switched on next to it. A port with a device now goes back to the end
+# of the list while a port of its hub still waits for power, and takes its turn again with a
+# fresh status. ext_port_process() leaves the actions of a port that moved back for its turn.
+_PORT_POWER_FIRST_ANCHOR = """    if (handle_port_changes(ext_port)) {
+        return;
+    } else if (handle_port_status(ext_port)) {
+        return;
+    }
+    handle_port_state(ext_port);
+}"""
+
+_PORT_POWER_FIRST_REPLACEMENT = """    if (handle_port_changes(ext_port)) {
+        return;
+    } else if (handle_port_status(ext_port)) {
+        return;
+    }
+    if ((ext_port->state == USB_PORT_STATE_DISCONNECTED || ext_port->state == USB_PORT_STATE_RESETTING) &&
+            port_has_connection(ext_port) && ext_port->dev_state == PORT_DEV_NOT_PRESENT &&
+            !ext_port->flags.reset_pending) {
+        ext_port_t *port;
+        TAILQ_FOREACH(port, &p_ext_port_driver->single_thread.pending_tailq, tailq_entry) {
+            if (port != ext_port && port->constant.context == ext_port->constant.context &&
+                    (port->state == USB_PORT_STATE_NOT_CONFIGURED || port->state == USB_PORT_STATE_POWERED_OFF)) {
+                break;
+            }
+        }
+        if (port != NULL) {
+            ESP_LOGD(EXT_PORT_TAG, "Port%d waits for port%d to be powered", ext_port->constant.port_num,
+                     port->constant.port_num);
+            TAILQ_REMOVE(&p_ext_port_driver->single_thread.pending_tailq, ext_port, tailq_entry);
+            TAILQ_INSERT_TAIL(&p_ext_port_driver->single_thread.pending_tailq, ext_port, tailq_entry);
+            port_set_actions(ext_port, PORT_ACTION_GET_STATUS);
+            return;
+        }
+    }
+    handle_port_state(ext_port);
+}"""
+
+_PORT_POWER_FIRST_LOOP_ANCHOR = """        action_flags = ext_port->action_flags;
+        ext_port->action_flags = 0;
+    }"""
+
+_PORT_POWER_FIRST_LOOP_REPLACEMENT = """        if (ext_port->flags.in_pending_list &&
+                TAILQ_FIRST(&p_ext_port_driver->single_thread.pending_tailq) != ext_port) {
+            // Moved back in the list: its actions wait for its turn
+            break;
+        }
+        action_flags = ext_port->action_flags;
+        ext_port->action_flags = 0;
+    }"""
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -1428,6 +1482,8 @@ PATCHES = (
     ("src/hcd_dwc.c", _LS_SPLIT_PARSE_ANCHOR, _LS_SPLIT_PARSE_REPLACEMENT),
     ("src/hcd_dwc.c", _HALT_ON_ERROR_ANCHOR, _HALT_ON_ERROR_REPLACEMENT),
     ("src/hcd_dwc.c", _HALT_DONE_ANCHOR, _HALT_DONE_REPLACEMENT),
+    ("src/ext_port.c", _PORT_POWER_FIRST_ANCHOR, _PORT_POWER_FIRST_REPLACEMENT),
+    ("src/ext_port.c", _PORT_POWER_FIRST_LOOP_ANCHOR, _PORT_POWER_FIRST_LOOP_REPLACEMENT),
 )
 
 # Identifies an existing patched copy. It has to change whenever anything about that copy
