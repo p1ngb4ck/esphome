@@ -7,6 +7,7 @@ from esphome.components.uart import (
     UARTComponent,
     UARTParityOptions,
     mark_unclocked,
+    restore_line_settings,
 )
 from esphome.components.usb_host import (
     get_max_packet_size,
@@ -333,6 +334,7 @@ async def to_code(config: list[ConfigType]) -> None:
             cg.add(chvar.set_data_bits(channel[CONF_DATA_BITS]))
             cg.add(chvar.set_parity(channel[CONF_PARITY]))
             cg.add(chvar.set_baud_rate(channel[CONF_BAUD_RATE]))
+            restore_line_settings(chvar, channel[CONF_ID])
             cg.add(chvar.set_dummy_receiver(channel[CONF_DUMMY_RECEIVER]))
             cg.add(chvar.set_claim_notification_ep(channel[CONF_CLAIM_NOTIFICATION_EP]))
             cg.add(chvar.set_flush_timeout(channel[CONF_FLUSH_TIMEOUT]))

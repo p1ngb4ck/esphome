@@ -8,6 +8,9 @@
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
+#if defined(USE_ESP8266) || defined(USE_ESP32)
+#include "esphome/core/preferences.h"
+#endif
 #ifdef USE_UART_DEBUGGER
 #include "esphome/core/automation.h"
 #endif
@@ -210,6 +213,12 @@ class UARTComponent {
    * This will load the current UART interface with the latest settings (baud_rate, parity, etc).
    */
   void load_settings() { this->load_settings(true); }
+
+  /// Apply line settings now and save them; from the next boot they replace the yaml ones.
+  /// False when they are invalid or not saved; valid ones are applied either way.
+  bool set_line_settings(uint32_t baud_rate, uint8_t data_bits, UARTParityOptions parity, uint8_t stop_bits);
+  /// Take saved line settings over the yaml ones. Codegen calls it after the line setters, before setup().
+  void restore_line_settings(uint32_t key);
 #endif  // USE_ESP8266 || USE_ESP32
 
 #ifdef USE_UART_DEBUGGER
@@ -233,6 +242,9 @@ class UARTComponent {
   uint8_t stop_bits_{0};
   uint8_t data_bits_{0};
   UARTParityOptions parity_{UART_CONFIG_PARITY_NONE};  // Must match the parity check in __init__.py
+#if defined(USE_ESP8266) || defined(USE_ESP32)
+  ESPPreferenceObject line_pref_;
+#endif
 #ifdef USE_UART_DEBUGGER
   CallbackManager<void(UARTDirection, uint8_t, StringRef)> debug_callback_{};
 #endif
