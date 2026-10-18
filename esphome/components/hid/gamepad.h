@@ -48,10 +48,24 @@ enum GamepadDpad : uint8_t {
 // and AXIS_Z, AXIS_RZ (left and right trigger, 0..65535).
 enum GamepadAxis : uint8_t { PAD_LX, PAD_LY, PAD_RX, PAD_RY, PAD_LT, PAD_RT, PAD_AXIS_COUNT };
 
+// A finger on the pad's touchpad, x and y in the touchpad's range (GamepadState::touch_width/height).
+struct GamepadTouch {
+  bool down{false};
+  uint16_t x{0};
+  uint16_t y{0};
+  bool operator!=(const GamepadTouch &other) const {
+    return this->down != other.down || this->x != other.x || this->y != other.y;
+  }
+};
+static constexpr uint8_t PAD_TOUCH_COUNT = 2;
+
 struct GamepadState {
   uint32_t buttons{0};
   uint8_t dpad{0};
   int32_t axes[PAD_AXIS_COUNT]{};
+  GamepadTouch touch[PAD_TOUCH_COUNT]{};
+  uint16_t touch_width{0};  // 0: no touchpad
+  uint16_t touch_height{0};
 };
 
 // What the outputs of a pad are set to: rumble motors (0..255), player number (0 off), light bar.

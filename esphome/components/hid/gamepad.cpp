@@ -13,6 +13,12 @@ static const char *const TAG = "hid.gamepad";
 static constexpr uint16_t PAGE_SIMULATION = 0x02;
 static constexpr uint16_t AXIS_USAGES[PAD_AXIS_COUNT] = {0x30, 0x31, 0x33, 0x34, 0x32, 0x35};
 static constexpr uint16_t USAGE_DPAD_UP = 0x90;
+// The touchpad's fingers, as controls on the Digitizer page (keys.py names them): the contact count,
+// each finger down (tip switch, secondary tip switch) and its x and y (0xF0.., reserved there).
+static constexpr uint16_t USAGE_CONTACT_COUNT = 0x54;
+static constexpr uint16_t USAGE_FINGER_DOWN[PAD_TOUCH_COUNT] = {0x42, 0x43};
+static constexpr uint16_t USAGE_FINGER_X[PAD_TOUCH_COUNT] = {0xF0, 0xF2};
+static constexpr uint16_t USAGE_FINGER_Y[PAD_TOUCH_COUNT] = {0xF1, 0xF3};
 static const char *const RUMBLE_TIMEOUT = "hid_rumble";
 
 int32_t pad_stick(int32_t v, int32_t min, int32_t max) {
@@ -54,6 +60,22 @@ void HIDInput::gamepad_state(const GamepadState &state) {
     if (state.axes[i] != this->pad_state_.axes[i])
       this->control_cb_.call(PAGE_GENERIC_DESKTOP, AXIS_USAGES[i], state.axes[i]);
   }
+  uint8_t contacts = 0;
+  uint8_t contacts_before = 0;
+  for (uint8_t i = 0; i < PAD_TOUCH_COUNT; i++) {
+    const GamepadTouch &now = state.touch[i];
+    const GamepadTouch &before = this->pad_state_.touch[i];
+    contacts += now.down;
+    contacts_before += before.down;
+    if (now.down != before.down)
+      this->control_cb_.call(PAGE_DIGITIZER, USAGE_FINGER_DOWN[i], now.down);
+    if (now.down && (now.x != before.x || !before.down))
+      this->control_cb_.call(PAGE_DIGITIZER, USAGE_FINGER_X[i], now.x);
+    if (now.down && (now.y != before.y || !before.down))
+      this->control_cb_.call(PAGE_DIGITIZER, USAGE_FINGER_Y[i], now.y);
+  }
+  if (contacts != contacts_before)
+    this->control_cb_.call(PAGE_DIGITIZER, USAGE_CONTACT_COUNT, contacts);
   this->pad_state_ = state;
 }
 

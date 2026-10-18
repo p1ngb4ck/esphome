@@ -15,6 +15,7 @@ KEYBOARD = 0x07
 CONSUMER = 0x0C
 BUTTON = 0x09
 GENERIC_DESKTOP = 0x01
+DIGITIZER = 0x0D
 
 
 def _keyboard() -> dict[str, int]:
@@ -154,8 +155,21 @@ SYSTEM_NAMES = {
     "HAT_SWITCH": 0x39,
 }
 
+# A gamepad's touchpad, as on_control names its fingers (hid/gamepad.cpp). The x and y of a finger
+# have no HID usage outside a touchpad's own report: 0xF0.. are reserved on the Digitizer page.
+DIGITIZER_NAMES = {
+    "CONTACT_COUNT": 0x54,
+    "FINGER1_DOWN": 0x42,
+    "FINGER2_DOWN": 0x43,
+    "FINGER1_X": 0xF0,
+    "FINGER1_Y": 0xF1,
+    "FINGER2_X": 0xF2,
+    "FINGER2_Y": 0xF3,
+}
+
 KEY_NAMES: dict[str, tuple[int, int]] = {
     **{name: (KEYBOARD, usage) for name, usage in _keyboard().items()},
+    **{name: (DIGITIZER, usage) for name, usage in DIGITIZER_NAMES.items()},
     **{name: (CONSUMER, usage) for name, usage in CONSUMER_NAMES.items()},
     **{name: (GENERIC_DESKTOP, usage) for name, usage in SYSTEM_NAMES.items()},
     **{f"BUTTON_{i}": (BUTTON, i) for i in range(1, 33)},

@@ -155,6 +155,18 @@ static void ps_buttons(GamepadState &s, const uint8_t *b) {
     s.buttons |= PAD_TOUCHPAD;
 }
 
+// Two touch points of 4 bytes (hid-playstation.c): bit 7 of the first set while not touched, then
+// x in 12 bits and y in 12 bits. Both pads are 1920 wide.
+static void ps_touch(GamepadState &s, const uint8_t *p, uint16_t height) {
+  s.touch_width = 1920;
+  s.touch_height = height;
+  for (uint8_t i = 0; i < PAD_TOUCH_COUNT; i++, p += 4) {
+    s.touch[i].down = (p[0] & 0x80) == 0;
+    s.touch[i].x = static_cast<uint16_t>(((p[2] & 0x0F) << 8) | p[1]);
+    s.touch[i].y = static_cast<uint16_t>((p[3] << 4) | (p[2] >> 4));
+  }
+}
+
 // -- DualShock 4 (hid-playstation.c) ---------------------------------------------------------
 
 class DualShock4Driver : public GamepadDriver {
@@ -186,6 +198,12 @@ class DualShock4Driver : public GamepadDriver {
     ps_buttons(s, c + 4);
     s.axes[PAD_LT] = pad_trigger(c[7], 0, 255);
     s.axes[PAD_RT] = pad_trigger(c[8], 0, 255);
+    // After the 32 common bytes: the number of touch reports, then 9 bytes each (a timestamp, two
+    // points); the last one is the latest.
+    const size_t at = c - d;
+    if (len >= at + 33 && c[32] >= 1 && len >= at + 33 + 9 * static_cast<size_t>(c[32])) {
+      ps_touch(s, c + 33 + 9 * (c[32] - 1) + 1, 942);
+    }
     this->input_->gamepad_state(s);
     return true;
   }
@@ -268,6 +286,9 @@ class DualSenseDriver : public GamepadDriver {
     ps_buttons(s, r + 7);
     if (r[9] & 0x04)
       s.buttons |= PAD_MUTE;
+    // Two touch points at offset 32 (hid-playstation.c dualsense_input_report).
+    if (len >= static_cast<size_t>(r - d) + 40)
+      ps_touch(s, r + 32, 1080);
     this->input_->gamepad_state(s);
     return true;
   }
