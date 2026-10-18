@@ -8,14 +8,17 @@
 #include "esphome/core/component.h"
 #include "esphome/core/preferences.h"
 
+#include <lvgl.h>
+
 #include <string>
 #include <vector>
 
 namespace esphome::lvgl {
 
 /// What the keys of HID keyboards and remotes do: the built-in navigation and the configuration's
-/// own actions. An action takes any number of keys, a key belongs to one action. Kept in a file
-/// (file:) or in preferences, written on every change.
+/// own actions. An action takes any number of keys, a key belongs to one action; a key can be a
+/// combo of up to three keys held together ("BUTTON_5+BUTTON_6+BUTTON_8"). Kept in a file (file:)
+/// or in preferences, written on every change.
 class KeyBindings : public Component {
  public:
   /// The built-in actions, first in the action list in this order.
@@ -38,12 +41,17 @@ class KeyBindings : public Component {
   };
   /// Modifiers of a key, either side.
   enum Modifier : uint8_t { MOD_SHIFT = 1, MOD_CTRL = 2, MOD_ALT = 4, MOD_GUI = 8 };
+  static constexpr uint8_t COMBO_MAX = 3;
   struct Key {
     uint16_t page;
     uint16_t usage;
     uint8_t mods;
+    /// The further keys of a combo, page << 16 | usage; 0 for none.
+    uint32_t with[COMBO_MAX - 1]{};
+    bool is_combo() const { return this->with[0] != 0; }
     bool operator==(const Key &other) const {
-      return this->page == other.page && this->usage == other.usage && this->mods == other.mods;
+      return this->page == other.page && this->usage == other.usage && this->mods == other.mods &&
+             this->with[0] == other.with[0] && this->with[1] == other.with[1];
     }
   };
 
@@ -82,8 +90,19 @@ class KeyBindings : public Component {
   // For the HID keypads, on the LVGL thread.
   /// The action a key stands for, -1 for none: with its modifiers, else without them.
   int resolve(uint16_t page, uint16_t usage, uint8_t mods) const;
-  /// While learning: binds the key and returns true.
+  /// The action of a combo the key pressed completes, with the keys held (page << 16 | usage, the
+  /// key pressed among them); -1 for none.
+  int resolve_combo(uint16_t page, uint16_t usage, const uint32_t *held, size_t count) const;
+  /// While learning: takes the key pressed (up to COMBO_MAX of them) and returns true.
   bool take_learned(uint16_t page, uint16_t usage, uint8_t mods);
+  /// While learning: a key let go binds the keys pressed until then, together. True when taken.
+  bool take_learned_release(uint16_t page, uint16_t usage);
+  /// While this widget shows, gamepad keys (buttons and D-pad) only run the actions of combos:
+  /// a page that tests a gamepad gets all of its inputs.
+  void set_capture(lv_obj_t *widget) { this->capture_ = widget; }
+  bool capturing() const;
+  /// A gamepad's button or D-pad.
+  static bool is_pad_key(uint16_t page, uint16_t usage);
   /// The action's own automation, if it has one.
   void fire(int action);
 
@@ -108,6 +127,7 @@ class KeyBindings : public Component {
     uint16_t usage;
     uint8_t mods;
     uint8_t action;
+    uint32_t with[COMBO_MAX - 1];
   };
   static constexpr size_t PREF_BINDINGS = 64;
   struct PrefData {
@@ -133,6 +153,10 @@ class KeyBindings : public Component {
   Trigger<std::string, std::string> learned_trigger_;
   int learn_action_{-1};
   uint32_t learn_until_{0};
+  uint32_t learn_keys_[COMBO_MAX]{};
+  uint8_t learn_count_{0};
+  uint8_t learn_mods_{0};
+  lv_obj_t *capture_{nullptr};
   uint32_t last_attempt_{0};
   bool loaded_{false};
   bool dirty_{false};

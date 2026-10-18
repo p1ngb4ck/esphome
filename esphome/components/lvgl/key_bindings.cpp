@@ -66,54 +66,89 @@ std::string KeyBindings::key_text(const Key &key) {
       text += '+';
     }
   }
-  return text + hid::key_name(key.page, key.usage);
+  text += hid::key_name(key.page, key.usage);
+  for (const uint32_t with : key.with) {
+    if (with == 0)
+      break;
+    text += '+';
+    text += hid::key_name(with >> 16, with & 0xFFFF);
+  }
+  return text;
+}
+
+// One key by name or "page:usage" (a bare number: a keyboard usage).
+static bool parse_one_key(const std::string &text, uint16_t *page, uint16_t *usage) {
+  for (uint16_t i = 0; i < hid::KEY_NAMES_COUNT; i++) {
+    if (text == hid::KEY_NAMES[i].name) {
+      *page = hid::KEY_NAMES[i].page;
+      *usage = hid::KEY_NAMES[i].usage;
+      return true;
+    }
+  }
+  char *end = nullptr;
+  const unsigned long first = strtoul(text.c_str(), &end, 0);
+  if (end == text.c_str() || first > 0xFFFF)
+    return false;
+  if (*end == '\0') {
+    *page = hid::PAGE_KEYBOARD;
+    *usage = static_cast<uint16_t>(first);
+    return true;
+  }
+  if (*end != ':')
+    return false;
+  const char *second_start = end + 1;
+  const unsigned long second = strtoul(second_start, &end, 0);
+  if (end == second_start || *end != '\0' || second > 0xFFFF)
+    return false;
+  *page = static_cast<uint16_t>(first);
+  *usage = static_cast<uint16_t>(second);
+  return true;
 }
 
 bool KeyBindings::parse_key(const std::string &text, Key *key) {
   Key result{hid::PAGE_KEYBOARD, 0, 0};
-  std::string rest = upper(trim(text));
-  // Modifiers first: "SHIFT+TAB"; a lone "+" is not one.
-  for (size_t plus; (plus = rest.find('+')) != std::string::npos && plus + 1 < rest.size();) {
-    const std::string name = trim(rest.substr(0, plus));
+  const std::string all = upper(trim(text));
+  // "SHIFT+TAB": modifiers, then the key; "BUTTON_5+BUTTON_6": a combo. A lone "+" is the key "+".
+  std::vector<std::string> parts;
+  size_t start = 0;
+  for (size_t plus; (plus = all.find('+', start)) != std::string::npos && plus + 1 < all.size() && plus > start;) {
+    parts.push_back(trim(all.substr(start, plus - start)));
+    start = plus + 1;
+  }
+  parts.push_back(trim(all.substr(start)));
+  uint8_t keys = 0;
+  for (const std::string &part : parts) {
+    if (part.empty())
+      return false;
     uint8_t mod = 0;
-    for (const auto &modifier : MODIFIER_NAMES) {
-      if (name == modifier.name)
-        mod = modifier.mod;
+    if (keys == 0) {
+      for (const auto &modifier : MODIFIER_NAMES) {
+        if (part == modifier.name)
+          mod = modifier.mod;
+      }
+      if (part == "META")
+        mod = MOD_GUI;
     }
-    if (name == "META")
-      mod = MOD_GUI;
-    if (mod == 0)
-      return false;
-    result.mods |= mod;
-    rest = trim(rest.substr(plus + 1));
-  }
-  if (rest.empty())
-    return false;
-  for (uint16_t i = 0; i < hid::KEY_NAMES_COUNT; i++) {
-    if (rest == hid::KEY_NAMES[i].name) {
-      result.page = hid::KEY_NAMES[i].page;
-      result.usage = hid::KEY_NAMES[i].usage;
-      *key = result;
-      return true;
+    if (mod != 0 && &part != &parts.back()) {
+      result.mods |= mod;
+      continue;
     }
+    if (keys == COMBO_MAX)
+      return false;
+    uint16_t page;
+    uint16_t usage;
+    if (!parse_one_key(part, &page, &usage))
+      return false;
+    if (keys == 0) {
+      result.page = page;
+      result.usage = usage;
+    } else {
+      result.with[keys - 1] = static_cast<uint32_t>(page) << 16 | usage;
+    }
+    keys++;
   }
-  // "page:usage", as key_name() writes a key without a name; a bare number is a keyboard usage.
-  char *end = nullptr;
-  const unsigned long first = strtoul(rest.c_str(), &end, 0);
-  if (end == rest.c_str() || first > 0xFFFF)
+  if (keys == 0)
     return false;
-  if (*end == '\0') {
-    result.usage = static_cast<uint16_t>(first);
-  } else {
-    if (*end != ':')
-      return false;
-    const char *second_start = end + 1;
-    const unsigned long second = strtoul(second_start, &end, 0);
-    if (end == second_start || *end != '\0' || second > 0xFFFF)
-      return false;
-    result.page = static_cast<uint16_t>(first);
-    result.usage = static_cast<uint16_t>(second);
-  }
   *key = result;
   return true;
 }
@@ -135,6 +170,7 @@ void KeyBindings::loop() {
   if (this->learn_action_ >= 0 && static_cast<int32_t>(now - this->learn_until_) >= 0) {
     const std::string action = this->actions_[this->learn_action_].name;
     this->learn_action_ = -1;
+    this->learn_count_ = 0;
     ESP_LOGI(TAG, "No key learned for %s", action.c_str());
     this->learned_trigger_.trigger(action, "");
   }
@@ -185,7 +221,7 @@ std::string KeyBindings::keys_text(size_t index) const {
 int KeyBindings::resolve(uint16_t page, uint16_t usage, uint8_t mods) const {
   int plain = -1;
   for (const Binding &binding : this->bindings_) {
-    if (binding.key.page != page || binding.key.usage != usage)
+    if (binding.key.page != page || binding.key.usage != usage || binding.key.is_combo())
       continue;
     if (binding.key.mods == mods)
       return binding.action;
@@ -195,13 +231,61 @@ int KeyBindings::resolve(uint16_t page, uint16_t usage, uint8_t mods) const {
   return plain;
 }
 
+int KeyBindings::resolve_combo(uint16_t page, uint16_t usage, const uint32_t *held, size_t count) const {
+  const uint32_t pressed = static_cast<uint32_t>(page) << 16 | usage;
+  auto is_held = [held, count](uint32_t code) { return std::find(held, held + count, code) != held + count; };
+  for (const Binding &binding : this->bindings_) {
+    if (!binding.key.is_combo())
+      continue;
+    const uint32_t first = static_cast<uint32_t>(binding.key.page) << 16 | binding.key.usage;
+    bool all = is_held(first);
+    bool mine = first == pressed;
+    for (const uint32_t with : binding.key.with) {
+      if (with == 0)
+        break;
+      all = all && is_held(with);
+      mine = mine || with == pressed;
+    }
+    if (all && mine)
+      return binding.action;
+  }
+  return -1;
+}
+
+bool KeyBindings::is_pad_key(uint16_t page, uint16_t usage) {
+  return page == hid::PAGE_BUTTON || (page == hid::PAGE_GENERIC_DESKTOP && usage >= 0x90 && usage <= 0x93);
+}
+
+bool KeyBindings::capturing() const {
+  return this->capture_ != nullptr && lv_obj_get_screen(this->capture_) == lv_screen_active() &&
+         lv_obj_is_visible(this->capture_);
+}
+
 bool KeyBindings::take_learned(uint16_t page, uint16_t usage, uint8_t mods) {
   if (this->learn_action_ < 0)
     return false;
   // Modifiers are learned with the key they are held for.
   if (page == hid::PAGE_KEYBOARD && usage >= 0xE0 && usage <= 0xE7)
     return true;
-  const Key key{page, usage, mods};
+  if (this->learn_count_ == 0)
+    this->learn_mods_ = mods;
+  if (this->learn_count_ < COMBO_MAX)
+    this->learn_keys_[this->learn_count_++] = static_cast<uint32_t>(page) << 16 | usage;
+  return true;
+}
+
+bool KeyBindings::take_learned_release(uint16_t page, uint16_t usage) {
+  if (this->learn_action_ < 0 || this->learn_count_ == 0)
+    return false;
+  const uint32_t released = static_cast<uint32_t>(page) << 16 | usage;
+  if (std::find(this->learn_keys_, this->learn_keys_ + this->learn_count_, released) ==
+      this->learn_keys_ + this->learn_count_)
+    return false;
+  Key key{static_cast<uint16_t>(this->learn_keys_[0] >> 16), static_cast<uint16_t>(this->learn_keys_[0] & 0xFFFF),
+          this->learn_mods_};
+  for (uint8_t i = 1; i < this->learn_count_; i++)
+    key.with[i - 1] = this->learn_keys_[i];
+  this->learn_count_ = 0;
   const auto action = static_cast<uint8_t>(this->learn_action_);
   this->learn_action_ = -1;
   this->bind_(key, action);
@@ -307,6 +391,7 @@ void KeyBindings::learn(const std::string &action, uint32_t timeout_ms) {
     return;
   }
   this->learn_action_ = index;
+  this->learn_count_ = 0;
   this->learn_until_ = millis() + timeout_ms;
   ESP_LOGI(TAG, "Press the key for %s", action.c_str());
 }
@@ -316,6 +401,7 @@ void KeyBindings::cancel_learn() {
     return;
   const std::string action = this->actions_[this->learn_action_].name;
   this->learn_action_ = -1;
+  this->learn_count_ = 0;
   this->learned_trigger_.trigger(action, "");
 }
 
@@ -414,7 +500,7 @@ bool KeyBindings::load_() {
   for (uint16_t i = 0; i < data.count; i++) {
     const PrefBinding &binding = data.bindings[i];
     if (binding.action < this->actions_.size())
-      this->bind_({binding.page, binding.usage, binding.mods}, binding.action);
+      this->bind_({binding.page, binding.usage, binding.mods, {binding.with[0], binding.with[1]}}, binding.action);
   }
   return true;
 }
@@ -445,7 +531,11 @@ bool KeyBindings::save_() {
       ESP_LOGW(TAG, "Only %u key bindings fit in preferences", static_cast<unsigned>(PREF_BINDINGS));
       break;
     }
-    data.bindings[data.count++] = {binding.key.page, binding.key.usage, binding.key.mods, binding.action};
+    data.bindings[data.count++] = {binding.key.page,
+                                   binding.key.usage,
+                                   binding.key.mods,
+                                   binding.action,
+                                   {binding.key.with[0], binding.key.with[1]}};
   }
   if (!this->pref_.save(&data) || !global_preferences->sync()) {
     ESP_LOGW(TAG, "Saving to preferences failed, retrying");

@@ -72,22 +72,32 @@ def _hid_id(value):
     return _hid_input()(value)
 
 
+COMBO_MAX = 3  # KeyBindings::COMBO_MAX
+
+
 def validate_key_combo(value):
-    """A key as hid names it, with modifiers in front: "SHIFT+TAB"."""
+    """A key as hid names it, with modifiers in front: "SHIFT+TAB"; or up to three keys held
+    together: "BUTTON_5+BUTTON_6+BUTTON_8". (page, usage, mods, (page << 16 | usage of the others))."""
     from esphome.components.hid.keys import validate_key
 
     if isinstance(value, int):
-        return (*validate_key(value), 0)
-    *modifiers, key = cv.string_strict(value).strip().split("+")
+        return (*validate_key(value), 0, (0, 0))
+    parts = [part.strip() for part in cv.string_strict(value).strip().split("+")]
     mods = 0
-    for modifier in modifiers:
-        name = modifier.strip().upper()
-        if name not in MODIFIERS:
-            raise cv.Invalid(
-                f"Unknown modifier '{modifier}': use {', '.join(MODIFIERS)}"
-            )
-        mods |= MODIFIERS[name]
-    return (*validate_key(key.strip()), mods)
+    while len(parts) > 1 and parts[0].upper() in MODIFIERS:
+        mods |= MODIFIERS[parts.pop(0).upper()]
+    if len(parts) > COMBO_MAX:
+        raise cv.Invalid(f"a combo is at most {COMBO_MAX} keys")
+    keys = []
+    for part in parts:
+        if not part:
+            raise cv.Invalid(f"Empty key in '{value}'")
+        if part.upper() in MODIFIERS:
+            raise cv.Invalid(f"Modifier '{part}' must come first: use {', '.join(MODIFIERS)}")
+        keys.append(validate_key(part))
+    others = [page << 16 | usage for page, usage in keys[1:]]
+    others += [0] * (COMBO_MAX - 1 - len(others))
+    return (*keys[0], mods, tuple(others))
 
 
 def _action_name(value):
@@ -174,7 +184,10 @@ HID_POINTERS_CONFIG = cv.ensure_list(
 
 
 def _keys_expression(keys) -> cg.RawExpression:
-    items = ", ".join(f"{{{page}, {usage}, {mods}}}" for page, usage, mods in keys)
+    items = ", ".join(
+        f"{{{page}, {usage}, {mods}, {{{', '.join(str(o) for o in others)}}}}}"
+        for page, usage, mods, others in keys
+    )
     return cg.RawExpression(f"std::vector<{KeyBindingsKey}>{{{items}}}")
 
 

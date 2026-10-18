@@ -1036,6 +1036,7 @@ void LVHIDKeypadListener::read_(lv_indev_data_t *data) {
         this->release_next_ = true;
         break;
       }
+      this->track_(event.code, event.kind == KEY_PRESS);
       if (event.kind == KEY_PRESS) {
         Held *slot = nullptr;
         for (Held &held : this->held_) {
@@ -1052,6 +1053,8 @@ void LVHIDKeypadListener::read_(lv_indev_data_t *data) {
         this->pressed_ = true;
         break;
       }
+      if (this->bindings_->take_learned_release(event.code >> 16, event.code & 0xFFFF))
+        continue;
       if (LVHIDPointerListener *pointer = this->parent_->get_key_pointer())
         pointer->key_release(event.code);
       Held *held = nullptr;
@@ -1086,7 +1089,10 @@ void LVHIDKeypadListener::run_paused() {
     }
     const uint16_t page = event.code >> 16;
     const uint16_t usage = event.code & 0xFFFF;
+    this->track_(event.code, event.kind == KEY_PRESS);
     if (event.kind == KEY_RELEASE) {
+      if (this->bindings_->take_learned_release(page, usage))
+        continue;
       for (Held &held : this->held_) {
         if (held.code == event.code) {
           held.code = 0;
@@ -1102,7 +1108,8 @@ void LVHIDKeypadListener::run_paused() {
       continue;
     if (this->bindings_->take_learned(page, usage, event.mods))
       continue;
-    const int action = this->bindings_->resolve(page, usage, event.mods);
+    const int combo = this->bindings_->resolve_combo(page, usage, this->down_, this->down_count_);
+    const int action = combo >= 0 ? combo : this->bindings_->resolve(page, usage, event.mods);
     if (taker != nullptr && taker->paused_key(page, usage, event.mods, true, action, event.layout_char, event.level3) &&
         action < KeyBindings::BUILTIN_COUNT)
       continue;
@@ -1110,10 +1117,32 @@ void LVHIDKeypadListener::run_paused() {
   }
 }
 
+void LVHIDKeypadListener::track_(uint32_t code, bool pressed) {
+  uint8_t at = 0;
+  while (at < this->down_count_ && this->down_[at] != code)
+    at++;
+  if (pressed && at == this->down_count_ && this->down_count_ < DOWN_SIZE) {
+    this->down_[this->down_count_++] = code;
+  } else if (!pressed && at < this->down_count_) {
+    this->down_[at] = this->down_[--this->down_count_];
+  }
+}
+
 uint32_t LVHIDKeypadListener::press_(uint16_t page, uint16_t usage, uint8_t mods) {
   if (this->bindings_->take_learned(page, usage, mods))
     return 0;
+  const int combo = this->bindings_->resolve_combo(page, usage, this->down_, this->down_count_);
+  // A page testing a gamepad gets its buttons and D-pad; only combos still act.
+  if (this->bindings_->capturing() && KeyBindings::is_pad_key(page, usage)) {
+    this->bindings_->fire(combo);
+    return 0;
+  }
   lv_obj_t *focused = this->focused_();
+  if (combo >= 0) {
+    const uint32_t key = combo < KeyBindings::BUILTIN_COUNT ? this->builtin_(combo, focused) : 0;
+    this->bindings_->fire(combo);
+    return key;
+  }
   if (is_textarea(focused) && types_text(page, usage, mods))
     return 0;
   const int action = this->bindings_->resolve(page, usage, mods);

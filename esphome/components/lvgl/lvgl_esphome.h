@@ -613,6 +613,8 @@ class LVHIDKeypadListener final : public Parented<LvglComponent> {
   void read_(lv_indev_data_t *data);
   /// The LVGL key a key press becomes, 0 when it is done here (or nothing).
   uint32_t press_(uint16_t page, uint16_t usage, uint8_t mods);
+  /// The keys held, for combos (KeyBindings::resolve_combo()).
+  void track_(uint32_t code, bool pressed);
   uint32_t builtin_(int action, lv_obj_t *focused);
   lv_obj_t *focused_() const;
   /// A full-screen widget shown on the top layer (a popup's backdrop): only its widgets are reached.
@@ -630,6 +632,9 @@ class LVHIDKeypadListener final : public Parented<LvglComponent> {
   std::atomic<uint8_t> head_{0};  // read by read_()
   std::atomic<uint8_t> tail_{0};  // written by push_()
   Held held_[HELD_SIZE]{};
+  static constexpr uint8_t DOWN_SIZE = 8;
+  uint32_t down_[DOWN_SIZE]{};
+  uint8_t down_count_{0};
   uint32_t key_{0};
   bool pressed_{false};
   bool release_next_{false};
