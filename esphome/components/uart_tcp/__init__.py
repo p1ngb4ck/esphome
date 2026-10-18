@@ -6,7 +6,7 @@ from esphome.components.const import (
     CONF_RECONNECT_INTERVAL,
     CONF_ROLE,
 )
-from esphome.components.tcp_uart import DOMAIN as TCP_UART_DOMAIN
+from esphome.components.tcp_uart import DOMAIN as TCP_UART_DOMAIN, TcpUart
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ENCRYPTION,
@@ -16,6 +16,7 @@ from esphome.const import (
     CONF_TIMEOUT,
     CONF_UART_ID,
 )
+from esphome.core import CORE, ID
 import esphome.final_validate as fv
 from esphome.helpers import fnv1_hash
 from esphome.types import ConfigType
@@ -30,6 +31,13 @@ CONF_UART_TCP_ID = "uart_tcp_id"
 
 uart_tcp_ns = cg.esphome_ns.namespace("uart_tcp")
 UartTcp = uart_tcp_ns.class_("UartTcp", cg.Component, uart.UARTDevice)
+UartTcpForwards = uart_tcp_ns.class_("UartTcpForwards", cg.Component)
+
+CONF_RUNNERS = "runners"
+CONF_SETTINGS_FILE = "settings_file"
+ROLE_FORWARDS = "forwards"
+# Sockets are reserved for the most runners, so the count can change at runtime.
+MAX_RUNNERS = 12
 noise.register_set_key_action(DOMAIN, UartTcp)
 
 
@@ -46,6 +54,15 @@ BASE_SCHEMA = cv.Schema(
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
+
+def _consume_sockets(config: ConfigType) -> ConfigType:
+    # The role can change at runtime, so every entry holds a listen socket;
+    # forwards hold one per runner at the most.
+    count = MAX_RUNNERS if config[CONF_ROLE] == ROLE_FORWARDS else 1
+    socket.consume_sockets(count, DOMAIN, socket.SocketType.TCP_LISTEN)(config)
+    return socket.consume_sockets(count, DOMAIN)(config)
+
+
 CONFIG_SCHEMA = cv.All(
     cv.typed_schema(
         {
@@ -53,14 +70,26 @@ CONFIG_SCHEMA = cv.All(
             "server": BASE_SCHEMA.extend(
                 {cv.Optional(CONF_ALLOWED_IPS): socket.IPV4_ALLOW_SCHEMA}
             ),
+            # UARTs forwarded at runtime, from a settings file on a storage
+            ROLE_FORWARDS: cv.Schema(
+                {
+                    cv.GenerateID(): cv.declare_id(UartTcpForwards),
+                    cv.Optional(CONF_RUNNERS, default=4): cv.int_range(
+                        min=2, max=MAX_RUNNERS
+                    ),
+                    cv.Optional(
+                        CONF_SETTINGS_FILE, default="/sd/serial_ports.txt"
+                    ): cv.All(cv.string, cv.Length(min=1, max=127)),
+                }
+            )
+            .extend(cv.COMPONENT_SCHEMA)
+            .add_extra(cv.requires_component("storage")),
         },
         key=CONF_ROLE,
         default_type="client",
         lower=True,
     ),
-    # The role can change at runtime, so every entry holds a listen socket.
-    socket.consume_sockets(1, DOMAIN, socket.SocketType.TCP_LISTEN),
-    socket.consume_sockets(1, DOMAIN),
+    _consume_sockets,
 )
 
 
@@ -89,7 +118,7 @@ def _final_validate(config: ConfigType) -> ConfigType:
     return config
 
 
-FINAL_VALIDATE_SCHEMA = cv.All(
+_FINAL_VALIDATE_LINK = cv.All(
     socket.final_validate_idle_timeout,
     noise.final_validate_reconnect_interval,
     noise.final_validate_stream_key(DOMAIN),
@@ -97,7 +126,80 @@ FINAL_VALIDATE_SCHEMA = cv.All(
 )
 
 
+def _final_validate_entry(config: ConfigType) -> ConfigType:
+    if config[CONF_ROLE] != ROLE_FORWARDS:
+        return _FINAL_VALIDATE_LINK(config)
+    data = fv.full_config.get().data.setdefault(DOMAIN, {})
+    if data.get(ROLE_FORWARDS):
+        raise cv.Invalid(
+            "Only one uart_tcp entry can have the role forwards.", [CONF_ROLE]
+        )
+    data[ROLE_FORWARDS] = True
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate_entry
+
+
+def _declared_ids(node: object):
+    if isinstance(node, ID):
+        if node.is_declaration:
+            yield node
+    elif isinstance(node, dict):
+        for value in node.values():
+            yield from _declared_ids(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _declared_ids(item)
+
+
+def _forwardable_uarts() -> list[ID]:
+    """Every UART the yaml declares that nothing else reads: hardware UARTs and each
+    usb_uart channel, not the log UART, not tcp_uart (already a TCP link)."""
+    full_config = CORE.config
+    found = []
+    for id_ in _declared_ids(full_config):
+        if (
+            id_.type is None
+            or not id_.type.inherits_from(uart.UARTComponent)
+            or id_.type.inherits_from(uart.VirtualUARTComponent)
+            or id_.type.inherits_from(TcpUart)
+        ):
+            continue
+        uart_id = str(id_)
+        if any(
+            uart.subtree_references_uart(conf, uart_id)
+            for conf in full_config.values()
+        ):
+            continue
+        found.append(id_)
+    return found
+
+
+async def _forwards_to_code(config: ConfigType) -> None:
+    from esphome.components.storage import request_storage_worker
+
+    var = cg.new_Pvariable(config[CONF_ID])
+    await cg.register_component(var, config)
+    cg.add_define("USE_UART_TCP_FORWARDS")
+    socket.require_tcp_listener()
+    cg.add_define("USE_SOCKET_IPV4_ALLOW")
+    request_storage_worker()
+    cg.add(var.set_runners_default(config[CONF_RUNNERS]))
+    cg.add(var.set_settings_file_default(config[CONF_SETTINGS_FILE]))
+    settings_key = fnv1_hash(f"uart_tcp_forwards:{config[CONF_ID].id}")
+    cg.add(var.set_settings_key(settings_key))
+    uarts = _forwardable_uarts()
+    cg.add(var.init_uarts(len(uarts)))
+    for uart_id in uarts:
+        uart_var = await cg.get_variable(uart_id)
+        cg.add(var.add_uart(uart_var, uart_id.id))
+
+
 async def to_code(config: ConfigType) -> None:
+    if config[CONF_ROLE] == ROLE_FORWARDS:
+        await _forwards_to_code(config)
+        return
     var = await uart.new_uart_component(config)
     uart_id, uart_var = await cg.get_variable_with_full_id(config[CONF_UART_ID])
     if uart_id.type.inherits_from(uart.VirtualUARTComponent):

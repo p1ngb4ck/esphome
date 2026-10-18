@@ -26,6 +26,10 @@
 
 namespace esphome::uart_tcp {
 
+#ifdef USE_UART_TCP_FORWARDS
+class UartTcpForwards;
+#endif
+
 /// Copies raw bytes between one hardware UART and one TCP socket.
 class UartTcp final : public Component, public uart::UARTDevice {
  public:
@@ -55,7 +59,7 @@ class UartTcp final : public Component, public uart::UARTDevice {
   /// Save a base64 key for `encryption:` without a key in yaml; the link reconnects with it.
   void set_encryption_key(const std::string &key) {
     if (this->noise_ != nullptr && this->noise_->set_key(this->link_, key) && this->is_enabled()) {
-      this->enable_loop();
+      this->run_(true);
     }
   }
 #endif
@@ -93,11 +97,10 @@ class UartTcp final : public Component, public uart::UARTDevice {
   void on_shutdown() override;
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
- protected:
   static constexpr uint8_t FLAG_DISABLED = 1 << 0;
   static constexpr uint8_t FLAG_SERVER = 1 << 1;
 
-  /// Saved as is; lives in PSRAM.
+  /// Saved as is (prefs, or a forwards settings file line); lives in PSRAM.
   struct Settings {
     uint32_t timeout_ms;
     uint32_t reconnect_ms;
@@ -107,6 +110,20 @@ class UartTcp final : public Component, public uart::UARTDevice {
     char host[HOST_MAX + 1];
     socket::Ipv4AllowEntry allow[MAX_ALLOWED_IPS];
   };
+
+#ifdef USE_UART_TCP_FORWARDS
+  /// A runner of owner: its settings come from the owner's file, the owner drives its loop. Instead of setup().
+  void setup_runner(UartTcpForwards *owner, Settings *settings);
+  /// Runner: the forwarded UART, nullptr for none; the link starts again.
+  void set_uart(uart::UARTComponent *uart);
+  uart::UARTComponent *get_uart() const { return this->parent_; }
+  /// Runner: its owner calls loop() while this holds.
+  bool is_running() const { return this->running_; }
+#endif
+
+ protected:
+  /// Loop on or off; a runner tells its owner instead.
+  void run_(bool on);
 
   /// The link is up and, with encryption, its session is secure.
   bool link_up_() {
@@ -161,6 +178,10 @@ class UartTcp final : public Component, public uart::UARTDevice {
   const socket::Ipv4AllowEntry *yaml_allow_{nullptr};
   size_t yaml_allow_count_{0};
   uint32_t settings_key_{0};
+#ifdef USE_UART_TCP_FORWARDS
+  UartTcpForwards *owner_{nullptr};
+  bool running_{false};
+#endif
   // Loop start time of the last socket-to-UART write; sizes the next paced write.
   uint32_t last_write_ms_{0};
 #ifdef USE_SENSOR

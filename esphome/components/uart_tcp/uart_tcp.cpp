@@ -1,4 +1,7 @@
 #include "uart_tcp.h"
+#ifdef USE_UART_TCP_FORWARDS
+#include "uart_tcp_forwards.h"
+#endif
 
 #include "esphome/core/application.h"
 #include "esphome/core/helpers.h"
@@ -121,14 +124,14 @@ void UartTcp::setup() {
 #ifdef USE_NOISE_STREAM_RUNTIME_KEY
     // Without a key the link stays closed: a client does not dial, a server does not listen
     if (!this->noise_->load_key()) {
-      this->disable_loop();
+      this->run_(false);
     }
 #endif
   }
 #endif
   this->listener_.begin(TAG);
   if (!this->is_enabled()) {
-    this->disable_loop();
+    this->run_(false);
   }
 #ifdef USE_BINARY_SENSOR
   if (this->connected_sensor_ != nullptr) {
@@ -362,7 +365,46 @@ void UartTcp::restart_link_() {
   }
 }
 
+void UartTcp::run_(bool on) {
+#ifdef USE_UART_TCP_FORWARDS
+  if (this->owner_ != nullptr) {
+    // Nothing to forward without a UART
+    this->running_ = on && this->parent_ != nullptr;
+    this->owner_->runner_changed();
+    return;
+  }
+#endif
+  if (on) {
+    this->enable_loop();
+  } else {
+    this->disable_loop();
+  }
+}
+
+#ifdef USE_UART_TCP_FORWARDS
+void UartTcp::setup_runner(UartTcpForwards *owner, Settings *settings) {
+  this->owner_ = owner;
+  this->settings_ = settings;
+  this->settings_->host[HOST_MAX] = '\0';
+  this->use_settings_();
+  this->link_.begin(TAG);
+  this->listener_.begin(TAG);
+}
+
+void UartTcp::set_uart(uart::UARTComponent *uart) {
+  this->restart_link_();
+  this->parent_ = uart;
+  this->run_(this->is_enabled());
+}
+#endif
+
 void UartTcp::save_settings_() {
+#ifdef USE_UART_TCP_FORWARDS
+  if (this->owner_ != nullptr) {
+    this->owner_->save();
+    return;
+  }
+#endif
   if (!this->pref_.save(this->settings_)) {
     ESP_LOGW(TAG, "Settings not saved");
     return;
@@ -379,15 +421,15 @@ void UartTcp::set_enabled(bool enabled) {
 #ifdef USE_NOISE_STREAM_RUNTIME_KEY
     // Without a key the link stays closed, as at boot
     if (this->noise_ == nullptr || this->noise_->has_key()) {
-      this->enable_loop();
+      this->run_(true);
     }
 #else
-    this->enable_loop();
+    this->run_(true);
 #endif
   } else {
     this->settings_->flags |= FLAG_DISABLED;
     this->restart_link_();
-    this->disable_loop();
+    this->run_(false);
   }
   this->save_settings_();
 }
