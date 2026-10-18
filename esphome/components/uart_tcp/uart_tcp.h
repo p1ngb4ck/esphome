@@ -39,6 +39,10 @@ class UartTcp final : public Component, public uart::UARTDevice {
   static constexpr size_t HOST_MAX = 253;
   static constexpr size_t MAX_ALLOWED_IPS = 16;
 
+  /// The object in PSRAM (codegen makes it so). Without PSRAM a plain one that fails its setup; no working copy
+  /// in internal RAM.
+  static UartTcp *create();
+
   // The yaml values; saved runtime settings replace them in setup().
   void set_host(const char *host) { this->link_.set_host(host); }
   void set_port(uint16_t port) { this->link_.set_port(port); }
@@ -99,9 +103,10 @@ class UartTcp final : public Component, public uart::UARTDevice {
   uint32_t connected_since() const { return this->connected_ms_; }
   size_t peer_address(std::span<char, socket::SOCKADDR_STR_LEN> buf) const { return this->link_.peer_address(buf); }
   uint32_t get_disconnects() const { return this->disconnects_; }
-  /// Called with true on a connect, false on a disconnect.
-  template<typename F> void add_on_connection_callback(F &&callback) {
-    this->connection_callback_.add(std::forward<F>(callback));
+  /// One listener, called with true on a connect, false on a disconnect.
+  void set_on_connection(void (*callback)(void *arg, bool up), void *arg) {
+    this->connection_cb_ = callback;
+    this->connection_arg_ = arg;
   }
 
   void setup() override;
@@ -200,10 +205,13 @@ class UartTcp final : public Component, public uart::UARTDevice {
 #ifdef USE_SENSOR
   sensor::Sensor *disconnects_sensor_{nullptr};
 #endif
-  LazyCallbackManager<void(bool)> connection_callback_;
+  void (*connection_cb_)(void *, bool){nullptr};
+  void *connection_arg_{nullptr};
   uint32_t disconnects_{0};
   uint32_t connected_ms_{0};
   bool server_{false};
+  // create() found no PSRAM: setup() fails.
+  bool no_psram_{false};
   // The link state loop() saw last; edges clear the buffer and publish the sensor.
   bool link_was_up_{false};
   // A read stopped before EAGAIN. ready() stays false until new data arrives.

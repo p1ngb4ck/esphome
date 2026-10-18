@@ -29,8 +29,14 @@ class UartTcpForwards : public Component {
   static constexpr size_t PATH_MAX_LEN = 128;
   static constexpr uint16_t FIRST_PORT = 4001;
 
-  void init_uarts(size_t count) { this->uarts_.init(count); }
-  void add_uart(uart::UARTComponent *uart, const char *name) { this->uarts_.push_back(Uart{uart, name}); }
+  /// The object in PSRAM. Without PSRAM a plain one that fails its setup; no working copy in internal RAM.
+  static UartTcpForwards *create();
+  /// The UART list, in PSRAM.
+  void init_uarts(size_t count);
+  void add_uart(uart::UARTComponent *uart, const char *name) {
+    if (this->uart_count_ < this->uart_capacity_)
+      this->uarts_[this->uart_count_++] = Uart{uart, name};
+  }
   void set_runners_default(uint8_t count) { this->runners_default_ = count; }
   void set_settings_file_default(const char *path) { this->path_default_ = path; }
   void set_settings_key(uint32_t key) { this->settings_key_ = key; }
@@ -52,10 +58,10 @@ class UartTcpForwards : public Component {
   /// The file was read (or found missing): changes are written from now on.
   bool is_loaded() const { return this->loaded_; }
 
-  size_t uart_count() const { return this->uarts_.size(); }
-  const char *uart_name(size_t index) const { return index < this->uarts_.size() ? this->uarts_[index].name : ""; }
+  size_t uart_count() const { return this->uart_count_; }
+  const char *uart_name(size_t index) const { return index < this->uart_count_ ? this->uarts_[index].name : ""; }
   uart::UARTComponent *uart_at(size_t index) const {
-    return index < this->uarts_.size() ? this->uarts_[index].uart : nullptr;
+    return index < this->uart_count_ ? this->uarts_[index].uart : nullptr;
   }
   UartTcp *runner(size_t index) { return index < this->count_ ? &this->runners_[index] : nullptr; }
   /// The UART of a runner as uart_count() counts them, -1 for none.
@@ -77,9 +83,11 @@ class UartTcpForwards : public Component {
   void save();
   /// A runner's need for the loop changed.
   void runner_changed();
-  /// Called when a runner connects or disconnects, or the forwards change (the file read, a setting set).
-  template<typename F> void add_on_change_callback(F &&callback) {
-    this->change_callback_.add(std::forward<F>(callback));
+  /// One listener, called when a runner connects or disconnects, or the forwards change (the file read, a setting
+  /// set).
+  void set_on_change(void (*callback)(void *arg), void *arg) {
+    this->change_cb_ = callback;
+    this->change_arg_ = arg;
   }
 
  protected:
@@ -117,8 +125,16 @@ class UartTcpForwards : public Component {
   void write_step_();
   void release_buffer_();
 
-  FixedVector<Uart> uarts_;
-  LazyCallbackManager<void()> change_callback_;
+  void changed_() {
+    if (this->change_cb_ != nullptr)
+      this->change_cb_(this->change_arg_);
+  }
+
+  Uart *uarts_{nullptr};
+  size_t uart_count_{0};
+  size_t uart_capacity_{0};
+  void (*change_cb_)(void *){nullptr};
+  void *change_arg_{nullptr};
   UartTcp *runners_{nullptr};
   UartTcp::Settings *settings_{nullptr};
   Line *lines_{nullptr};
@@ -137,6 +153,8 @@ class UartTcpForwards : public Component {
   bool dirty_{false};
   // Applying the file: the runners' changes are not written back.
   bool parsing_{false};
+  // create() found no PSRAM: setup() fails.
+  bool no_psram_{false};
 };
 
 }  // namespace esphome::uart_tcp

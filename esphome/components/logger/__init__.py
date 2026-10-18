@@ -452,10 +452,11 @@ async def to_code(config: ConfigType) -> None:
         uart.require_virtual_uart()
         cg.add_define("USE_LOGGER_UART")
         request_log_listener()
-        log_uart = cg.new_Pvariable(
+        log_uart = cg.Pvariable(
             uart_conf[CONF_ID],
-            uart_conf[CONF_BOOT_BUFFER_SIZE],
-            uart_conf[CONF_LIVE_BUFFER_SIZE],
+            cg.MockObj(str(LogUART), "::").create(
+                uart_conf[CONF_BOOT_BUFFER_SIZE], uart_conf[CONF_LIVE_BUFFER_SIZE]
+            ),
         )
         cg.add(log_uart.set_level(LOG_LEVELS[uart_conf.get(CONF_LEVEL, level)]))
         cg.add(log_uart.set_boot_hold_default(uart_conf[CONF_BOOT_HOLD]))

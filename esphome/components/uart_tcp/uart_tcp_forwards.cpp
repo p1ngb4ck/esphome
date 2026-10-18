@@ -24,7 +24,30 @@ static constexpr uint32_t DEFAULT_BAUD_RATE = 115200;
 // Parity in the file, by UARTParityOptions
 static constexpr char PARITY_CHARS[] = "NEOMS";
 
+UartTcpForwards *UartTcpForwards::create() {
+  void *mem = RAMAllocator<UartTcpForwards>(RAMAllocator<UartTcpForwards>::ALLOC_EXTERNAL).allocate(1);
+  if (mem != nullptr)
+    return new (mem) UartTcpForwards();
+  auto *forwards = new UartTcpForwards();  // only to report in setup() and fail there
+  forwards->no_psram_ = true;
+  return forwards;
+}
+
+void UartTcpForwards::init_uarts(size_t count) {
+  this->uarts_ = RAMAllocator<Uart>(RAMAllocator<Uart>::ALLOC_EXTERNAL).allocate(count);
+  if (this->uarts_ == nullptr) {
+    this->no_psram_ = true;
+    return;
+  }
+  this->uart_capacity_ = count;
+}
+
 void UartTcpForwards::setup() {
+  if (this->no_psram_) {
+    ESP_LOGE(TAG, "No PSRAM for the forwards");
+    this->mark_failed();
+    return;
+  }
   this->prefs_ = RAMAllocator<Prefs>(RAMAllocator<Prefs>::ALLOC_EXTERNAL).allocate(1);
   if (this->prefs_ == nullptr) {
     ESP_LOGE(TAG, "No PSRAM for the settings");
@@ -53,7 +76,7 @@ void UartTcpForwards::setup() {
     new (&this->runners_[i]) UartTcp();
     this->default_runner_(i);
     this->runners_[i].setup_runner(this, &this->settings_[i]);
-    this->runners_[i].add_on_connection_callback([this](bool) { this->change_callback_.call(); });
+    this->runners_[i].set_on_connection([](void *self, bool) { static_cast<UartTcpForwards *>(self)->changed_(); }, this);
   }
   this->disable_loop();
 #ifndef USE_STORAGE_TRANSFER_BUFFER
@@ -108,7 +131,7 @@ void UartTcpForwards::dump_config() {
                 "  Settings file: %s\n"
                 "  UARTs: %u",
                 this->count_, this->get_saved_runner_count(), this->get_settings_file(),
-                static_cast<unsigned>(this->uarts_.size()));
+                static_cast<unsigned>(this->uart_count_));
 }
 
 void UartTcpForwards::on_shutdown() {
@@ -147,7 +170,7 @@ bool UartTcpForwards::set_settings_file(const std::string &path) {
 }
 
 bool UartTcpForwards::set_runner_uart(size_t index, int uart) {
-  if (index >= this->count_ || uart < -1 || uart >= static_cast<int>(this->uarts_.size())) {
+  if (index >= this->count_ || uart < -1 || uart >= static_cast<int>(this->uart_count_)) {
     return false;
   }
   for (size_t i = 0; uart >= 0 && i < this->count_; i++) {
@@ -197,7 +220,7 @@ void UartTcpForwards::save() {
   if (this->parsing_) {
     return;
   }
-  this->change_callback_.call();
+  this->changed_();
   this->dirty_ = true;
   this->write_();
 }
@@ -291,7 +314,7 @@ void UartTcpForwards::read_done_(StorageError err) {
     this->parse_();
     this->release_buffer_();
     this->loaded_ = true;
-    this->change_callback_.call();
+    this->changed_();
     if (this->dirty_) {
       this->write_();
     }
@@ -331,7 +354,7 @@ void UartTcpForwards::parse_() {
     }
     UartTcp &runner = this->runners_[index];
     int uart = -1;
-    for (size_t u = 0; u < this->uarts_.size(); u++) {
+    for (size_t u = 0; u < this->uart_count_; u++) {
       if (std::strcmp(fields[1], this->uarts_[u].name) == 0) {
         uart = static_cast<int>(u);
       }

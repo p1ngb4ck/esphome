@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 
 namespace esphome::uart_tcp {
 
@@ -101,7 +102,21 @@ static size_t parse_allow_list(const char *p, socket::Ipv4AllowEntry *out, size_
   return count;
 }
 
+UartTcp *UartTcp::create() {
+  void *mem = RAMAllocator<UartTcp>(RAMAllocator<UartTcp>::ALLOC_EXTERNAL).allocate(1);
+  if (mem != nullptr)
+    return new (mem) UartTcp();
+  auto *uart_tcp = new UartTcp();  // only to report in setup() and fail there
+  uart_tcp->no_psram_ = true;
+  return uart_tcp;
+}
+
 void UartTcp::setup() {
+  if (this->no_psram_) {
+    ESP_LOGE(TAG, "No PSRAM for the link");
+    this->mark_failed();
+    return;
+  }
   RAMAllocator<Settings> allocator(RAMAllocator<Settings>::ALLOC_EXTERNAL);
   this->settings_ = allocator.allocate(1);
   if (this->settings_ == nullptr) {
@@ -226,7 +241,9 @@ void UartTcp::sync_link_(bool up) {
     }
 #endif
   }
-  this->connection_callback_.call(up);
+  if (this->connection_cb_ != nullptr) {
+    this->connection_cb_(this->connection_arg_, up);
+  }
 }
 
 void UartTcp::read_socket_() {

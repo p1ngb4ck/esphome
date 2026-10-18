@@ -179,7 +179,9 @@ def _forwardable_uarts() -> list[ID]:
 async def _forwards_to_code(config: ConfigType) -> None:
     from esphome.components.storage import request_storage_worker
 
-    var = cg.new_Pvariable(config[CONF_ID])
+    # In PSRAM, as its runners
+    create = cg.MockObj(str(UartTcpForwards), "::").create()
+    var = cg.Pvariable(config[CONF_ID], create)
     await cg.register_component(var, config)
     cg.add_define("USE_UART_TCP_FORWARDS")
     socket.require_tcp_listener()
@@ -200,7 +202,11 @@ async def to_code(config: ConfigType) -> None:
     if config[CONF_ROLE] == ROLE_FORWARDS:
         await _forwards_to_code(config)
         return
-    var = await uart.new_uart_component(config)
+    # In PSRAM: the object holds the link's TX buffer
+    create = cg.MockObj(str(UartTcp), "::").create()
+    var = cg.Pvariable(config[CONF_ID], create)
+    await cg.register_component(var, config)
+    await uart.register_uart_device(var, config)
     uart_id, uart_var = await cg.get_variable_with_full_id(config[CONF_UART_ID])
     if uart_id.type.inherits_from(uart.VirtualUARTComponent):
         cg.add(var.set_virtual_uart(uart_var))

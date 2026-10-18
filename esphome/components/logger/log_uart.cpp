@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <new>
 
 namespace esphome::logger {
 
@@ -28,7 +29,22 @@ void LogUART::on_log_(uint8_t level, const char *message, size_t len) {
   this->inject_rx(LINE_END, sizeof(LINE_END));
 }
 
+LogUART *LogUART::create(size_t boot_buffer_size, size_t live_buffer_size) {
+  void *mem = RAMAllocator<LogUART>(RAMAllocator<LogUART>::ALLOC_EXTERNAL).allocate(1);
+  if (mem != nullptr)
+    return new (mem) LogUART(boot_buffer_size, live_buffer_size);
+  // Only to report in setup() and fail there: no ring either
+  auto *log_uart = new LogUART(0, 0);
+  log_uart->no_psram_ = true;
+  return log_uart;
+}
+
 void LogUART::setup() {
+  if (this->no_psram_) {
+    ESP_LOGE(TAG, "No PSRAM for the log UART");
+    this->mark_failed();
+    return;
+  }
   if (this->boot_size_ != 0 && this->rx_ == nullptr) {
     ESP_LOGE(TAG, "No PSRAM for the boot buffer");
     this->mark_failed();
