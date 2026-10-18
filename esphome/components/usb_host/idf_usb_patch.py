@@ -1411,6 +1411,95 @@ _PORT_POWER_FIRST_LOOP_REPLACEMENT = """        if (ext_port->flags.in_pending_l
         ext_port->action_flags = 0;
     }"""
 
+# A low-speed control transfer behind a full-speed hub and a hub's port request (class, to a
+# port) take turns on the port: neither starts while the other runs. The hub's requests for its
+# other ports otherwise ran in the middle of a low-speed device's control transfers, which is
+# where the root port was lost. One that cannot start waits (ls_bus_deferred) and is started
+# when the other side's last transfer ends, in _ls_ctrl_release(), which every end of a control
+# transfer calls.
+_LS_TURN_PIPE_FIELDS_ANCHOR = """    bool ls_ctrl_holding;                   // A control transfer of this pipe holds the low-speed bus"""
+
+_LS_TURN_PIPE_FIELDS_REPLACEMENT = """    bool ls_ctrl_holding;                   // A control transfer of this pipe holds the low-speed bus
+    bool ls_hub_req_running;                // Runs a hub's port request, counted in ls_hub_reqs
+    bool ls_bus_deferred;                   // Waits for its turn against the low-speed control transfers"""
+
+_LS_TURN_PORT_FIELDS_ANCHOR = """    uint8_t ls_ctrl_holds;              // Control transfers holding the low-speed bus (LS via FS hub)"""
+
+_LS_TURN_PORT_FIELDS_REPLACEMENT = """    uint8_t ls_ctrl_holds;              // Control transfers holding the low-speed bus (LS via FS hub)
+    uint8_t ls_hub_reqs;                // Hub port requests running"""
+
+_LS_TURN_RELEASE_ANCHOR = """static inline void _ls_ctrl_release(pipe_t *pipe)
+{
+    port_t *port = pipe->port;
+    if (!pipe->ls_ctrl_holding) {
+        return;
+    }"""
+
+_LS_TURN_RELEASE_REPLACEMENT = """// The pipes that waited for their turn start now, where they still can
+static void _ls_bus_turn(port_t *port)
+{
+    pipe_t *waiting;
+    TAILQ_FOREACH(waiting, &port->pipes_active_tailq, tailq_entry) {
+        if (!waiting->ls_bus_deferred) {
+            continue;
+        }
+        waiting->ls_bus_deferred = false;
+        if (waiting->state == HCD_PIPE_STATE_ACTIVE && port->flags.conn_dev_ena && _buffer_can_exec(waiting)) {
+            _buffer_exec(waiting);
+        }
+    }
+}
+
+static inline void _ls_ctrl_release(pipe_t *pipe)
+{
+    port_t *port = pipe->port;
+    if (pipe->ls_hub_req_running) {
+        pipe->ls_hub_req_running = false;
+        if (--port->ls_hub_reqs == 0) {
+            _ls_bus_turn(port);
+        }
+    }
+    if (!pipe->ls_ctrl_holding) {
+        return;
+    }"""
+
+_LS_TURN_RELEASE_END_ANCHOR = """        CACHE_SYNC_FRAME_LIST(port->frame_list);
+    }
+}
+
+/**
+ * @brief Give a low-speed periodic pipe behind a full-speed hub frames of its own"""
+
+_LS_TURN_RELEASE_END_REPLACEMENT = """        CACHE_SYNC_FRAME_LIST(port->frame_list);
+    }
+    if (port->ls_ctrl_holds == 0) {
+        _ls_bus_turn(port);
+    }
+}
+
+/**
+ * @brief Give a low-speed periodic pipe behind a full-speed hub frames of its own"""
+
+_LS_TURN_EXEC_ANCHOR = """    pipe->ls_ctrl_retry_count = 0;
+    if (pipe->ls_first_launch_pending ||"""
+
+_LS_TURN_EXEC_REPLACEMENT = """    if (pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL) {
+        const uint8_t request_type = ((const usb_setup_packet_t *)buffer_to_exec->urb->transfer.data_buffer)->bmRequestType;
+        const bool hub_req = !pipe->ep_char.ls_via_fs_hub &&
+                             (request_type & USB_BM_REQUEST_TYPE_TYPE_MASK) == USB_BM_REQUEST_TYPE_TYPE_CLASS &&
+                             (request_type & USB_BM_REQUEST_TYPE_RECIP_MASK) == USB_BM_REQUEST_TYPE_RECIP_OTHER;
+        if ((hub_req && pipe->port->ls_ctrl_holds) || (pipe->ep_char.ls_via_fs_hub && pipe->port->ls_hub_reqs)) {
+            pipe->ls_bus_deferred = true;
+            return;
+        }
+        if (hub_req) {
+            pipe->ls_hub_req_running = true;
+            pipe->port->ls_hub_reqs++;
+        }
+    }
+    pipe->ls_ctrl_retry_count = 0;
+    if (pipe->ls_first_launch_pending ||"""
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -1484,6 +1573,11 @@ PATCHES = (
     ("src/hcd_dwc.c", _HALT_DONE_ANCHOR, _HALT_DONE_REPLACEMENT),
     ("src/ext_port.c", _PORT_POWER_FIRST_ANCHOR, _PORT_POWER_FIRST_REPLACEMENT),
     ("src/ext_port.c", _PORT_POWER_FIRST_LOOP_ANCHOR, _PORT_POWER_FIRST_LOOP_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_TURN_PIPE_FIELDS_ANCHOR, _LS_TURN_PIPE_FIELDS_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_TURN_PORT_FIELDS_ANCHOR, _LS_TURN_PORT_FIELDS_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_TURN_RELEASE_ANCHOR, _LS_TURN_RELEASE_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_TURN_RELEASE_END_ANCHOR, _LS_TURN_RELEASE_END_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_TURN_EXEC_ANCHOR, _LS_TURN_EXEC_REPLACEMENT),
 )
 
 # Identifies an existing patched copy. It has to change whenever anything about that copy

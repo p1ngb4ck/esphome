@@ -22,6 +22,10 @@ Status: (update as work finishes)
 - Olli chose B: usb_host, ext_port: a port with a device waits (back to the end of the pending
   list, fresh status on its turn) while a port of its hub is not powered yet, so all ports are
   powered before any device is reset and enumerated. Awaiting Olli's test.
+- And A (Olli: both ways, hub port requests = class requests to a port): usb_host, hcd: an LS
+  control transfer behind the FS hub and a hub port request take turns on the root port; the one
+  that cannot start waits and is started when the other side's last transfer ends. Awaiting
+  Olli's test.
 
 ---
 
