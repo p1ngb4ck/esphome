@@ -21,6 +21,10 @@ static const char *const TAG = "usb_audio";
 // Timeout for each blocking control transfer during connection setup.
 static constexpr uint32_t CTRL_TIMEOUT_MS = 1000;
 
+static constexpr uint32_t CTRL_TASK_STACK_SIZE = 4096;
+// Below the USB host task, so its transfers are not held up by class requests.
+static constexpr UBaseType_t CTRL_TASK_PRIORITY = 5;
+
 // Largest data stage any control request in this component uses.
 static constexpr size_t UAC_CTRL_MAX_DATA_LEN = 8;
 
@@ -82,11 +86,31 @@ void USBAudioClient::setup() {
   // has to keep the host library's event handler running, see uac_control_transfer_.
   this->loop_task_ = xTaskGetCurrentTaskHandle();
 
+  this->ctrl_queue_ = xQueueCreateStatic(CTRL_QUEUE_LENGTH, sizeof(CtrlRequest), this->ctrl_queue_storage_.data(),
+                                         &this->ctrl_queue_struct_);
+  if (this->ctrl_queue_ == nullptr ||
+      !this->ctrl_task_.create(&USBAudioClient::ctrl_task, "usb_audio_ctl", CTRL_TASK_STACK_SIZE, this,
+                               CTRL_TASK_PRIORITY, true)) {
+    this->mark_failed(LOG_STR("Failed to create control task"));
+    return;
+  }
+
   usb_host::USBClient::setup();
 }
 
 void USBAudioClient::loop() {
   this->process_usb_events_();
+
+  if (this->setup_pending_ && this->setup_done_seq_.load() == this->setup_seq_)
+    this->finish_connect_();
+  if (this->spk_rate_pending_ && this->spk_rate_done_seq_.load() == this->spk_rate_seq_) {
+    this->spk_rate_pending_ = false;
+    this->finish_speaker_open_();
+  }
+  if (this->mic_rate_pending_ && this->mic_rate_done_seq_.load() == this->mic_rate_seq_) {
+    this->mic_rate_pending_ = false;
+    this->finish_microphone_open_();
+  }
 
   // A stream can stop on its own: the device went away mid-transfer, or the periodic
   // scheduler rejected every resubmission until no URB was left. Nothing is drained after
@@ -975,7 +999,9 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
   // itself preventing, which is why these requests never completed while a request issued
   // from the stream task did. Drive it here for as long as the wait lasts. Requests from
   // other tasks must not touch it, since it belongs to the loop task.
-  const bool on_loop_task = (this->loop_task_ != nullptr && xTaskGetCurrentTaskHandle() == this->loop_task_);
+  const TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
+  const bool on_loop_task = (this->loop_task_ != nullptr && current_task == this->loop_task_);
+  const bool on_ctrl_task = (current_task == this->ctrl_task_.get_handle());
 
   uint16_t last_status = USB_TRANSFER_STATUS_COMPLETED;
   size_t last_len = 0;
@@ -986,17 +1012,33 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
     if (out_data != nullptr && out_len != 0)
       memcpy(payload.data(), out_data, out_len);
 
-    if (!this->control_transfer(req_type, request, value, index,
-                                [result](const usb_host::TransferStatus &s) {
-                                  result->success = s.success;
-                                  result->status = s.error_code;
-                                  if (s.success && s.data != nullptr) {
-                                    result->data_len = std::min<size_t>(s.data_len, UAC_CTRL_MAX_DATA_LEN);
-                                    memcpy(result->data, s.data, result->data_len);
-                                  }
-                                  result->done.store(true, std::memory_order_release);
-                                },
-                                payload, static_cast<int32_t>(w_length))) {
+    // The device and its transfer buffers go away on the main loop. A disconnect bumps the
+    // generation and then waits for this flag, so a request is either handed over before the
+    // close or not at all.
+    if (on_ctrl_task) {
+      this->ctrl_submitting_.store(true);
+      if (this->ctrl_gen_.load() != this->ctrl_op_gen_) {
+        this->ctrl_submitting_.store(false);
+        return false;
+      }
+    }
+    const bool submitted =
+        this->control_transfer(req_type, request, value, index,
+                               [result, current_task, on_ctrl_task](const usb_host::TransferStatus &s) {
+                                 result->success = s.success;
+                                 result->status = s.error_code;
+                                 if (s.success && s.data != nullptr) {
+                                   result->data_len = std::min<size_t>(s.data_len, UAC_CTRL_MAX_DATA_LEN);
+                                   memcpy(result->data, s.data, result->data_len);
+                                 }
+                                 result->done.store(true, std::memory_order_release);
+                                 if (on_ctrl_task)
+                                   xTaskNotifyGive(current_task);
+                               },
+                               payload, static_cast<int32_t>(w_length));
+    if (on_ctrl_task)
+      this->ctrl_submitting_.store(false);
+    if (!submitted) {
       // Nothing was handed to the host, so no callback is coming. Waiting for one would
       // spend the full timeout and then report a device that did not answer, which is not
       // what happened.
@@ -1005,12 +1047,23 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
     }
 
     const uint32_t started = millis();
-    while (!result->done.load(std::memory_order_acquire) && (millis() - started) < CTRL_TIMEOUT_MS) {
-      if (on_loop_task) {
-        uint32_t event_flags = 0;
-        usb_host_lib_handle_events(0, &event_flags);
+    if (on_ctrl_task) {
+      // The completion wakes this task. A wake left over from an earlier request that timed
+      // out only costs one more look at the flag.
+      while (!result->done.load(std::memory_order_acquire)) {
+        const uint32_t elapsed = millis() - started;
+        if (elapsed >= CTRL_TIMEOUT_MS)
+          break;
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(CTRL_TIMEOUT_MS - elapsed));
       }
-      vTaskDelay(pdMS_TO_TICKS(1));
+    } else {
+      while (!result->done.load(std::memory_order_acquire) && (millis() - started) < CTRL_TIMEOUT_MS) {
+        if (on_loop_task) {
+          uint32_t event_flags = 0;
+          usb_host_lib_handle_events(0, &event_flags);
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+      }
     }
 
     if (!result->done.load(std::memory_order_acquire)) {
@@ -1619,6 +1672,7 @@ void USBAudioClient::close_speaker_stream_() {
     this->spk_fb_open_ = false;
   }
   this->stream_close(this->spk_stream_);
+  this->spk_rate_pending_ = false;
   if (!this->spk_stream_open_)
     return;
   this->spk_stream_open_ = false;
@@ -1629,6 +1683,7 @@ void USBAudioClient::close_speaker_stream_() {
 
 void USBAudioClient::close_microphone_stream_() {
   this->stream_close(this->mic_stream_);
+  this->mic_rate_pending_ = false;
   if (!this->mic_stream_open_)
     return;
   this->mic_stream_open_ = false;
@@ -1696,23 +1751,40 @@ void USBAudioClient::on_connected() {
     if (this->mic_format_ok_)
       this->mic_ctl_.clock_id = this->find_clock_source_(this->mic_alt_.terminal_link);
     ESP_LOGD(TAG, "Clock sources: speaker=%u mic=%u", this->spk_ctl_.clock_id, this->mic_ctl_.clock_id);
-    // Set the rate now, while every AudioStreaming interface is still on its zero-bandwidth
-    // alt-setting. A Clock Source is addressed through the AudioControl interface and does
-    // not need the stream, and a device is entitled to refuse or quietly ignore a clock
-    // change once an alt-setting is active -- it would then run at its own rate while the
-    // host paced at the configured one, which is silence with nothing logged. Linux sets it
-    // in the same order, before the interface is selected.
+  }
+
+  // The class requests (rates, volume ranges, volume and mute) run on the control task; the
+  // streams open once it is done, see finish_connect_().
+  this->setup_seq_ = this->ctrl_gen_.fetch_add(1) + 1;
+  this->setup_pending_ = this->post_ctrl_(CtrlOp::SETUP, this->setup_seq_);
+  if (!this->setup_pending_)
+    this->set_stream_error_("Control task queue full; device setup not started");
+}
+
+// Control task: everything a fresh device has to be told before its streams open.
+void USBAudioClient::connect_setup_() {
+  // Set the rate now, while every AudioStreaming interface is still on its zero-bandwidth
+  // alt-setting. A Clock Source is addressed through the AudioControl interface and does
+  // not need the stream, and a device is entitled to refuse or quietly ignore a clock
+  // change once an alt-setting is active -- it would then run at its own rate while the
+  // host paced at the configured one, which is silence with nothing logged. Linux sets it
+  // in the same order, before the interface is selected.
+  if (this->uac_version_ >= UAC_VERSION_2) {
     if (this->spk_format_ok_)
       this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_cfg_.sample_rate);
     if (this->mic_format_ok_)
       this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->mic_cfg_.sample_rate);
   }
 
-  this->device_connected_ = true;
-
   // Feature Unit requests go to the AudioControl interface, so the saved volume and mute
   // state can be sent as soon as the device is there. Nothing about them depends on an
   // AudioStreaming alt-setting being selected or a stream being open.
+  this->ctrl_pending_.fetch_and(
+      static_cast<uint8_t>(~(PENDING_SPK_VOLUME | PENDING_SPK_MUTE | PENDING_MIC_VOLUME | PENDING_MIC_MUTE)));
+  this->spk_ctl_.volume = this->spk_vol_req_.load();
+  this->spk_ctl_.muted = this->spk_mute_req_.load();
+  this->mic_ctl_.volume = this->mic_vol_req_.load();
+  this->mic_ctl_.muted = this->mic_mute_req_.load();
   this->probe_volume_range_(this->spk_ctl_, "Speaker");
   this->apply_volume_(this->spk_ctl_, "Speaker");
   this->apply_mute_(this->spk_ctl_, "Speaker");
@@ -1723,6 +1795,15 @@ void USBAudioClient::on_connected() {
   this->apply_mute_(this->mic_ctl_, "Mic");
   this->mic_ctl_.volume_sent = true;
   this->mic_ctl_.mute_sent = true;
+}
+
+// Main loop: the control task has told the device everything; open the streams.
+void USBAudioClient::finish_connect_() {
+  this->setup_pending_ = false;
+  this->device_connected_ = true;
+  // Volume or mute set while the setup ran.
+  if (this->ctrl_pending_.load() != 0)
+    this->post_controls_();
 
   // Open whichever streams are needed immediately.
   if (this->spk_cfg_.configured && this->spk_format_ok_ && !this->spk_suspended_)
@@ -1732,6 +1813,12 @@ void USBAudioClient::on_connected() {
 }
 
 void USBAudioClient::on_disconnected() {
+  // Requests of this connection are not sent any more. One being handed to the host right
+  // now finishes first, before the device and its transfer buffers are released.
+  this->ctrl_gen_.fetch_add(1);
+  while (this->ctrl_submitting_.load())
+    vTaskDelay(1);
+  this->setup_pending_ = false;
   this->close_speaker_stream_();
   this->close_microphone_stream_();
   this->device_connected_ = false;
@@ -1957,12 +2044,16 @@ void USBAudioClient::on_stream_open(usb_host::IsocStream &stream, bool ok) {
 
     // UAC 1.0 only: the sampling frequency is a control on the isochronous endpoint, which
     // exists only now that the alt-setting is active. UAC 2.0 was handled at connect time,
-    // before the interface was selected.
-    if (this->uac_version_ < UAC_VERSION_2)
-      this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_cfg_.sample_rate);
-    this->spk_stream_open_ = true;
-    this->note_open_result_(true, this->spk_reopen_at_ms_, this->spk_open_fails_);
-    ESP_LOGI(TAG, "Speaker stream open");
+    // before the interface was selected. The stream counts as open once the rate is set.
+    if (this->uac_version_ < UAC_VERSION_2) {
+      this->spk_rate_seq_ = ++this->ctrl_seq_;
+      if (this->post_ctrl_(CtrlOp::SPK_RATE, this->spk_rate_seq_)) {
+        this->spk_rate_pending_ = true;
+        return;
+      }
+      ESP_LOGW(TAG, "Control task queue full; speaker sample rate not set");
+    }
+    this->finish_speaker_open_();
     return;
   }
 
@@ -1972,12 +2063,28 @@ void USBAudioClient::on_stream_open(usb_host::IsocStream &stream, bool ok) {
       this->note_open_result_(false, this->mic_reopen_at_ms_, this->mic_open_fails_);
       return;
     }
-    if (this->uac_version_ < UAC_VERSION_2)
-      this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->mic_cfg_.sample_rate);
-    this->mic_stream_open_ = true;
-    this->note_open_result_(true, this->mic_reopen_at_ms_, this->mic_open_fails_);
-    ESP_LOGI(TAG, "Microphone stream open");
+    if (this->uac_version_ < UAC_VERSION_2) {
+      this->mic_rate_seq_ = ++this->ctrl_seq_;
+      if (this->post_ctrl_(CtrlOp::MIC_RATE, this->mic_rate_seq_)) {
+        this->mic_rate_pending_ = true;
+        return;
+      }
+      ESP_LOGW(TAG, "Control task queue full; microphone sample rate not set");
+    }
+    this->finish_microphone_open_();
   }
+}
+
+void USBAudioClient::finish_speaker_open_() {
+  this->spk_stream_open_ = true;
+  this->note_open_result_(true, this->spk_reopen_at_ms_, this->spk_open_fails_);
+  ESP_LOGI(TAG, "Speaker stream open");
+}
+
+void USBAudioClient::finish_microphone_open_() {
+  this->mic_stream_open_ = true;
+  this->note_open_result_(true, this->mic_reopen_at_ms_, this->mic_open_fails_);
+  ESP_LOGI(TAG, "Microphone stream open");
 }
 
 // -----------------------------------------------------------------------------
@@ -2030,41 +2137,118 @@ void USBAudioClient::suspend_microphone() {
 // device was last told is dropped: a media player drives several speakers that all end up
 // here, so the same setting arrives more than once, and asking the device again for what
 // it was just asked is a control request that cannot change anything.
-void USBAudioClient::set_volume_level_(UacControlState &ctl, const char *what, float volume) {
+// The control task sends the value; a device that is not set up yet gets the latest one
+// with its setup.
+void USBAudioClient::set_volume_level_(std::atomic<float> &request, uint8_t pending_bit, float volume) {
   const float clamped = std::clamp(volume, 0.0f, 1.0f);
-  if (ctl.volume_sent && clamped == ctl.volume)
+  if (request.exchange(clamped) == clamped)
     return;
-  ctl.volume = clamped;
-  if (!this->device_connected_)
-    return;
-  this->apply_volume_(ctl, what);
-  ctl.volume_sent = true;
+  this->ctrl_pending_.fetch_or(pending_bit);
+  if (this->device_connected_.load())
+    this->post_controls_();
 }
 
-void USBAudioClient::set_mute_state_(UacControlState &ctl, const char *what, bool mute_state) {
-  if (ctl.mute_sent && mute_state == ctl.muted)
+void USBAudioClient::set_mute_state_(std::atomic<bool> &request, uint8_t pending_bit, bool mute_state) {
+  if (request.exchange(mute_state) == mute_state)
     return;
-  ctl.muted = mute_state;
-  if (!this->device_connected_)
-    return;
-  this->apply_mute_(ctl, what);
-  ctl.mute_sent = true;
+  this->ctrl_pending_.fetch_or(pending_bit);
+  if (this->device_connected_.load())
+    this->post_controls_();
 }
 
 void USBAudioClient::set_speaker_volume_level(float volume) {
-  this->set_volume_level_(this->spk_ctl_, "Speaker", volume);
+  this->set_volume_level_(this->spk_vol_req_, PENDING_SPK_VOLUME, volume);
 }
 
 void USBAudioClient::set_speaker_mute_state(bool mute_state) {
-  this->set_mute_state_(this->spk_ctl_, "Speaker", mute_state);
+  this->set_mute_state_(this->spk_mute_req_, PENDING_SPK_MUTE, mute_state);
 }
 
 void USBAudioClient::set_microphone_volume_level(float volume) {
-  this->set_volume_level_(this->mic_ctl_, "Mic", volume);
+  this->set_volume_level_(this->mic_vol_req_, PENDING_MIC_VOLUME, volume);
 }
 
 void USBAudioClient::set_microphone_mute_state(bool mute_state) {
-  this->set_mute_state_(this->mic_ctl_, "Mic", mute_state);
+  this->set_mute_state_(this->mic_mute_req_, PENDING_MIC_MUTE, mute_state);
+}
+
+// -----------------------------------------------------------------------------
+// Control task
+// -----------------------------------------------------------------------------
+
+bool USBAudioClient::post_ctrl_(CtrlOp op, uint32_t seq) {
+  const CtrlRequest request{op, this->ctrl_gen_.load(), seq};
+  return xQueueSend(this->ctrl_queue_, &request, 0) == pdTRUE;
+}
+
+// One CONTROLS request carries every pending change, so a burst of volume steps queues one.
+void USBAudioClient::post_controls_() {
+  if (this->ctrl_controls_queued_.exchange(true))
+    return;
+  if (!this->post_ctrl_(CtrlOp::CONTROLS, 0)) {
+    this->ctrl_controls_queued_.store(false);
+    ESP_LOGW(TAG, "Control task queue full; volume/mute change not sent");
+  }
+}
+
+void USBAudioClient::ctrl_task(void *param) {
+  auto *self = static_cast<USBAudioClient *>(param);
+  CtrlRequest request;
+  while (true) {
+    if (xQueueReceive(self->ctrl_queue_, &request, portMAX_DELAY) == pdTRUE)
+      self->run_ctrl_(request);
+  }
+}
+
+void USBAudioClient::run_ctrl_(const CtrlRequest &request) {
+  if (request.op == CtrlOp::CONTROLS)
+    this->ctrl_controls_queued_.store(false);
+  // A request of a connection that is gone; the next device gets its own.
+  if (request.gen != this->ctrl_gen_.load())
+    return;
+  this->ctrl_op_gen_ = request.gen;
+  switch (request.op) {
+    case CtrlOp::SETUP:
+      this->connect_setup_();
+      this->setup_done_seq_.store(request.seq);
+      break;
+    case CtrlOp::CONTROLS:
+      this->apply_pending_controls_();
+      return;
+    case CtrlOp::SPK_RATE:
+      this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_cfg_.sample_rate);
+      this->spk_rate_done_seq_.store(request.seq);
+      break;
+    case CtrlOp::MIC_RATE:
+      this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->mic_cfg_.sample_rate);
+      this->mic_rate_done_seq_.store(request.seq);
+      break;
+  }
+  this->enable_loop_soon_any_context();
+}
+
+void USBAudioClient::apply_pending_controls_() {
+  const uint8_t pending = this->ctrl_pending_.exchange(0);
+  if (pending & PENDING_SPK_VOLUME) {
+    this->spk_ctl_.volume = this->spk_vol_req_.load();
+    this->apply_volume_(this->spk_ctl_, "Speaker");
+    this->spk_ctl_.volume_sent = true;
+  }
+  if (pending & PENDING_SPK_MUTE) {
+    this->spk_ctl_.muted = this->spk_mute_req_.load();
+    this->apply_mute_(this->spk_ctl_, "Speaker");
+    this->spk_ctl_.mute_sent = true;
+  }
+  if (pending & PENDING_MIC_VOLUME) {
+    this->mic_ctl_.volume = this->mic_vol_req_.load();
+    this->apply_volume_(this->mic_ctl_, "Mic");
+    this->mic_ctl_.volume_sent = true;
+  }
+  if (pending & PENDING_MIC_MUTE) {
+    this->mic_ctl_.muted = this->mic_mute_req_.load();
+    this->apply_mute_(this->mic_ctl_, "Mic");
+    this->mic_ctl_.mute_sent = true;
+  }
 }
 
 esp_err_t USBAudioClient::write_speaker(const uint8_t *data, size_t length, uint32_t timeout_ms) {

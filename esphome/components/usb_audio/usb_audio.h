@@ -7,13 +7,16 @@
 #include "esphome/components/usb_host/usb_host.h"
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
+#include "esphome/core/static_task.h"
 #include "uac_types.h"
 
+#include <array>
 #include <atomic>
 #include <vector>
 
 extern "C" {
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/ringbuf.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -68,6 +71,25 @@ enum class VolumeCurve : uint8_t {
 enum class VolumeEncoding : uint8_t {
   DB = 0,
   BYTE = 1,
+};
+
+// A class request sequence, run on the control task.
+enum class CtrlOp : uint8_t {
+  // After a connect: UAC 2.0 sample rates, volume ranges, volume and mute of both directions.
+  SETUP,
+  // Volume or mute changed; sends the pending ones.
+  CONTROLS,
+  // UAC 1.0 sample rate, once the stream's alt-setting is active.
+  SPK_RATE,
+  MIC_RATE,
+};
+
+struct CtrlRequest {
+  CtrlOp op{CtrlOp::SETUP};
+  // Connection the request belongs to; the control task drops it once that is gone.
+  uint32_t gen{0};
+  // Reported back when done, so the main loop acts only on the answer to its latest request.
+  uint32_t seq{0};
 };
 
 // One configured device quirk, matched against the device descriptor on connection.
@@ -142,15 +164,15 @@ class USBAudioClient : public usb_host::USBClient {
   void set_speaker_mute_state(bool mute_state);
   // The last requested values. A request is held while the stream is closed, so these can
   // be ahead of what the device has been told.
-  float get_speaker_volume_level() const { return this->spk_ctl_.volume; }
-  bool get_speaker_mute_state() const { return this->spk_ctl_.muted; }
+  float get_speaker_volume_level() const { return this->spk_vol_req_.load(); }
+  bool get_speaker_mute_state() const { return this->spk_mute_req_.load(); }
 
   // The capture side of the same thing. A device that describes a Feature Unit in its
   // capture path takes these the same way the playback path takes the two above.
   void set_microphone_volume_level(float volume);
   void set_microphone_mute_state(bool mute_state);
-  float get_microphone_volume_level() const { return this->mic_ctl_.volume; }
-  bool get_microphone_mute_state() const { return this->mic_ctl_.muted; }
+  float get_microphone_volume_level() const { return this->mic_vol_req_.load(); }
+  bool get_microphone_mute_state() const { return this->mic_mute_req_.load(); }
 
   // Speaker write - called from speaker task / play(); returns bytes accepted.
   // timeout_ms: FreeRTOS ring buffer block time (0 = non-blocking).
@@ -172,7 +194,7 @@ class USBAudioClient : public usb_host::USBClient {
 
   uint32_t get_speaker_buffer_size() const { return this->spk_buf_size_; }
   uint32_t get_microphone_buffer_size() const { return this->mic_buf_size_; }
-  bool device_connected() const { return this->device_connected_; }
+  bool device_connected() const { return this->device_connected_.load(); }
 
  protected:
   void on_connected() override;
@@ -231,8 +253,22 @@ class USBAudioClient : public usb_host::USBClient {
   void probe_sticky_volume_(UacControlState &ctl, const char *what, uint8_t channel);
   bool apply_volume_(UacControlState &ctl, const char *what);
   bool apply_mute_(UacControlState &ctl, const char *what);
-  void set_volume_level_(UacControlState &ctl, const char *what, float volume);
-  void set_mute_state_(UacControlState &ctl, const char *what, bool mute_state);
+  void set_volume_level_(std::atomic<float> &request, uint8_t pending_bit, float volume);
+  void set_mute_state_(std::atomic<bool> &request, uint8_t pending_bit, bool mute_state);
+
+  // -- Control task --------------------------------------------------------------
+  // Every class request runs here, so the main loop never waits on the device.
+  static void ctrl_task(void *param);
+  void run_ctrl_(const CtrlRequest &request);
+  bool post_ctrl_(CtrlOp op, uint32_t seq);
+  void post_controls_();
+  // Control task side of a connect, and of a volume or mute change.
+  void connect_setup_();
+  void apply_pending_controls_();
+  // Main loop side, once the control task has answered.
+  void finish_connect_();
+  void finish_speaker_open_();
+  void finish_microphone_open_();
 
   // -- Stream open / close ---------------------------------------------------
   bool open_speaker_stream_();
@@ -310,7 +346,7 @@ class USBAudioClient : public usb_host::USBClient {
   // -- Playback state --------------------------------------------------------
   bool spk_suspended_{false};   // true when speaker is explicitly paused
   bool mic_suspended_{false};   // true when microphone is explicitly paused
-  bool device_connected_{false};
+  std::atomic<bool> device_connected_{false};
 
   // -- Volume mapping --------------------------------------------------------
   VolumeCurve volume_curve_{VolumeCurve::LINEAR};
@@ -321,6 +357,44 @@ class USBAudioClient : public usb_host::USBClient {
   VolumeEncoding volume_encoding_{VolumeEncoding::DB};
 
   void resolve_device_quirks_();
+
+  // -- Control task state ------------------------------------------------------
+  static constexpr size_t CTRL_QUEUE_LENGTH = 8;
+  static constexpr uint8_t PENDING_SPK_VOLUME = 1 << 0;
+  static constexpr uint8_t PENDING_SPK_MUTE = 1 << 1;
+  static constexpr uint8_t PENDING_MIC_VOLUME = 1 << 2;
+  static constexpr uint8_t PENDING_MIC_MUTE = 1 << 3;
+
+  StaticTask ctrl_task_;
+  QueueHandle_t ctrl_queue_{nullptr};
+  StaticQueue_t ctrl_queue_struct_{};
+  std::array<uint8_t, CTRL_QUEUE_LENGTH * sizeof(CtrlRequest)> ctrl_queue_storage_{};
+  // Bumped on every connect and disconnect; requests of an older connection are not sent.
+  std::atomic<uint32_t> ctrl_gen_{0};
+  // Control task only: the connection the request it runs belongs to.
+  uint32_t ctrl_op_gen_{0};
+  // Set while the control task hands a request to the host, so a disconnect waits for that
+  // before the device and its transfer buffers go away.
+  std::atomic<bool> ctrl_submitting_{false};
+  std::atomic<bool> ctrl_controls_queued_{false};
+  std::atomic<uint8_t> ctrl_pending_{0};
+  // The latest requested volume and mute; the control task sends them.
+  std::atomic<float> spk_vol_req_{1.0f};
+  std::atomic<bool> spk_mute_req_{false};
+  std::atomic<float> mic_vol_req_{1.0f};
+  std::atomic<bool> mic_mute_req_{false};
+  // Written by the control task when a request finishes, read by the main loop.
+  std::atomic<uint32_t> setup_done_seq_{0};
+  std::atomic<uint32_t> spk_rate_done_seq_{0};
+  std::atomic<uint32_t> mic_rate_done_seq_{0};
+  // Main loop only: what is waiting for an answer.
+  bool setup_pending_{false};
+  bool spk_rate_pending_{false};
+  bool mic_rate_pending_{false};
+  uint32_t setup_seq_{0};
+  uint32_t ctrl_seq_{0};
+  uint32_t spk_rate_seq_{0};
+  uint32_t mic_rate_seq_{0};
 };
 
 }  // namespace usb_audio
