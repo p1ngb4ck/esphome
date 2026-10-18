@@ -1688,6 +1688,8 @@ void USBAudioClient::close_microphone_stream_() {
     return;
   this->mic_stream_open_ = false;
   ESP_LOGI(TAG, "Microphone stream closed");
+  if (this->microphone_ != nullptr)
+    this->microphone_->on_stream_event(MicStreamEvent::LOST);
 }
 
 // -----------------------------------------------------------------------------
@@ -2061,6 +2063,8 @@ void USBAudioClient::on_stream_open(usb_host::IsocStream &stream, bool ok) {
     if (!ok) {
       ESP_LOGE(TAG, "stream_open_ failed for microphone");
       this->note_open_result_(false, this->mic_reopen_at_ms_, this->mic_open_fails_);
+      if (this->microphone_ != nullptr)
+        this->microphone_->on_stream_event(MicStreamEvent::FAILED);
       return;
     }
     if (this->uac_version_ < UAC_VERSION_2) {
@@ -2085,6 +2089,8 @@ void USBAudioClient::finish_microphone_open_() {
   this->mic_stream_open_ = true;
   this->note_open_result_(true, this->mic_reopen_at_ms_, this->mic_open_fails_);
   ESP_LOGI(TAG, "Microphone stream open");
+  if (this->microphone_ != nullptr)
+    this->microphone_->on_stream_event(MicStreamEvent::OPEN);
 }
 
 // -----------------------------------------------------------------------------
@@ -2124,9 +2130,9 @@ void USBAudioClient::suspend_speaker() {
   this->spk_suspended_ = true;
 }
 
-void USBAudioClient::resume_microphone() {
+bool USBAudioClient::resume_microphone() {
   this->mic_suspended_ = false;
-  this->ensure_started_microphone();
+  return this->ensure_started_microphone();
 }
 
 void USBAudioClient::suspend_microphone() {

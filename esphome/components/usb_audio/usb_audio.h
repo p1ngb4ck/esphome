@@ -100,8 +100,22 @@ struct UsbAudioQuirk {
 };
 
 // -- Forward declarations -----------------------------------------------------
-class USBAudioMicrophone;
 class USBAudioSpeaker;
+
+// What the client tells the microphone about its stream, on the main loop.
+enum class MicStreamEvent : uint8_t {
+  OPEN,
+  // The open stream closed: the device went away or the stream died. It reopens once the
+  // device is back, as long as the microphone has not been suspended.
+  LOST,
+  // An open was refused; the microphone retries with a backoff.
+  FAILED,
+};
+
+class USBAudioMicrophoneListener {
+ public:
+  virtual void on_stream_event(MicStreamEvent event) = 0;
+};
 
 // -----------------------------------------------------------------------------
 // USBAudioClient
@@ -149,7 +163,7 @@ class USBAudioClient : public usb_host::USBClient {
   // when the device offers no plain stereo alt-setting.
   void set_channel_pair(UacChannelPair pair) { this->channel_pair_ = pair; }
 
-  void set_microphone(USBAudioMicrophone *mic) { this->microphone_ = mic; }
+  void set_microphone(USBAudioMicrophoneListener *mic) { this->microphone_ = mic; }
   void set_speaker(USBAudioSpeaker *spk) { this->speaker_ = spk; }
 
   // -- Subcomponent API - called from USBAudioSpeaker / USBAudioMicrophone ----
@@ -157,7 +171,8 @@ class USBAudioClient : public usb_host::USBClient {
   bool ensure_started_microphone();
   void resume_speaker();
   void suspend_speaker();
-  void resume_microphone();
+  // True when the stream is open or opening; on_stream_event() then reports the outcome.
+  bool resume_microphone();
   void suspend_microphone();
 
   void set_speaker_volume_level(float volume);
@@ -195,6 +210,7 @@ class USBAudioClient : public usb_host::USBClient {
   uint32_t get_speaker_buffer_size() const { return this->spk_buf_size_; }
   uint32_t get_microphone_buffer_size() const { return this->mic_buf_size_; }
   bool device_connected() const { return this->device_connected_.load(); }
+  bool microphone_stream_open() const { return this->mic_stream_open_; }
 
  protected:
   void on_connected() override;
@@ -286,7 +302,7 @@ class USBAudioClient : public usb_host::USBClient {
   void set_stream_error_(const char *what);
 
   // -- Subcomponent pointers ------------------------------------------------
-  USBAudioMicrophone *microphone_{nullptr};
+  USBAudioMicrophoneListener *microphone_{nullptr};
   USBAudioSpeaker *speaker_{nullptr};
 
   // -- Audio format config (set from to_code / subcomponent setup) ----------
