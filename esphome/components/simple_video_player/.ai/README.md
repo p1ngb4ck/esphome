@@ -2,8 +2,6 @@
 
 Read in this order before touching anything svp (or svp_relay):
 
-0. [`session-todo.md`](session-todo.md) when it exists: Olli's standing order for the current session, binding.
-
 1. This file: hardware/environment facts, goals, hard rules, change procedure.
 2. [`architecture.md`](architecture.md): how the code is built today (tasks, locks, sessions, buffers).
 3. [`open-issues.md`](open-issues.md): known violations, bug reports, the optimisation backlog.
@@ -14,7 +12,7 @@ Also binding: the repo's [`CLAUDE.md`](../../../../CLAUDE.md) and `AGENTS.md`.
 
 Everything in these files was read from the code (file:line) unless marked *unverified*. When the
 code and these files disagree, the code wins: fix the file in the same commit, never the other way
-round without Olli's go.
+round without the maintainer's go.
 
 ---
 
@@ -23,20 +21,19 @@ round without Olli's go.
 | Item | Fact |
 |---|---|
 | MCU | ESP32-P4 (engineering sample, silicon < v3: `CONFIG_ESP32P4_SELECTS_REV_LESS_V3`), 2 HP cores, 360 MHz in the device YAML |
-| RAM | 512 KB internal SRAM (scarce), 32 MB PSRAM. svp gets one PSRAM pool (`psram_pool_size`, device: 15 MB). Idle free PSRAM on the device: ~5.5 MB (Olli, 2026-10-15) |
-| IDF | Must build with ESP-IDF 5.5.5 (ESPHome's) and 6.1 (Olli's device: 6.1, `release/v6.1`) |
+| RAM | 512 KB internal SRAM (scarce), 32 MB PSRAM. svp gets one PSRAM pool (`psram_pool_size`, device: 15 MB). Idle free PSRAM on the device: ~5.5 MB |
+| IDF | Must build with ESP-IDF 5.5.5 (ESPHome's) and 6.1 (reference device: 6.1, `release/v6.1`) |
 | Display | MIPI-DSI panel 800x1280 native, LVGL screen 1280x800 (rotated). DSI-direct video: decoded frame copied into the panel framebuffer; LVGL paused meanwhile |
 | Decoders | HW JPEG decoder (the only video path: MJPEG), shared by video, stream stills, pictures, cover (driver `codec_mutex` serialises). No H.264. PNG/BMP in software |
 | Audio out | Speakers: I2S (es8311), USB audio, Bluetooth A2DP. `audio_router` picks the output; mixers/resamplers in YAML. Speaker media player (HA audio) separate |
 | Network | Wi-Fi via esp32_hosted (ESP32-C6 over SDIO, `use_psram: true`) and Ethernet (IP101). wifi's scan-done handling holds ESP-Hosted's ~3.9 KB stack buffer for all records (wifi_component_esp_idf.cpp) |
-| Stacks | loopTask: `ESPHOME_LOOP_TASK_STACK_SIZE` (esp32 `advanced: loop_task_stack_size`, default 8192; not set in the device YAML); `CONFIG_ESP_MAIN_TASK_STACK_SIZE` 32768 (device YAML, Olli 2026-10-18) is the IDF main task, not loopTask. LVGL event callbacks run deep inside `lv_timer_handler` on loopTask |
+| Stacks | loopTask: `ESPHOME_LOOP_TASK_STACK_SIZE` (esp32 `advanced: loop_task_stack_size`, default 8192; not set in the device YAML); `CONFIG_ESP_MAIN_TASK_STACK_SIZE` 32768 (device YAML) is the IDF main task, not loopTask. LVGL event callbacks run deep inside `lv_timer_handler` on loopTask |
 | Storage | SD (sd_storage), USB mass storage, NFS, via the storage subsystem (`storage` component) |
 | Other users of PSRAM/RAM | LVGL, mipi_dsi framebuffer(s), storage `psram_transfer_buffer_size: 2MB`, speaker media player `buffer_size: 1000000`, BT/A2DP, micro_wake_word, voice_assistant, USB host, task stacks |
 | Frame budget | 25 fps = 40 ms per frame for decode + present + audio + storage (perf-notes). Device YAML has `target_fps: 30`; the stream fps is a relay option, set at runtime |
 | Relay | svp_relay: Home Assistant custom component (HACS), not in this repo; delivered as a zip (current 0.9.46). Optional svp-relay worker on another machine (out of scope for now) |
-| Build/test | Olli compiles and tests. Never compile, run config checks or tests yourself |
 
-## 2. Goals (Olli's requirements)
+## 2. Goals
 
 - A media player as close as possible to the user experience of players on real CPUs with an OS:
   the MCU can do everything, but only a few things at the same time. The art is RAM size and
@@ -45,7 +42,7 @@ round without Olli's go.
   Assistant (incl. everything svp_relay produces).
 - svp_relay transcodes on demand, as fast as possible: not realtime, but lowest possible latency.
 - Every device feature is operable remotely (Home Assistant), never only on the screen.
-- General-purpose component: Olli's hardware only limits what he can test.
+- General-purpose component: the reference hardware only limits what can be tested.
 - Monolithic svp for now (later split into components), but structured inside: one mechanism per
   job, no duplicated handling, no feature working past the shared infrastructure.
 
@@ -54,7 +51,7 @@ round without Olli's go.
 ### Memory
 - **All svp buffers come from the PSRAM pool, through the buffer manager.** No svp function allocates
   past it (no own `heap_caps_*`, no fixed reservations for one feature). Exceptions only with
-  Olli's go and listed in architecture.md (today: small internal buffers for SPICE input/USB, up to
+  the maintainer's go and listed in architecture.md (today: small internal buffers for SPICE input/USB, up to
   32-64 KB, where it helps performance).
 - **Buffers are taken only when needed and handed over between functions**; reallocation only when
   the function switches (video->video: none; video <-> pictures/cover/desktop: hand over), never per
@@ -77,10 +74,10 @@ round without Olli's go.
 ### Sessions
 - A running desktop session, video, stream or dashboard is never interrupted by a call from outside
   (HA, relay); a call made on the panel itself (opening the dashboard, another kind of media) ends
-  what runs and takes over (Olli, 2026-10-17).
+  what runs and takes over.
 - The kinds of media and the apps (dashboard, remote desktop) exclude each other; the buffer manager
   hands the buffers over on a change of kind where needed. Only these run side by side: audio and
-  pictures; audio and a VNC desktop without sound, while the pool has room for both (Olli, 2026-10-17).
+  pictures; audio and a VNC desktop without sound, while the pool has room for both.
 
 ### LVGL / display
 - Never call LVGL (any widget, even hidden, even a read) while LVGL is paused or DSI-direct runs.
@@ -91,10 +88,10 @@ round without Olli's go.
   never `lv_obj_add_flag` / `lv_obj_remove_flag` (deprecated, warnings), in C++ and in YAML lambdas.
 - The device never resizes, rescales or reflows at runtime. Its picture size is fixed in YAML; the
   panel reports it to the relay ('V'); only the relay fits pictures to it.
-- UI: design (mockup) first, Olli approves, then implement. Highlights by colour only. Touch and keys
+- UI: design (mockup) first, approved, then implement. Highlights by colour only. Touch and keys
   (remote, keyboard, gamepad) always both work, with a correct focus order.
 
-### Stack (Olli, 2026-10-18: "we are on a MCU")
+### Stack
 - Never use much stack: no large locals, no deep work nested in someone else's callback frame.
 - No driver / network / storage calls (WiFi scan, enable/disable, saving settings, ...) nested inside
   LVGL's event handling or inside another component's listener: hand them to the next main loop
@@ -105,33 +102,19 @@ round without Olli's go.
 - No frame dropping / catch-up logic: present at the paced cadence and move on.
 - Event-driven everywhere; no polling (MCU, not a server).
 
-### Behaviour of the assistant (Olli's standing rules)
-- Do exactly the asked task. No extras, no "while I'm here", no unrequested scripts/mechanisms.
-- Never remove anything (code, config, features, mappings) unless Olli says so.
-- No assumptions: verify behaviour in source (this repo first; IDF/LVGL upstream at the used
-  version) before stating it. Say "unverified" otherwise.
-- Complaints and questions are not work orders: answer and stop. Lists Olli gives are saved at once
-  (open-issues.md or the session's TODO file).
-- Commits: `git -c user.name=p1ngb4ck -c user.email=kleinecke.oliver@googlemail.com commit --no-verify`,
-  push to `origin testing_dev`, no trailers, never amend.
-- Device configs delivered: `lvgl_media.yaml`, `esp32-p4-media.yaml` only, sent to Olli as files
-  (SendUserFile) every time either changes. Relay: zip, sent the same way.
-
 ## 4. Change procedure (every change, no exceptions)
 
 1. **Read** this folder (at least README + the architecture sections the change touches).
 2. **Scope** in writing before coding: what changes (files/functions), which invariants and which
-   buffer-table rows it touches, what it must not change. Ask Olli when anything is open.
+   buffer-table rows it touches, what it must not change. Ask the maintainer when anything is open.
 3. **Integrate, don't add beside**: use the existing mechanism (buffer manager, session handling,
    handshakes, controls bar code). If none fits, propose extending it; don't build a second one.
 4. **Implement** only the scope.
 5. **Diff review** line by line against the scope and the rules: everything not asked for goes.
-6. **No own checks**: no review agents, no config checks, no compiles, no tests. Olli builds and
-   tests, without exception (Olli, 2026-10-16).
-7. **One topic per commit.** If a fact in these files changed, update them in the same commit.
-8. Olli builds and runs the regression checklist below.
+6. **One topic per commit.** If a fact in these files changed, update them in the same commit.
+7. The change is built and the regression checklist below is run on the device.
 
-## 5. Regression checklist (Olli, after each build)
+## 5. Regression checklist (after each build)
 
 - [ ] TV / live stream via relay (DSI direct): smooth, sound, channel switch
 - [ ] SD video: start, pause/resume, seek, next in playlist, end

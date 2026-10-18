@@ -233,8 +233,8 @@ without one or with its queue full): its entry callback writes the list's places
 listing asked for meanwhile drops the one on its way and lists anew (`FolderListing`, a pool piece).
 The video plays at once, its folder's videos put round it when listed. A picture folder's failed
 listing leaves `images_` empty (`picture_listing_failed()`, the device YAML shows "Listing failed"). Still on the PSRAM heap: the configuration's lists filled before
-the pool exists (picture folders, controls buttons, keyboards). Stay outside by decision
-(Olli, 2026-10-17): the codec libraries' own working buffers (FLAC_MALLOC etc.) -- ESPHome's audio
+the pool exists (picture folders, controls buttons, keyboards). Stay outside by decision:
+the codec libraries' own working buffers (FLAC_MALLOC etc.) -- ESPHome's audio
 codecs as they are, in PSRAM.
 Outside the pool (svp): `spice_scratch_` 20 KiB internal; per USB slot 4 KiB internal `stage_` +
 bookkeeping; task stacks 48 KiB PSRAM; the configuration's PsramVector lists (above); `channel_http_` response buffer PSRAM 16-256 KiB per request; AudioDecoder internals;
