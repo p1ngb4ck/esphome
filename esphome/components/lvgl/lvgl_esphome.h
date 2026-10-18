@@ -383,6 +383,30 @@ class LvglComponent final : public PollingComponent {
   uint16_t get_width() const { return lv_display_get_horizontal_resolution(this->disp_); }
   uint16_t get_height() const { return lv_display_get_vertical_resolution(this->disp_); }
 
+#ifdef USE_ESP32
+  /// Gets what LVGL draws as the LVGL screen shows it (its size, orientation and colour format): every
+  /// area rendered while it is set goes into the buffer capture_target() gives, and capture_done()
+  /// follows once a refresh is complete. All three on the LVGL thread (the main loop).
+  class FrameCapture {
+   public:
+    /// The buffer this area goes into: capture_bytes() long, cache-line aligned, packed rows of the
+    /// LVGL screen's width. nullptr: this area is not wanted.
+    virtual uint8_t *capture_target() = 0;
+    /// The area (clipped to the screen) is in the buffer now.
+    virtual void capture_area(const lv_area_t &area) = 0;
+    virtual void capture_done() = 0;
+  };
+  void set_frame_capture(FrameCapture *capture) { this->frame_capture_ = capture; }
+  /// Bytes per pixel of the LVGL screen (2 RGB565, 3 RGB888) and the size of a buffer for its picture
+  /// (whole cache lines).
+  static size_t capture_bpp();
+  size_t capture_bytes() const;
+  /// LVGL thread, not paused: the picture shown (the display's frame buffer flipped in last) into dst
+  /// (capture_bytes(), cache-line aligned), turned back into the LVGL screen's orientation. False when
+  /// LVGL does not draw into the display's frame buffers itself.
+  bool copy_shown(uint8_t *dst);
+#endif
+
  protected:
   void set_resolution_() const;
   // Determine the current orientation from the effective resolution and fire the
@@ -415,6 +439,10 @@ class LvglComponent final : public PollingComponent {
 #ifdef USE_ESP32_VARIANT_ESP32P4
   bool ppa_blit_(const uint8_t *src, uint16_t src_w, uint16_t src_h, uint16_t sx, uint16_t sy, uint16_t w, uint16_t h,
                  uint8_t *dst, uint16_t dx, uint16_t dy, ppa_srm_rotation_angle_t angle);
+  /// The same into a picture of dst_w x dst_h (dst_size bytes).
+  bool ppa_blit_to_(const uint8_t *src, uint16_t src_w, uint16_t src_h, uint16_t sx, uint16_t sy, uint16_t w,
+                    uint16_t h, uint8_t *dst, uint16_t dst_w, uint16_t dst_h, size_t dst_size, uint16_t dx, uint16_t dy,
+                    ppa_srm_rotation_angle_t angle);
 #endif
 #endif
   void flush_cb_(lv_display_t *disp_drv, const lv_area_t *area, uint8_t *color_p);
@@ -473,6 +501,8 @@ class LvglComponent final : public PollingComponent {
   uint8_t scanout_back_{1};
   bool scanout_wait_{};
   uint32_t scanout_presented_{};
+  FrameCapture *frame_capture_{nullptr};
+  void capture_area_(const lv_area_t *area, const uint8_t *src);
 #endif
 };
 

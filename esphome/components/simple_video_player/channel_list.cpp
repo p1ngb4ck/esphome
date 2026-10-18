@@ -508,6 +508,10 @@ void SimpleVideoPlayer::channel_task_loop_() {
     } else if (request.cmd == CHANNEL_CMD_KEYBOARD_GET) {
       this->keyboard_get_task_();
 #endif
+#ifdef SVP_CAPTURE
+    } else if (request.cmd == CHANNEL_CMD_CAST) {
+      this->cast_relay_task_(request.index != 0);
+#endif
     }
   }
 }

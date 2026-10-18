@@ -684,9 +684,113 @@ void LvglComponent::scanout_sync_cb(lv_display_t *disp, const lv_area_t *area) {
   lv_display_sync_ready(disp);
 }
 
+size_t LvglComponent::capture_bpp() { return SCANOUT_BPP; }
+
+size_t LvglComponent::capture_bytes() const {
+#ifdef USE_ESP32_VARIANT_ESP32P4
+  static constexpr size_t LINE = CONFIG_CACHE_L2_CACHE_LINE_SIZE;
+#else
+  static constexpr size_t LINE = 64;
+#endif
+  const size_t bytes = static_cast<size_t>(lv_display_get_horizontal_resolution(this->disp_)) *
+                       lv_display_get_vertical_resolution(this->disp_) * SCANOUT_BPP;
+  return (bytes + LINE - 1) / LINE * LINE;
+}
+
+// A rendered area (packed rows of its full width) also into the capture's buffer, as LVGL has it.
+void LvglComponent::capture_area_(const lv_area_t *area, const uint8_t *src) {
+  lv_area_t clip;
+  if (!this->scanout_clip_(area, &clip))
+    return;
+  uint8_t *dst = this->frame_capture_->capture_target();
+  if (dst == nullptr)
+    return;
+  const int32_t hor = lv_display_get_horizontal_resolution(this->disp_);
+  const int32_t src_w = lv_area_get_width(area);
+  const int32_t sx = clip.x1 - area->x1;
+  const int32_t sy = clip.y1 - area->y1;
+  const int32_t cw = lv_area_get_width(&clip);
+  const int32_t ch = lv_area_get_height(&clip);
+#ifdef USE_ESP32_VARIANT_ESP32P4
+  if (this->ppa_client_ != nullptr &&
+      this->ppa_blit_to_(src, src_w, lv_area_get_height(area), sx, sy, cw, ch, dst, hor,
+                         lv_display_get_vertical_resolution(this->disp_), this->capture_bytes(), clip.x1, clip.y1,
+                         PPA_SRM_ROTATION_ANGLE_0)) {
+    this->frame_capture_->capture_area(clip);
+    return;
+  }
+#endif
+  const size_t stride = static_cast<size_t>(hor) * SCANOUT_BPP;
+  for (int32_t r = 0; r != ch; r++) {
+    std::memcpy(dst + static_cast<size_t>(clip.y1 + r) * stride + clip.x1 * SCANOUT_BPP,
+                src + (static_cast<size_t>(sy + r) * src_w + sx) * SCANOUT_BPP, cw * SCANOUT_BPP);
+  }
+  esp_cache_msync(dst + clip.y1 * stride, ch * stride, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+  this->frame_capture_->capture_area(clip);
+}
+
+bool LvglComponent::copy_shown(uint8_t *dst) {
+  if (this->scanout_[0] == nullptr || this->paused_ || dst == nullptr)
+    return false;
+  const uint8_t *front = this->scanout_[this->scanout_back_ ^ 1];
+  const int32_t hor = lv_display_get_horizontal_resolution(this->disp_);
+  const int32_t ver = lv_display_get_vertical_resolution(this->disp_);
+  const auto rotation =
+      this->rotation_type_ == ROTATION_SOFTWARE ? this->rotation_ : display::DISPLAY_ROTATION_0_DEGREES;
+#ifdef USE_ESP32_VARIANT_ESP32P4
+  if (this->scanout_ppa_ && this->ppa_client_ != nullptr) {
+    // Back the other way than draw_scanout_() turns it (the PPA turns counter-clockwise).
+    ppa_srm_rotation_angle_t angle = PPA_SRM_ROTATION_ANGLE_0;
+    if (rotation == display::DISPLAY_ROTATION_90_DEGREES) {
+      angle = PPA_SRM_ROTATION_ANGLE_90;
+    } else if (rotation == display::DISPLAY_ROTATION_180_DEGREES) {
+      angle = PPA_SRM_ROTATION_ANGLE_180;
+    } else if (rotation == display::DISPLAY_ROTATION_270_DEGREES) {
+      angle = PPA_SRM_ROTATION_ANGLE_270;
+    }
+    if (this->ppa_blit_to_(front, this->width_, this->height_, 0, 0, this->width_, this->height_, dst, hor, ver,
+                           this->capture_bytes(), 0, 0, angle))
+      return true;
+  }
+#endif
+  // LVGL pixel (lx, ly) is where draw_scanout_() put it on the panel.
+  const auto *in = reinterpret_cast<const ScanoutPixel *>(front);
+  auto *out = reinterpret_cast<ScanoutPixel *>(dst);
+  const size_t panel = this->width_;
+  for (int32_t ly = 0; ly != ver; ly++) {
+    ScanoutPixel *row = out + static_cast<size_t>(ly) * hor;
+    switch (rotation) {
+      case display::DISPLAY_ROTATION_90_DEGREES:
+        for (int32_t lx = 0; lx != hor; lx++)
+          row[lx] = in[static_cast<size_t>(lx) * panel + this->width_ - 1 - ly];
+        break;
+      case display::DISPLAY_ROTATION_180_DEGREES:
+        for (int32_t lx = 0; lx != hor; lx++)
+          row[lx] = in[static_cast<size_t>(this->height_ - 1 - ly) * panel + this->width_ - 1 - lx];
+        break;
+      case display::DISPLAY_ROTATION_270_DEGREES:
+        for (int32_t lx = 0; lx != hor; lx++)
+          row[lx] = in[static_cast<size_t>(this->height_ - 1 - lx) * panel + ly];
+        break;
+      default:
+        std::memcpy(row, in + static_cast<size_t>(ly) * panel, hor * SCANOUT_BPP);
+        break;
+    }
+  }
+  esp_cache_msync(dst, this->capture_bytes(), ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+  return true;
+}
+
 #ifdef USE_ESP32_VARIANT_ESP32P4
 bool LvglComponent::ppa_blit_(const uint8_t *src, uint16_t src_w, uint16_t src_h, uint16_t sx, uint16_t sy, uint16_t w,
                               uint16_t h, uint8_t *dst, uint16_t dx, uint16_t dy, ppa_srm_rotation_angle_t angle) {
+  return this->ppa_blit_to_(src, src_w, src_h, sx, sy, w, h, dst, this->width_, this->height_,
+                            this->scanout_stride_ * this->height_, dx, dy, angle);
+}
+
+bool LvglComponent::ppa_blit_to_(const uint8_t *src, uint16_t src_w, uint16_t src_h, uint16_t sx, uint16_t sy,
+                                 uint16_t w, uint16_t h, uint8_t *dst, uint16_t dst_w, uint16_t dst_h, size_t dst_size,
+                                 uint16_t dx, uint16_t dy, ppa_srm_rotation_angle_t angle) {
   ppa_srm_oper_config_t cfg{};
   cfg.in.buffer = src;
   cfg.in.pic_w = src_w;
@@ -696,9 +800,9 @@ bool LvglComponent::ppa_blit_(const uint8_t *src, uint16_t src_w, uint16_t src_h
   cfg.in.block_offset_x = sx;
   cfg.in.block_offset_y = sy;
   cfg.out.buffer = dst;
-  cfg.out.buffer_size = this->scanout_stride_ * this->height_;
-  cfg.out.pic_w = this->width_;
-  cfg.out.pic_h = this->height_;
+  cfg.out.buffer_size = dst_size;
+  cfg.out.pic_w = dst_w;
+  cfg.out.pic_h = dst_h;
   cfg.out.block_offset_x = dx;
   cfg.out.block_offset_y = dy;
 #if LV_COLOR_DEPTH == 16
@@ -724,6 +828,8 @@ void LvglComponent::flush_cb_(lv_display_t *disp_drv, const lv_area_t *area, uin
   if (!this->paused_) {
     auto now = millis();
 #ifdef USE_ESP32
+    if (this->frame_capture_ != nullptr)
+      this->capture_area_(area, color_p);
     if (this->scanout_[0] != nullptr) {
       this->wait_scanout_flip_();
       this->draw_scanout_(area, color_p, this->scanout_[this->scanout_back_]);
@@ -736,6 +842,10 @@ void LvglComponent::flush_cb_(lv_display_t *disp_drv, const lv_area_t *area, uin
     } else
 #endif
       this->draw_buffer_(area, reinterpret_cast<lv_color_data *>(color_p));
+#ifdef USE_ESP32
+    if (this->frame_capture_ != nullptr && lv_display_flush_is_last(disp_drv))
+      this->frame_capture_->capture_done();
+#endif
     ESP_LOGV(TAG, "flush_cb, area=%d/%d, %d/%d took %dms", (int) area->x1, (int) area->y1,
              (int) lv_area_get_width(area), (int) lv_area_get_height(area), (int) (millis() - now));
   }

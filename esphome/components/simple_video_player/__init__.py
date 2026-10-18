@@ -138,6 +138,8 @@ PreviousAction = simple_video_player_ns.class_("PreviousAction", automation.Acti
 RepeatAction = simple_video_player_ns.class_("RepeatAction", automation.Action)
 VolumeStepAction = simple_video_player_ns.class_("VolumeStepAction", automation.Action)
 ShowImageAction = simple_video_player_ns.class_("ShowImageAction", automation.Action)
+ScreenshotAction = simple_video_player_ns.class_("ScreenshotAction", automation.Action)
+ScreencastAction = simple_video_player_ns.class_("ScreencastAction", automation.Action)
 PictureDirectoryAction = simple_video_player_ns.class_("PictureDirectoryAction", automation.Action)
 PictureCommandAction = simple_video_player_ns.class_("PictureCommandAction", automation.Action)
 FullscreenAction = simple_video_player_ns.class_("FullscreenAction", automation.Action)
@@ -249,6 +251,45 @@ def _spice(value):
             }
         )(value)
     return {CONF_CONNECTIONS: SPICE_CONNECTIONS_DEFAULT} if cv.boolean(value) else False
+
+
+CONF_SCREEN_CAPTURE = "screen_capture"
+CONF_SCREENSHOT_DIRECTORY = "screenshot_directory"
+CONF_SCREENCAST_DIRECTORY = "screencast_directory"
+CONF_JPEG_QUALITY = "jpeg_quality"
+CONF_FPS = "fps"
+CONF_TARGET = "target"
+CONF_SOUND = "sound"
+CONF_ON_SCREENSHOT = "on_screenshot"
+CONF_ON_SCREENCAST_STARTED = "on_screencast_started"
+CONF_ON_SCREENCAST_STOPPED = "on_screencast_stopped"
+# Where a screencast goes: its folder, svp_relay (channel_list), or both (CastTarget bits).
+SCREENCAST_TARGETS = {"local": 1, "relay": 2, "both": 3}
+
+
+def _screen_capture_schema():
+    from esphome.components import microphone
+
+    return cv.Schema(
+        {
+            # Screenshots (JPEG) and, by default, screencasts (MJPEG AVI) go into these folders.
+            cv.Required(CONF_SCREENSHOT_DIRECTORY): _storage_dir,
+            cv.Optional(CONF_SCREENCAST_DIRECTORY): _storage_dir,
+            # The HW JPEG encoder's quality, for both (settable at runtime).
+            cv.Optional(CONF_JPEG_QUALITY, default=80): cv.int_range(min=1, max=100),
+            # A screencast's pictures per second (settable at runtime, taken at its start).
+            cv.Optional(CONF_FPS, default=25): cv.int_range(min=1, max=30),
+            cv.Optional(CONF_TARGET, default="local"): cv.one_of(*SCREENCAST_TARGETS, lower=True),
+            # Its sound: the microphone's PCM as it comes (16-bit, one or two channels).
+            cv.Optional(microphone.CONF_MICROPHONE): microphone.microphone_source_schema(
+                min_channels=1, max_channels=2
+            ),
+            cv.Optional(CONF_SOUND, default=True): cv.boolean,
+            cv.Optional(CONF_ON_SCREENSHOT): automation.validate_automation(single=True),
+            cv.Optional(CONF_ON_SCREENCAST_STARTED): automation.validate_automation(single=True),
+            cv.Optional(CONF_ON_SCREENCAST_STOPPED): automation.validate_automation(single=True),
+        }
+    )
 
 
 CONF_SPICE_SOUND_SHARES = "spice_sound_shares"  # resolved: (audio files, media player)
@@ -659,6 +700,9 @@ CONFIG_SCHEMA = cv.All(
                     ),
                 }
             ),
+            # Screenshots and screencasts of what LVGL shows, as it shows it (HW JPEG; a screencast
+            # is an MJPEG AVI with the microphone's PCM, into its folder and/or to svp_relay).
+            cv.Optional(CONF_SCREEN_CAPTURE): cv.All(cv.requires_component("lvgl"), _screen_capture_schema()),
             # Touches go back to the stream sender, which replays them into its page.
             cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
             # Channel list from the svp_relay Home Assistant integration, shown in an LVGL dropdown;
@@ -996,6 +1040,12 @@ def _resolve_spice_sound(config, fconf):
 def _final_validate(config):
     fconf = fv.full_config.get()
 
+    # The screencast's microphone: its channels there (any sample rate, written as it comes).
+    if (mic := (config.get(CONF_SCREEN_CAPTURE) or {}).get("microphone")) is not None:
+        from esphome.components import microphone
+
+        microphone.final_validate_microphone_source_schema("simple_video_player")(mic)
+
     # With display_id, LVGL is paused while a sender is connected; a touch would resume it on top
     # of the stream.
     if CONF_STREAM_PORT in config and CONF_DISPLAY_ID in config:
@@ -1155,6 +1205,34 @@ async def to_code(config):
             cg.add_define("SVP_KEYBOARD_ENTITIES")
             sensor = await text_sensor_domain.new_text_sensor(layout_sensor)
             cg.add(var.set_keyboard_layout_sensor(sensor))
+
+    if capture := config.get(CONF_SCREEN_CAPTURE):
+        cg.add_define("SVP_CAPTURE")
+        cg.add(var.set_screenshot_directory(capture[CONF_SCREENSHOT_DIRECTORY]))
+        cg.add(
+            var.set_screencast_directory(
+                capture.get(CONF_SCREENCAST_DIRECTORY, capture[CONF_SCREENSHOT_DIRECTORY])
+            )
+        )
+        cg.add(var.set_capture_quality(capture[CONF_JPEG_QUALITY]))
+        cg.add(var.set_screencast_fps(capture[CONF_FPS]))
+        cg.add(var.set_screencast_target(SCREENCAST_TARGETS[capture[CONF_TARGET]]))
+        cg.add(var.set_screencast_sound(capture[CONF_SOUND]))
+        if (mic := capture.get("microphone")) is not None:
+            from esphome.components import microphone
+
+            cg.add_define("SVP_CAPTURE_MIC")
+            # passive=False: the screencast is a reason for the microphone to run while it lasts.
+            mic_source = await microphone.microphone_source_to_code(mic, passive=False)
+            cg.add(var.set_capture_microphone(mic_source))
+        if on_shot := capture.get(CONF_ON_SCREENSHOT):
+            await automation.build_automation(var.get_screenshot_trigger(), [(cg.std_string, "path")], on_shot)
+        if on_started := capture.get(CONF_ON_SCREENCAST_STARTED):
+            await automation.build_automation(var.get_screencast_started_trigger(), [], on_started)
+        if on_stopped := capture.get(CONF_ON_SCREENCAST_STOPPED):
+            await automation.build_automation(
+                var.get_screencast_stopped_trigger(), [(cg.std_string, "reason")], on_stopped
+            )
 
     if controls := config.get(CONF_CONTROLS):
         cg.add_define("SVP_CONTROLS")
@@ -1768,3 +1846,39 @@ async def simple_video_player_fullscreen_to_code(config, action_id, template_arg
     var = cg.new_Pvariable(action_id, template_arg, paren)
     cg.add(var.set_fullscreen(await cg.templatable(config[CONF_FULLSCREEN], args, bool)))
     return var
+
+
+# screen_capture: a screenshot into its folder.
+@automation.register_action(
+    "simple_video_player.screenshot",
+    ScreenshotAction,
+    SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+    synchronous=True,
+)
+async def simple_video_player_screenshot_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, paren)
+
+
+# screen_capture: the screencast starts, stops, or the one or the other.
+SCREENCAST_COMMANDS = {"start": 0, "stop": 1, "toggle": 2}
+
+
+def _register_screencast(name, command):
+    @automation.register_action(
+        f"simple_video_player.screencast_{name}",
+        ScreencastAction,
+        SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+        synchronous=True,
+    )
+    async def _to_code(config, action_id, template_arg, args):
+        paren = await cg.get_variable(config[CONF_ID])
+        var = cg.new_Pvariable(action_id, template_arg, paren)
+        cg.add(var.set_command(command))
+        return var
+
+    return _to_code
+
+
+for _name, _command in SCREENCAST_COMMANDS.items():
+    _register_screencast(_name, _command)

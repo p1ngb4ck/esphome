@@ -60,6 +60,7 @@ u32 = frame_id (low 10 bits) | payload size (high 22 bits).
 | GET/POST `/options?port` | `{port, key, value}` | panel's relay options, among them the keyboard layout sources `keyboard_source` (xkeyboard-config archive URL) and `keyboard_keysyms` (xkbcommon-keysyms.h URL), kept in the panel's entry like the others (also in HA's Settings form; empty = default); GET also `keyboard_status`; POST `keyboard_install` (only the panel triggers it) installs from this panel's sources for all panels and answers once done (panel: 180 s timeout, then the options again) |
 | POST `/desktop` | `{port, action:start, kind, host, server_port, password, connection_id}` / `{action:stop}` | answered once the desktop is up |
 | GET `/api/svp_relay/audio/<key>.<fmt>` | (media player, URL via `svp_play_audio`) | ffmpeg audio stream |
+| POST `/cast` | `{port, action:start, fps, width, height, sound}` / `{port, action:stop}` | `{ok, port, token}`: svp_relay's port for this screencast (one connection, from the panel's address); the panel connects (svp_cast_tx), sends `SVPCAST <token>\n`, then the AVI (MJPEG + PCM, sizes 0, empty chunks for a repeated picture); svp_relay saves it with ffmpeg per the panel's options `cast_dir`, `cast_name`, `cast_format` (mkv/avi copy, mp4 H.264+AAC); stop or the connection's end completes it |
 | GET `/keyboard[?layout=<name>]` | – / an XKB name (`de(nodeadkeys)`) | `name\tdescription` lines (<=32 KiB) / the layout's `.kbl` (hid::parse_layout, <=8 KiB); files installed from xkeyboard-config (`keyboard_layouts.py`, `<config>/svp_relay/keyboard`), till then the bundled `keyboard/` (ESPHome's `script/export_hid_layouts.py`) |
 
 ## 3. ESPHome services, relay -> panel
@@ -82,5 +83,5 @@ Status JSON fields read by the relay: `svp`, `port`, `state`, `volume`, `muted`,
 ## 5. Relay state deciding what the panel shows
 
 `_sessions` (AVI), `_dashboards` (Chromium page), `_desktops`, `_art` (cover via /cover),
-`_benchmarks`, `playlist_active` (status `playlist`). `_busy` = any of sessions/covers/art/
-benchmarks/desktops/playlist -> no dashboard. `_covers`/`_show_cover` are dead code since 0.9.36.
+`_benchmarks`, `_casts` (screencasts taken in), `playlist_active` (status `playlist`). `_busy` = any of
+sessions/covers/art/benchmarks/desktops/casts/playlist -> no dashboard. `_covers`/`_show_cover` are dead code since 0.9.36.

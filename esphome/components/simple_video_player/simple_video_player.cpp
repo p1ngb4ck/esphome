@@ -257,6 +257,9 @@ void SimpleVideoPlayer::setup() {
 #ifdef SVP_KEYBOARD
   this->keyboard_setup_();
 #endif
+#ifdef SVP_CAPTURE
+  this->capture_setup_();
+#endif
 
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
   ESP_LOGCONFIG(TAG, "  PSRAM pool: %u bytes (PSRAM left: %u bytes, largest block %u)",
@@ -340,6 +343,9 @@ void SimpleVideoPlayer::loop() {
 #endif
 #ifdef SVP_AUDIO_COVER
   this->cover_loop_();
+#endif
+#ifdef SVP_CAPTURE
+  this->capture_loop_();
 #endif
   // A file played to its end: the next of the playlist, before LVGL would get the screen back.
   if (this->advance_req_.load(std::memory_order_acquire) &&
@@ -527,6 +533,13 @@ void SimpleVideoPlayer::dump_config() {
     ESP_LOGCONFIG(TAG, "  Current file: %s", this->video_path_.c_str());
     ESP_LOGCONFIG(TAG, "  Video size: %" PRIu32 "x%" PRIu32, this->video_width_, this->video_height_);
   }
+#ifdef SVP_CAPTURE
+  ESP_LOGCONFIG(TAG,
+                "  Screen capture: screenshots %s, screencasts %s, JPEG quality %u, %u fps, target %s, sound %s",
+                this->shot_dir_.c_str(), this->cast_dir_.c_str(), this->get_capture_quality(), this->cast_fps_,
+                this->cast_target_ == CAST_LOCAL ? "folder" : this->cast_target_ == CAST_RELAY ? "svp_relay" : "both",
+                this->cast_sound_ ? "on" : "off");
+#endif
 }
 
 //========================================================================
@@ -2445,8 +2458,15 @@ uint8_t *SimpleVideoPlayer::pool_take_(size_t size, uint8_t user) {
 }
 
 bool SimpleVideoPlayer::pool_give_back_(uint8_t groups, uint8_t user) {
-  if (user == POOL_USER_PICTURES)
+  if (user == POOL_USER_PICTURES || user == POOL_USER_CAPTURE)
     return this->give_back_media_(groups);  // main loop
+  if (groups == POOL_CAPTURE) {
+#ifdef SVP_CAPTURE
+    return this->pool_request_(groups, user);
+#else
+    return false;
+#endif
+  }
   if (groups == POOL_DESKTOP) {
 #ifdef SVP_SPICE
     return this->release_desktop_();  // any task, under its own locks
@@ -2527,6 +2547,14 @@ bool SimpleVideoPlayer::video_session_() const {
 void SimpleVideoPlayer::pool_service_() {
   for (auto &request : this->pool_requests_) {
     const uint8_t groups = request.groups.load(std::memory_order_acquire);
+#ifdef SVP_CAPTURE
+    // A session takes the panel: the screencast ends; answered once its pictures and JPEGs are back.
+    if (groups == POOL_CAPTURE) {
+      if (this->capture_give_back_(request.user.load(std::memory_order_relaxed)))
+        pool_answered_(request, groups);
+      continue;
+    }
+#endif
     if ((groups & (POOL_VIDEO | POOL_DIRECT | POOL_CANVAS)) == 0)
       continue;
     if ((groups & POOL_VIDEO) != 0) {
@@ -3073,6 +3101,8 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   return true;
 }
 
+#endif  // USE_AUDIO
+#if defined(USE_AUDIO) || defined(SVP_CAPTURE_MIC)
 std::shared_ptr<ring_buffer::RingBuffer> PoolRingBuffer::create(uint8_t *storage, size_t len) {
   PsramPool *pool = PsramPool::instance();
   if (storage == nullptr || pool == nullptr || pool->largest_free() < sizeof(PoolRingBuffer) + 64)
@@ -3084,6 +3114,8 @@ std::shared_ptr<ring_buffer::RingBuffer> PoolRingBuffer::create(uint8_t *storage
   rb->created_ = true;
   return rb;
 }
+#endif
+#ifdef USE_AUDIO
 
 // Playback task, video session start, no sound task running: the sound block for this lead. Kept when
 // its size is the same; else the rings over it and the decoder's hold on them go first, then the

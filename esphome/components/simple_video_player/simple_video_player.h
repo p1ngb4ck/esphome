@@ -63,6 +63,14 @@
 #include "esphome/components/api/custom_api_device.h"
 #include "esphome/components/media_player/media_player.h"
 #endif
+#ifdef SVP_CAPTURE
+#include "driver/jpeg_encode.h"
+#include "driver/ppa.h"
+#include "cast_avi.h"
+#endif
+#ifdef SVP_CAPTURE_MIC
+#include "esphome/components/microphone/microphone_source.h"
+#endif
 // ring_buffer::RingBuffer is used for the audio input/decoded rings (see USE_AUDIO members).
 #include "esphome/components/ring_buffer/ring_buffer.h"
 #include "buffered_file_reader.h"
@@ -157,7 +165,7 @@ class KeyboardDeviceSelect : public select::Select {
 };
 #endif
 
-#ifdef USE_AUDIO
+#if defined(USE_AUDIO) || defined(SVP_CAPTURE_MIC)
 /// ring_buffer::RingBuffer in the player's pool memory (create() allocates its own); the object with
 /// its ring structure in PSRAM only.
 class PoolRingBuffer : public ring_buffer::RingBuffer {
@@ -960,6 +968,61 @@ class SimpleVideoPlayer : public Component
   void add_on_picture_callback(std::function<void()> &&callback) { this->picture_callbacks_.add(std::move(callback)); }
 #endif
 
+#ifdef SVP_CAPTURE
+  // Screenshots and screencasts of what LVGL shows (screen_capture:), as LVGL shows it. The pictures
+  // come from LVGL's own drawing (FrameCapture), the HW JPEG encoder makes the JPEGs; a screencast is
+  // an MJPEG AVI with the microphone's PCM, into its folder and/or to svp_relay. Its buffers come from
+  // the pool (the capture's row of the owner table). Not while a video, a stream (dashboard) or a
+  // remote desktop has the panel: one of them starting ends the screencast. Main loop.
+  enum CastState : uint8_t { CAST_IDLE, CAST_STARTING, CAST_RUNNING, CAST_ENDING };
+  enum CastTarget : uint8_t { CAST_LOCAL = 1, CAST_RELAY = 2 };
+  void set_screenshot_directory(const std::string &dir) { this->shot_dir_ = dir; }
+  const std::string &get_screenshot_directory() const { return this->shot_dir_; }
+  void set_screencast_directory(const std::string &dir) { this->cast_dir_ = dir; }
+  const std::string &get_screencast_directory() const { return this->cast_dir_; }
+  /// 1..100, for screenshots and screencasts.
+  void set_capture_quality(uint8_t quality) {
+    this->cap_quality_.store(std::clamp<uint8_t>(quality, 1, 100), std::memory_order_relaxed);
+  }
+  uint8_t get_capture_quality() const { return this->cap_quality_.load(std::memory_order_relaxed); }
+  /// 1..30 pictures per second; taken at a screencast's start.
+  void set_screencast_fps(uint8_t fps) { this->cast_fps_ = std::clamp<uint8_t>(fps, 1, 30); }
+  uint8_t get_screencast_fps() const { return this->cast_fps_; }
+  /// CastTarget bits; taken at a screencast's start.
+  void set_screencast_target(uint8_t target) {
+    if ((target & (CAST_LOCAL | CAST_RELAY)) != 0)
+      this->cast_target_ = target & (CAST_LOCAL | CAST_RELAY);
+  }
+  uint8_t get_screencast_target() const { return this->cast_target_; }
+  /// The microphone's sound in it (with microphone:); taken at a screencast's start.
+  void set_screencast_sound(bool on) { this->cast_sound_ = on; }
+  bool get_screencast_sound() const { return this->cast_sound_; }
+#ifdef SVP_CAPTURE_MIC
+  void set_capture_microphone(microphone::MicrophoneSource *mic) { this->cap_mic_ = mic; }
+#endif
+  /// A screenshot into the screenshot folder; false when it cannot be taken now (logged).
+  bool screenshot();
+  /// False when it cannot start now (logged, on_screencast_stopped with the reason).
+  bool screencast_start();
+  void screencast_stop();
+  void screencast_toggle() {
+    if (this->cast_state_ == CAST_IDLE) {
+      this->screencast_start();
+    } else {
+      this->screencast_stop();
+    }
+  }
+  CastState screencast_state() const { return this->cast_state_; }
+  bool screencast_running() const { return this->cast_state_ != CAST_IDLE; }
+  /// The screenshot's file, "" when it failed.
+  Trigger<std::string> *get_screenshot_trigger() { return &this->shot_trigger_; }
+  Trigger<> *get_screencast_started_trigger() { return &this->cast_started_trigger_; }
+  /// Why it ended: "" when asked to, else the reason (a notice).
+  Trigger<std::string> *get_screencast_stopped_trigger() { return &this->cast_stopped_trigger_; }
+  /// Main loop: screencast_state() changed.
+  void add_on_capture_callback(std::function<void()> &&callback) { this->cap_callbacks_.add(std::move(callback)); }
+#endif
+
  protected:
   //========================================================================
   // Playback Task (Core 1): open file, probe dimensions, allocate buffers, then loop:
@@ -1188,6 +1251,7 @@ class SimpleVideoPlayer : public Component
     CHANNEL_CMD_COVER,
     CHANNEL_CMD_KEYBOARD_LIST,
     CHANNEL_CMD_KEYBOARD_GET,
+    CHANNEL_CMD_CAST,  // index 1: svp_relay takes a screencast (POST /cast start), 0: it ends
   };
   struct ChannelCmd {
     uint8_t cmd;
@@ -1383,6 +1447,9 @@ class SimpleVideoPlayer : public Component
     POOL_DIRECT = 1 << 2,    // the display's decode buffer and the controls (main loop)
     POOL_CANVAS = 1 << 3,    // the canvas output pair (main loop)
     POOL_DESKTOP = 1 << 4,   // the desktop's cursors and USB transfers (release_desktop_(), no session)
+    // The screencast's or a screenshot's pictures and JPEGs (main loop: the screencast ends, they go
+    // once nothing uses them; its index and sound ring follow when its file is complete).
+    POOL_CAPTURE = 1 << 5,
   };
   enum : uint8_t {
     POOL_USER_VIDEO,          // playback task: ring, sound block, frame slot, index
@@ -1392,17 +1459,20 @@ class SimpleVideoPlayer : public Component
     POOL_USER_STREAM_CANVAS,  // stream draw task: the canvas pair
     POOL_USER_PICTURES,       // main loop: pictures and cover art
     POOL_USER_DESKTOP,        // spice task: cursors, USB transfers
+    POOL_USER_CAPTURE,        // main loop: screenshots and the screencast
     POOL_USERS,
   };
-  static constexpr size_t POOL_STEPS = 4;
+  static constexpr size_t POOL_STEPS = 5;
   static constexpr uint8_t POOL_OWNERS[POOL_USERS][POOL_STEPS] = {
-      {POOL_PICTURES, POOL_DESKTOP, 0, 0},
-      {POOL_CANVAS, POOL_PICTURES, POOL_DESKTOP, 0},
-      {POOL_DIRECT, POOL_PICTURES, POOL_DESKTOP, 0},
-      {POOL_CANVAS, POOL_PICTURES, POOL_VIDEO, POOL_DESKTOP},
-      {POOL_DIRECT, POOL_PICTURES, POOL_VIDEO, POOL_DESKTOP},
-      {POOL_DIRECT | POOL_CANVAS, POOL_VIDEO, POOL_DESKTOP, 0},
-      {POOL_PICTURES, POOL_VIDEO, 0, 0},
+      {POOL_CAPTURE, POOL_PICTURES, POOL_DESKTOP, 0, 0},
+      {POOL_CAPTURE, POOL_CANVAS, POOL_PICTURES, POOL_DESKTOP, 0},
+      {POOL_CAPTURE, POOL_DIRECT, POOL_PICTURES, POOL_DESKTOP, 0},
+      {POOL_CAPTURE, POOL_CANVAS, POOL_PICTURES, POOL_VIDEO, POOL_DESKTOP},
+      {POOL_CAPTURE, POOL_DIRECT, POOL_PICTURES, POOL_VIDEO, POOL_DESKTOP},
+      {POOL_DIRECT | POOL_CANVAS, POOL_VIDEO, POOL_DESKTOP, 0, 0},
+      {POOL_CAPTURE, POOL_PICTURES, POOL_VIDEO, 0, 0},
+      // What LVGL shows (pictures among it) stays; a video, a stream or a desktop excludes it.
+      {POOL_VIDEO, POOL_DIRECT | POOL_CANVAS, 0, 0, 0},
   };
   /// A piece for this user: from the pool, else after its row's groups were handed back step by step.
   uint8_t *pool_take_(size_t size, uint8_t user);
@@ -2724,6 +2794,240 @@ class SimpleVideoPlayer : public Component
   void build_media_traits_();
   std::string media_traits_json_;  // "pause":..,"formats":[..] of the status
 #endif
+
+#ifdef SVP_CAPTURE
+  // ---- Screen capture (screen_capture.cpp) ---------------------------------------------------------
+  // LVGL's drawing goes into the back one of two pictures (the screen's size and colour format); once
+  // a refresh is complete and the encoder does not read the front one, they swap and the capture task
+  // copies what changed into the new back one before LVGL draws into it again (it waits for that).
+  // The capture task encodes the front picture once per tick when it changed, into the JPEG buffer
+  // not written out; a tick's picture goes out as a batch (CastAvi::Batch: the newest JPEG, or an
+  // empty chunk for the same picture, and the sound since) to the file (main loop, storage worker)
+  // and/or svp_relay (the cast sender task), one batch at a time.
+  class CaptureSink : public lvgl::LvglComponent::FrameCapture {
+   public:
+    explicit CaptureSink(SimpleVideoPlayer *player) : player_(player) {}
+    uint8_t *capture_target() override { return this->player_->cap_target_(); }
+    void capture_area(const lv_area_t &area) override { this->player_->cap_area_(area); }
+    void capture_done() override { this->player_->cap_done_(); }
+
+   protected:
+    SimpleVideoPlayer *player_;
+  };
+  static constexpr size_t CAP_JPEG_BYTES = 512 * 1024;
+  static constexpr size_t CAP_PREFIX = 128;  // the picture's chunk header before its JPEG (cache-line aligned)
+  static constexpr size_t CAP_PCM_BYTES = 32 * 1024;
+  static constexpr size_t CAP_INDEX_BYTES = 128 * 1024;
+  static constexpr uint16_t CAP_MAX_PICTURES = 250;  // in one batch at most
+  // After the JPEG: the batch's further chunk headers and its sound.
+  static constexpr size_t CAP_TAIL = CastAvi::CHUNK_HEADER * (CAP_MAX_PICTURES + 2) + CAP_PCM_BYTES;
+  static constexpr size_t CAP_JPEG_ROOM = CAP_JPEG_BYTES - CAP_PREFIX - CAP_TAIL;
+  static constexpr uint8_t CAP_RECTS = 16;
+  static constexpr uint32_t CAP_SYNC_WAIT_MS = 100;
+  static constexpr uint32_t CAP_ENCODE_TIMEOUT_MS = 200;
+  static constexpr uint32_t CAP_RELAY_WAIT_MS = 10000;
+  static constexpr uint32_t CAP_TX_TIMEOUT_MS = 5000;
+  static constexpr size_t CAP_TASK_STACK = 4096;
+  enum : uint32_t {
+    CAPN_TICK = 1 << 0,   // the screencast's tick
+    CAPN_SYNC = 1 << 1,   // the pictures swapped: the changed areas into the new back one
+    CAPN_SHOT = 1 << 2,   // a screenshot's picture (or, casting, the newest JPEG) wanted
+    CAPN_SINK = 1 << 3,   // a batch or a screenshot was written out
+    CAPN_STOP = 1 << 4,   // no batches any more
+    CAPN_CAST_SHOT = 1 << 5,  // casting: a screenshot of the newest JPEG
+  };
+  enum : uint8_t { CAP_OWNER_FREE, CAP_OWNER_ENCODING, CAP_OWNER_SWAPPING };
+  enum : uint8_t { CAP_SINK_FILE = 1, CAP_SINK_RELAY = 2 };
+  enum : uint8_t { CAP_RELAY_NONE, CAP_RELAY_ASKED, CAP_RELAY_CONNECTING, CAP_RELAY_READY, CAP_RELAY_FAILED };
+  // The file's steps (main loop).
+  enum : uint8_t {
+    CF_NONE,
+    CF_OPENING,
+    CF_HEADER,
+    CF_READY,
+    CF_BUSY,  // an operation in flight
+    CF_BATCH,
+    CF_IX_VIDEO,
+    CF_IX_AUDIO,
+    CF_SEEK_HEADER,
+    CF_HEADER_AGAIN,
+    CF_SEEK_PATCH,
+    CF_PATCH,
+    CF_SEEK_END,
+    CF_SEGMENT,
+    CF_CLOSING,
+    CF_DONE,
+    CF_FAILED,
+  };
+
+  void capture_setup_();
+  /// Main loop: what the screen capture has to do (sinks, its start and end, sessions taking the panel).
+  void capture_loop_();
+  /// The task, the encoder, the PPA client and the tick, made the first time and kept.
+  bool capture_ready_();
+  /// A screenshot's / the screencast's buffers from the pool; all or none.
+  bool capture_take_(bool cast);
+  void capture_free_frames_();
+  void capture_free_rest_();
+  /// Ends the screencast (reason "" when asked to); its file is completed after.
+  void capture_end_(const char *reason);
+  /// Main loop, a session's request for POOL_CAPTURE: true once the pictures and JPEGs are back.
+  bool capture_give_back_(uint8_t user);
+  void capture_finished_();
+  void capture_notify_(uint32_t bits);
+  std::string capture_name_(const std::string &dir, const char *prefix, const char *suffix);
+
+  // LVGL thread (FrameCapture).
+  uint8_t *cap_target_();
+  void cap_area_(const lv_area_t &area);
+  void cap_done_();
+
+  // Capture task.
+  static void capture_task_entry_(void *param);
+  void capture_task_loop_();
+  static void capture_tick_cb_(void *arg);
+  void capture_sync_();
+  bool capture_encode_(const uint8_t *picture, uint8_t *out, uint32_t *len);
+  void capture_cast_encode_();
+  void capture_compose_();
+  void capture_shot_from_cast_();
+  /// A sink is done with the batch (any task).
+  void capture_sink_done_(uint8_t sink);
+
+  // Main loop: the screenshot's file, the screencast's file.
+  void shot_write_();
+  void shot_done_(bool ok);
+  bool cast_file_open_();
+  void cast_file_run_();
+  void cast_file_op_(storage::StorageError err);
+  void cast_file_result_(storage::StorageError err);
+  void cast_file_write_(const uint8_t *data, size_t len, uint8_t next);
+  void cast_file_seek_(uint64_t pos, uint8_t next);
+  void cast_file_fail_();
+
+  // svp_relay: asked on the channel task, sent on the cast sender task.
+#ifdef SVP_CHANNEL_LIST
+  void cast_relay_task_(bool start);
+#endif
+  static void cast_tx_entry_(void *param);
+  void cast_tx_loop_();
+  bool cast_tx_send_(const uint8_t *data, size_t len);
+  void cast_tx_close_();
+
+  std::string shot_dir_;
+  std::string cast_dir_;
+  std::atomic<uint8_t> cap_quality_{80};
+  uint8_t cast_fps_{25};
+  uint8_t cast_target_{CAST_LOCAL};
+  bool cast_sound_{true};
+#ifdef SVP_CAPTURE_MIC
+  microphone::MicrophoneSource *cap_mic_{nullptr};
+#endif
+  Trigger<std::string> shot_trigger_;
+  Trigger<> cast_started_trigger_;
+  Trigger<std::string> cast_stopped_trigger_;
+  CallbackManager<void()> cap_callbacks_;
+  CaptureSink cap_sink_{this};
+
+  CastState cast_state_{CAST_IDLE};
+  std::string cast_reason_;  // why it ends
+  TaskHandle_t cap_task_{nullptr};
+  esp_timer_handle_t cap_timer_{nullptr};
+  jpeg_encoder_handle_t cap_encoder_{nullptr};
+  ppa_client_handle_t cap_ppa_{nullptr};
+  StaticSemaphore_t cap_sync_sem_buf_;
+  SemaphoreHandle_t cap_sync_sem_{nullptr};
+  // The pictures (2 for a screencast, 1 for a screenshot), the JPEG buffers, the file's index and the
+  // sound ring; from the pool.
+  uint8_t *cap_frame_[2]{};
+  uint8_t *cap_jpeg_[2]{};
+  uint8_t *cap_index_{nullptr};
+  uint8_t *cap_pcm_{nullptr};
+  size_t cap_frame_bytes_{0};  // a piece (whole cache lines)
+  uint16_t cap_w_{0};
+  uint16_t cap_h_{0};
+  uint8_t cap_bpp_{2};
+  // LVGL thread.
+  uint8_t cap_back_{1};
+  lv_area_t cap_rects_[CAP_RECTS];
+  uint8_t cap_rects_n_{0};
+  bool cap_need_take_{false};
+  bool cap_single_{false};  // a screenshot drawn by LVGL anew into cap_frame_[0]
+  // Set by the LVGL thread at a swap, read by the capture task while cap_sync_busy_.
+  lv_area_t cap_sync_rects_[CAP_RECTS];
+  uint8_t cap_sync_n_{0};
+  std::atomic<bool> cap_sync_busy_{false};
+  std::atomic<uint8_t> cap_front_{0};
+  std::atomic<uint32_t> cap_swaps_{0};  // complete pictures in the front one so far
+  std::atomic<uint8_t> cap_owner_{CAP_OWNER_FREE};
+  std::atomic<bool> cap_broken_{false};
+  // Capture task.
+  uint32_t cap_encoded_swaps_{0};
+  uint8_t cap_wjpeg_{0};       // the JPEG buffer written out (the other one is encoded into)
+  uint32_t cap_wlen_{0};       // its JPEG, 0 none yet
+  bool cap_ejpeg_ready_{false};  // the other one has a newer JPEG
+  uint32_t cap_elen_{0};
+  uint32_t cap_ticks_{0};
+  uint32_t cap_enc_errors_{0};
+  bool cap_shot_wait_{false};  // casting: a screenshot waits for the first JPEG
+  std::atomic<uint8_t> cap_jpeg_users_[2]{};  // screenshots still writing them
+  std::atomic<bool> cap_casting_{false};
+  std::atomic<bool> cap_stopping_{false};
+  std::atomic<bool> cap_drained_{false};
+  std::atomic<bool> cap_shot_cast_{false};  // a screenshot of the screencast's JPEG wanted
+  // The batch out (written by the capture task before cap_batch_sinks_).
+  CastAvi::Batch cap_batch_{};
+  const uint8_t *cap_batch_data_{nullptr};
+  size_t cap_batch_len_{0};
+  std::atomic<uint8_t> cap_batch_sinks_{0};
+  std::atomic<bool> cap_file_batch_{false};
+  std::atomic<uint8_t> cap_sinks_{0};  // the screencast's sinks still up
+  bool cap_relay_asked_any_{false};    // svp_relay was asked to take it: told when it ends
+  // The screenshot (main loop; the data from the capture task).
+  std::atomic<bool> shot_ready_{false};
+  const uint8_t *shot_data_{nullptr};
+  uint32_t shot_len_{0};
+  int8_t shot_jpeg_{-1};  // the screencast's JPEG buffer it writes, -1 its own buffers
+  bool shot_busy_{false};
+  uint8_t shot_step_{0};
+  bool shot_ok_{false};
+  std::string shot_path_;
+  storage::StreamHandle shot_handle_{};
+  std::string shot_last_stamp_;
+  uint8_t shot_same_stamp_{0};
+  // The sound: the microphone's PCM into the ring (any task while cap_ring_live_).
+#ifdef SVP_CAPTURE_MIC
+  std::shared_ptr<ring_buffer::RingBuffer> cap_ring_;
+  std::atomic<ring_buffer::RingBuffer *> cap_ring_raw_{nullptr};
+  std::atomic<uint8_t> cap_mic_in_{0};
+  bool cap_mic_on_{false};
+#endif
+  uint32_t cap_rate_{0};
+  uint8_t cap_channels_{0};
+  // The screencast's file.
+  CastAvi cap_avi_;
+  std::string cast_path_;
+  storage::StreamHandle cast_handle_{};
+  uint8_t cast_file_{CF_NONE};
+  uint8_t cast_file_next_{CF_NONE};
+  bool cast_file_final_{false};
+  bool cast_file_pending_{false};  // the batch waits for the segment's end
+  // The operation in flight, for a retry when the worker was not ready for it.
+  bool cast_op_seek_{false};
+  const uint8_t *cast_op_data_{nullptr};
+  size_t cast_op_len_{0};
+  uint64_t cast_op_pos_{0};
+  // svp_relay.
+  std::atomic<uint8_t> cap_relay_{CAP_RELAY_NONE};
+  std::atomic<uint16_t> cap_relay_port_{0};
+  char cap_relay_token_[48]{};
+  uint32_t cap_relay_asked_{0};
+  TaskHandle_t cap_tx_task_{nullptr};
+  int cap_sock_{-1};
+  std::atomic<bool> cap_tx_connect_{false};
+  std::atomic<bool> cap_tx_send_{false};
+  std::atomic<bool> cap_tx_close_{false};
+#endif
 };
 
 //========================================================================
@@ -3019,6 +3323,37 @@ template<typename... Ts> class StopAction : public Action<Ts...> {
  protected:
   SimpleVideoPlayer *player_;
 };
+
+#ifdef SVP_CAPTURE
+template<typename... Ts> class ScreenshotAction : public Action<Ts...> {
+ public:
+  explicit ScreenshotAction(SimpleVideoPlayer *player) : player_(player) {}
+  void play(const Ts &...x) override { this->player_->screenshot(); }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
+/// 0 start, 1 stop, 2 the one or the other.
+template<typename... Ts> class ScreencastAction : public Action<Ts...> {
+ public:
+  explicit ScreencastAction(SimpleVideoPlayer *player) : player_(player) {}
+  void set_command(uint8_t command) { this->command_ = command; }
+  void play(const Ts &...x) override {
+    if (this->command_ == 0) {
+      this->player_->screencast_start();
+    } else if (this->command_ == 1) {
+      this->player_->screencast_stop();
+    } else {
+      this->player_->screencast_toggle();
+    }
+  }
+
+ protected:
+  SimpleVideoPlayer *player_;
+  uint8_t command_{2};
+};
+#endif
 
 //========================================================================
 // Trigger Implementations (after SimpleVideoPlayer is complete)

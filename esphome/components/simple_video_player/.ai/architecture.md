@@ -23,6 +23,8 @@ Line numbers drift: search the symbol when a line doesn't match.
 | controls.cpp | On-screen controls: video bar (pre-rendered, composited in DSI direct), picture bar and audio bar (LVGL) |
 | spice_client.cpp | SPICE and VNC (via relay) remote desktop, cursor, desktop panel takeover |
 | select/spice_usb.*, usbip.cpp | USB redirection slots (usbredir, USB/IP) |
+| screen_capture.cpp | `screen_capture:`: screenshots and screencasts of what LVGL shows (section 11) |
+| cast_avi.* | `CastAvi`: the bytes of a screencast's AVI (OpenDML as ffmpeg's avienc: RIFF 'AVI ' + 'AVIX' up to 1 GB, ix00/ix01 per movi list, indx super indexes of 256 entries) |
 | number/, text_sensor/ | Volume number, status text sensor |
 | `__init__.py` | Config schema and codegen (defines `SVP_*`) |
 
@@ -42,6 +44,9 @@ Main loop: `loopTask`, prio 1, core 1 (`CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1`, `Ap
 | svp_stream_draw | `stream_draw_task_entry_` R:1010 | 1 | 2 | 4096 | decode/draw udisp stills, desktop cursor |
 | svp_stream_net | `stream_net_task_entry_` R:271 | any | 4 | 4096 | accept/serve one sender at a time, push AVI into ring |
 | svp_pace (esp_timer) | `pace_timer_cb_` H:2089 | – | – | – | wakes `playback_wait_` at the frame instant |
+| svp_capture | `capture_task_entry_` (screen_capture.cpp; made at the first capture, kept) | 0 | 3 | 4096 | copies the changed areas into the back picture after a swap, HW JPEG encodes, composes the screencast's batches; task notification bits |
+| svp_cast_tx | `cast_tx_entry_` (made at the first screencast to svp_relay, kept) | any | 3 | 4096 | connects to svp_relay's cast port, sends the header and each batch (SO_SNDTIMEO 5 s) |
+| svp_cast (esp_timer) | `capture_tick_cb_` | – | – | – | the screencast's tick (1/fps) to svp_capture |
 
 ## 3. Locks (and the order they nest in)
 
@@ -118,7 +123,7 @@ reports the media player's state instead while `state_` is STOPPED and `audio_re
   audio-file session runs (it takes no picture), not while a direct sender streams or a playlist
   advances. The dashboard (direct sender) and a remote desktop run only with everything else stopped;
   pictures and audio are the only things that run side by side.
-  No PPA in svp.
+  No PPA in the video paths (the screen capture has a PPA client of its own, section 11).
 - **Canvas**: RGB888 pair `output_buffers_[2]` at canvas size; decode into the back buffer, loop swaps
   the canvas draw buffer (S:419-441, S:1612-1625).
 - **udisp stills**: draw task decodes into the direct target or the canvas pair (R:1014-1153).
@@ -178,19 +183,26 @@ what the room leaves (`max_prebuffer()`).
 | `cover_views_[<=3]` + `cover_file_` | A16 w·h·2 each (device 25 K + 320 K + 1.28 MB) + 512 KiB | cover wanted, reclaim | decoded cover / JPEG | **no** |
 | desktop cursors | ~300 KiB | session start, `release_desktop_` | cursor shapes | no |
 | USB transfers per slot | ~550 KiB at link_open + ISO | link open, `release_buffers` | USB data | no |
+| capture pictures `cap_frame_[2]` | LVGL screen w·h·bpp in whole cache lines (device 2,048,000 each) | screenshot: one, till its file is written; screencast: two, its start to its end | what LVGL shows | **no** |
+| capture JPEGs `cap_jpeg_[2]` | 512 KiB each | with the pictures | prefix 128 (the chunk header before the JPEG) + JPEG + the batch's further chunks and sound | **no** |
+| screencast index `cap_index_` | 128 KiB | screencast's start, after its file is complete | ix00/ix01 of the segment (60 KiB each), 8 KiB super index entries; the header built into it | **no** |
+| screencast sound ring `cap_pcm_` | 32 KiB | screencast with sound | the microphone's PCM | **no** |
 
 Handover: the owner table (`POOL_OWNERS`, H). Every user takes from the pool; only when a piece does
 not fit are other users' idle buffers handed back, group by group in its row's order, and only while
 it still does not fit (`pool_take_()`). Groups: pictures (+ cover art), video (ring, slot, index),
-direct (decode buffer + controls), canvas (pair), desktop (cursors, USB).
+direct (decode buffer + controls), canvas (pair), desktop (cursors, USB), capture (the screencast's
+or a screenshot's pictures and JPEGs: `capture_give_back_()` in `pool_service_()` ends the
+screencast and answers once they are back; its index and ring go when its file is complete).
 
 | User | Steps |
 |---|---|
-| video (playback: ring, sound block, slot, index) | pictures, desktop |
-| direct / canvas output (playback) | the other output, pictures, desktop |
-| direct / canvas output (stream draw: dashboard, desktop picture) | the other output, pictures, video, desktop |
+| video (playback: ring, sound block, slot, index) | capture, pictures, desktop |
+| direct / canvas output (playback) | capture, the other output, pictures, desktop |
+| direct / canvas output (stream draw: dashboard, desktop picture) | capture, the other output, pictures, video, desktop |
 | pictures and cover art (main loop) | outputs, video, desktop; only when nothing plays or streams |
-| desktop (spice task: cursors, USB) | pictures, video |
+| desktop (spice task: cursors, USB) | capture, pictures, video |
+| capture (main loop: screenshot, screencast) | video, outputs (only idle: nothing plays or streams); never pictures |
 
 The video's buffers go only while no video session runs or starts (`video_session_()`); the stream
 never takes a file's output. A task's step is a request to the main loop (`pool_request_()`); the
@@ -239,3 +251,31 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
   `/cover`, `/options`, `/desktop`, `/keyboard`. The first `/channels` and every `/browse` asked for
   before the network is up wait in `channel_loop_()` (`ha_browse_waiting_`) until `network::is_connected()`.
 - Stream port: AVI ('RIFF') or udisp (16-byte header); panel reports 'C','V','A','L','N','F','S'.
+
+## 11. Screen capture (screen_capture.cpp, `SVP_CAPTURE`)
+
+- Pictures come from LVGL's drawing: `LvglComponent::FrameCapture` (lvgl_esphome.h). In `flush_cb_` each
+  rendered area is also copied (LVGL's PPA client, angle 0; else memcpy + cache write-back) into the
+  buffer `capture_target()` gives, in the LVGL screen's size, orientation and colour format (device
+  1280x800 RGB565); `capture_done()` at the refresh's last flush. `copy_shown()`: the shown scanout
+  buffer turned back (PPA) into that orientation.
+- Screenshot (not casting): one picture from `copy_shown()` (else LVGL draws the screen anew into it:
+  `cap_single_`), encoded on svp_capture, written by the main loop (storage worker), its buffers given
+  back. Casting: the newest JPEG written out (its buffer kept by `cap_jpeg_users_` till written).
+- Screencast: two pictures. LVGL draws into the back one; at `capture_done()` with something drawn and
+  the encoder not reading the front one (`cap_owner_` FREE -> SWAPPING), they swap and svp_capture
+  copies the changed areas (`cap_sync_rects_`, its own PPA client) into the new back one; LVGL's next
+  `capture_target()` waits for that (`cap_sync_sem_`, at most 100 ms, else the screencast ends). The
+  tick (esp_timer, 1/fps): the front picture encoded (ENCODING) when it changed since, into the JPEG
+  buffer not written out; a batch (`CastAvi::Batch`: the newest JPEG, else an empty chunk = the same
+  picture, one per tick since the last batch, and the PCM since) composed once the last batch is out,
+  to the file (main loop) and/or svp_relay (svp_cast_tx). No encoding of anything else.
+- The file: header (sizes 0) at the start; batches appended; a segment ends at 1 GB or a full index:
+  ix00, ix01, the header again (sizes, super indexes), an AVIX segment's start patched, the next
+  segment's start. At the end the same, then closed. 256 segments at most (ends with a notice).
+- svp_relay: POST /cast on the channel task (protocol.md), the cast connection on svp_cast_tx: the
+  header and every batch as the file gets them (no indexes, sizes 0).
+- Not while a video, a stream sender (dashboard) or a remote desktop has the panel; one of them starting
+  ends it (`capture_loop_()`, and POOL_CAPTURE in their rows), with the reason in
+  `on_screencast_stopped` (the device YAML shows it as a notice). Starting is refused the same way, and
+  when the pool has no room (the capture row hands back only idle video buffers and outputs).

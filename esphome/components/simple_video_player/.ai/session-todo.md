@@ -8,9 +8,19 @@ sound from the microphone, PCM only (no audio encoding). With it: the relay's pa
 (screenshot folder, JPEG quality) and the screencast options on the settings page. "Build a version
 that properly keeps the arch in mind."
 
+Olli's decisions (2026-10-18): both targets (folder and svp_relay, the relay saving per its options);
+no tearing; 15-25 fps; orientation as on the device (local files turned directly, from LVGL's own
+drawing); the screencast ends with a notice when a video, desktop or dashboard starts; screenshot on a
+key (configurable in Key bindings); no length cap. Buffers as planned: capture pair 2 x 2,048,000 B,
+JPEG pair 2 x 512 KiB, PCM ring 32 KiB, index 128 KiB. "Implement it fully, not steps."
+
 Status:
-- Design proposal written (scope, buffers, decisions open); awaiting Olli's decisions and the
-  settings mockup's approval before any code (README rules: design first, buffers planned with Olli).
+- Implemented: LVGL FrameCapture + copy_shown(); svp screen_capture.cpp + cast_avi.*; actions,
+  triggers, schema; svp_relay 0.9.47 (/cast, cast.py, options cast_dir/cast_name/cast_format); device
+  YAML (screen_capture:, max_streams 4, HA entities, key bindings PRINT_SCREEN / SHIFT+PRINT_SCREEN,
+  the end notice, no dashboard on idle while casting). Awaiting Olli's build and test.
+- Open: the Settings page section (Screen capture; the folders in Media folders; the screencast
+  options in SVP Relay) waits for the mockup's approval.
 
 # Session order (Olli, 2026-10-18, before he went to sleep) — binding
 
