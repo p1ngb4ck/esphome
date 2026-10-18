@@ -35,6 +35,13 @@ Status:
   mouse_speed, mouse_wheel_lines, mouse_acceleration, mouse_reverse_wheel). Awaiting Olli's test.
 - d) Remote controls: pointer mode (lvgl 7d098f19c3; key action pointer_mode, default MENU;
   remote_pointer_step, remote_hold_after, remote_hold_most). Awaiting Olli's test.
+- Gamepad page (2026-10-18): DualSense picture with shape overlays (L2/R2 fill, Create/Options,
+  touchpad, mute), light bar colour picker; touchpad fingers (hid 4aa4b8b1f2, controls
+  FINGER1_X.. 0..65535); Details box: connection, firmware, signal (read on opening), battery (hid
+  43bf2fac7a); the test page captures the pad, combo key bindings, action leave_gamepad_test
+  (L1+R1+Options; lvgl 0ea294a0e8); touchpad as the display's touch, select "Gamepad touchpad"
+  (lvgl 91835c4cc1). Open: touchpad "for swiping" waits for step f (Gestures); per-pad touchpad
+  setting (the design's "unless a gamepad sets its own") with it. Awaiting Olli's test.
 
 ---
 
