@@ -670,6 +670,13 @@ class LVHIDPointerListener final : public Parented<LvglComponent> {
     this->key_after_ms_ = after_ms;
     this->key_most_ = most;
   }
+  /// A gamepad's touchpad as the display's touch (its first finger), while on; not while the capture
+  /// widget shows (a page testing the gamepad). Its fingers come as controls of this input and of
+  /// those added here.
+  void set_pad_touch(bool on) { this->pad_touch_ = on; }
+  bool is_pad_touch() const { return this->pad_touch_; }
+  void add_pad_touch_input(hid::HIDInput *input);
+  void set_pad_touch_capture(lv_obj_t *widget) { this->pad_capture_ = widget; }
   /// From a keypad (LVGL thread): its key code pressed as a direction (LV_KEY_UP..LEFT) or
   /// LV_KEY_ENTER, or a key let go (any code; those not held are passed over).
   void key_press(uint32_t code, uint32_t key);
@@ -683,6 +690,18 @@ class LVHIDPointerListener final : public Parented<LvglComponent> {
   void set_cursor_(lv_obj_t *cursor);
 
   void key_read_();
+  /// A control of a pad touch input (transport task): its first finger.
+  void pad_control_(uint16_t page, uint16_t usage, int32_t value);
+  /// LVGL thread: the touchpad as the display's touch now, written into data; false when it is not.
+  bool pad_read_(lv_indev_t *drv, lv_indev_data_t *data);
+
+  std::atomic<bool> pad_down_{false};
+  std::atomic<uint16_t> pad_x_{0};
+  std::atomic<uint16_t> pad_y_{0};
+  lv_obj_t *pad_capture_{nullptr};
+  lv_point_t pad_point_{};
+  bool pad_touch_{false};
+  bool pad_pressed_{false};
 
   static constexpr uint8_t KEYS_HELD = 4;
   struct KeyHeld {

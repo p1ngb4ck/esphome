@@ -21,6 +21,12 @@ static constexpr uint16_t PAGE_GENERIC_DEVICE = 0x06;
 // Generic Device Controls: the battery in percent; the radio signal (0xF0, reserved there; keys.py).
 static constexpr uint16_t USAGE_BATTERY_STRENGTH = 0x20;
 static constexpr uint16_t USAGE_SIGNAL = 0xF0;
+// Digitizer: a gamepad touchpad's fingers (gamepad.cpp): the contact count, each finger down (tip
+// switch, secondary tip switch) and its x and y, 0..65535 across the touchpad (0xF0.., reserved there).
+static constexpr uint16_t USAGE_CONTACT_COUNT = 0x54;
+static constexpr uint16_t USAGE_FINGER_DOWN[2] = {0x42, 0x43};
+static constexpr uint16_t USAGE_FINGER_X[2] = {0xF0, 0xF2};
+static constexpr uint16_t USAGE_FINGER_Y[2] = {0xF1, 0xF3};
 static constexpr uint16_t PAGE_KEYBOARD = 0x07;
 static constexpr uint16_t PAGE_LED = 0x08;
 static constexpr uint16_t PAGE_BUTTON = 0x09;

@@ -156,8 +156,9 @@ SYSTEM_NAMES = {
     "HAT_SWITCH": 0x39,
 }
 
-# A gamepad's touchpad, as on_control names its fingers (hid/gamepad.cpp). The x and y of a finger
-# have no HID usage outside a touchpad's own report: 0xF0.. are reserved on the Digitizer page.
+# A gamepad's touchpad, as on_control names its fingers (hid/gamepad.cpp; x and y 0..65535 across
+# it). The x and y of a finger have no HID usage outside a touchpad's own report: 0xF0.. are
+# reserved on the Digitizer page.
 DIGITIZER_NAMES = {
     "CONTACT_COUNT": 0x54,
     "FINGER1_DOWN": 0x42,

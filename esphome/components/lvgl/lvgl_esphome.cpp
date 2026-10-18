@@ -1398,6 +1398,8 @@ LVHIDPointerListener::LVHIDPointerListener(hid::HIDInput *input, uint16_t long_p
     parent->set_key_pointer(this);
   lv_indev_set_read_cb(this->drv_, [](lv_indev_t *d, lv_indev_data_t *data) {
     auto *l = static_cast<LVHIDPointerListener *>(lv_indev_get_user_data(d));
+    if (l->pad_read_(d, data))
+      return;
     if (l->key_mode_)
       l->key_read_();
     data->point.x = l->x_;
@@ -1410,6 +1412,44 @@ LVHIDPointerListener::LVHIDPointerListener(hid::HIDInput *input, uint16_t long_p
   input->add_on_pointer_callback([this](int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
     this->move_(dx, dy, wheel, pan, buttons);
   });
+  this->add_pad_touch_input(input);
+}
+
+void LVHIDPointerListener::add_pad_touch_input(hid::HIDInput *input) {
+  input->add_on_control_callback(
+      [this](uint16_t page, uint16_t usage, int32_t value) { this->pad_control_(page, usage, value); });
+}
+
+void LVHIDPointerListener::pad_control_(uint16_t page, uint16_t usage, int32_t value) {
+  if (page != hid::PAGE_DIGITIZER)
+    return;
+  if (usage == hid::USAGE_FINGER_DOWN[0]) {
+    this->pad_down_.store(value != 0, std::memory_order_relaxed);
+  } else if (usage == hid::USAGE_FINGER_X[0]) {
+    this->pad_x_.store(static_cast<uint16_t>(value), std::memory_order_relaxed);
+  } else if (usage == hid::USAGE_FINGER_Y[0]) {
+    this->pad_y_.store(static_cast<uint16_t>(value), std::memory_order_relaxed);
+  }
+}
+
+bool LVHIDPointerListener::pad_read_(lv_indev_t *drv, lv_indev_data_t *data) {
+  const bool captured = this->pad_capture_ != nullptr && lv_obj_get_screen(this->pad_capture_) == lv_screen_active() &&
+                        lv_obj_is_visible(this->pad_capture_);
+  const bool down = this->pad_touch_ && !captured && this->pad_down_.load(std::memory_order_relaxed);
+  if (down) {
+    lv_display_t *disp = lv_indev_get_display(drv);
+    const int32_t width = lv_display_get_horizontal_resolution(disp);
+    const int32_t height = lv_display_get_vertical_resolution(disp);
+    this->pad_point_.x = static_cast<int32_t>(this->pad_x_.load(std::memory_order_relaxed)) * (width - 1) / 65535;
+    this->pad_point_.y = static_cast<int32_t>(this->pad_y_.load(std::memory_order_relaxed)) * (height - 1) / 65535;
+  } else if (!this->pad_pressed_) {
+    return false;
+  }
+  // Let go where it was, once, before the mouse has the pointer again.
+  this->pad_pressed_ = down;
+  data->point = this->pad_point_;
+  data->state = down ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+  return true;
 }
 
 void LVHIDPointerListener::set_key_mode(bool on) {
