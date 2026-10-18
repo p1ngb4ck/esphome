@@ -54,6 +54,9 @@ class UartTcpForwards : public Component {
 
   size_t uart_count() const { return this->uarts_.size(); }
   const char *uart_name(size_t index) const { return index < this->uarts_.size() ? this->uarts_[index].name : ""; }
+  uart::UARTComponent *uart_at(size_t index) const {
+    return index < this->uarts_.size() ? this->uarts_[index].uart : nullptr;
+  }
   UartTcp *runner(size_t index) { return index < this->count_ ? &this->runners_[index] : nullptr; }
   /// The UART of a runner as uart_count() counts them, -1 for none.
   int get_runner_uart(size_t index) const { return index < this->count_ ? this->lines_[index].uart : -1; }
