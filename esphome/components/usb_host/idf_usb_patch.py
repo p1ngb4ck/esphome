@@ -1312,6 +1312,42 @@ _LS_SPLIT_PARSE_REPLACEMENT = """    } else if (buffer->flags.ctrl.ls_split) {
         // Parse the data stage for the remaining length
         int rem_len;"""
 
+# A pipe halt that ends in a channel error. _pipe_cmd_halt() asks the channel to halt and waits
+# for the HALT_REQ event, but a channel that stops on an error at the same time reports ERROR
+# (the HAL ranks errors first) and nobody wakes the waiter: the task halting the pipe waits for
+# good. That task is the one releasing a device that is gone (usbh, or a class driver halting
+# its IN endpoints on the main loop). An unplugged low-speed device behind a hub hits it: its
+# interrupt IN runs again on the transaction errors (_ls_intr_retry()) until the halt comes.
+# The error then ends the requested halt as HALT_REQ would, and clears the HAL's request flag
+# (left set, the next halt of that channel reads as one more request). waiting_halt was never
+# cleared either, which also turned the low-speed retries off for good after the first halt.
+_HALT_ON_ERROR_ANCHOR = """                pipe->port->flags.conn_dev_ena && !pipe->cs_flags.waiting_halt && _ls_intr_retry(pipe)) {
+            break;
+        }"""
+
+_HALT_ON_ERROR_REPLACEMENT = """                pipe->port->flags.conn_dev_ena && !pipe->cs_flags.waiting_halt && _ls_intr_retry(pipe)) {
+            break;
+        }
+        if (pipe->cs_flags.waiting_halt) {
+            chan_obj->flags.halt_requested = 0;
+            pipe->cs_flags.waiting_halt = 0;
+            _ls_ctrl_release(pipe);
+            pipe->last_event = HCD_PIPE_EVENT_URB_DONE;
+            event = pipe->last_event;
+            pipe->state = HCD_PIPE_STATE_HALTED;
+            _buffer_done(pipe, usb_dwc_hal_chan_get_qtd_idx(chan_obj), HCD_PIPE_EVENT_NONE, true);
+            _buffer_parse(pipe);
+            *yield |= _internal_pipe_event_notify(pipe, true);
+            break;
+        }"""
+
+_HALT_DONE_ANCHOR = """        // Notify the task waiting for the pipe halt
+        *yield |= _internal_pipe_event_notify(pipe, true);"""
+
+_HALT_DONE_REPLACEMENT = """        // Notify the task waiting for the pipe halt
+        pipe->cs_flags.waiting_halt = 0;
+        *yield |= _internal_pipe_event_notify(pipe, true);"""
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -1381,6 +1417,8 @@ PATCHES = (
     ("src/hcd_dwc.c", _LS_SPLIT_CONT_ANCHOR, _LS_SPLIT_CONT_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_SPLIT_DATA_ANCHOR, _LS_SPLIT_DATA_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_SPLIT_PARSE_ANCHOR, _LS_SPLIT_PARSE_REPLACEMENT),
+    ("src/hcd_dwc.c", _HALT_ON_ERROR_ANCHOR, _HALT_ON_ERROR_REPLACEMENT),
+    ("src/hcd_dwc.c", _HALT_DONE_ANCHOR, _HALT_DONE_REPLACEMENT),
 )
 
 # Identifies an existing patched copy. It has to change whenever anything about that copy
