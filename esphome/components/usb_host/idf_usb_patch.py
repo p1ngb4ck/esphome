@@ -217,74 +217,6 @@ _HOST_WARN_REPLACEMENT = """        .intr_flags = config->intr_flags,
         hub_config.fifo_bias[i] = (hcd_fifo_bias_t)config->fifo_bias_per_port[i];
     }"""
 
-_LS_PREAMBLE_ANCHOR = """static inline bool _buffer_check_done(pipe_t *pipe)
-{
-    // Only control transfers need to be continued
-    if (pipe->ep_char.type != USB_DWC_XFER_TYPE_CTRL) {
-        return true;
-    }
-    // The HW can't handle two transactions with preamble in one frame.
-    // TODO: IDF-12986
-    if (pipe->ep_char.ls_via_fs_hub) {
-        esp_rom_delay_us(1000);
-    }"""
-
-_LS_PREAMBLE_REPLACEMENT = """/**
- * @brief Wait for the frame counter to advance before the next PREamble transaction
- *
- * The controller cannot issue two PRE-qualified transactions in the same frame. Sleeping
- * for one frame's worth of microseconds only works when the stage completed near the start
- * of a frame: a completion just before the counter rolls over is followed by another
- * transaction in the very next frame, which is the case this is meant to prevent. Watch the
- * counter itself instead.
- *
- * The bound is what keeps this safe to call from an interrupt: a stopped frame clock, which
- * is what a disconnect during a control transfer looks like, must not wedge the handler. A
- * full-speed frame is 1 ms, so 3 ms is well past any legitimate transition.
- */
-static inline void _wait_next_preamble_frame(pipe_t *pipe)
-{
-    const uint32_t start_frame = usb_dwc_hal_port_get_cur_frame_num(pipe->port->hal);
-    for (int waited_us = 0; waited_us < 3000; waited_us += 10) {
-        if (usb_dwc_hal_port_get_cur_frame_num(pipe->port->hal) != start_frame) {
-            return;
-        }
-        esp_rom_delay_us(10);
-    }
-}
-
-static inline bool _buffer_check_done(pipe_t *pipe)
-{
-    // Only control transfers need to be continued
-    if (pipe->ep_char.type != USB_DWC_XFER_TYPE_CTRL) {
-        return true;
-    }
-    // The HW can't handle two transactions with preamble in one frame.
-    if (pipe->ep_char.ls_via_fs_hub) {
-        _wait_next_preamble_frame(pipe);
-    }"""
-
-_LS_EP0_ANCHOR = """    ep_char->ls_via_fs_hub = 0;
-    if (pipe_idx > 0) {
-        // TODO: remove warning after IDF-12986
-        if (port_speed == USB_SPEED_FULL && pipe_config->dev_speed == USB_SPEED_LOW) {
-            ESP_LOGW(HCD_DWC_TAG, "Low-speed, extra delay will be applied in ISR");
-            ep_char->ls_via_fs_hub = 1;
-        }
-    }"""
-
-_LS_EP0_REPLACEMENT = """    // A low-speed device reached through a full-speed hub needs a PREamble before every
-    // transaction, the default control pipe included. Excluding pipe index 0 left that pipe
-    // without it, so the first GET_DESCRIPTOR of enumeration went out unqualified and the
-    // device never answered -- no endpoint of such a device could ever be reached, which is
-    // why the exclusion was not noticed. A device on the root port is unaffected either way:
-    // there the port speed is LOW, not FULL.
-    ep_char->ls_via_fs_hub = 0;
-    if (port_speed == USB_SPEED_FULL && pipe_config->dev_speed == USB_SPEED_LOW) {
-        ESP_LOGD(HCD_DWC_TAG, "Low-speed device behind a full-speed hub, PREamble enabled");
-        ep_char->ls_via_fs_hub = 1;
-    }"""
-
 _RESET_BAILOUT_ANCHOR = """    ret = ESP_OK;
 bailout:
     _port_reset_all_pipes(port);
@@ -352,358 +284,6 @@ reset_err:
         }
         break;
     }"""
-
-# A low-speed device behind a full-speed hub: the controller can lose a PRE-qualified
-# transaction with a transaction error, most often the first one a new pipe launches, right
-# after the hub's port reset. From NonaSuomy's ESP32-P4 USB host work: the first launch of a
-# pipe waits for a frame boundary, and a control stage that fails that way is run again on a
-# later frame with a rebuilt descriptor (the controller writes the descriptor back in place),
-# a bounded number of times before the error reaches the transfer.
-_LS_PIPE_FIELDS_ANCHOR = """    usb_dwc_hal_ep_char_t ep_char;
-    // Port related"""
-
-_LS_PIPE_FIELDS_REPLACEMENT = """    usb_dwc_hal_ep_char_t ep_char;
-    uint8_t ls_ctrl_retry_count;            // Retries of the current control stage (LS via FS hub)
-    uint8_t ls_intr_retry_count;            // Interrupt transfer retries in the current run (LS via FS hub)
-    uint16_t ls_intr_retry_frame;           // Frame of the last interrupt transfer retry
-    bool ls_ctrl_holding;                   // A control transfer of this pipe holds the low-speed bus
-    bool ls_first_launch_pending;           // First PRE-qualified launch waits for a frame boundary
-    // Port related"""
-
-_LS_PIPE_ALLOC_ANCHOR = """    memcpy(&pipe->ep_char, &ep_char, sizeof(usb_dwc_hal_ep_char_t));
-    pipe->state = HCD_PIPE_STATE_ACTIVE;"""
-
-_LS_PIPE_ALLOC_REPLACEMENT = """    memcpy(&pipe->ep_char, &ep_char, sizeof(usb_dwc_hal_ep_char_t));
-    pipe->ls_first_launch_pending = pipe->ep_char.ls_via_fs_hub;
-    pipe->state = HCD_PIPE_STATE_ACTIVE;"""
-
-_LS_EXEC_ANCHOR = """    dma_buffer_block_t *buffer_to_exec = pipe->buffers[pipe->multi_buffer_control.rd_idx];
-    assert(buffer_to_exec->urb != NULL);
-
-    uint32_t start_idx;"""
-
-_LS_EXEC_REPLACEMENT = """    dma_buffer_block_t *buffer_to_exec = pipe->buffers[pipe->multi_buffer_control.rd_idx];
-    assert(buffer_to_exec->urb != NULL);
-    pipe->ls_ctrl_retry_count = 0;
-    if (pipe->ls_first_launch_pending) {
-        pipe->ls_first_launch_pending = false;
-        _wait_next_preamble_frame(pipe);
-    }
-
-    uint32_t start_idx;"""
-
-_LS_EXEC_CONT_ANCHOR = """    // Continue the control transfer
-    usb_dwc_hal_chan_set_dir(pipe->chan_obj, next_dir_is_in);"""
-
-_LS_EXEC_CONT_REPLACEMENT = """    // Continue the control transfer
-    pipe->ls_ctrl_retry_count = 0;
-    usb_dwc_hal_chan_set_dir(pipe->chan_obj, next_dir_is_in);"""
-
-_LS_RETRY_HELPER_ANCHOR = """/**
- * @brief Handles a HAL channel interrupt
-"""
-
-_LS_RETRY_HELPER_REPLACEMENT = """#define LS_CTRL_RETRY_MAX 3
-
-/*
- * The data stage of a control transfer to a low-speed device behind a full-speed hub, one packet
- * per frame. The controller cannot issue two PRE-qualified transactions in one frame (see
- * _buffer_check_done()), and a data stage of several packets in one channel activation is
- * exactly that: the device descriptor is 3 packets, a HID report descriptor often more than 10.
- * Each piece is one packet, launched after the frame counter moved on; bytes done are kept in
- * the buffer's control flags (ls_done), which _buffer_parse_ctrl() then reports.
- */
-static inline int _ls_ctrl_data_len(dma_buffer_block_t *buffer)
-{
-    usb_transfer_t *transfer = &buffer->urb->transfer;
-    const usb_setup_packet_t *setup = (const usb_setup_packet_t *)transfer->data_buffer;
-    const int len = transfer->num_bytes - (int)sizeof(usb_setup_packet_t);
-    return (setup->wLength < len) ? setup->wLength : len;
-}
-
-static inline int _ls_ctrl_data_piece(pipe_t *pipe, dma_buffer_block_t *buffer)
-{
-    const int mps = pipe->ep_char.mps;
-    const int rem = _ls_ctrl_data_len(buffer) - (int)buffer->flags.ctrl.ls_done;
-    // An IN piece asks for a whole packet: the buffer holds whole packets, a short one ends the stage
-    return (buffer->flags.ctrl.data_stg_in || rem > mps) ? mps : rem;
-}
-
-static inline int _ls_ctrl_data_pid(pipe_t *pipe, dma_buffer_block_t *buffer)
-{
-    // DATA1 first, then alternating
-    return ((buffer->flags.ctrl.ls_done / pipe->ep_char.mps) & 1) ? 0 : 1;
-}
-
-static inline void _ls_ctrl_data_fill(pipe_t *pipe, dma_buffer_block_t *buffer)
-{
-    usb_transfer_t *transfer = &buffer->urb->transfer;
-    usb_dwc_hal_xfer_desc_fill(buffer->xfer_desc_list, 1,
-                               transfer->data_buffer + sizeof(usb_setup_packet_t) + buffer->flags.ctrl.ls_done,
-                               _ls_ctrl_data_piece(pipe, buffer),
-                               (buffer->flags.ctrl.data_stg_in ? USB_DWC_HAL_XFER_DESC_FLAG_IN : 0) |
-                               USB_DWC_HAL_XFER_DESC_FLAG_HOC);
-    CACHE_SYNC_XFER_DESCRIPTOR_LIST_C2M(buffer);
-}
-
-static inline void _ls_ctrl_data_start(pipe_t *pipe, dma_buffer_block_t *buffer)
-{
-    buffer->flags.ctrl.ls_split = 1;
-    buffer->flags.ctrl.ls_done = 0;
-    _ls_ctrl_data_fill(pipe, buffer);
-}
-
-/**
- * @brief A data stage piece completed: launch the next one
- *
- * @return true when another piece was launched, false when the data stage is done (a short
- *         packet, or all bytes of it) and the status stage follows
- */
-static inline bool _ls_ctrl_data_next(pipe_t *pipe, dma_buffer_block_t *buffer)
-{
-    const int asked = _ls_ctrl_data_piece(pipe, buffer);
-    int rem_len;
-    int desc_status;
-    CACHE_SYNC_XFER_DESCRIPTOR_LIST_M2C(buffer);
-    usb_dwc_hal_xfer_desc_parse(buffer->xfer_desc_list, 1, &rem_len, &desc_status);
-    const int got = asked - rem_len;
-    buffer->flags.ctrl.ls_done += got;
-    if (got < pipe->ep_char.mps || (int)buffer->flags.ctrl.ls_done >= _ls_ctrl_data_len(buffer)) {
-        return false;
-    }
-    pipe->ls_ctrl_retry_count = 0;
-    _ls_ctrl_data_fill(pipe, buffer);
-    usb_dwc_hal_chan_set_dir(pipe->chan_obj, buffer->flags.ctrl.data_stg_in);
-    usb_dwc_hal_chan_set_pid(pipe->chan_obj, _ls_ctrl_data_pid(pipe, buffer));
-    usb_dwc_hal_chan_activate(pipe->chan_obj, buffer->xfer_desc_list, XFER_LIST_LEN_CTRL, 1);
-    return true;
-}
-
-/**
- * @brief Run the current stage of a control transfer again, on a later frame
- *
- * Descriptor DMA writes the stage's descriptor back in place before it reports the error,
- * so it is rebuilt from the URB, as _buffer_fill_ctrl() built it.
- */
-static inline void _ls_ctrl_retry(pipe_t *pipe)
-{
-    dma_buffer_block_t *buffer = pipe->buffers[pipe->multi_buffer_control.rd_idx];
-    usb_transfer_t *transfer = &buffer->urb->transfer;
-    const int stage = buffer->flags.ctrl.cur_stg;
-    bool is_in;
-    int pid;
-    uint8_t *data;
-    int len;
-    uint32_t flags = USB_DWC_HAL_XFER_DESC_FLAG_HOC;
-    if (stage == 0) {
-        is_in = false;
-        pid = 0;
-        data = transfer->data_buffer;
-        len = sizeof(usb_setup_packet_t);
-        flags |= USB_DWC_HAL_XFER_DESC_FLAG_SETUP;
-    } else if (stage == 1) {
-        is_in = buffer->flags.ctrl.data_stg_in;
-        pid = _ls_ctrl_data_pid(pipe, buffer);
-        data = transfer->data_buffer + sizeof(usb_setup_packet_t) + buffer->flags.ctrl.ls_done;
-        len = _ls_ctrl_data_piece(pipe, buffer);
-    } else {
-        is_in = !(buffer->flags.ctrl.data_stg_in && !buffer->flags.ctrl.data_stg_skip);
-        pid = 1;
-        data = NULL;
-        len = 0;
-    }
-    if (is_in) {
-        flags |= USB_DWC_HAL_XFER_DESC_FLAG_IN;
-    }
-    usb_dwc_hal_xfer_desc_fill(buffer->xfer_desc_list, stage, data, len, flags);
-    CACHE_SYNC_XFER_DESCRIPTOR_LIST_C2M(buffer);
-    usb_dwc_hal_chan_set_dir(pipe->chan_obj, is_in);
-    usb_dwc_hal_chan_set_pid(pipe->chan_obj, pid);
-    _wait_next_preamble_frame(pipe);
-    usb_dwc_hal_chan_activate(pipe->chan_obj, buffer->xfer_desc_list, XFER_LIST_LEN_CTRL, stage);
-}
-
-#define LS_INTR_RETRY_WINDOW 1024   // Frames: errors further apart start a new run of retries
-
-/**
- * @brief Run an interrupt transfer again from its first packet not done, on a later frame
- *
- * A lost PRE-qualified transaction halts the channel like a dead device does. Descriptors done
- * keep their status, the rest are rebuilt as _buffer_fill_intr() built them; the data toggle
- * stays in HCTSIZ across the activation. Bounded per run, so a device that is gone still ends
- * the transfer with the error.
- *
- * @return true when the transfer runs again
- */
-static inline bool _ls_intr_retry(pipe_t *pipe)
-{
-    const uint16_t frame = usb_dwc_hal_port_get_cur_frame_num(pipe->port->hal);
-    if (((uint16_t)(frame - pipe->ls_intr_retry_frame) & 0x3FFF) >= LS_INTR_RETRY_WINDOW) {
-        pipe->ls_intr_retry_count = 0;
-    }
-    if (pipe->ls_intr_retry_count >= LS_CTRL_RETRY_MAX) {
-        return false;
-    }
-    dma_buffer_block_t *buffer = pipe->buffers[pipe->multi_buffer_control.rd_idx];
-    usb_transfer_t *transfer = &buffer->urb->transfer;
-    const int mps = pipe->ep_char.mps;
-    const int num_qtds = buffer->flags.intr.num_qtds;
-    const bool zero_len_packet = buffer->flags.intr.zero_len_packet;
-    const int list_len = num_qtds + (zero_len_packet ? 1 : 0);
-    const uint32_t dir_flag = (pipe->ep_char.bEndpointAddress & USB_B_ENDPOINT_ADDRESS_EP_DIR_MASK) ? USB_DWC_HAL_XFER_DESC_FLAG_IN : 0;
-    CACHE_SYNC_XFER_DESCRIPTOR_LIST_M2C(buffer);
-    int first = 0;
-    for (; first < list_len; first++) {
-        int rem_len;
-        int desc_status;
-        usb_dwc_hal_xfer_desc_parse(buffer->xfer_desc_list, first, &rem_len, &desc_status);
-        if (rem_len != 0 || desc_status != USB_DWC_HAL_XFER_DESC_STS_SUCCESS) {
-            break;
-        }
-    }
-    if (first >= list_len) {
-        return false;
-    }
-    pipe->ls_intr_retry_count++;
-    pipe->ls_intr_retry_frame = frame;
-    for (int i = first; i < num_qtds; i++) {
-        const bool last = (i == num_qtds - 1);
-        usb_dwc_hal_xfer_desc_fill(buffer->xfer_desc_list, i, &transfer->data_buffer[i * mps],
-                                   last ? transfer->num_bytes - i * mps : mps,
-                                   dir_flag | ((last && !zero_len_packet) ? USB_DWC_HAL_XFER_DESC_FLAG_HOC : 0));
-    }
-    if (zero_len_packet) {
-        usb_dwc_hal_xfer_desc_fill(buffer->xfer_desc_list, num_qtds, NULL, 0, USB_DWC_HAL_XFER_DESC_FLAG_HOC);
-    }
-    CACHE_SYNC_XFER_DESCRIPTOR_LIST_C2M(buffer);
-    _wait_next_preamble_frame(pipe);
-    usb_dwc_hal_chan_activate(pipe->chan_obj, buffer->xfer_desc_list, list_len, first);
-    return true;
-}
-
-// A periodic pipe's interval in the frame list: rounded down to a power of two, as the HAL schedules it
-static inline unsigned int _ls_periodic_interval(const usb_dwc_hal_ep_char_t *ep_char)
-{
-    unsigned int interval = FRAME_LIST_LEN;
-    while (interval > 1 && interval > ep_char->periodic.interval) {
-        interval >>= 1;
-    }
-    return interval;
-}
-
-// The frames (a bit each) the low-speed periodic pipes poll in; with chan >= 0 only that channel's
-static inline uint32_t _ls_periodic_frames(port_t *port, int only_chan)
-{
-    _Static_assert(FRAME_LIST_LEN <= 32, "one bit per frame");
-    uint32_t frames = 0;
-    for (int chan = 0; chan < 32; chan++) {
-        usb_dwc_hal_chan_t *chan_obj = (port->ls_pre_periodic_chans & (1U << chan)) && (only_chan < 0 || only_chan == chan)
-                                       ? port->hal->channels.hdls[chan] : NULL;
-        if (chan_obj == NULL) {
-            continue;
-        }
-        const pipe_t *periodic = (const pipe_t *)usb_dwc_hal_chan_get_context(chan_obj);
-        const unsigned int interval = _ls_periodic_interval(&periodic->ep_char);
-        for (unsigned int i = periodic->ep_char.periodic.offset % interval; i < FRAME_LIST_LEN; i += interval) {
-            frames |= 1U << i;
-        }
-    }
-    return frames;
-}
-
-/**
- * @brief A control transfer to a low-speed device behind a full-speed hub holds the bus
- *
- * From its first stage to its end. The descriptor DMA runs a NAKed stage again by itself, frame
- * after frame, so where a stage starts says nothing about where it runs. The low-speed periodic
- * pipes leave the frame list meanwhile (their channels stay enabled, they are just not polled)
- * and return when the last such control transfer ends.
- */
-static inline void _ls_ctrl_hold(pipe_t *pipe)
-{
-    port_t *port = pipe->port;
-    if (pipe->ls_ctrl_holding) {
-        return;
-    }
-    pipe->ls_ctrl_holding = true;
-    if (port->ls_ctrl_holds++ == 0 && port->ls_pre_periodic_chans) {
-        for (int i = 0; i < FRAME_LIST_LEN; i++) {
-            port->hal->periodic_frame_list[i] &= ~port->ls_pre_periodic_chans;
-        }
-        CACHE_SYNC_FRAME_LIST(port->frame_list);
-    }
-}
-
-static inline void _ls_ctrl_release(pipe_t *pipe)
-{
-    port_t *port = pipe->port;
-    if (!pipe->ls_ctrl_holding) {
-        return;
-    }
-    pipe->ls_ctrl_holding = false;
-    if (--port->ls_ctrl_holds == 0 && port->ls_pre_periodic_chans) {
-        for (int chan = 0; chan < 32; chan++) {
-            if (!(port->ls_pre_periodic_chans & (1U << chan))) {
-                continue;
-            }
-            const uint32_t frames = _ls_periodic_frames(port, chan);
-            for (int i = 0; i < FRAME_LIST_LEN; i++) {
-                if (frames & (1U << i)) {
-                    port->hal->periodic_frame_list[i] |= 1U << chan;
-                }
-            }
-        }
-        CACHE_SYNC_FRAME_LIST(port->frame_list);
-    }
-}
-
-/**
- * @brief Give a low-speed periodic pipe behind a full-speed hub frames of its own
- *
- * Two PRE-qualified transactions must not share a frame. The offset moves to the first phase
- * whose frames no such pipe polls in yet; with none left the pipe keeps its own.
- */
-static inline void _ls_periodic_set_offset(port_t *port, usb_dwc_hal_ep_char_t *ep_char)
-{
-    const unsigned int interval = _ls_periodic_interval(ep_char);
-    const uint32_t polled = _ls_periodic_frames(port, -1);
-    for (unsigned int k = 0; k < interval; k++) {
-        const unsigned int offset = (ep_char->periodic.offset + k) % interval;
-        bool taken = false;
-        for (unsigned int i = offset; i < FRAME_LIST_LEN && !taken; i += interval) {
-            taken = (polled & (1U << i)) != 0;
-        }
-        if (!taken) {
-            ep_char->periodic.offset = offset;
-            return;
-        }
-    }
-}
-
-/**
- * @brief Handles a HAL channel interrupt
-"""
-
-_LS_RETRY_ANCHOR = """        // Get and store the pipe error event
-        usb_dwc_hal_chan_error_t chan_error = usb_dwc_hal_chan_get_error(chan_obj);
-        pipe->last_event = pipe_decode_error_event(chan_error);"""
-
-_LS_RETRY_REPLACEMENT = """        // Get and store the pipe error event
-        usb_dwc_hal_chan_error_t chan_error = usb_dwc_hal_chan_get_error(chan_obj);
-        if (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL &&
-                chan_error == USB_DWC_HAL_CHAN_ERROR_XCS_XACT && pipe->ls_ctrl_retry_count < LS_CTRL_RETRY_MAX &&
-                pipe->port->flags.conn_dev_ena && !pipe->cs_flags.waiting_halt) {
-            pipe->ls_ctrl_retry_count++;
-            _ls_ctrl_retry(pipe);
-            break;
-        }
-        if (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_INTR &&
-                chan_error == USB_DWC_HAL_CHAN_ERROR_XCS_XACT &&
-                pipe->port->flags.conn_dev_ena && !pipe->cs_flags.waiting_halt && _ls_intr_retry(pipe)) {
-            break;
-        }
-        _ls_ctrl_release(pipe);
-        pipe->last_event = pipe_decode_error_event(chan_error);"""
 
 # The high-speed controller as a full/low-speed host: HCFG.FSLSSupp set before every port
 # reset, so the controller does not answer a device's high-speed chirp. Backported from
@@ -807,13 +387,13 @@ static hcd_pipe_event_t _intr_hdlr_chan(pipe_t *pipe, usb_dwc_hal_chan_t *chan_o
     usb_dwc_hal_chan_event_t chan_event = usb_dwc_hal_chan_decode_intr(chan_obj);"""
 
 _LS_DEBUG_ERROR_ANCHOR = """        usb_dwc_hal_chan_error_t chan_error = usb_dwc_hal_chan_get_error(chan_obj);
-        if (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL &&"""
+        pipe->last_event = pipe_decode_error_event(chan_error);"""
 
 _LS_DEBUG_ERROR_REPLACEMENT = """        usb_dwc_hal_chan_error_t chan_error = usb_dwc_hal_chan_get_error(chan_obj);
         if (usb_host_ls_hub_debug && pipe->ep_char.ls_via_fs_hub) {
             _ls_hub_debug_log(pipe, chan_obj, chan_error, raw_chan_intrs);
         }
-        if (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL &&"""
+        pipe->last_event = pipe_decode_error_event(chan_error);"""
 
 # The diagnostic printed from the interrupt with ESP_EARLY_LOGE, which goes straight to the ROM
 # console (esp_rom_printf) and never through the vprintf hook ESPHome's logger installs, so it
@@ -881,7 +461,7 @@ _LS_DEBUG_RING_LOG_REPLACEMENT = """    const usb_host_ls_hub_debug_entry_t entr
         .xfer_type = (uint8_t)pipe->ep_char.type,
         .stage = (int8_t)stage,
         .err = (uint8_t)chan_error,
-        .retry = pipe->ls_ctrl_retry_count,
+        .retry = 0,
         .mps = (uint8_t)(pipe->ep_char.mps > 255 ? 255 : pipe->ep_char.mps),
         .frame = usb_dwc_hal_port_get_cur_frame_num(pipe->port->hal),
         .hcint = raw_chan_intrs,
@@ -891,10 +471,10 @@ _LS_DEBUG_RING_LOG_REPLACEMENT = """    const usb_host_ls_hub_debug_entry_t entr
     };
     _ls_hub_debug_record(&entry);"""
 
-_LS_DEBUG_RING_ALLOC_ANCHOR = """    pipe->ls_first_launch_pending = pipe->ep_char.ls_via_fs_hub;
+_LS_DEBUG_RING_ALLOC_ANCHOR = """    memcpy(&pipe->ep_char, &ep_char, sizeof(usb_dwc_hal_ep_char_t));
     pipe->state = HCD_PIPE_STATE_ACTIVE;"""
 
-_LS_DEBUG_RING_ALLOC_REPLACEMENT = """    pipe->ls_first_launch_pending = pipe->ep_char.ls_via_fs_hub;
+_LS_DEBUG_RING_ALLOC_REPLACEMENT = """    memcpy(&pipe->ep_char, &ep_char, sizeof(usb_dwc_hal_ep_char_t));
     if (usb_host_ls_hub_debug && pipe->ep_char.ls_via_fs_hub) {
         const usb_host_ls_hub_debug_entry_t entry = {
             .kind = 0,
@@ -1175,172 +755,22 @@ _HUB_STATUS_CHANGE_REPLACEMENT = """        if (device_status == EXT_HUB_STATUS_
             ESP_LOGW(EXT_HUB_TAG, "Hub status change has not been implemented yet");
         }"""
 
-# Low-speed behind a full-speed hub: the frames the periodic (interrupt) pipes of such devices
-# are scheduled in carry a PREamble transaction already, so a control stage of such a device
-# must not start in one of them or in the frame before one (a NAKed stage runs on into the next
-# frame), and two such pipes get frames of their own. The port keeps which channels those pipes
-# use; the frame list says which frames they poll in.
-_LS_PERIODIC_PORT_FIELD_ANCHOR = """    usb_dwc_hal_context_t *hal;
-    void *frame_list;"""
-
-_LS_PERIODIC_PORT_FIELD_REPLACEMENT = """    usb_dwc_hal_context_t *hal;
-    void *frame_list;
-    uint32_t ls_pre_periodic_chans;     // Channels of periodic pipes with PREamble (LS via FS hub)
-    uint8_t ls_ctrl_holds;              // Control transfers holding the low-speed bus (LS via FS hub)"""
-
-_LS_PERIODIC_WAIT_ANCHOR = """    for (int waited_us = 0; waited_us < 3000; waited_us += 10) {
-        if (usb_dwc_hal_port_get_cur_frame_num(pipe->port->hal) != start_frame) {
-            return;
-        }"""
-
-_LS_PERIODIC_WAIT_REPLACEMENT = """    const uint32_t busy_chans = (pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL) ? pipe->port->ls_pre_periodic_chans : 0;
-    for (int waited_us = 0; waited_us < 3000; waited_us += 10) {
-        const uint32_t frame = usb_dwc_hal_port_get_cur_frame_num(pipe->port->hal);
-        if (frame != start_frame &&
-                !(pipe->port->hal->periodic_frame_list[frame % FRAME_LIST_LEN] & busy_chans) &&
-                !(pipe->port->hal->periodic_frame_list[(frame + 1) % FRAME_LIST_LEN] & busy_chans)) {
-            return;
-        }"""
-
-_LS_PERIODIC_EXEC_ANCHOR = """    pipe->ls_ctrl_retry_count = 0;
-    if (pipe->ls_first_launch_pending) {
-        pipe->ls_first_launch_pending = false;
-        _wait_next_preamble_frame(pipe);
-    }"""
-
-# The frame is chosen before the hold: _wait_next_preamble_frame() looks in the frame list for a
-# frame where neither it nor the next one has a low-speed periodic pipe, and the hold takes those
-# pipes out of the frame list. Taken first, the hold left that check nothing to find.
-_LS_PERIODIC_EXEC_REPLACEMENT = """    pipe->ls_ctrl_retry_count = 0;
-    if (pipe->ls_first_launch_pending ||
-            (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL &&
-             pipe->port->ls_pre_periodic_chans)) {
-        pipe->ls_first_launch_pending = false;
-        _wait_next_preamble_frame(pipe);
-    }
-    if (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL) {
-        _ls_ctrl_hold(pipe);
-    }"""
-
-_LS_PERIODIC_ALLOC_ANCHOR = """    usb_dwc_hal_chan_set_ep_char(port->hal, pipe->chan_obj, &pipe->ep_char);
-    CACHE_SYNC_FRAME_LIST(port->frame_list);"""
-
-_LS_PERIODIC_ALLOC_REPLACEMENT = """    if (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_INTR) {
-        _ls_periodic_set_offset(port, &pipe->ep_char);
-    }
-    usb_dwc_hal_chan_set_ep_char(port->hal, pipe->chan_obj, &pipe->ep_char);
-    if (pipe->ep_char.ls_via_fs_hub &&
-            (pipe->ep_char.type == USB_DWC_XFER_TYPE_INTR || pipe->ep_char.type == USB_DWC_XFER_TYPE_ISOCHRONOUS)) {
-        port->ls_pre_periodic_chans |= 1U << pipe->chan_obj->flags.chan_idx;
-        if (port->ls_ctrl_holds) {
-            // A control transfer holds the bus: polled from its end on
-            for (int i = 0; i < FRAME_LIST_LEN; i++) {
-                port->hal->periodic_frame_list[i] &= ~(1U << pipe->chan_obj->flags.chan_idx);
-            }
-        }
-    }
-    CACHE_SYNC_FRAME_LIST(port->frame_list);"""
-
-_LS_PERIODIC_FREE_ANCHOR = """    pipe->port->num_pipes_idle--;
-    usb_dwc_hal_chan_free(pipe->port->hal, pipe->chan_obj);"""
-
-_LS_PERIODIC_FREE_REPLACEMENT = """    pipe->port->num_pipes_idle--;
-    _ls_ctrl_release(pipe);
-    pipe->port->ls_pre_periodic_chans &= ~(1U << pipe->chan_obj->flags.chan_idx);
-    usb_dwc_hal_chan_free(pipe->port->hal, pipe->chan_obj);"""
-
-# The end of a control transfer to a low-speed device behind a full-speed hub, done or halted on
-# request, gives the bus back to the low-speed periodic pipes (see _ls_ctrl_hold()).
-_LS_HOLD_DONE_ANCHOR = """        if (!_buffer_check_done(pipe)) {
-            _buffer_exec_cont(pipe);
-            break;
-        }
-        pipe->last_event = HCD_PIPE_EVENT_URB_DONE;"""
-
-_LS_HOLD_DONE_REPLACEMENT = """        if (!_buffer_check_done(pipe)) {
-            _buffer_exec_cont(pipe);
-            break;
-        }
-        _ls_ctrl_release(pipe);
-        pipe->last_event = HCD_PIPE_EVENT_URB_DONE;"""
-
-_LS_HOLD_HALT_ANCHOR = """        assert(pipe->cs_flags.waiting_halt);
-        // We've halted a transfer, so we need to trigger the pipe callback"""
-
-_LS_HOLD_HALT_REPLACEMENT = """        assert(pipe->cs_flags.waiting_halt);
-        _ls_ctrl_release(pipe);
-        // We've halted a transfer, so we need to trigger the pipe callback"""
-
-# Data stage of a low-speed control transfer behind a full-speed hub, one packet per frame (see
-# _ls_ctrl_data_next() in _LS_RETRY_HELPER_REPLACEMENT).
-_LS_SPLIT_FLAGS_ANCHOR = """            uint32_t cur_stg: 2;            // Index of the current stage (e.g., 0 is setup stage, 2 is status stage)
-            uint32_t reserved28: 28;"""
-
-_LS_SPLIT_FLAGS_REPLACEMENT = """            uint32_t cur_stg: 2;            // Index of the current stage (e.g., 0 is setup stage, 2 is status stage)
-            uint32_t ls_split: 1;           // Data stage run one packet at a time (LS via FS hub)
-            uint32_t ls_done: 16;           // Data stage bytes done so far, with ls_split
-            uint32_t reserved11: 11;"""
-
-_LS_SPLIT_FILL_ANCHOR = """    buffer->flags.ctrl.data_stg_skip = data_stg_skip;
-    buffer->flags.ctrl.cur_stg = 0;"""
-
-_LS_SPLIT_FILL_REPLACEMENT = """    buffer->flags.ctrl.data_stg_skip = data_stg_skip;
-    buffer->flags.ctrl.cur_stg = 0;
-    buffer->flags.ctrl.ls_split = 0;
-    buffer->flags.ctrl.ls_done = 0;"""
-
-_LS_SPLIT_CONT_ANCHOR = """    bool next_dir_is_in;
-    int next_pid;
-    assert(buffer_inflight->flags.ctrl.cur_stg != 2);"""
-
-_LS_SPLIT_CONT_REPLACEMENT = """    bool next_dir_is_in;
-    int next_pid;
-    assert(buffer_inflight->flags.ctrl.cur_stg != 2);
-    if (buffer_inflight->flags.ctrl.cur_stg == 1 && buffer_inflight->flags.ctrl.ls_split &&
-            _ls_ctrl_data_next(pipe, buffer_inflight)) {
-        return;
-    }"""
-
-_LS_SPLIT_DATA_ANCHOR = """            next_pid = 1;   // Data stage always starts with a PID of DATA1
-            buffer_inflight->flags.ctrl.cur_stg = 1;"""
-
-_LS_SPLIT_DATA_REPLACEMENT = """            next_pid = 1;   // Data stage always starts with a PID of DATA1
-            buffer_inflight->flags.ctrl.cur_stg = 1;
-            if (pipe->ep_char.ls_via_fs_hub) {
-                _ls_ctrl_data_start(pipe, buffer_inflight);
-            }"""
-
-_LS_SPLIT_PARSE_ANCHOR = """    } else {
-        // Parse the data stage for the remaining length
-        int rem_len;"""
-
-_LS_SPLIT_PARSE_REPLACEMENT = """    } else if (buffer->flags.ctrl.ls_split) {
-        // Data stage run one packet at a time: its bytes were counted as they came
-        transfer->actual_num_bytes = sizeof(usb_setup_packet_t) + buffer->flags.ctrl.ls_done;
-    } else {
-        // Parse the data stage for the remaining length
-        int rem_len;"""
-
 # A pipe halt that ends in a channel error. _pipe_cmd_halt() asks the channel to halt and waits
 # for the HALT_REQ event, but a channel that stops on an error at the same time reports ERROR
 # (the HAL ranks errors first) and nobody wakes the waiter: the task halting the pipe waits for
 # good. That task is the one releasing a device that is gone (usbh, or a class driver halting
-# its IN endpoints on the main loop). An unplugged low-speed device behind a hub hits it: its
-# interrupt IN runs again on the transaction errors (_ls_intr_retry()) until the halt comes.
-# The error then ends the requested halt as HALT_REQ would, and clears the HAL's request flag
-# (left set, the next halt of that channel reads as one more request). waiting_halt was never
-# cleared either, which also turned the low-speed retries off for good after the first halt.
-_HALT_ON_ERROR_ANCHOR = """                pipe->port->flags.conn_dev_ena && !pipe->cs_flags.waiting_halt && _ls_intr_retry(pipe)) {
-            break;
-        }"""
+# its IN endpoints on the main loop). The error now ends the requested halt as HALT_REQ would,
+# and clears the HAL's request flag (left set, the next halt of that channel reads as one more
+# request). waiting_halt was never cleared after HALT_REQ either.
+_HALT_ON_ERROR_ANCHOR = """            _ls_hub_debug_log(pipe, chan_obj, chan_error, raw_chan_intrs);
+        }
+        pipe->last_event = pipe_decode_error_event(chan_error);"""
 
-_HALT_ON_ERROR_REPLACEMENT = """                pipe->port->flags.conn_dev_ena && !pipe->cs_flags.waiting_halt && _ls_intr_retry(pipe)) {
-            break;
+_HALT_ON_ERROR_REPLACEMENT = """            _ls_hub_debug_log(pipe, chan_obj, chan_error, raw_chan_intrs);
         }
         if (pipe->cs_flags.waiting_halt) {
             chan_obj->flags.halt_requested = 0;
             pipe->cs_flags.waiting_halt = 0;
-            _ls_ctrl_release(pipe);
             pipe->last_event = HCD_PIPE_EVENT_URB_DONE;
             event = pipe->last_event;
             pipe->state = HCD_PIPE_STATE_HALTED;
@@ -1348,7 +778,8 @@ _HALT_ON_ERROR_REPLACEMENT = """                pipe->port->flags.conn_dev_ena &
             _buffer_parse(pipe);
             *yield |= _internal_pipe_event_notify(pipe, true);
             break;
-        }"""
+        }
+        pipe->last_event = pipe_decode_error_event(chan_error);"""
 
 _HALT_DONE_ANCHOR = """        // Notify the task waiting for the pipe halt
         *yield |= _internal_pipe_event_notify(pipe, true);"""
@@ -1410,95 +841,6 @@ _PORT_POWER_FIRST_LOOP_REPLACEMENT = """        if (ext_port->flags.in_pending_l
         action_flags = ext_port->action_flags;
         ext_port->action_flags = 0;
     }"""
-
-# A low-speed control transfer behind a full-speed hub and a hub's port request (class, to a
-# port) take turns on the port: neither starts while the other runs. The hub's requests for its
-# other ports otherwise ran in the middle of a low-speed device's control transfers, which is
-# where the root port was lost. One that cannot start waits (ls_bus_deferred) and is started
-# when the other side's last transfer ends, in _ls_ctrl_release(), which every end of a control
-# transfer calls.
-_LS_TURN_PIPE_FIELDS_ANCHOR = """    bool ls_ctrl_holding;                   // A control transfer of this pipe holds the low-speed bus"""
-
-_LS_TURN_PIPE_FIELDS_REPLACEMENT = """    bool ls_ctrl_holding;                   // A control transfer of this pipe holds the low-speed bus
-    bool ls_hub_req_running;                // Runs a hub's port request, counted in ls_hub_reqs
-    bool ls_bus_deferred;                   // Waits for its turn against the low-speed control transfers"""
-
-_LS_TURN_PORT_FIELDS_ANCHOR = """    uint8_t ls_ctrl_holds;              // Control transfers holding the low-speed bus (LS via FS hub)"""
-
-_LS_TURN_PORT_FIELDS_REPLACEMENT = """    uint8_t ls_ctrl_holds;              // Control transfers holding the low-speed bus (LS via FS hub)
-    uint8_t ls_hub_reqs;                // Hub port requests running"""
-
-_LS_TURN_RELEASE_ANCHOR = """static inline void _ls_ctrl_release(pipe_t *pipe)
-{
-    port_t *port = pipe->port;
-    if (!pipe->ls_ctrl_holding) {
-        return;
-    }"""
-
-_LS_TURN_RELEASE_REPLACEMENT = """// The pipes that waited for their turn start now, where they still can
-static void _ls_bus_turn(port_t *port)
-{
-    pipe_t *waiting;
-    TAILQ_FOREACH(waiting, &port->pipes_active_tailq, tailq_entry) {
-        if (!waiting->ls_bus_deferred) {
-            continue;
-        }
-        waiting->ls_bus_deferred = false;
-        if (waiting->state == HCD_PIPE_STATE_ACTIVE && port->flags.conn_dev_ena && _buffer_can_exec(waiting)) {
-            _buffer_exec(waiting);
-        }
-    }
-}
-
-static inline void _ls_ctrl_release(pipe_t *pipe)
-{
-    port_t *port = pipe->port;
-    if (pipe->ls_hub_req_running) {
-        pipe->ls_hub_req_running = false;
-        if (--port->ls_hub_reqs == 0) {
-            _ls_bus_turn(port);
-        }
-    }
-    if (!pipe->ls_ctrl_holding) {
-        return;
-    }"""
-
-_LS_TURN_RELEASE_END_ANCHOR = """        CACHE_SYNC_FRAME_LIST(port->frame_list);
-    }
-}
-
-/**
- * @brief Give a low-speed periodic pipe behind a full-speed hub frames of its own"""
-
-_LS_TURN_RELEASE_END_REPLACEMENT = """        CACHE_SYNC_FRAME_LIST(port->frame_list);
-    }
-    if (port->ls_ctrl_holds == 0) {
-        _ls_bus_turn(port);
-    }
-}
-
-/**
- * @brief Give a low-speed periodic pipe behind a full-speed hub frames of its own"""
-
-_LS_TURN_EXEC_ANCHOR = """    pipe->ls_ctrl_retry_count = 0;
-    if (pipe->ls_first_launch_pending ||"""
-
-_LS_TURN_EXEC_REPLACEMENT = """    if (pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL) {
-        const uint8_t request_type = ((const usb_setup_packet_t *)buffer_to_exec->urb->transfer.data_buffer)->bmRequestType;
-        const bool hub_req = !pipe->ep_char.ls_via_fs_hub &&
-                             (request_type & USB_BM_REQUEST_TYPE_TYPE_MASK) == USB_BM_REQUEST_TYPE_TYPE_CLASS &&
-                             (request_type & USB_BM_REQUEST_TYPE_RECIP_MASK) == USB_BM_REQUEST_TYPE_RECIP_OTHER;
-        if ((hub_req && pipe->port->ls_ctrl_holds) || (pipe->ep_char.ls_via_fs_hub && pipe->port->ls_hub_reqs)) {
-            pipe->ls_bus_deferred = true;
-            return;
-        }
-        if (hub_req) {
-            pipe->ls_hub_req_running = true;
-            pipe->port->ls_hub_reqs++;
-        }
-    }
-    pipe->ls_ctrl_retry_count = 0;
-    if (pipe->ls_first_launch_pending ||"""
 
 # A device takes its new address only once the status stage of SET_ADDRESS is done on its side;
 # a low-speed device behind a full-speed hub that misses the host's last handshake there stays at
@@ -1609,14 +951,6 @@ PATCHES = (
     ("private_include/hub.h", _HUB_HEADER_ANCHOR, _HUB_HEADER_REPLACEMENT),
     ("src/hcd_dwc.c", _HCD_CALC_ANCHOR, _HCD_CALC_REPLACEMENT),
     ("src/hcd_dwc.c", _HCD_CALL_ANCHOR, _HCD_CALL_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_PREAMBLE_ANCHOR, _LS_PREAMBLE_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_EP0_ANCHOR, _LS_EP0_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_PIPE_FIELDS_ANCHOR, _LS_PIPE_FIELDS_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_PIPE_ALLOC_ANCHOR, _LS_PIPE_ALLOC_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_EXEC_ANCHOR, _LS_EXEC_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_EXEC_CONT_ANCHOR, _LS_EXEC_CONT_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_RETRY_HELPER_ANCHOR, _LS_RETRY_HELPER_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_RETRY_ANCHOR, _LS_RETRY_REPLACEMENT),
     ("src/hcd_dwc.c", _RESET_BAILOUT_ANCHOR, _RESET_BAILOUT_REPLACEMENT),
     ("src/hub.c", _HUB_PORT_ANCHOR, _HUB_PORT_REPLACEMENT),
     ("src/hub.c", _HUB_RESET_ERR_ANCHOR, _HUB_RESET_ERR_REPLACEMENT),
@@ -1657,27 +991,10 @@ PATCHES = (
     ("src/ext_hub.c", _HUB_PORT_STATUS_ANCHOR, _HUB_PORT_STATUS_REPLACEMENT),
     ("src/ext_hub.c", _HUB_REQUEST_ANCHOR, _HUB_REQUEST_REPLACEMENT),
     ("src/ext_hub.c", _HUB_STATUS_CHANGE_ANCHOR, _HUB_STATUS_CHANGE_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_PERIODIC_PORT_FIELD_ANCHOR, _LS_PERIODIC_PORT_FIELD_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_PERIODIC_WAIT_ANCHOR, _LS_PERIODIC_WAIT_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_PERIODIC_EXEC_ANCHOR, _LS_PERIODIC_EXEC_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_PERIODIC_ALLOC_ANCHOR, _LS_PERIODIC_ALLOC_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_PERIODIC_FREE_ANCHOR, _LS_PERIODIC_FREE_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_HOLD_DONE_ANCHOR, _LS_HOLD_DONE_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_HOLD_HALT_ANCHOR, _LS_HOLD_HALT_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_SPLIT_FLAGS_ANCHOR, _LS_SPLIT_FLAGS_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_SPLIT_FILL_ANCHOR, _LS_SPLIT_FILL_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_SPLIT_CONT_ANCHOR, _LS_SPLIT_CONT_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_SPLIT_DATA_ANCHOR, _LS_SPLIT_DATA_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_SPLIT_PARSE_ANCHOR, _LS_SPLIT_PARSE_REPLACEMENT),
     ("src/hcd_dwc.c", _HALT_ON_ERROR_ANCHOR, _HALT_ON_ERROR_REPLACEMENT),
     ("src/hcd_dwc.c", _HALT_DONE_ANCHOR, _HALT_DONE_REPLACEMENT),
     ("src/ext_port.c", _PORT_POWER_FIRST_ANCHOR, _PORT_POWER_FIRST_REPLACEMENT),
     ("src/ext_port.c", _PORT_POWER_FIRST_LOOP_ANCHOR, _PORT_POWER_FIRST_LOOP_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_TURN_PIPE_FIELDS_ANCHOR, _LS_TURN_PIPE_FIELDS_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_TURN_PORT_FIELDS_ANCHOR, _LS_TURN_PORT_FIELDS_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_TURN_RELEASE_ANCHOR, _LS_TURN_RELEASE_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_TURN_RELEASE_END_ANCHOR, _LS_TURN_RELEASE_END_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_TURN_EXEC_ANCHOR, _LS_TURN_EXEC_REPLACEMENT),
     ("src/enum.c", _ENUM_PROBE_FIELD_ANCHOR, _ENUM_PROBE_FIELD_REPLACEMENT),
     ("src/enum.c", _ENUM_PROBE_STATUS_ANCHOR, _ENUM_PROBE_STATUS_REPLACEMENT),
     ("src/enum.c", _ENUM_PROBE_PARSE_ANCHOR, _ENUM_PROBE_PARSE_REPLACEMENT),
