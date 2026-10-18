@@ -77,9 +77,11 @@ from .hid_input import (
     CONF_HID_KEYBOARDS,
     CONF_HID_POINTERS,
     CONF_KEY_BINDINGS,
+    CONF_REMOTE_INPUT,
     HID_KEYBOARDS_CONFIG,
     HID_POINTERS_CONFIG,
     KEY_BINDINGS_SCHEMA,
+    REMOTE_INPUT_CONFIG,
     hid_inputs_to_code,
 )
 from .keypads import KEYPADS_CONFIG, keypads_to_code
@@ -693,6 +695,7 @@ LVGL_TOP_LEVEL_SCHEMA = (
             cv.Optional(df.CONF_KEYPADS, default=None): KEYPADS_CONFIG,
             cv.Optional(CONF_HID_KEYBOARDS): HID_KEYBOARDS_CONFIG,
             cv.Optional(CONF_HID_POINTERS): HID_POINTERS_CONFIG,
+            cv.Optional(CONF_REMOTE_INPUT): REMOTE_INPUT_CONFIG,
             cv.Optional(CONF_KEY_BINDINGS, default={}): KEY_BINDINGS_SCHEMA,
             cv.GenerateID(df.CONF_DEFAULT_GROUP): cv.declare_id(lv_group_t),
             cv.Optional(df.CONF_RESUME_ON_INPUT, default=True): cv.boolean,

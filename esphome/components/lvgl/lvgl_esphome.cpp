@@ -10,7 +10,9 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstdint>
 #include <cstdlib>
+#include <new>
 #include <numeric>
 
 #ifdef USE_ESP32
@@ -1091,6 +1093,8 @@ LVHIDKeypadListener::LVHIDKeypadListener(hid::HIDInput *input, KeyBindings *bind
   lv_indev_set_read_cb(this->drv_, [](lv_indev_t *d, lv_indev_data_t *data) {
     static_cast<LVHIDKeypadListener *>(lv_indev_get_user_data(d))->read_(data);
   });
+  if (input == nullptr)
+    return;
   input->add_on_key_event_callback([this, input](uint16_t page, uint16_t usage, bool pressed) {
     const bool keyboard = page == hid::PAGE_KEYBOARD;
     this->push_(static_cast<uint32_t>(page) << 16 | usage, KeyBindings::modifiers_of(input->get_modifiers()),
@@ -1098,34 +1102,41 @@ LVHIDKeypadListener::LVHIDKeypadListener(hid::HIDInput *input, KeyBindings *bind
                 keyboard && usage == 0xE6 && input->layout_has_level3());
   });
   // Typed characters; Enter and Tab are keys.
-  input->add_on_text_callback([this](const std::string &text) {
-    for (size_t i = 0; i < text.size();) {
-      const auto lead = static_cast<uint8_t>(text[i]);
-      const size_t n = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
-      uint32_t c = n == 1 ? lead : lead & (0x7F >> n);
-      for (size_t j = 1; j < n && i + j < text.size(); j++)
-        c = (c << 6) | (static_cast<uint8_t>(text[i + j]) & 0x3F);
-      i += n;
-      if (c == '\n' || c == '\t')
-        continue;
-      this->push_(c, 0, TEXT);
-    }
-  });
+  input->add_on_text_callback([this](const std::string &text) { this->push_text(text); });
+}
+
+void LVHIDKeypadListener::push_text(const std::string &text) {
+  for (size_t i = 0; i < text.size();) {
+    const auto lead = static_cast<uint8_t>(text[i]);
+    const size_t n = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+    uint32_t c = n == 1 ? lead : lead & (0x7F >> n);
+    for (size_t j = 1; j < n && i + j < text.size(); j++)
+      c = (c << 6) | (static_cast<uint8_t>(text[i + j]) & 0x3F);
+    i += n;
+    if (c == '\n' || c == '\t')
+      continue;
+    this->push_(c, 0, TEXT);
+  }
+}
+
+bool LVHIDKeypadListener::push_action(int action) {
+  return action >= 0 && this->push_(static_cast<uint32_t>(action), 0, ACTION);
 }
 
 // From the HID transport's task; read_() takes them on the LVGL thread.
-void LVHIDKeypadListener::push_(uint32_t code, uint8_t mods, EventKind kind, uint32_t layout_char, bool level3) {
+bool LVHIDKeypadListener::push_(uint32_t code, uint8_t mods, EventKind kind, uint32_t layout_char, bool level3) {
   if (this->parent_->is_paused()) {
     if (kind == KEY_RELEASE)
       this->parent_->maybe_wakeup();
     if (kind == TEXT && this->parent_->get_paused_input() == nullptr)
-      return;
+      return false;
   }
   const uint8_t tail = this->tail_.load(std::memory_order_relaxed);
   if (static_cast<uint8_t>(tail - this->head_.load(std::memory_order_acquire)) == QUEUE_SIZE)
-    return;
+    return false;
   this->queue_[tail % QUEUE_SIZE] = {code, layout_char, mods, kind, level3};
   this->tail_.store(tail + 1, std::memory_order_release);
+  return true;
 }
 
 void LVHIDKeypadListener::read_(lv_indev_data_t *data) {
@@ -1141,6 +1152,18 @@ void LVHIDKeypadListener::read_(lv_indev_data_t *data) {
         if (!is_textarea(this->focused_()))
           continue;
         this->key_ = event.code;
+        this->pressed_ = true;
+        this->release_next_ = true;
+        break;
+      }
+      // A key_bindings action given by name (remote input): what one of its keys does, pressed and let go.
+      if (event.kind == ACTION) {
+        const int action = static_cast<int>(event.code);
+        const uint32_t key = action < KeyBindings::BUILTIN_COUNT ? this->builtin_(action, this->focused_()) : 0;
+        this->bindings_->fire(action);
+        if (key == 0)
+          continue;
+        this->key_ = key;
         this->pressed_ = true;
         this->release_next_ = true;
         break;
@@ -1796,6 +1819,211 @@ void LVHIDPointerListener::move_(int16_t dx, int16_t dy, int16_t wheel, int16_t 
     }
   }
 }
+
+#ifdef USE_LVGL_REMOTE_INPUT
+LVRemoteInput *LVRemoteInput::create(KeyBindings *bindings, uint16_t long_press_time,
+                                     uint16_t long_press_repeat_time, LvglComponent *parent, lv_group_t *group) {
+  void *mem = RAMAllocator<LVRemoteInput>(RAMAllocator<LVRemoteInput>::ALLOC_EXTERNAL).allocate(1);
+  if (mem == nullptr) {
+    ESP_LOGE(TAG, "No PSRAM for the remote input");
+    return nullptr;
+  }
+  auto *remote = new (mem) LVRemoteInput(bindings, long_press_time, long_press_repeat_time, parent);
+  if (group != nullptr)
+    lv_indev_set_group(remote->keypad_.get_drv(), group);
+  return remote;
+}
+
+LVRemoteInput::LVRemoteInput(KeyBindings *bindings, uint16_t long_press_time, uint16_t long_press_repeat_time,
+                             LvglComponent *parent)
+    : keypad_(nullptr, bindings, long_press_time, long_press_repeat_time), bindings_(bindings) {
+  this->set_parent(parent);
+  this->keypad_.set_parent(parent);
+  this->drv_ = lv_indev_create();
+  lv_indev_set_type(this->drv_, LV_INDEV_TYPE_POINTER);
+  lv_indev_set_disp(this->drv_, parent->get_disp());
+  lv_indev_set_long_press_time(this->drv_, long_press_time);
+  lv_indev_set_long_press_repeat_time(this->drv_, long_press_repeat_time);
+  lv_indev_set_user_data(this->drv_, this);
+  lv_indev_set_read_cb(this->drv_, [](lv_indev_t *d, lv_indev_data_t *data) {
+    static_cast<LVRemoteInput *>(lv_indev_get_user_data(d))->read_(data);
+  });
+}
+
+bool LVRemoteInput::push_(const Step &step) {
+  if (this->count_ == STEPS)
+    return false;
+  this->steps_[(this->head_ + this->count_) % STEPS] = step;
+  this->count_++;
+  return true;
+}
+
+const char *LVRemoteInput::run(const std::string &command, int32_t x, int32_t y, int32_t x2, int32_t y2, int32_t ms,
+                               const std::string &text) {
+  if (this->parent_->is_paused())
+    return "LVGL is paused";
+  auto coord = [](int32_t v) { return static_cast<int16_t>(clamp<int32_t>(v, 0, INT16_MAX)); };
+  Step step{coord(x), coord(y), coord(x2), coord(y2), static_cast<uint16_t>(clamp<int32_t>(ms, 0, 10000)), STEP_TAP};
+  if (command == "tap") {
+    step.kind = STEP_TAP;
+  } else if (command == "press") {
+    step.kind = STEP_PRESS;
+  } else if (command == "move") {
+    step.kind = STEP_MOVE;
+  } else if (command == "release") {
+    step.kind = STEP_RELEASE;
+  } else if (command == "swipe") {
+    step.kind = STEP_SWIPE;
+  } else if (command == "key") {
+    const int action = this->bindings_ != nullptr ? this->bindings_->find_action(text) : -1;
+    if (action < 0)
+      return "no such key_bindings action";
+    return this->keypad_.push_action(action) ? nullptr : "key queue full";
+  } else if (command == "text") {
+    if (!is_textarea(this->focused()))
+      return "no text area has the focus";
+    this->keypad_.push_text(text);
+    return nullptr;
+  } else {
+    return "unknown command";
+  }
+  return this->push_(step) ? nullptr : "pointer queue full";
+}
+
+// LVGL thread, each read: the current step goes on, else the next one starts.
+void LVRemoteInput::read_(lv_indev_data_t *data) {
+  const uint32_t now = lv_tick_get();
+  if (!this->running_ && this->count_ != 0) {
+    this->current_ = this->steps_[this->head_];
+    this->head_ = (this->head_ + 1) % STEPS;
+    this->count_--;
+    this->running_ = true;
+    this->begun_ = false;
+    this->started_ = now;
+  }
+  if (this->running_) {
+    const Step &step = this->current_;
+    switch (step.kind) {
+      case STEP_TAP:
+        // Down for one read, up the next: a click where it is
+        if (!this->begun_) {
+          this->x_ = step.x;
+          this->y_ = step.y;
+          this->pressed_ = true;
+          this->begun_ = true;
+        } else {
+          this->pressed_ = false;
+          this->running_ = false;
+        }
+        break;
+      case STEP_PRESS:
+        this->x_ = step.x;
+        this->y_ = step.y;
+        this->pressed_ = true;
+        this->running_ = false;
+        break;
+      case STEP_MOVE:
+        this->x_ = step.x;
+        this->y_ = step.y;
+        this->running_ = false;
+        break;
+      case STEP_RELEASE:
+        this->pressed_ = false;
+        this->running_ = false;
+        break;
+      case STEP_SWIPE: {
+        const uint32_t elapsed = now - this->started_;
+        if (!this->begun_) {
+          this->x_ = step.x;
+          this->y_ = step.y;
+          this->pressed_ = true;
+          this->begun_ = true;
+        } else if (elapsed < step.ms) {
+          this->x_ = static_cast<int16_t>(step.x + (step.x2 - step.x) * static_cast<int32_t>(elapsed) / step.ms);
+          this->y_ = static_cast<int16_t>(step.y + (step.y2 - step.y) * static_cast<int32_t>(elapsed) / step.ms);
+        } else if (this->x_ != step.x2 || this->y_ != step.y2) {
+          this->x_ = step.x2;
+          this->y_ = step.y2;
+        } else {
+          this->pressed_ = false;
+          this->running_ = false;
+        }
+        break;
+      }
+    }
+  }
+  data->point.x = this->x_;
+  data->point.y = this->y_;
+  data->state = this->pressed_ ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+}
+
+lv_obj_t *LVRemoteInput::focused() {
+  lv_group_t *group = lv_indev_get_group(this->keypad_.get_drv());
+  return group != nullptr ? lv_group_get_focused(group) : nullptr;
+}
+
+const char *LVRemoteInput::type_name(lv_obj_t *obj) {
+  if (obj == nullptr)
+    return "";
+#ifdef USE_LVGL_BUTTON
+  if (lv_obj_check_type(obj, &lv_button_class))
+    return "button";
+#endif
+#ifdef USE_LVGL_TEXTAREA
+  if (lv_obj_check_type(obj, &lv_textarea_class))
+    return "textarea";
+#endif
+#ifdef USE_LVGL_DROPDOWN
+  if (lv_obj_check_type(obj, &lv_dropdown_class))
+    return "dropdown";
+#endif
+#ifdef USE_LVGL_SLIDER
+  if (lv_obj_check_type(obj, &lv_slider_class))
+    return "slider";
+#endif
+#ifdef USE_LVGL_LABEL
+  if (lv_obj_check_type(obj, &lv_label_class))
+    return "label";
+#endif
+#ifdef USE_LVGL_SWITCH
+  if (lv_obj_check_type(obj, &lv_switch_class))
+    return "switch";
+#endif
+#ifdef USE_LVGL_CHECKBOX
+  if (lv_obj_check_type(obj, &lv_checkbox_class))
+    return "checkbox";
+#endif
+#ifdef USE_LVGL_ROLLER
+  if (lv_obj_check_type(obj, &lv_roller_class))
+    return "roller";
+#endif
+#ifdef USE_LVGL_KEYBOARD
+  if (lv_obj_check_type(obj, &lv_keyboard_class))
+    return "keyboard";
+#endif
+  return "obj";
+}
+
+const char *LVRemoteInput::text_of(lv_obj_t *obj) {
+  if (obj == nullptr)
+    return "";
+#ifdef USE_LVGL_TEXTAREA
+  if (lv_obj_check_type(obj, &lv_textarea_class))
+    return lv_textarea_get_text(obj);
+#endif
+#ifdef USE_LVGL_LABEL
+  if (lv_obj_check_type(obj, &lv_label_class))
+    return lv_label_get_text(obj);
+  const uint32_t children = lv_obj_get_child_count(obj);
+  for (uint32_t i = 0; i < children; i++) {
+    lv_obj_t *child = lv_obj_get_child(obj, static_cast<int32_t>(i));
+    if (lv_obj_check_type(child, &lv_label_class))
+      return lv_label_get_text(child);
+  }
+#endif
+  return "";
+}
+#endif  // USE_LVGL_REMOTE_INPUT
 #endif  // USE_LVGL_HID
 
 #if defined(USE_LVGL_DROPDOWN) || defined(LV_USE_ROLLER)

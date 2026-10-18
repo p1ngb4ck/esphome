@@ -25,6 +25,7 @@
 #include <lvgl.h>
 #include <map>
 #include <utility>
+#include <string>
 #include <vector>
 
 #ifdef USE_ESP32_VARIANT_ESP32P4
@@ -622,15 +623,20 @@ class LVEncoderListener final : public Parented<LvglComponent> {
 // to a focused text area. Key changes are queued, so a press and release between two reads are kept.
 class LVHIDKeypadListener final : public Parented<LvglComponent> {
  public:
+  /// input nullptr: keys and text come only by push_action() / push_text() (remote input).
   LVHIDKeypadListener(hid::HIDInput *input, KeyBindings *bindings, uint16_t long_press_time,
                       uint16_t long_press_repeat_time);
   lv_indev_t *get_drv() { return this->drv_; }
+  /// A key_bindings action (its index) as if one of its keys was pressed and let go; false when the queue is full.
+  bool push_action(int action);
+  /// Characters for a focused text area (UTF-8); Enter and Tab are left out, as typed.
+  void push_text(const std::string &text);
   /// While the display is paused (main loop): keys and characters go to the paused input, if any; the
   /// keys run their actions' own automations (navigation only when not taken), and keys let go are let go.
   void run_paused();
 
  protected:
-  enum EventKind : uint8_t { KEY_PRESS, KEY_RELEASE, TEXT };
+  enum EventKind : uint8_t { KEY_PRESS, KEY_RELEASE, TEXT, ACTION };
   struct Event {
     uint32_t code;         // page << 16 | usage, or a character
     uint32_t layout_char;  // a key's: hid::HIDInput::layout_char()
@@ -645,7 +651,8 @@ class LVHIDKeypadListener final : public Parented<LvglComponent> {
   static constexpr uint8_t QUEUE_SIZE = 32;
   static constexpr uint8_t HELD_SIZE = 4;
 
-  void push_(uint32_t code, uint8_t mods, EventKind kind, uint32_t layout_char = 0, bool level3 = false);
+  /// False when the queue is full (or the text has no place while paused).
+  bool push_(uint32_t code, uint8_t mods, EventKind kind, uint32_t layout_char = 0, bool level3 = false);
   void read_(lv_indev_data_t *data);
   /// The LVGL key a key press becomes, 0 when it is done here (or nothing).
   uint32_t press_(uint16_t page, uint16_t usage, uint8_t mods);
@@ -785,6 +792,56 @@ class LVHIDPointerListener final : public Parented<LvglComponent> {
   uint32_t hide_after_{0};
   uint32_t last_motion_{0};
 };
+
+#ifdef USE_LVGL_REMOTE_INPUT
+/// Input from outside (the API), for testing and debugging: a pointer at LVGL screen coordinates (tap, press, move,
+/// release, swipe) as a touch gives it, and keys (key_bindings actions by name) and text as a keyboard gives them.
+/// Main loop only; nothing is taken while LVGL is paused.
+class LVRemoteInput final : public Parented<LvglComponent> {
+ public:
+  /// The object in PSRAM, its indevs created; nullptr without PSRAM.
+  static LVRemoteInput *create(KeyBindings *bindings, uint16_t long_press_time, uint16_t long_press_repeat_time,
+                               LvglComponent *parent, lv_group_t *group);
+  /// tap / press / move (x, y), release, swipe (x, y to x2, y2 in ms), key (text: an action's name), text (text).
+  /// nullptr when taken, else why not.
+  const char *run(const std::string &command, int32_t x, int32_t y, int32_t x2, int32_t y2, int32_t ms,
+                  const std::string &text);
+  /// The widget with the key focus, or nullptr.
+  lv_obj_t *focused();
+  /// A short name of the widget's type ("button", "textarea", ... "obj").
+  static const char *type_name(lv_obj_t *obj);
+  /// The text of a label, a text area, or of the widget's first label child; "" for none.
+  static const char *text_of(lv_obj_t *obj);
+
+ protected:
+  LVRemoteInput(KeyBindings *bindings, uint16_t long_press_time, uint16_t long_press_repeat_time,
+                LvglComponent *parent);
+  enum StepKind : uint8_t { STEP_TAP, STEP_PRESS, STEP_MOVE, STEP_RELEASE, STEP_SWIPE };
+  struct Step {
+    int16_t x, y, x2, y2;
+    uint16_t ms;
+    StepKind kind;
+  };
+  static constexpr uint8_t STEPS = 8;
+  bool push_(const Step &step);
+  void read_(lv_indev_data_t *data);
+
+  LVHIDKeypadListener keypad_;
+  KeyBindings *bindings_;
+  Step steps_[STEPS]{};
+  Step current_{};
+  uint32_t started_{0};
+  lv_indev_t *drv_{};
+  int16_t x_{0};
+  int16_t y_{0};
+  uint8_t head_{0};
+  uint8_t count_{0};
+  bool running_{false};
+  // The step's first read is done (a tap's or a swipe's press).
+  bool begun_{false};
+  bool pressed_{false};
+};
+#endif  // USE_LVGL_REMOTE_INPUT
 #endif  // USE_LVGL_HID
 
 #ifdef USE_LVGL_LINE

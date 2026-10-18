@@ -34,9 +34,11 @@ CONF_HIDE_AFTER = "hide_after"
 CONF_KEY_BINDINGS = "key_bindings"
 CONF_KEYS = "keys"
 CONF_ON_LEARNED = "on_learned"
+CONF_REMOTE_INPUT = "remote_input"
 
 LVHIDKeypadListener = lvgl_ns.class_("LVHIDKeypadListener")
 LVHIDPointerListener = lvgl_ns.class_("LVHIDPointerListener")
+LVRemoteInput = lvgl_ns.class_("LVRemoteInput")
 KeyBindings = lvgl_ns.class_("KeyBindings", cg.Component)
 KeyBindingsKey = KeyBindings.struct("Key")
 
@@ -166,6 +168,16 @@ HID_KEYBOARDS_CONFIG = cv.ensure_list(
     )
 )
 
+# Input from outside (the API) for testing and debugging: a pointer at screen coordinates and keys by the
+# key_bindings action names (LVRemoteInput), in PSRAM.
+REMOTE_INPUT_CONFIG = cv.Schema(
+    {
+        cv.GenerateID(): cv.declare_id(LVRemoteInput),
+        cv.Optional(CONF_LONG_PRESS_TIME, default="400ms"): PRESS_TIME,
+        cv.Optional(CONF_LONG_PRESS_REPEAT_TIME, default="100ms"): PRESS_TIME,
+    }
+)
+
 # Relative motion as a pointer with a cursor; the left button presses, the wheel scrolls.
 HID_POINTERS_CONFIG = cv.ensure_list(
     cv.maybe_simple_value(
@@ -222,9 +234,20 @@ async def key_bindings_to_code(config):
 
 async def hid_inputs_to_code(lv_component, config, default_group):
     bindings = None
-    if config.get(CONF_HID_KEYBOARDS):
+    if config.get(CONF_HID_KEYBOARDS) or CONF_REMOTE_INPUT in config:
         add_lv_use("HID")
         bindings = await key_bindings_to_code(config[CONF_KEY_BINDINGS])
+    if (remote := config.get(CONF_REMOTE_INPUT)) is not None:
+        cg.add_define("USE_LVGL_REMOTE_INPUT")
+        # In PSRAM; nullptr without it (the API then answers that there is none)
+        create = cg.MockObj(str(LVRemoteInput), "::").create(
+            bindings,
+            remote[CONF_LONG_PRESS_TIME].total_milliseconds,
+            remote[CONF_LONG_PRESS_REPEAT_TIME].total_milliseconds,
+            lv_component,
+            default_group,
+        )
+        cg.Pvariable(remote[CONF_ID], create)
     for conf in config.get(CONF_HID_KEYBOARDS) or ():
         add_lv_use("HID")
         hid = await cg.get_variable(conf[CONF_HID_ID])
