@@ -34,6 +34,12 @@ class LogUART : public uart::VirtualUARTComponent, public Component {
   void set_boot_hold(uint32_t ms);
   uint32_t get_boot_hold() const { return this->boot_hold_ms_; }
 
+  enum class BufferState : uint8_t { BOOT, LIVE, NONE };
+  /// What the ring in PSRAM holds now: the boot log, live lines, or there is none.
+  BufferState buffer_state() const {
+    return this->rx_ == nullptr ? BufferState::NONE : this->boot_ring_ ? BufferState::BOOT : BufferState::LIVE;
+  }
+
   void setup() override;
   void dump_config() override;
 
@@ -58,6 +64,8 @@ class LogUART : public uart::VirtualUARTComponent, public Component {
   uint32_t settings_key_{0};
   uint8_t level_{0};
   bool holding_{true};
+  // The ring is still the boot ring.
+  bool boot_ring_{true};
   bool connected_{false};
 };
 

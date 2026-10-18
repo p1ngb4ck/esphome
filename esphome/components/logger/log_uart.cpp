@@ -69,6 +69,7 @@ void LogUART::end_hold_() {
   if (!this->connected_) {
     // Nobody came for the boot log: its ring goes back to PSRAM
     this->free_rx_();
+    this->boot_ring_ = false;
   }
 }
 
@@ -80,6 +81,7 @@ void LogUART::set_reader_connected(bool connected) {
     }
   } else if (!this->holding_) {
     this->free_rx_();
+    this->boot_ring_ = false;
   }
 }
 
