@@ -2801,7 +2801,7 @@ void SimpleVideoPlayer::direct_show_(uint8_t *target, int x, int y, int w, int h
     return;
   }
   bitness = this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
-  this->dsi_->draw_pixels_at(x, y, w, h, target, display::COLOR_ORDER_RGB, bitness, false, 0, 0, x_pad);
+  this->dsi_->draw_pixels_at(x, y, w, h, target, bitness, false, 0, 0, x_pad);
 }
 #endif
 

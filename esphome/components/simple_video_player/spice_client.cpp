@@ -2129,7 +2129,7 @@ void SimpleVideoPlayer::spice_out_write_(int32_t x, int32_t y, int32_t w, int32_
   if (this->spice_direct_out_.load(std::memory_order_acquire)) {
     const display::ColorBitness bitness =
         this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
-    this->dsi_->draw_pixels_at(x, y, w, h, src, display::COLOR_ORDER_RGB, bitness, false, 0, 0, 0);
+    this->dsi_->draw_pixels_at(x, y, w, h, src, bitness, false, 0, 0, 0);
     return;
   }
 #endif
