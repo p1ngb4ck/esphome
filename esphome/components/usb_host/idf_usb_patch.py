@@ -1203,15 +1203,24 @@ _LS_PERIODIC_WAIT_REPLACEMENT = """    const uint32_t busy_chans = (pipe->ep_cha
         }"""
 
 _LS_PERIODIC_EXEC_ANCHOR = """    pipe->ls_ctrl_retry_count = 0;
-    if (pipe->ls_first_launch_pending) {"""
+    if (pipe->ls_first_launch_pending) {
+        pipe->ls_first_launch_pending = false;
+        _wait_next_preamble_frame(pipe);
+    }"""
 
+# The frame is chosen before the hold: _wait_next_preamble_frame() looks in the frame list for a
+# frame where neither it nor the next one has a low-speed periodic pipe, and the hold takes those
+# pipes out of the frame list. Taken first, the hold left that check nothing to find.
 _LS_PERIODIC_EXEC_REPLACEMENT = """    pipe->ls_ctrl_retry_count = 0;
-    if (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL) {
-        _ls_ctrl_hold(pipe);
-    }
     if (pipe->ls_first_launch_pending ||
             (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL &&
-             pipe->port->ls_pre_periodic_chans)) {"""
+             pipe->port->ls_pre_periodic_chans)) {
+        pipe->ls_first_launch_pending = false;
+        _wait_next_preamble_frame(pipe);
+    }
+    if (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL) {
+        _ls_ctrl_hold(pipe);
+    }"""
 
 _LS_PERIODIC_ALLOC_ANCHOR = """    usb_dwc_hal_chan_set_ep_char(port->hal, pipe->chan_obj, &pipe->ep_char);
     CACHE_SYNC_FRAME_LIST(port->frame_list);"""
