@@ -47,6 +47,13 @@ MIN_TCP_LISTEN_SOCKETS = 2
 _DEFAULT_LOOP_INTERVAL = TimePeriodMilliseconds(milliseconds=16)
 
 
+def get_loop_interval() -> TimePeriodMilliseconds:
+    """Return the main loop interval of the configuration; for final validation."""
+    return fv.full_config.get()[CONF_ESPHOME].get(
+        CONF_LOOP_INTERVAL, _DEFAULT_LOOP_INTERVAL
+    )
+
+
 class SocketType(StrEnum):
     TCP = "tcp"
     UDP = "udp"
@@ -241,9 +248,7 @@ def final_validate_idle_timeout(config: ConfigType) -> ConfigType:
     timeout = config[CONF_TIMEOUT]
     if timeout.total_milliseconds == 0:
         return config
-    loop_interval = fv.full_config.get()[CONF_ESPHOME].get(
-        CONF_LOOP_INTERVAL, _DEFAULT_LOOP_INTERVAL
-    )
+    loop_interval = get_loop_interval()
     if timeout.total_milliseconds < loop_interval.total_milliseconds:
         raise cv.Invalid(
             f"{CONF_TIMEOUT} of {timeout} is shorter than one main loop pass "

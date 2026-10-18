@@ -7,6 +7,7 @@ from typing import Any
 
 from esphome import automation
 import esphome.codegen as cg
+from esphome.components import socket
 from esphome.components.const import CONF_RECONNECT_INTERVAL
 from esphome.config_helpers import filter_source_files_from_defines
 import esphome.config_validation as cv
@@ -22,7 +23,7 @@ from esphome.const import (
     CONF_PRIORITY,
 )
 from esphome.core import CORE, ID
-from esphome.core.config import CONF_LOOP_INTERVAL, get_loop_interval
+from esphome.core.config import CONF_LOOP_INTERVAL
 from esphome.cpp_generator import MockObj, MockObjClass
 import esphome.final_validate as fv
 from esphome.helpers import fnv1_hash
@@ -212,7 +213,7 @@ def final_validate_reconnect_interval(config: ConfigType) -> ConfigType:
     handshake."""
     if CONF_ENCRYPTION not in config:
         return config
-    loop_interval = get_loop_interval()
+    loop_interval = socket.get_loop_interval()
     if config[CONF_RECONNECT_INTERVAL] < loop_interval:
         raise cv.Invalid(
             f"With {CONF_ENCRYPTION}, {CONF_RECONNECT_INTERVAL} must last at least one "
