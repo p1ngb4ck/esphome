@@ -223,7 +223,7 @@ void UartTcpForwards::load_() {
   if (ps == nullptr) {
     return;  // its storage registers later
   }
-  this->buf_ = storage::global_transfer_buffer->try_acquire(FILE_MAX + 1);
+  this->buf_ = storage::global_transfer_buffer->try_acquire(FILE_SIZE + 1);
   if (this->buf_ == nullptr) {
     // Another transfer has it
     this->set_timeout("file", RETRY_MS, [this]() { this->load_(); });
@@ -259,7 +259,7 @@ void UartTcpForwards::load_() {
 }
 
 void UartTcpForwards::read_() {
-  const size_t room = FILE_MAX - this->buf_len_;
+  const size_t room = FILE_SIZE - this->buf_len_;
   if (room == 0) {
     this->read_done_(StorageError::STORAGE_ERROR_OK);
     return;
@@ -368,7 +368,7 @@ void UartTcpForwards::write_() {
   if (ps == nullptr) {
     return;  // written once its storage is there
   }
-  this->buf_ = storage::global_transfer_buffer->try_acquire(FILE_MAX + 1);
+  this->buf_ = storage::global_transfer_buffer->try_acquire(FILE_SIZE + 1);
   if (this->buf_ == nullptr) {
     this->set_timeout("file", RETRY_MS, [this]() { this->write_(); });
     return;
@@ -376,16 +376,16 @@ void UartTcpForwards::write_() {
   char *out = reinterpret_cast<char *>(this->buf_);
   size_t len = 0;
   // Each piece straight into the buffer; snprintf cuts at its end
-  auto put = [&len](int n) { len = std::min(len + static_cast<size_t>(std::max(n, 0)), FILE_MAX); };
-  for (size_t i = 0; i < this->count_ && len < FILE_MAX; i++) {
+  auto put = [&len](int n) { len = std::min(len + static_cast<size_t>(std::max(n, 0)), FILE_SIZE); };
+  for (size_t i = 0; i < this->count_ && len < FILE_SIZE; i++) {
     UartTcp &runner = this->runners_[i];
     const Line &line = this->lines_[i];
-    put(std::snprintf(out + len, FILE_MAX - len, "%u\t%s\t%c\t%s\t%u\t%s\t", static_cast<unsigned>(i),
+    put(std::snprintf(out + len, FILE_SIZE - len, "%u\t%s\t%c\t%s\t%u\t%s\t", static_cast<unsigned>(i),
                       line.uart >= 0 ? this->uarts_[line.uart].name : "-", runner.is_enabled() ? '1' : '0',
                       runner.is_server() ? "server" : "client", runner.get_port(), runner.get_host()));
-    runner.format_allowed_ips(out + len, FILE_MAX - len);
-    len = std::min(len + std::strlen(out + len), FILE_MAX);
-    put(std::snprintf(out + len, FILE_MAX - len, "\t%" PRIu32 "\t%" PRIu32 "\t%" PRIu32 "\t%u\t%c\t%u\n",
+    runner.format_allowed_ips(out + len, FILE_SIZE - len);
+    len = std::min(len + std::strlen(out + len), FILE_SIZE);
+    put(std::snprintf(out + len, FILE_SIZE - len, "\t%" PRIu32 "\t%" PRIu32 "\t%" PRIu32 "\t%u\t%c\t%u\n",
                       runner.get_timeout(), runner.get_reconnect_interval(), line.baud_rate, line.data_bits,
                       PARITY_CHARS[line.parity], line.stop_bits));
   }

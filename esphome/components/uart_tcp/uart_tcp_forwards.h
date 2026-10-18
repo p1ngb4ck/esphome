@@ -100,8 +100,8 @@ class UartTcpForwards : public Component {
     uint8_t stop_bits;
   };
   // One file line: the settings, the allow list and the host at their longest.
-  static constexpr size_t LINE_MAX = 768;
-  static constexpr size_t FILE_MAX = LINE_MAX * MAX_RUNNERS;
+  static constexpr size_t LINE_SIZE = 768;
+  static constexpr size_t FILE_SIZE = LINE_SIZE * MAX_RUNNERS;
   static constexpr uint32_t RETRY_MS = 500;
 
   void default_runner_(size_t index);
