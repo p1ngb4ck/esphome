@@ -796,7 +796,7 @@ class LVHIDPointerListener final : public Parented<LvglComponent> {
 #ifdef USE_LVGL_REMOTE_INPUT
 /// Input from outside (the API), for testing and debugging: a pointer at LVGL screen coordinates (tap, press, move,
 /// release, swipe) as a touch gives it, and keys (key_bindings actions by name) and text as a keyboard gives them.
-/// Main loop only; nothing is taken while LVGL is paused.
+/// Main loop only. While LVGL is paused only keys are taken: their action fires at once.
 class LVRemoteInput final : public Parented<LvglComponent> {
  public:
   /// The object in PSRAM, its indevs created; nullptr without PSRAM.

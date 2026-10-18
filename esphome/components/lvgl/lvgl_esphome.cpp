@@ -1860,8 +1860,17 @@ bool LVRemoteInput::push_(const Step &step) {
 
 const char *LVRemoteInput::run(const std::string &command, int32_t x, int32_t y, int32_t x2, int32_t y2, int32_t ms,
                                const std::string &text) {
-  if (this->parent_->is_paused())
-    return "LVGL is paused";
+  if (this->parent_->is_paused()) {
+    // The screen is the player's (dashboard, video, desktop): only key_bindings actions, fired at once as
+    // an HID key fires them then (LVHIDKeypadListener::run_paused); the queue is not read while paused.
+    if (command != "key")
+      return "LVGL is paused";
+    const int action = this->bindings_ != nullptr ? this->bindings_->find_action(text) : -1;
+    if (action < 0)
+      return "no such key_bindings action";
+    this->bindings_->fire(action);
+    return nullptr;
+  }
   auto coord = [](int32_t v) { return static_cast<int16_t>(clamp<int32_t>(v, 0, INT16_MAX)); };
   Step step{coord(x), coord(y), coord(x2), coord(y2), static_cast<uint16_t>(clamp<int32_t>(ms, 0, 10000)), STEP_TAP};
   if (command == "tap") {
