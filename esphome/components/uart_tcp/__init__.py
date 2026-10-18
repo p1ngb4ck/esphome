@@ -78,7 +78,7 @@ CONFIG_SCHEMA = cv.All(
                         min=2, max=MAX_RUNNERS
                     ),
                     cv.Optional(
-                        CONF_SETTINGS_FILE, default="/sd/serial_ports.txt"
+                        CONF_SETTINGS_FILE, default="/sdcard/serial_ports.txt"
                     ): cv.All(cv.string, cv.Length(min=1, max=127)),
                 }
             )
