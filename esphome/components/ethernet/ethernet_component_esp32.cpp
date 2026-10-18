@@ -6,6 +6,7 @@
 #include "esphome/core/application.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
+#include "esphome/core/preferences.h"
 #include "w5500_custom_spi.h"
 
 #include <lwip/dns.h>
@@ -179,7 +180,88 @@ void EthernetComponent::loop() {
   }
 }
 
+#ifdef USE_ETHERNET_MANUAL_IP
+struct SavedEthernetSettings {
+  uint8_t flags;
+  uint32_t static_ip;
+  uint32_t gateway;
+  uint32_t subnet;
+  uint32_t dns1;
+  uint32_t dns2;
+} PACKED;
+static constexpr uint8_t SAVED_MANUAL_IP = 1 << 0;
+static constexpr uint8_t SAVED_DISABLED = 1 << 1;
+
+static uint32_t ip4_value(const network::IPAddress &ip) {
+  esp_ip4_addr_t value = ip;
+  return value.addr;
+}
+
+static network::IPAddress ip4_address(uint32_t value) {
+  esp_ip4_addr_t ip{.addr = value};
+  return network::IPAddress(&ip);
+}
+
+void EthernetComponent::load_settings_() {
+  this->settings_pref_ =
+      global_preferences->make_preference<SavedEthernetSettings>(fnv1_hash("ethernet_settings"), true);
+  SavedEthernetSettings saved{};
+  if (!this->settings_pref_.load(&saved))
+    return;
+  if (saved.flags & SAVED_MANUAL_IP) {
+    ManualIP manual_ip{};
+    manual_ip.static_ip = ip4_address(saved.static_ip);
+    manual_ip.gateway = ip4_address(saved.gateway);
+    manual_ip.subnet = ip4_address(saved.subnet);
+    manual_ip.dns1 = ip4_address(saved.dns1);
+    manual_ip.dns2 = ip4_address(saved.dns2);
+    this->manual_ip_ = manual_ip;
+  } else {
+    this->manual_ip_.reset();
+  }
+  this->enable_on_boot_ = !(saved.flags & SAVED_DISABLED);
+}
+
+void EthernetComponent::save_settings_() {
+  SavedEthernetSettings saved{};
+  if (this->manual_ip_.has_value()) {
+    saved.flags |= SAVED_MANUAL_IP;
+    saved.static_ip = ip4_value(this->manual_ip_->static_ip);
+    saved.gateway = ip4_value(this->manual_ip_->gateway);
+    saved.subnet = ip4_value(this->manual_ip_->subnet);
+    saved.dns1 = ip4_value(this->manual_ip_->dns1);
+    saved.dns2 = ip4_value(this->manual_ip_->dns2);
+  }
+  if (this->disabled_)
+    saved.flags |= SAVED_DISABLED;
+  this->settings_pref_.save(&saved);
+  global_preferences->sync();
+}
+
+void EthernetComponent::apply_manual_ip(const optional<ManualIP> &manual_ip) {
+  this->manual_ip_ = manual_ip;
+  this->save_settings_();
+  if (this->disabled_)
+    return;
+  // start_connect_() takes the address on the next connect: stop and start the link
+  this->disable();
+  this->enable();
+}
+
+void EthernetComponent::set_enabled(bool enabled) {
+  if (enabled) {
+    this->enable();
+  } else {
+    this->disable();
+  }
+  this->save_settings_();
+}
+#endif  // USE_ETHERNET_MANUAL_IP
+
 void EthernetComponent::setup() {
+#ifdef USE_ETHERNET_MANUAL_IP
+  this->load_settings_();
+#endif
   if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
     // Delay here to allow power to stabilise before Ethernet is initialized.
     delay(300);  // NOLINT

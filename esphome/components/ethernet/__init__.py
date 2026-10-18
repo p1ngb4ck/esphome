@@ -666,8 +666,10 @@ async def to_code(config: ConfigType) -> None:
         cg.add(var.set_enable_on_boot(False))
     CORE.data.setdefault(DOMAIN, {})[ETHERNET_TYPE_KEY] = config[CONF_TYPE]
 
-    if CONF_MANUAL_IP in config:
+    # ESP32: always, so the address can be set at runtime (apply_manual_ip)
+    if CONF_MANUAL_IP in config or CORE.is_esp32:
         cg.add_define("USE_ETHERNET_MANUAL_IP")
+    if CONF_MANUAL_IP in config:
         cg.add(var.set_manual_ip(manual_ip(config[CONF_MANUAL_IP])))
 
     # Add compile-time define for PHY types with specific code

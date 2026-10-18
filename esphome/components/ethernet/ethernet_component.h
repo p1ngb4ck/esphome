@@ -5,6 +5,7 @@
 #include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/automation.h"
+#include "esphome/core/preferences.h"
 #include "esphome/components/network/ip_address.h"
 
 #ifdef USE_ETHERNET
@@ -219,7 +220,21 @@ class EthernetComponent final : public Component {
   Trigger<> *get_disconnect_trigger() { return &this->disconnect_trigger_; }
 #endif
 
+#if defined(USE_ESP32) && defined(USE_ETHERNET_MANUAL_IP)
+  /// Runtime settings, saved: from the next boot on they win over manual_ip and enable_on_boot.
+  /// A manual address (none: DHCP), applied at once by connecting again while enabled.
+  void apply_manual_ip(const optional<ManualIP> &manual_ip);
+  const optional<ManualIP> &get_manual_ip() const { return this->manual_ip_; }
+  /// enable() / disable(), saved.
+  void set_enabled(bool enabled);
+#endif
+
  protected:
+#if defined(USE_ESP32) && defined(USE_ETHERNET_MANUAL_IP)
+  void load_settings_();
+  void save_settings_();
+  ESPPreferenceObject settings_pref_;
+#endif
   void start_connect_();
   void finish_connect_();
 #if LWIP_IPV6
