@@ -670,9 +670,10 @@ class LVHIDPointerListener final : public Parented<LvglComponent> {
     this->key_after_ms_ = after_ms;
     this->key_most_ = most;
   }
-  /// A gamepad's touchpad as the display's touch (its first finger), while on; not while the capture
-  /// widget shows (a page testing the gamepad). Its fingers come as controls of this input and of
-  /// those added here.
+  /// A gamepad's touchpad as this pointer, while on; not while the capture widget shows (a page
+  /// testing the gamepad). One finger moves it (a touchpad width: the display's width, times the
+  /// speed, with the acceleration), a tap or the touchpad's button clicks, two fingers scroll (by the
+  /// reverse wheel setting). Its fingers come as controls of this input and of those added here.
   void set_pad_touch(bool on) { this->pad_touch_ = on; }
   bool is_pad_touch() const { return this->pad_touch_; }
   void add_pad_touch_input(hid::HIDInput *input);
@@ -690,18 +691,37 @@ class LVHIDPointerListener final : public Parented<LvglComponent> {
   void set_cursor_(lv_obj_t *cursor);
 
   void key_read_();
-  /// A control of a pad touch input (transport task): its first finger.
+  /// A control of a pad touch input (main loop): its fingers' motion gathered for the next read.
   void pad_control_(uint16_t page, uint16_t usage, int32_t value);
-  /// LVGL thread: the touchpad as the display's touch now, written into data; false when it is not.
-  bool pad_read_(lv_indev_t *drv, lv_indev_data_t *data);
+  /// A key of a pad touch input (main loop): the touchpad's button.
+  void pad_key_(uint16_t page, uint16_t usage, bool down);
+  /// LVGL thread, each read: the gathered motion moves the pointer or scrolls; true while it clicks.
+  bool pad_read_();
+  void pad_reset_();
 
-  std::atomic<bool> pad_down_{false};
-  std::atomic<uint16_t> pad_x_{0};
-  std::atomic<uint16_t> pad_y_{0};
+  // A tap: down this short, moved this little (across the touchpad, 0..65535), one finger.
+  static constexpr uint32_t PAD_TAP_MS = 200;
+  static constexpr int32_t PAD_TAP_MOVE = 1300;
+  struct PadFinger {
+    int32_t x, y;
+    bool down, has_x, has_y;
+  };
+  PadFinger pad_fingers_[2]{};
+  int32_t pad_dx_{0};  // gathered since the last read, 0..65535 across the touchpad
+  int32_t pad_dy_{0};
+  int32_t pad_sx_{0};  // two fingers: to scroll
+  int32_t pad_sy_{0};
+  int32_t pad_moved_{0};  // this touch, for the tap
+  uint32_t pad_since_{0};
+  uint8_t pad_most_{0};  // most fingers down at once this touch
+  float pad_rest_x_{0.0f};
+  float pad_rest_y_{0.0f};
   lv_obj_t *pad_capture_{nullptr};
-  lv_point_t pad_point_{};
   bool pad_touch_{false};
-  bool pad_pressed_{false};
+  bool pad_button_{false};
+  bool pad_no_tap_{false};  // the button was pressed this touch
+  bool pad_tap_{false};
+  bool pad_tap_shown_{false};
 
   static constexpr uint8_t KEYS_HELD = 4;
   struct KeyHeld {

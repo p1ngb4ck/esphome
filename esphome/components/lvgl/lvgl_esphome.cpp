@@ -1398,15 +1398,14 @@ LVHIDPointerListener::LVHIDPointerListener(hid::HIDInput *input, uint16_t long_p
     parent->set_key_pointer(this);
   lv_indev_set_read_cb(this->drv_, [](lv_indev_t *d, lv_indev_data_t *data) {
     auto *l = static_cast<LVHIDPointerListener *>(lv_indev_get_user_data(d));
-    if (l->pad_read_(d, data))
-      return;
+    const bool pad = l->pad_read_();
     if (l->key_mode_)
       l->key_read_();
     data->point.x = l->x_;
     data->point.y = l->y_;
-    data->state = l->pressed_ || l->key_pressed_ ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
-    if (l->hide_after_ != 0 && l->cursor_ != nullptr && !l->pressed_ && millis() - l->last_motion_ > l->hide_after_ &&
-        !lv_obj_is_hidden(l->cursor_))
+    data->state = l->pressed_ || l->key_pressed_ || pad ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    if (l->hide_after_ != 0 && l->cursor_ != nullptr && !l->pressed_ && !pad &&
+        millis() - l->last_motion_ > l->hide_after_ && !lv_obj_is_hidden(l->cursor_))
       lv_obj_set_hidden(l->cursor_, true);
   });
   input->add_on_pointer_callback([this](int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
@@ -1418,38 +1417,134 @@ LVHIDPointerListener::LVHIDPointerListener(hid::HIDInput *input, uint16_t long_p
 void LVHIDPointerListener::add_pad_touch_input(hid::HIDInput *input) {
   input->add_on_control_callback(
       [this](uint16_t page, uint16_t usage, int32_t value) { this->pad_control_(page, usage, value); });
+  input->add_on_key_event_callback(
+      [this](uint16_t page, uint16_t usage, bool down) { this->pad_key_(page, usage, down); });
+}
+
+void LVHIDPointerListener::pad_reset_() {
+  this->pad_dx_ = this->pad_dy_ = this->pad_sx_ = this->pad_sy_ = 0;
+  this->pad_tap_ = this->pad_tap_shown_ = false;
 }
 
 void LVHIDPointerListener::pad_control_(uint16_t page, uint16_t usage, int32_t value) {
   if (page != hid::PAGE_DIGITIZER)
     return;
-  if (usage == hid::USAGE_FINGER_DOWN[0]) {
-    this->pad_down_.store(value != 0, std::memory_order_relaxed);
-  } else if (usage == hid::USAGE_FINGER_X[0]) {
-    this->pad_x_.store(static_cast<uint16_t>(value), std::memory_order_relaxed);
-  } else if (usage == hid::USAGE_FINGER_Y[0]) {
-    this->pad_y_.store(static_cast<uint16_t>(value), std::memory_order_relaxed);
+  const bool active = this->pad_touch_ && !this->parent_->is_paused();
+  if (!active)
+    this->pad_reset_();
+  for (uint8_t i = 0; i < 2; i++) {
+    PadFinger &finger = this->pad_fingers_[i];
+    int32_t dx = 0;
+    int32_t dy = 0;
+    if (usage == hid::USAGE_FINGER_DOWN[i]) {
+      const uint8_t before = this->pad_fingers_[0].down + this->pad_fingers_[1].down;
+      finger = {finger.x, finger.y, value != 0, false, false};
+      const uint8_t now = this->pad_fingers_[0].down + this->pad_fingers_[1].down;
+      if (before == 0 && now != 0) {
+        this->pad_since_ = millis();
+        this->pad_moved_ = 0;
+        this->pad_most_ = 0;
+        this->pad_no_tap_ = this->pad_button_;
+      }
+      this->pad_most_ = std::max(this->pad_most_, now);
+      if (active && now == 0 && before != 0 && this->pad_most_ == 1 && !this->pad_no_tap_ &&
+          this->pad_moved_ < PAD_TAP_MOVE && millis() - this->pad_since_ < PAD_TAP_MS)
+        this->pad_tap_ = true;
+      return;
+    }
+    if (usage == hid::USAGE_FINGER_X[i]) {
+      if (finger.has_x)
+        dx = value - finger.x;
+      finger.x = value;
+      finger.has_x = true;
+    } else if (usage == hid::USAGE_FINGER_Y[i]) {
+      if (finger.has_y)
+        dy = value - finger.y;
+      finger.y = value;
+      finger.has_y = true;
+    } else {
+      continue;
+    }
+    if (!active)
+      return;
+    this->pad_moved_ += std::abs(dx) + std::abs(dy);
+    // Two fingers scroll by their mean motion, one moves the pointer.
+    if (this->pad_fingers_[0].down && this->pad_fingers_[1].down) {
+      this->pad_sx_ += dx;
+      this->pad_sy_ += dy;
+    } else {
+      this->pad_dx_ += dx;
+      this->pad_dy_ += dy;
+    }
+    return;
   }
 }
 
-bool LVHIDPointerListener::pad_read_(lv_indev_t *drv, lv_indev_data_t *data) {
-  const bool captured = this->pad_capture_ != nullptr && lv_obj_get_screen(this->pad_capture_) == lv_screen_active() &&
-                        lv_obj_is_visible(this->pad_capture_);
-  const bool down = this->pad_touch_ && !captured && this->pad_down_.load(std::memory_order_relaxed);
-  if (down) {
-    lv_display_t *disp = lv_indev_get_display(drv);
-    const int32_t width = lv_display_get_horizontal_resolution(disp);
-    const int32_t height = lv_display_get_vertical_resolution(disp);
-    this->pad_point_.x = static_cast<int32_t>(this->pad_x_.load(std::memory_order_relaxed)) * (width - 1) / 65535;
-    this->pad_point_.y = static_cast<int32_t>(this->pad_y_.load(std::memory_order_relaxed)) * (height - 1) / 65535;
-  } else if (!this->pad_pressed_) {
+void LVHIDPointerListener::pad_key_(uint16_t page, uint16_t usage, bool down) {
+  // hid::PAD_TOUCHPAD's button.
+  static constexpr uint16_t TOUCHPAD_BUTTON = __builtin_ctz(hid::PAD_TOUCHPAD) + 1;
+  if (page != hid::PAGE_BUTTON || usage != TOUCHPAD_BUTTON)
+    return;
+  this->pad_button_ = down && this->pad_touch_ && !this->parent_->is_paused();
+  if (down)
+    this->pad_no_tap_ = true;
+}
+
+bool LVHIDPointerListener::pad_read_() {
+  if (!this->pad_touch_)
+    return false;
+  if (this->pad_capture_ != nullptr && lv_obj_get_screen(this->pad_capture_) == lv_screen_active() &&
+      lv_obj_is_visible(this->pad_capture_)) {
+    this->pad_reset_();
     return false;
   }
-  // Let go where it was, once, before the mouse has the pointer again.
-  this->pad_pressed_ = down;
-  data->point = this->pad_point_;
-  data->state = down ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
-  return true;
+  lv_display_t *disp = this->parent_->get_disp();
+  const int32_t width = lv_display_get_horizontal_resolution(disp);
+  const int32_t height = lv_display_get_vertical_resolution(disp);
+  if (this->pad_dx_ != 0 || this->pad_dy_ != 0) {
+    // A touchpad width is the display's width.
+    const float px = static_cast<float>(this->pad_dx_) * width / 65535.0f;
+    const float py = static_cast<float>(this->pad_dy_) * width / 65535.0f;
+    this->pad_dx_ = this->pad_dy_ = 0;
+    float factor = this->speed_;
+    if (this->acceleration_)
+      factor *= std::min(3.0f, 1.0f + (std::abs(px) + std::abs(py)) / 20.0f);
+    const float fx = px * factor + this->pad_rest_x_;
+    const float fy = py * factor + this->pad_rest_y_;
+    const auto mx = static_cast<int32_t>(fx);
+    const auto my = static_cast<int32_t>(fy);
+    this->pad_rest_x_ = fx - mx;
+    this->pad_rest_y_ = fy - my;
+    this->x_ = std::clamp<int32_t>(this->x_ + mx, 0, width - 1);
+    this->y_ = std::clamp<int32_t>(this->y_ + my, 0, height - 1);
+    this->last_motion_ = millis();
+    if (this->cursor_ != nullptr && lv_obj_is_hidden(this->cursor_))
+      lv_obj_set_hidden(this->cursor_, false);
+  }
+  // The content follows the fingers (reversed by the reverse wheel setting); what is below a pixel
+  // waits for the next read. Both fingers' motion is gathered: halved.
+  const int32_t sx = this->pad_sx_ * width / (2 * 65535);
+  const int32_t sy = this->pad_sy_ * width / (2 * 65535);
+  if (sx != 0 || sy != 0) {
+    this->pad_sx_ -= sx * 2 * 65535 / width;
+    this->pad_sy_ -= sy * 2 * 65535 / width;
+    const int32_t sign = this->reverse_wheel_ ? -1 : 1;
+    lv_point_t point{this->x_, this->y_};
+    for (lv_obj_t *obj = lv_indev_search_obj(lv_screen_active(), &point); obj != nullptr; obj = lv_obj_get_parent(obj)) {
+      if (lv_obj_is_scrollable(obj)) {
+        lv_obj_scroll_by_bounded(obj, sign * sx, sign * sy, LV_ANIM_OFF);
+        break;
+      }
+    }
+  }
+  // A tap is pressed for one read, let go at the next.
+  if (this->pad_tap_shown_) {
+    this->pad_tap_ = this->pad_tap_shown_ = false;
+  } else if (this->pad_tap_) {
+    this->pad_tap_shown_ = true;
+    return true;
+  }
+  return this->pad_button_;
 }
 
 void LVHIDPointerListener::set_key_mode(bool on) {
