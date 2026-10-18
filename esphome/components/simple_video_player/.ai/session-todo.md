@@ -26,6 +26,10 @@ Status: (update as work finishes)
   control transfer behind the FS hub and a hub port request take turns on the root port; the one
   that cannot start waits and is started when the other side's last transfer ends. Awaiting
   Olli's test.
+- Still (Olli's log, after A and B): the first request at the new address (full device
+  descriptor) gets no answer. usb_host, enum: on no answer there, the same request once to
+  address 0; answered, SET_ADDRESS again and on; else it fails as before (Olli: yes). Awaiting
+  Olli's test.
 
 ---
 

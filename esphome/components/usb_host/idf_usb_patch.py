@@ -1500,6 +1500,106 @@ _LS_TURN_EXEC_REPLACEMENT = """    if (pipe->ep_char.type == USB_DWC_XFER_TYPE_C
     pipe->ls_ctrl_retry_count = 0;
     if (pipe->ls_first_launch_pending ||"""
 
+# A device takes its new address only once the status stage of SET_ADDRESS is done on its side;
+# a low-speed device behind a full-speed hub that misses the host's last handshake there stays at
+# address 0, while the host goes on at the new one and gets no answer. When the full device
+# descriptor gets no answer at the new address, the same request goes once to address 0; if the
+# device answers there, SET_ADDRESS runs again and enumeration goes on. If not, it fails as before.
+# addr_probe: 0 not used, 1 next request to address 0, 2 that request in flight, 3 used.
+_ENUM_PROBE_FIELD_ANCHOR = """    uint8_t bConfigurationValue;    /**< Device's current configuration number */"""
+
+_ENUM_PROBE_FIELD_REPLACEMENT = """    uint8_t bConfigurationValue;    /**< Device's current configuration number */
+    uint8_t addr_probe;             /**< Device descriptor asked at address 0 after no answer at the new one */"""
+
+_ENUM_PROBE_STATUS_ANCHOR = """    if (ctrl_xfer->status != USB_TRANSFER_STATUS_COMPLETED) {
+        if (ctrl_xfer->status == USB_TRANSFER_STATUS_STALL &&"""
+
+_ENUM_PROBE_STATUS_REPLACEMENT = """    if (ctrl_xfer->status != USB_TRANSFER_STATUS_COMPLETED) {
+        if (stage == ENUM_STAGE_CHECK_FULL_DEV_DESC && ctrl_xfer->status == USB_TRANSFER_STATUS_ERROR &&
+                p_enum_driver->single_thread.dev_params.addr_probe == 0 &&
+                usbh_dev_clear_addr(p_enum_driver->single_thread.dev_hdl) == ESP_OK) {
+            ESP_LOGW(ENUM_TAG, "No answer at address %d, asking address 0",
+                     p_enum_driver->single_thread.dev_params.new_dev_addr);
+            p_enum_driver->single_thread.dev_params.addr_probe = 1;
+            return ret;
+        }
+        if (ctrl_xfer->status == USB_TRANSFER_STATUS_STALL &&"""
+
+_ENUM_PROBE_PARSE_ANCHOR = """    case ENUM_STAGE_CHECK_FULL_DEV_DESC:
+        ret = parse_full_dev_desc();"""
+
+_ENUM_PROBE_PARSE_REPLACEMENT = """    case ENUM_STAGE_CHECK_FULL_DEV_DESC:
+        // An answer at address 0 is only the sign to set the address again
+        ret = (p_enum_driver->single_thread.dev_params.addr_probe == 2) ? ESP_OK : parse_full_dev_desc();"""
+
+_ENUM_PROBE_NEXT_ANCHOR = """            } else {
+                // Simply increment to get the next stage
+                next_stage = last_stage + 1;
+            }"""
+
+_ENUM_PROBE_NEXT_REPLACEMENT = """            } else if (last_stage == ENUM_STAGE_CHECK_FULL_DEV_DESC &&
+                       p_enum_driver->single_thread.dev_params.addr_probe == 2) {
+                // The device answered at address 0: set its address again
+                ESP_LOGW(ENUM_TAG, "Device still at address 0, setting its address again");
+                p_enum_driver->single_thread.dev_params.addr_probe = 3;
+                next_stage = ENUM_STAGE_SET_ADDR;
+            } else {
+                // Simply increment to get the next stage
+                next_stage = last_stage + 1;
+            }"""
+
+_ENUM_PROBE_FAIL_ANCHOR = """            default:
+                // Stage is not allowed to failed. Cancel enumeration."""
+
+_ENUM_PROBE_FAIL_REPLACEMENT = """            case ENUM_STAGE_CHECK_FULL_DEV_DESC:
+                if (p_enum_driver->single_thread.dev_params.addr_probe == 1) {
+                    p_enum_driver->single_thread.dev_params.addr_probe = 2;
+                    next_stage = ENUM_STAGE_GET_FULL_DEV_DESC;
+                    break;
+                }
+                ESP_LOGE(ENUM_TAG, "%s FAILED", enum_stage_strings[last_stage]);
+                next_stage = ENUM_STAGE_CANCEL;
+                break;
+            default:
+                // Stage is not allowed to failed. Cancel enumeration."""
+
+_USBH_CLEAR_ADDR_ANCHOR = """esp_err_t usbh_dev_set_desc(usb_device_handle_t dev_hdl, const usb_device_desc_t *device_desc)
+{"""
+
+_USBH_CLEAR_ADDR_REPLACEMENT = """esp_err_t usbh_dev_clear_addr(usb_device_handle_t dev_hdl)
+{
+    USBH_CHECK(dev_hdl != NULL, ESP_ERR_INVALID_ARG);
+    esp_err_t ret;
+    device_t *dev_obj = (device_t *)dev_hdl;
+
+    USBH_ENTER_CRITICAL();
+    USBH_CHECK_FROM_CRIT(dev_obj->dynamic.state == USB_DEVICE_STATE_ADDRESS, ESP_ERR_INVALID_STATE);
+    USBH_CHECK_FROM_CRIT(dev_obj->dynamic.flags.enum_lock, ESP_ERR_NOT_ALLOWED);
+    ret = hcd_pipe_update_dev_addr(dev_obj->constant.default_pipe, 0);
+    if (ret == ESP_OK) {
+        dev_obj->constant.address = 0;
+        dev_obj->dynamic.state = USB_DEVICE_STATE_DEFAULT;
+    }
+    USBH_EXIT_CRITICAL();
+
+    return ret;
+}
+
+esp_err_t usbh_dev_set_desc(usb_device_handle_t dev_hdl, const usb_device_desc_t *device_desc)
+{"""
+
+_USBH_CLEAR_ADDR_HEADER_ANCHOR = """esp_err_t usbh_dev_set_addr(usb_device_handle_t dev_hdl, uint8_t dev_addr);"""
+
+_USBH_CLEAR_ADDR_HEADER_REPLACEMENT = """esp_err_t usbh_dev_set_addr(usb_device_handle_t dev_hdl, uint8_t dev_addr);
+
+/**
+ * @brief Point a device and its default pipe back at address 0 (the device kept it)
+ *
+ * The device must be in the address state with its enumeration lock set; it is in the default
+ * state after.
+ */
+esp_err_t usbh_dev_clear_addr(usb_device_handle_t dev_hdl);"""
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -1578,6 +1678,13 @@ PATCHES = (
     ("src/hcd_dwc.c", _LS_TURN_RELEASE_ANCHOR, _LS_TURN_RELEASE_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_TURN_RELEASE_END_ANCHOR, _LS_TURN_RELEASE_END_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_TURN_EXEC_ANCHOR, _LS_TURN_EXEC_REPLACEMENT),
+    ("src/enum.c", _ENUM_PROBE_FIELD_ANCHOR, _ENUM_PROBE_FIELD_REPLACEMENT),
+    ("src/enum.c", _ENUM_PROBE_STATUS_ANCHOR, _ENUM_PROBE_STATUS_REPLACEMENT),
+    ("src/enum.c", _ENUM_PROBE_PARSE_ANCHOR, _ENUM_PROBE_PARSE_REPLACEMENT),
+    ("src/enum.c", _ENUM_PROBE_NEXT_ANCHOR, _ENUM_PROBE_NEXT_REPLACEMENT),
+    ("src/enum.c", _ENUM_PROBE_FAIL_ANCHOR, _ENUM_PROBE_FAIL_REPLACEMENT),
+    ("src/usbh.c", _USBH_CLEAR_ADDR_ANCHOR, _USBH_CLEAR_ADDR_REPLACEMENT),
+    ("private_include/usbh.h", _USBH_CLEAR_ADDR_HEADER_ANCHOR, _USBH_CLEAR_ADDR_HEADER_REPLACEMENT),
 )
 
 # Identifies an existing patched copy. It has to change whenever anything about that copy
