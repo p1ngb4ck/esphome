@@ -1,3 +1,20 @@
+# Session order (Olli, 2026-10-18, evening) — binding, in this order
+
+Olli: "update all knowledge first, then compact and re-read memory. Then:
+1. u are the architect. check online ressources like reverse-engineer-anything and use its methods to
+   create a skillset for our project that is able to "keep on working"
+2. I need a proper separate private repo for this as well where the configs go and other stuff
+3. then: adopt the latest changes for tcp_uart to allow to set up ports that forward local uarts and
+   ideally also the log on specified port and add this as lvgl config page.
+4. Once done and once the screencast/-shot feature is tested, we can build mechanisms, that would
+   allow for you to check/test the device yourself (image&serial)"
+
+Status:
+- Knowledge updated (memory, README stack rules and environment, CLAUDE.md, this file). Waiting for
+  the compaction; then re-read memory and the .ai files, then item 1.
+
+---
+
 # Session order (Olli, 2026-10-18, network) — binding
 
 Olli: a proper LVGL settings screen for networking: every connected adapter configured (Ethernet and

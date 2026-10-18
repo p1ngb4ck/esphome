@@ -28,7 +28,8 @@ round without Olli's go.
 | Display | MIPI-DSI panel 800x1280 native, LVGL screen 1280x800 (rotated). DSI-direct video: decoded frame copied into the panel framebuffer; LVGL paused meanwhile |
 | Decoders | HW JPEG decoder (the only video path: MJPEG), shared by video, stream stills, pictures, cover (driver `codec_mutex` serialises). No H.264. PNG/BMP in software |
 | Audio out | Speakers: I2S (es8311), USB audio, Bluetooth A2DP. `audio_router` picks the output; mixers/resamplers in YAML. Speaker media player (HA audio) separate |
-| Network | Wi-Fi via esp32_hosted (ESP32-C6 over SDIO, `use_psram: true`) and Ethernet |
+| Network | Wi-Fi via esp32_hosted (ESP32-C6 over SDIO, `use_psram: true`) and Ethernet (IP101). wifi's scan-done handling holds ESP-Hosted's ~3.9 KB stack buffer for all records (wifi_component_esp_idf.cpp) |
+| Stacks | loopTask: `ESPHOME_LOOP_TASK_STACK_SIZE` (esp32 `advanced: loop_task_stack_size`, default 8192; not set in the device YAML); `CONFIG_ESP_MAIN_TASK_STACK_SIZE` 32768 (device YAML, Olli 2026-10-18) is the IDF main task, not loopTask. LVGL event callbacks run deep inside `lv_timer_handler` on loopTask |
 | Storage | SD (sd_storage), USB mass storage, NFS, via the storage subsystem (`storage` component) |
 | Other users of PSRAM/RAM | LVGL, mipi_dsi framebuffer(s), storage `psram_transfer_buffer_size: 2MB`, speaker media player `buffer_size: 1000000`, BT/A2DP, micro_wake_word, voice_assistant, USB host, task stacks |
 | Frame budget | 25 fps = 40 ms per frame for decode + present + audio + storage (perf-notes). Device YAML has `target_fps: 30`; the stream fps is a relay option, set at runtime |
@@ -92,6 +93,12 @@ round without Olli's go.
   panel reports it to the relay ('V'); only the relay fits pictures to it.
 - UI: design (mockup) first, Olli approves, then implement. Highlights by colour only. Touch and keys
   (remote, keyboard, gamepad) always both work, with a correct focus order.
+
+### Stack (Olli, 2026-10-18: "we are on a MCU")
+- Never use much stack: no large locals, no deep work nested in someone else's callback frame.
+- No driver / network / storage calls (WiFi scan, enable/disable, saving settings, ...) nested inside
+  LVGL's event handling or inside another component's listener: hand them to the next main loop
+  pass (YAML: the script starts with `delay: 0ms`; C++: `defer()`).
 
 ### Hot paths (playback, decode, present, audio feed)
 - No `ESP_LOG*`. No fixed-duration blocking waits (`xSemaphoreTake(h, 0)` is the only allowed take).

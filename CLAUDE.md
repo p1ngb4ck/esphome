@@ -60,6 +60,9 @@ infrastructure.
   fallback; verify capacity with `heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)`
   *before* calling into them if the size could plausibly need SRAM to fail instead of silently
   succeeding somewhere unsafe.
+- Stack is scarce too: no large locals, and no driver/network/storage work nested inside LVGL's event
+  handling or another component's callback frame — defer it to the next main loop pass (YAML
+  `delay: 0ms` first in the script, C++ `defer()`). A UI scan crash came from exactly that.
 - No `ESP_LOG*` calls anywhere in a hot/priority-10 execution path. Logging itself is expensive
   enough on this MCU to be a real cause of missed deadlines, not just noise.
 - No blocking waits of any fixed duration in a hot path, however short. `xSemaphoreTake(h, 0)` is a
