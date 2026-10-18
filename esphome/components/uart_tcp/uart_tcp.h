@@ -18,12 +18,14 @@
 #include "esphome/components/uart/uart_virtual.h"
 #endif
 #include "esphome/core/component.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/preferences.h"
 
 #include <cstdint>
 #include <memory>
 #include <span>
 #include <string>
+#include <utility>
 
 namespace esphome::uart_tcp {
 
@@ -97,6 +99,10 @@ class UartTcp final : public Component, public uart::UARTDevice {
   uint32_t connected_since() const { return this->connected_ms_; }
   size_t peer_address(std::span<char, socket::SOCKADDR_STR_LEN> buf) const { return this->link_.peer_address(buf); }
   uint32_t get_disconnects() const { return this->disconnects_; }
+  /// Called with true on a connect, false on a disconnect.
+  template<typename F> void add_on_connection_callback(F &&callback) {
+    this->connection_callback_.add(std::forward<F>(callback));
+  }
 
   void setup() override;
   void loop() override;
@@ -194,6 +200,7 @@ class UartTcp final : public Component, public uart::UARTDevice {
 #ifdef USE_SENSOR
   sensor::Sensor *disconnects_sensor_{nullptr};
 #endif
+  LazyCallbackManager<void(bool)> connection_callback_;
   uint32_t disconnects_{0};
   uint32_t connected_ms_{0};
   bool server_{false};

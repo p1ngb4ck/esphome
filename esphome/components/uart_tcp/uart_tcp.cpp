@@ -226,6 +226,7 @@ void UartTcp::sync_link_(bool up) {
     }
 #endif
   }
+  this->connection_callback_.call(up);
 }
 
 void UartTcp::read_socket_() {

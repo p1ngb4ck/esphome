@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 
 namespace esphome::uart_tcp {
 
@@ -73,6 +74,10 @@ class UartTcpForwards : public Component {
   void save();
   /// A runner's need for the loop changed.
   void runner_changed();
+  /// Called when a runner connects or disconnects, or the forwards change (the file read, a setting set).
+  template<typename F> void add_on_change_callback(F &&callback) {
+    this->change_callback_.add(std::forward<F>(callback));
+  }
 
  protected:
   struct Uart {
@@ -110,6 +115,7 @@ class UartTcpForwards : public Component {
   void release_buffer_();
 
   FixedVector<Uart> uarts_;
+  LazyCallbackManager<void()> change_callback_;
   UartTcp *runners_{nullptr};
   UartTcp::Settings *settings_{nullptr};
   Line *lines_{nullptr};

@@ -53,6 +53,7 @@ void UartTcpForwards::setup() {
     new (&this->runners_[i]) UartTcp();
     this->default_runner_(i);
     this->runners_[i].setup_runner(this, &this->settings_[i]);
+    this->runners_[i].add_on_connection_callback([this](bool) { this->change_callback_.call(); });
   }
   this->disable_loop();
 #ifndef USE_STORAGE_TRANSFER_BUFFER
@@ -196,6 +197,7 @@ void UartTcpForwards::save() {
   if (this->parsing_) {
     return;
   }
+  this->change_callback_.call();
   this->dirty_ = true;
   this->write_();
 }
@@ -289,6 +291,7 @@ void UartTcpForwards::read_done_(StorageError err) {
     this->parse_();
     this->release_buffer_();
     this->loaded_ = true;
+    this->change_callback_.call();
     if (this->dirty_) {
       this->write_();
     }
