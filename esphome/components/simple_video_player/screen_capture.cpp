@@ -39,7 +39,6 @@ static const char *const R_RELAY = "SVP Relay was not reached";
 static const char *const R_RELAY_LOST = "The connection to SVP Relay was lost";
 static const char *const R_FULL = "The screencast reached its longest length";
 static const char *const R_CAPTURE = "The screen capture stopped";
-static const char *const R_LVGL = "The screen is not shown by LVGL now";
 static const char *const R_BUSY = "A screenshot is still being written";
 static const char *const R_TARGET = "Nowhere to write the screencast";
 
@@ -479,8 +478,10 @@ bool SimpleVideoPlayer::screenshot() {
   };
   if (this->shot_busy_)
     return refuse(R_BUSY);
-  if (this->shot_dir_.empty() || this->lvgl_component_ == nullptr || this->lvgl_component_->is_paused())
-    return refuse(R_LVGL);
+  if (this->shot_dir_.empty() || this->lvgl_component_ == nullptr || this->lvgl_component_->is_paused()) {
+    this->shot_trigger_.trigger(std::string());  // nothing of LVGL's to take
+    return false;
+  }
   this->shot_path_ = this->capture_name_(this->shot_dir_, "screenshot_", ".jpg");
   if (this->cast_state_ == CAST_RUNNING) {
     // The screencast's newest JPEG.
@@ -586,7 +587,7 @@ bool SimpleVideoPlayer::screencast_start() {
   if (this->shot_busy_)
     return refuse(R_BUSY);
   if (this->lvgl_component_ == nullptr || this->lvgl_component_->is_paused())
-    return refuse(R_LVGL);
+    return false;  // nothing of LVGL's to take
   if (this->video_session_())
     return refuse(R_VIDEO);
 #ifdef SVP_STREAM
