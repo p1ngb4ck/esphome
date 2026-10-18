@@ -14,6 +14,9 @@
 #include "esphome/components/socket/tcp_client_link.h"
 #include "esphome/components/socket/tcp_listener.h"
 #include "esphome/components/uart/uart.h"
+#ifdef USE_UART_VIRTUAL
+#include "esphome/components/uart/uart_virtual.h"
+#endif
 #include "esphome/core/component.h"
 #include "esphome/core/preferences.h"
 
@@ -39,6 +42,10 @@ class UartTcp final : public Component, public uart::UARTDevice {
     this->yaml_allow_ = entries;
     this->yaml_allow_count_ = count;
   }
+#ifdef USE_UART_VIRTUAL
+  /// The UART is a virtual one: it hears of the peer coming and going and keeps what it wants on connect.
+  void set_virtual_uart(uart::VirtualUARTComponent *uart) { this->virtual_uart_ = uart; }
+#endif
   /// The key of the saved runtime settings, from the entry id.
   void set_settings_key(uint32_t key) { this->settings_key_ = key; }
 #ifdef USE_NOISE_STREAM
@@ -144,6 +151,9 @@ class UartTcp final : public Component, public uart::UARTDevice {
 #endif
 #ifdef USE_BINARY_SENSOR
   binary_sensor::BinarySensor *connected_sensor_{nullptr};
+#endif
+#ifdef USE_UART_VIRTUAL
+  uart::VirtualUARTComponent *virtual_uart_{nullptr};
 #endif
   // The runtime settings, in PSRAM; the link's host and the listener's allow list point into it.
   Settings *settings_{nullptr};

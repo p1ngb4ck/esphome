@@ -186,9 +186,20 @@ void UartTcp::on_shutdown() {
 
 void UartTcp::sync_link_(bool up) {
   this->link_was_up_ = up;
+#ifdef USE_UART_VIRTUAL
+  // A virtual UART decides itself what it keeps for a new peer
+  const bool is_virtual = this->virtual_uart_ != nullptr;
+  if (is_virtual) {
+    this->virtual_uart_->set_reader_connected(up);
+  }
+#else
+  const bool is_virtual = false;
+#endif
   if (up) {
-    // The driver kept whatever arrived while the link was down.
-    this->discard_uart_();
+    if (!is_virtual) {
+      // The driver kept whatever arrived while the link was down.
+      this->discard_uart_();
+    }
 #ifdef USE_NOISE_STREAM
     // The handshake's last read can leave session bytes the socket's ready flag does not show
     if (this->noise_ != nullptr) {

@@ -99,6 +99,9 @@ FINAL_VALIDATE_SCHEMA = cv.All(
 
 async def to_code(config: ConfigType) -> None:
     var = await uart.new_uart_component(config)
+    uart_id, uart_var = await cg.get_variable_with_full_id(config[CONF_UART_ID])
+    if uart_id.type.inherits_from(uart.VirtualUARTComponent):
+        cg.add(var.set_virtual_uart(uart_var))
     # Both roles and the allow list are compiled; the runtime settings switch them.
     socket.require_tcp_listener()
     cg.add_define("USE_SOCKET_IPV4_ALLOW")
