@@ -15,6 +15,7 @@ KEYBOARD = 0x07
 CONSUMER = 0x0C
 BUTTON = 0x09
 GENERIC_DESKTOP = 0x01
+GENERIC_DEVICE = 0x06
 DIGITIZER = 0x0D
 
 
@@ -167,9 +168,16 @@ DIGITIZER_NAMES = {
     "FINGER2_Y": 0xF3,
 }
 
+# A device's battery in percent, and its radio signal (hid_input.h; 0xF0 is reserved on the page).
+GENERIC_DEVICE_NAMES = {
+    "BATTERY_STRENGTH": 0x20,
+    "SIGNAL": 0xF0,
+}
+
 KEY_NAMES: dict[str, tuple[int, int]] = {
     **{name: (KEYBOARD, usage) for name, usage in _keyboard().items()},
     **{name: (DIGITIZER, usage) for name, usage in DIGITIZER_NAMES.items()},
+    **{name: (GENERIC_DEVICE, usage) for name, usage in GENERIC_DEVICE_NAMES.items()},
     **{name: (CONSUMER, usage) for name, usage in CONSUMER_NAMES.items()},
     **{name: (GENERIC_DESKTOP, usage) for name, usage in SYSTEM_NAMES.items()},
     **{f"BUTTON_{i}": (BUTTON, i) for i in range(1, 33)},

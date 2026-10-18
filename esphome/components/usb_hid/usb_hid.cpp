@@ -47,6 +47,12 @@ void USBHIDClient::setup() {
       if (info.serial_number[0] != '\0')
         this->device_key_ += std::string(":") + info.serial_number;
       this->device_name_ = info.product[0] != '\0' ? info.product : std::string("USB ") + (key + 4);
+      // bcdDevice: the device's release, unless its driver reads its firmware.
+      if (this->get_details().firmware[0] == '\0') {
+        char release[8];
+        snprintf(release, sizeof(release), "%X.%02X", info.bcd_device >> 8, info.bcd_device & 0xFF);
+        this->set_firmware(release);
+      }
     }
     this->devices_cb_.call();
   });

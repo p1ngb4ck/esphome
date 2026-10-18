@@ -132,6 +132,7 @@ enum class ReadPurpose : uint8_t {
   PNP_ID,
   MANUFACTURER,
   SERIAL_NUMBER,
+  FIRMWARE_REVISION,
   HID_INFORMATION,
   HID_REPORT_MAP,
   HID_PROTOCOL_MODE,
@@ -182,6 +183,7 @@ class BLEClientHID : public Component,
   void loop() override;
   void dump_config() override;
   void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) override;
+  bool request_signal() override;
   void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                            esp_ble_gattc_cb_param_t *param) override;
   float get_setup_priority() const override { return setup_priority::AFTER_BLUETOOTH; }

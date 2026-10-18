@@ -146,6 +146,11 @@ void HIDInput::process_hid_values(const std::vector<HIDReportItemValue> &values)
     }
     if (v.application_usage.page == PAGE_DIGITIZER && this->touch_(v))
       continue;
+    if (page == PAGE_GENERIC_DEVICE && usage == USAGE_BATTERY_STRENGTH && v.logical_max > v.logical_min) {
+      const int64_t percent = (v.value - v.logical_min) * 100 / (v.logical_max - v.logical_min);
+      this->set_battery(static_cast<int8_t>(std::clamp<int64_t>(percent, 0, 100)), this->details_.battery_state);
+      continue;
+    }
     if (!v.is_relative && v.logical_min != v.logical_max) {
       if (page == PAGE_GENERIC_DESKTOP && usage == USAGE_HAT_SWITCH && pad_application(v.application_usage)) {
         this->gamepad_hat_(v);
@@ -227,6 +232,26 @@ void HIDInput::release_all_hid() {
   this->dead_ = 0;
   this->touch_down_ = this->touch_was_down_ = this->touch_changed_ = false;
   this->touch_collection_ = HIDCollectionSchema::NO_PARENT;
+  this->details_ = HIDDeviceDetails{};
+}
+
+void HIDInput::set_firmware(const char *text) {
+  snprintf(this->details_.firmware, sizeof(this->details_.firmware), "%s", text);
+}
+
+void HIDInput::set_battery(int8_t percent, HIDBattery state) {
+  const bool changed = percent != this->details_.battery;
+  this->details_.battery = percent;
+  this->details_.battery_state = state;
+  if (changed && percent >= 0)
+    this->control_cb_.call(PAGE_GENERIC_DEVICE, USAGE_BATTERY_STRENGTH, percent);
+}
+
+void HIDInput::set_signal(int8_t value, bool delta) {
+  this->details_.has_signal = true;
+  this->details_.signal_delta = delta;
+  this->details_.signal = value;
+  this->control_cb_.call(PAGE_GENERIC_DEVICE, USAGE_SIGNAL, value);
 }
 
 void HIDInput::key_(uint16_t page, uint16_t usage, bool pressed) {

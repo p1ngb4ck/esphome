@@ -47,7 +47,8 @@ struct HostEvent {
     AUTH,
     FOUND,
     SCAN_STATE,
-    CLAIMED
+    CLAIMED,
+    SIGNAL
   };
   Type type{INIT};
   uint8_t handle{0xFF};
@@ -247,6 +248,17 @@ bool gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void * /*
         return false;
       esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true);
       return true;
+    case ESP_BT_GAP_READ_RSSI_DELTA_EVT: {
+      if (param->read_rssi_delta.stat != ESP_BT_STATUS_SUCCESS || find_by_address(param->read_rssi_delta.bda) == nullptr)
+        return false;
+      HostEvent e;
+      e.type = HostEvent::SIGNAL;
+      memcpy(e.bda, param->read_rssi_delta.bda, ESP_BD_ADDR_LEN);
+      e.rssi = param->read_rssi_delta.rssi_delta;
+      e.has_rssi = true;
+      push(std::move(e));
+      return true;
+    }
     case ESP_BT_GAP_KEY_NOTIF_EVT: {
       find_or_adopt(param->key_notif.bda);
       HostEvent e;
@@ -466,6 +478,10 @@ void handle_event(HostEvent &e) {
     case HostEvent::CLAIMED:
       if (BTHIDDevice *dev = find_by_address(e.bda))
         dev->on_claimed();
+      break;
+    case HostEvent::SIGNAL:
+      if (BTHIDDevice *dev = find_by_address(e.bda))
+        dev->set_signal(e.rssi, true);
       break;
     case HostEvent::LISTED:
       if (h.pairing != nullptr && h.pairing->has_device_select() && find_by_address(e.bda) == nullptr)
@@ -1241,6 +1257,10 @@ void BTHIDDevice::on_pin_request() {
   if (this->pairing_ != nullptr)
     this->pairing_->on_pin_request(this, this->pin_);
 #endif
+}
+
+bool BTHIDDevice::request_signal() {
+  return this->connected_ && esp_bt_gap_read_rssi_delta(this->bda_) == ESP_OK;
 }
 
 void BTHIDDevice::on_passkey(uint32_t passkey) {

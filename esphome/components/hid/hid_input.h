@@ -17,6 +17,10 @@ class Component;
 namespace esphome::hid {
 
 static constexpr uint16_t PAGE_GENERIC_DESKTOP = 0x01;
+static constexpr uint16_t PAGE_GENERIC_DEVICE = 0x06;
+// Generic Device Controls: the battery in percent; the radio signal (0xF0, reserved there; keys.py).
+static constexpr uint16_t USAGE_BATTERY_STRENGTH = 0x20;
+static constexpr uint16_t USAGE_SIGNAL = 0xF0;
 static constexpr uint16_t PAGE_KEYBOARD = 0x07;
 static constexpr uint16_t PAGE_LED = 0x08;
 static constexpr uint16_t PAGE_BUTTON = 0x09;
@@ -93,6 +97,18 @@ void append_utf8(std::string &out, char32_t c);
 /// with the bits of `leds` set, without its report ID byte. False if the device has none.
 bool build_led_report(const HIDReportMap &map, uint8_t leds, uint8_t &report_id, std::vector<uint8_t> &payload);
 
+enum class HIDBattery : uint8_t { UNKNOWN, DISCHARGING, CHARGING, FULL, NOT_CHARGING };
+
+/// What a device reports about itself, where it does.
+struct HIDDeviceDetails {
+  char firmware[24]{};  // "" when unknown
+  int8_t battery{-1};   // percent, -1 when unknown
+  HIDBattery battery_state{HIDBattery::UNKNOWN};
+  bool has_signal{false};
+  bool signal_delta{false};  // Bluetooth Classic: dB from the controller's golden receive range, not dBm
+  int8_t signal{0};
+};
+
 // What any HID transport (USB, BLE, Bluetooth Classic) feeds its decoded reports into: keys,
 // typed text, pointer motion and every other control, for automations, sensors, LVGL and
 // key_provider (key_collector) alike. Typed characters go to key_provider as well when they
@@ -135,6 +151,17 @@ class HIDInput : public key_provider::KeyProvider {
   virtual void set_device_layout(const std::string &key, const KeyboardLayout *layout) {}
   /// Main loop: a device behind it came or went, was paired or forgotten.
   template<typename F> void add_on_devices_callback(F &&cb) { this->devices_cb_.add(std::forward<F>(cb)); }
+
+  // -- Device details ----------------------------------------------------------------------
+  const HIDDeviceDetails &get_details() const { return this->details_; }
+  /// Asks the radio for the link's signal; it comes back as the SIGNAL control (Generic Device
+  /// Controls). False without a radio link.
+  virtual bool request_signal() { return false; }
+  // From the transport and the gamepad drivers.
+  void set_firmware(const char *text);
+  /// Reported as BATTERY_STRENGTH (Generic Device Controls) when it changed.
+  void set_battery(int8_t percent, HIDBattery state);
+  void set_signal(int8_t value, bool delta);
 
   // -- Gamepads ----------------------------------------------------------------------------
   /// Rumble, 0..255 per motor (strong: low frequency, weak: high frequency). Duration 0 holds
@@ -229,6 +256,7 @@ class HIDInput : public key_provider::KeyProvider {
   std::unique_ptr<GamepadDriver> pad_;
   GamepadState pad_state_;
   GamepadOutputs pad_outputs_;
+  HIDDeviceDetails details_;
   HIDBus bus_{HIDBus::USB};
 };
 

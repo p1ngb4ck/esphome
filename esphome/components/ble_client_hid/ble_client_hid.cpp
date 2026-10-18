@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cinttypes>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <utility>
@@ -941,6 +942,8 @@ void BLEClientHID::plan_reads_() {
           purpose = ReadPurpose::MANUFACTURER;
         } else if (uuid == UUID_SERIAL_NUMBER) {
           purpose = ReadPurpose::SERIAL_NUMBER;
+        } else if (uuid == UUID_FIRMWARE_REVISION) {
+          purpose = ReadPurpose::FIRMWARE_REVISION;
         }
       } else if (battery) {
         standard = true;
@@ -1076,6 +1079,9 @@ void BLEClientHID::process_read_value_(const GattReadOperation &operation, const
       ESP_LOGD(TAG, "HID_DEVICE field=serial_number len=%u value=%s privacy=sensitive", static_cast<unsigned>(length),
                printable_text(value, length).c_str());
       break;
+    case ReadPurpose::FIRMWARE_REVISION:
+      this->set_firmware(printable_text(value, length).c_str());
+      break;
     case ReadPurpose::APPEARANCE:
       if (length == 2) {
         ESP_LOGD(TAG, "HID_DEVICE field=appearance value=%u", value[0] | (static_cast<uint16_t>(value[1]) << 8U));
@@ -1098,6 +1104,7 @@ void BLEClientHID::process_read_value_(const GattReadOperation &operation, const
       this->battery_handles_.insert(operation.characteristic_handle);
       if (length >= 1) {
         ESP_LOGD(TAG, "HID_BATTERY source=read value=%u", value[0]);
+        this->set_battery(static_cast<int8_t>(std::min<uint8_t>(value[0], 100)), this->get_details().battery_state);
 #ifdef USE_SENSOR
         if (this->battery_sensor_ != nullptr)
           this->battery_sensor_->publish_state(value[0]);
@@ -1107,6 +1114,8 @@ void BLEClientHID::process_read_value_(const GattReadOperation &operation, const
       }
       break;
     case ReadPurpose::KEEPALIVE:
+      if (this->battery_handles_.count(operation.characteristic_handle) != 0 && length >= 1)
+        this->set_battery(static_cast<int8_t>(std::min<uint8_t>(value[0], 100)), this->get_details().battery_state);
 #ifdef USE_SENSOR
       // The keepalive reads the battery level where there is one.
       if (this->battery_handles_.count(operation.characteristic_handle) != 0 && length >= 1 &&
@@ -1534,6 +1543,12 @@ void BLEClientHID::finalize_setup_() {
     this->transition_(SetupPhase::READY);
   }
   this->gamepad_attach_(hid::HIDBus::BLE, this->pnp_vid_, this->pnp_pid_, this->pnp_version_);
+  // Without a Firmware Revision String: the PnP ID's release (BCD).
+  if (this->get_details().firmware[0] == '\0' && this->pnp_version_ != 0) {
+    char release[8];
+    snprintf(release, sizeof(release), "%X.%02X", this->pnp_version_ >> 8, this->pnp_version_ & 0xFF);
+    this->set_firmware(release);
+  }
   this->gamepad_start_();
   this->end_pairing_(true, nullptr);
   // Cache the profile for the next connection, if every HID service has its report map.
@@ -1795,7 +1810,19 @@ bool BLEClientHID::request_feature_report(uint8_t id, uint16_t len) {
 
 // -- GAP events --------------------------------------------------------------------------
 
+bool BLEClientHID::request_signal() {
+  if (this->node_state != espbt::ClientState::ESTABLISHED)
+    return false;
+  return esp_ble_gap_read_rssi(this->parent()->get_remote_bda()) == ESP_OK;
+}
+
 void BLEClientHID::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
+  if (event == ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT) {
+    if (param->read_rssi_cmpl.status == ESP_BT_STATUS_SUCCESS &&
+        memcmp(param->read_rssi_cmpl.remote_addr, this->parent()->get_remote_bda(), sizeof(esp_bd_addr_t)) == 0)
+      this->set_signal(param->read_rssi_cmpl.rssi, false);
+    return;
+  }
   if ((event == ESP_GAP_BLE_PASSKEY_NOTIF_EVT || event == ESP_GAP_BLE_NC_REQ_EVT) &&
       memcmp(param->ble_security.key_notif.bd_addr, this->parent()->get_remote_bda(), sizeof(esp_bd_addr_t)) == 0) {
     if (event == ESP_GAP_BLE_NC_REQ_EVT) {
@@ -1958,6 +1985,8 @@ void BLEClientHID::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
           ESP_LOGW(TAG, "HID_IGNORE seq_id=%" PRIu64 " reason=invalid_battery_payload", seq_id);
         } else {
           ESP_LOGD(TAG, "HID_BATTERY source=notification value=%u", param->notify.value[0]);
+          this->set_battery(static_cast<int8_t>(std::min<uint8_t>(param->notify.value[0], 100)),
+                            this->get_details().battery_state);
 #ifdef USE_SENSOR
           if (this->battery_sensor_ != nullptr)
             this->battery_sensor_->publish_state(param->notify.value[0]);

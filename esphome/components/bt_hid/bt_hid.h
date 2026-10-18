@@ -141,6 +141,8 @@ class BTHIDDevice : public Component,
   bool request_feature_report(uint8_t id, uint16_t len) override;
   Component *hid_component() override { return this; }
   void on_passkey(uint32_t passkey);
+  /// The link's signal: the RSSI delta from the controller's golden receive range.
+  bool request_signal() override;
   void on_pin_request();
   uint8_t handle() const { return this->handle_; }
   uint32_t next_connect_ms() const { return this->next_connect_ms_; }

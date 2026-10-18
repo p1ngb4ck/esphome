@@ -10,6 +10,8 @@
 #include "esphome/core/log.h"
 
 #include <algorithm>
+#include <cinttypes>
+#include <cstdio>
 #include <cstring>
 
 #ifdef USE_BT_CLASSIC
@@ -167,6 +169,43 @@ static void ps_touch(GamepadState &s, const uint8_t *p, uint16_t height) {
   }
 }
 
+// The battery in a status byte (hid-playstation.c): DualSense, charging state in the high nibble.
+static void ds_battery(HIDInput *input, uint8_t status) {
+  const auto level = static_cast<int8_t>(std::min((status & 0x0F) * 10 + 5, 100));
+  switch (status >> 4) {
+    case 0x0:
+      input->set_battery(level, HIDBattery::DISCHARGING);
+      break;
+    case 0x1:
+      input->set_battery(level, HIDBattery::CHARGING);
+      break;
+    case 0x2:
+      input->set_battery(100, HIDBattery::FULL);
+      break;
+    case 0xA:  // voltage or temperature out of range
+    case 0xB:  // temperature error
+      input->set_battery(0, HIDBattery::NOT_CHARGING);
+      break;
+    default:
+      input->set_battery(-1, HIDBattery::UNKNOWN);
+      break;
+  }
+}
+
+// DualShock 4: bit 4 set while the cable is in; 11 is full then, 14 and 15 are errors.
+static void ds4_battery(HIDInput *input, uint8_t status) {
+  const uint8_t data = status & 0x0F;
+  if ((status & 0x10) == 0) {
+    input->set_battery(static_cast<int8_t>(data < 10 ? data * 10 + 5 : 100), HIDBattery::DISCHARGING);
+  } else if (data <= 10) {
+    input->set_battery(static_cast<int8_t>(data < 10 ? data * 10 + 5 : 100), HIDBattery::CHARGING);
+  } else if (data == 11) {
+    input->set_battery(100, HIDBattery::FULL);
+  } else {
+    input->set_battery(-1, HIDBattery::UNKNOWN);
+  }
+}
+
 // -- DualShock 4 (hid-playstation.c) ---------------------------------------------------------
 
 class DualShock4Driver : public GamepadDriver {
@@ -175,10 +214,24 @@ class DualShock4Driver : public GamepadDriver {
   const char *name() const override { return "DualShock 4"; }
 
   void start() override {
-    // Over Bluetooth the pad sends the short report 0x01 until its calibration is read.
-    if (this->input_->get_bus() != HIDBus::USB)
+    // Over Bluetooth the pad sends the short report 0x01 until its calibration is read; the
+    // firmware info follows it.
+    if (this->input_->get_bus() != HIDBus::USB) {
       this->input_->request_feature_report(0x05, 41);
+    } else {
+      this->input_->request_feature_report(0xA3, 49);
+    }
     this->outputs(this->input_->get_gamepad_outputs());
+  }
+
+  void feature(uint8_t id, const uint8_t *data, size_t len) override {
+    if (id == 0x05) {
+      this->input_->request_feature_report(0xA3, 49);
+    } else if (id == 0xA3 && len >= 43) {
+      char text[8];
+      snprintf(text, sizeof(text), "%04X", le16(data + 41));
+      this->input_->set_firmware(text);
+    }
   }
 
   bool report(const uint8_t *d, size_t len) override {
@@ -204,6 +257,8 @@ class DualShock4Driver : public GamepadDriver {
     if (len >= at + 33 && c[32] >= 1 && len >= at + 33 + 9 * static_cast<size_t>(c[32])) {
       ps_touch(s, c + 33 + 9 * (c[32] - 1) + 1, 942);
     }
+    if (len >= at + 30)
+      ds4_battery(this->input_, c[29]);
     this->input_->gamepad_state(s);
     return true;
   }
@@ -255,6 +310,11 @@ class DualSenseDriver : public GamepadDriver {
     }
     if (id != 0x20)
       return;
+    if (len >= 32) {
+      char text[12];
+      snprintf(text, sizeof(text), "%08" PRIX32, le16(data + 28) | (static_cast<uint32_t>(le16(data + 30)) << 16));
+      this->input_->set_firmware(text);
+    }
     // Feature version 2.21 brought the vibration the Edge always has.
     if (len >= 46 && le16(data + 44) >= 0x0215)
       this->vibration_v2_ = true;
@@ -289,6 +349,9 @@ class DualSenseDriver : public GamepadDriver {
     // Two touch points at offset 32 (hid-playstation.c dualsense_input_report).
     if (len >= static_cast<size_t>(r - d) + 40)
       ps_touch(s, r + 32, 1080);
+    // The status byte after the touch points and 12 reserved bytes.
+    if (len >= static_cast<size_t>(r - d) + 53)
+      ds_battery(this->input_, r[52]);
     this->input_->gamepad_state(s);
     return true;
   }
