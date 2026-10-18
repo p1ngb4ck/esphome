@@ -1014,6 +1014,8 @@ class SimpleVideoPlayer : public Component
   }
   CastState screencast_state() const { return this->cast_state_; }
   bool screencast_running() const { return this->cast_state_ != CAST_IDLE; }
+  /// The screencast's file in the screencast folder ("" before its first one, or with target relay only).
+  const std::string &get_screencast_path() const { return this->cast_path_; }
   /// The screenshot's file, "" when it failed.
   Trigger<std::string> *get_screenshot_trigger() { return &this->shot_trigger_; }
   Trigger<> *get_screencast_started_trigger() { return &this->cast_started_trigger_; }
