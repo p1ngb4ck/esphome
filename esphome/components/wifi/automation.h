@@ -32,10 +32,23 @@ template<typename... Ts> class WiFiDisableAction final : public Action<Ts...> {
 };
 
 #ifdef USE_WIFI_SCAN_RESULTS_TRIGGER
-/// on_scan_results: a scan finished (main loop); get_scan_result() holds what it found.
-class ScanResultsTrigger final : public Trigger<>, public WiFiScanResultsListener {
+/// on_scan_results: a scan finished; get_scan_result() holds what it found. The listener is called from
+/// inside the scan's event handling, whose frame is large (ESP-Hosted reads every record into a stack
+/// buffer): the automation runs from the next main loop pass instead, once for scans that came meanwhile.
+class ScanResultsTrigger final : public Trigger<>, public Component, public WiFiScanResultsListener {
  public:
-  void on_wifi_scan_results(const wifi_scan_vector_t<WiFiScanResult> &results) override { this->trigger(); }
+  void on_wifi_scan_results(const wifi_scan_vector_t<WiFiScanResult> &results) override {
+    if (this->pending_)
+      return;
+    this->pending_ = true;
+    this->defer([this]() {
+      this->pending_ = false;
+      this->trigger();
+    });
+  }
+
+ protected:
+  bool pending_{false};
 };
 #endif
 

@@ -26,6 +26,11 @@ Status:
   Ethernet address + manual texts + apply, WiFi scan, WiFi networks, WiFi networks around). Static
   YAML pages as the Mice/Remote pages. Ethernet's sixth fact is the link, not the adapter type (not
   known at runtime). Awaiting Olli's build and test.
+- Olli (2026-10-18): looks great; crashed often on the WiFi page and always on Scan. Cause: the
+  scan results listener is called inside wifi's scan event handling, whose frame holds ESP-Hosted's
+  ~3.9 KB stack record buffer (all records at once, P4 + C6); on_scan_results ran net_changed /
+  net_show (HA publish, LVGL) nested in it on the 8 KB loopTask stack. Fixed: on_scan_results runs
+  from the next main loop pass (defer), once for scans that came meanwhile. Awaiting Olli's test.
 
 ---
 

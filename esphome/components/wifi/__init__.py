@@ -251,7 +251,9 @@ WiFiAPActiveCondition = wifi_ns.class_("WiFiAPActiveCondition", Condition)
 WiFiEnableAction = wifi_ns.class_("WiFiEnableAction", automation.Action)
 WiFiDisableAction = wifi_ns.class_("WiFiDisableAction", automation.Action)
 WiFiRoamAction = wifi_ns.class_("WiFiRoamAction", automation.Action)
-ScanResultsTrigger = wifi_ns.class_("ScanResultsTrigger", automation.Trigger.template())
+ScanResultsTrigger = wifi_ns.class_(
+    "ScanResultsTrigger", automation.Trigger.template(), cg.Component
+)
 WiFiConfigureAction = wifi_ns.class_(
     "WiFiConfigureAction", automation.Action, cg.Component
 )
@@ -1064,6 +1066,7 @@ async def to_code(config):
         request_wifi_scan_results()
         for conf in on_scan_results:
             trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
+            await cg.register_component(trigger, conf)
             request_wifi_scan_results_listener()
             cg.add(var.add_scan_results_listener(trigger))
             await automation.build_automation(trigger, [], conf)
