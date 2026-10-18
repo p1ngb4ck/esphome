@@ -1,0 +1,33 @@
+usb_audio:
+  id: usb_audio_id
+  speaker_buffer_size: 6400
+  microphone_buffer_size: 6400
+  channel_pair: front
+  feedback: true
+  volume_curve: logarithmic
+  device_quirks:
+    - vid: 0x8087
+      pid: 0x1024
+      volume_encoding: byte
+
+speaker:
+  - platform: usb_audio
+    id: usb_speaker
+    usb_audio_id: usb_audio_id
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    num_channels: 2
+
+microphone:
+  - platform: usb_audio
+    id: usb_mic
+    usb_audio_id: usb_audio_id
+    sample_rate: 16000
+    bits_per_sample: 16bit
+    num_channels: 2
+    channels: [0]
+
+audio_dac:
+  - platform: usb_audio
+    id: usb_dac
+    usb_audio_id: usb_audio_id
