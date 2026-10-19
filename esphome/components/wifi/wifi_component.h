@@ -1111,7 +1111,7 @@ class WiFiComponent final : public Component {
   // 1-byte members so they pack into its trailing bytes instead of padding after it
   WiFiAP ap_;
 #endif  // USE_WIFI_AP
-  void startup_done_() {
+  void finish_startup_() {
     if (this->startup_done_)
       return;
     this->startup_done_ = true;
