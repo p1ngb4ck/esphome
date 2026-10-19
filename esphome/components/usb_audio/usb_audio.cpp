@@ -99,7 +99,10 @@ void USBAudioClient::setup() {
 }
 
 void USBAudioClient::loop() {
-  this->process_usb_events_();
+  // Event-driven, no polling: woken by the client's USB events (USBClient::client_event_cb), the
+  // control task's completions, a stream request (resume_speaker / resume_microphone), usb_host when
+  // a stream died or finished closing, and the reopen backoff's timer. Idle it is disabled.
+  const bool usb_work = this->process_usb_events_();
 
   if (this->setup_pending_ && this->setup_done_seq_.load() == this->setup_seq_)
     this->finish_connect_();
@@ -138,6 +141,18 @@ void USBAudioClient::loop() {
       this->mic_format_ok_ && this->mic_alt_.valid && this->mic_stream_.is_closed() &&
       this->reopen_due_(this->mic_reopen_at_ms_, this->mic_open_fails_))
     this->ensure_started_microphone();
+
+  // A wanted stream whose reopen waits for its backoff: woken when it is due.
+  uint32_t due_in = UINT32_MAX;
+  const uint32_t now = millis();
+  if (this->spk_wanted_ && !this->spk_stream_open_ && this->spk_open_fails_ != 0)
+    due_in = std::min(due_in, static_cast<uint32_t>(std::max<int32_t>(0, (int32_t) (this->spk_reopen_at_ms_ - now))));
+  if (this->mic_wanted_ && !this->mic_stream_open_ && this->mic_open_fails_ != 0)
+    due_in = std::min(due_in, static_cast<uint32_t>(std::max<int32_t>(0, (int32_t) (this->mic_reopen_at_ms_ - now))));
+  if (due_in != UINT32_MAX)
+    this->set_timeout(REOPEN_TIMEOUT_ID, std::max<uint32_t>(1, due_in), [this]() { this->enable_loop(); });
+  if (!usb_work && !this->setup_pending_ && !this->spk_rate_pending_ && !this->mic_rate_pending_)
+    this->disable_loop();
 }
 
 // Backoff helpers. next_attempt_ms is an absolute millis() deadline; fail_count only sets
@@ -2168,6 +2183,8 @@ void USBAudioClient::resume_speaker() {
   this->spk_suspended_ = false;
   this->spk_wanted_ = true;
   this->cancel_timeout(SPK_IDLE_TIMEOUT_ID);
+  // The open is loop() work: wake it now, not whenever the main loop next comes around.
+  this->enable_loop_soon_any_context();
 }
 
 void USBAudioClient::suspend_speaker() {
@@ -2206,6 +2223,7 @@ bool USBAudioClient::resume_microphone() {
   this->mic_suspended_ = false;
   this->mic_wanted_ = true;
   this->cancel_timeout(MIC_IDLE_TIMEOUT_ID);
+  this->enable_loop_soon_any_context();  // a failed open is retried by loop()
   return this->ensure_started_microphone();
 }
 
@@ -2338,12 +2356,8 @@ esp_err_t USBAudioClient::write_speaker(const uint8_t *data, size_t length, uint
   if (this->spk_rb_ == nullptr)
     return ESP_ERR_INVALID_STATE;
   TickType_t ticks = (timeout_ms == 0) ? 0 : std::max<TickType_t>(1, pdMS_TO_TICKS(timeout_ms));
-  if (!this->spk_stream_open_) {
-    // Opening, or waiting for a free host channel: nothing drains yet, so the caller waits as
-    // on a full buffer instead of coming straight back (a pipeline task would spin on it).
-    vTaskDelay(std::max<TickType_t>(1, ticks));
-    return ESP_ERR_TIMEOUT;
-  }
+  // Also while the stream still opens: the audio goes into the ring (the stream starts prefilled),
+  // and a full ring blocks the caller on its space - the drain is the event, nothing sleeps blind.
   BaseType_t ok = xRingbufferSend(this->spk_rb_, data, length, ticks);
   if (ok != pdTRUE)
     return ESP_ERR_TIMEOUT;

@@ -375,6 +375,7 @@ class USBAudioClient : public usb_host::USBClient {
   uint32_t stream_idle_timeout_ms_{0};
   static constexpr uint32_t SPK_IDLE_TIMEOUT_ID = 0;
   static constexpr uint32_t MIC_IDLE_TIMEOUT_ID = 1;
+  static constexpr uint32_t REOPEN_TIMEOUT_ID = 2;  // the reopen backoff wakes loop()
   void close_idle_speaker_();
   void close_idle_microphone_();
   std::atomic<bool> device_connected_{false};

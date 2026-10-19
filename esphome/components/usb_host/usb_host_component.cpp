@@ -636,8 +636,10 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
       // Last URB gone. If nobody asked for a close, the stream stopped by itself and is now
       // silently dead: flag it so the owner can tear it down instead of writing into a
       // buffer that is never drained again.
-      if (stream->streaming.exchange(false, std::memory_order_acq_rel))
+      if (stream->streaming.exchange(false, std::memory_order_acq_rel)) {
         stream->died.store(true, std::memory_order_release);
+        client->enable_loop_soon_any_context();  // the owner tears it down: wake it (USB task)
+      }
       get_usb_host()->defer([stream, client] {
         stream->xfers.reset();
         stream->ctxs.reset();
@@ -652,6 +654,7 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
           get_usb_host()->stream_release(*stream, client, client->handle_, client->device_handle_);
         }
         stream->open_state.store(IsocOpenState::CLOSED, std::memory_order_release);
+        client->enable_loop();  // closed: an owner waiting to open it again runs now (main loop)
         ESP_LOGD(TAG, "stream_close deferred: ep=0x%02X", stream->ep_addr);
       });
     }
