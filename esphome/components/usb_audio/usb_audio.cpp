@@ -2335,9 +2335,15 @@ void USBAudioClient::apply_pending_controls_() {
 }
 
 esp_err_t USBAudioClient::write_speaker(const uint8_t *data, size_t length, uint32_t timeout_ms) {
-  if (this->spk_rb_ == nullptr || !this->spk_stream_open_)
+  if (this->spk_rb_ == nullptr)
     return ESP_ERR_INVALID_STATE;
-  TickType_t ticks = (timeout_ms == 0) ? 0 : pdMS_TO_TICKS(timeout_ms);
+  TickType_t ticks = (timeout_ms == 0) ? 0 : std::max<TickType_t>(1, pdMS_TO_TICKS(timeout_ms));
+  if (!this->spk_stream_open_) {
+    // Opening, or waiting for a free host channel: nothing drains yet, so the caller waits as
+    // on a full buffer instead of coming straight back (a pipeline task would spin on it).
+    vTaskDelay(std::max<TickType_t>(1, ticks));
+    return ESP_ERR_TIMEOUT;
+  }
   BaseType_t ok = xRingbufferSend(this->spk_rb_, data, length, ticks);
   if (ok != pdTRUE)
     return ESP_ERR_TIMEOUT;

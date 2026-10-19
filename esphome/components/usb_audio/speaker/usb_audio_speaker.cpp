@@ -59,8 +59,9 @@ void USBAudioSpeaker::start() {
     return;
   }
   if (!this->parent_->speaker_available()) {
-    // No device, or an unusable format: a state to report, not an error to repeat.
-    ESP_LOGW(TAG_SPK, "USB audio stream not available yet");
+    // No device, or an unusable format: a state to report once, not an error to repeat.
+    if (!this->status_has_warning())
+      ESP_LOGW(TAG_SPK, "USB audio stream not available yet");
     this->status_set_warning();
     return;
   }
@@ -127,7 +128,12 @@ size_t USBAudioSpeaker::play_internal_(const uint8_t *data, size_t length, uint3
   if (!this->is_running()) {
     this->start();
   }
-  if (!this->is_running() || data == nullptr || length == 0) {
+  if (!this->is_running()) {
+    // No device: the caller waits its budget, as on a full buffer, instead of spinning.
+    vTaskDelay(std::max<TickType_t>(1, pdMS_TO_TICKS(std::max<uint32_t>(1, time_budget_ms))));
+    return 0;
+  }
+  if (data == nullptr || length == 0) {
     return 0;
   }
 
