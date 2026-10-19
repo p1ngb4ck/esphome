@@ -64,6 +64,7 @@ CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["storage"]
 
 CONF_PICTURE_CANVAS_ID = "picture_canvas_id"
+CONF_BACKGROUND_CANVAS_ID = "background_canvas_id"
 
 
 def AUTO_LOAD(config):
@@ -398,6 +399,7 @@ CONF_FULLSCREEN = "fullscreen"
 PICTURE_FORMATS = ("PNG", "BMP")
 # Picture keys with no default: setting one without picture_canvas_id is an error.
 PICTURE_ONLY_KEYS = (
+    CONF_BACKGROUND_CANVAS_ID,
     CONF_PICTURE_DIRECTORIES,
     CONF_DEFAULT_IMAGE_INDEX,
     CONF_THUMBNAIL_CONTAINER_ID,
@@ -554,6 +556,10 @@ def _picture_schema():
         # canvases (external_buffer: true), each fitted into its size; their buffers (and the fetched
         # file's) from the PSRAM pool once cover art shows, until a video or the desktop reclaims the pool.
         cv.Optional(CONF_AUDIO_COVER): cv.All(cv.ensure_list(cv.use_id(lv_canvas_t)), cv.Length(min=1, max=3)),
+        # A picture file behind a page (set_background_path / set_background_wanted) in this canvas
+        # (external_buffer: true), fitted as the pictures; its pixels a piece of the PSRAM pool (the
+        # pictures' share) only while the page shows, decoded by the picture task.
+        cv.Optional(CONF_BACKGROUND_CANVAS_ID): cv.use_id(lv_canvas_t),
         cv.Optional(CONF_PICTURE_DIRECTORIES): cv.ensure_list(cv.string),
         cv.Optional(CONF_SLIDESHOW_INTERVAL, default="5s"): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_FIT_MODE, default="SCALE_TO_FIT"): cv.enum(IMAGE_FIT_MODES, upper=True),
@@ -1286,6 +1292,9 @@ async def to_code(config):
 
     if CONF_PICTURE_CANVAS_ID in config:
         await _pictures_to_code(var, config)
+    if CONF_BACKGROUND_CANVAS_ID in config:
+        cg.add_define("SVP_BACKGROUND")
+        cg.add(var.set_background_canvas(await cg.get_variable(config[CONF_BACKGROUND_CANVAS_ID])))
     if CONF_AUDIO_COVER in config:
         cg.add_define("SVP_AUDIO_COVER")
         for canvas in config[CONF_AUDIO_COVER]:

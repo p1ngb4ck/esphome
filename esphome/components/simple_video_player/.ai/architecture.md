@@ -180,6 +180,7 @@ what the room leaves (`max_prebuffer()`).
 | `pic_pages_[2]` | 2 × stride565(max(disp, canvas)) · h | first picture, reclaim, `close_picture()` | the shown picture and the next one (no decode ahead; neighbours only read undecoded) | **no** |
 | `pic_decode_buf_` | the decode's size in 1 MiB steps | only while a picture larger than its target (or a thumbnail) is decoded | full native decode | **no** |
 | `pic_files_[3]` | 1 MiB each, grows | first picture, reclaim, `close_picture()` | compressed files | **no** |
+| page background `bg_data_` + `bg_file_` (`background_canvas_id`, `SVP_BACKGROUND`) | A16 w·h·2 of the canvas (device 1280x800: 2,048,000) + the file (<= 4 MB, read only) | `bg_data_` while the page shows (`set_background_wanted`); the file and, for a JPEG larger than the canvas, `pic_decode_buf_` only for the read/decode; both back on leaving the page and on the pictures' reclaim | decoded background (fitted as pictures, `decode_job_` on the picture task) | **no** |
 | `cover_views_[<=3]` + `cover_file_` | A16 w·h·2 each (device 25 K + 320 K + 1.28 MB) + 512 KiB | cover wanted, reclaim | decoded cover / JPEG | **no** |
 | desktop cursors | ~300 KiB | session start, `release_desktop_` | cursor shapes | no |
 | USB transfers per slot | ~550 KiB at link_open + ISO | link open, `release_buffers` | USB data | no |

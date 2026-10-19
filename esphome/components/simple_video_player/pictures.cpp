@@ -10,6 +10,8 @@
 #include <esp_memory_utils.h>
 
 #include <algorithm>
+#include <cinttypes>
+#include <cstdio>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -199,6 +201,12 @@ void SimpleVideoPlayer::pictures_loop_() {
         this->pic_decoded_.store(false, std::memory_order_relaxed);
       }
     }
+#ifdef SVP_BACKGROUND
+    // The page background: its read or decode finishes, then its pieces go (shown again later).
+    if (this->bg_busy_())
+      return;
+    this->release_background_();
+#endif
 #ifdef SVP_AUDIO_COVER
     // Cover art being fetched into its buffer: dropped, or stopped after its block.
     if (this->cover_step_ == CoverStep::FETCHING && !this->fetch_drop_(this->cover_fetch_))
@@ -1058,6 +1066,13 @@ void SimpleVideoPlayer::picture_task_entry_(void *arg) {
   auto *self = static_cast<SimpleVideoPlayer *>(arg);
   while (true) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+#ifdef SVP_BACKGROUND
+    if (self->bg_job_.exchange(false, std::memory_order_acq_rel)) {
+      self->decode_job_(self->bg_job_data_);
+      self->bg_decoded_.store(true, std::memory_order_release);
+      continue;
+    }
+#endif
 #ifdef SVP_AUDIO_COVER
     if (self->cover_job_.exchange(false, std::memory_order_acq_rel)) {
       self->cover_decode_();
@@ -1172,7 +1187,7 @@ void SimpleVideoPlayer::decode_job_(PictureJob &job) {
         out != 0) {
       scale_rgb565(job.scratch, static_cast<int32_t>(info.width), static_cast<int32_t>(info.height), pw * 2,
                    job.target, job.target_w, job.target_h, job.target_stride, job.fit);
-      written_by_cpu(job.page != nullptr ? job.target : nullptr, job.target_capacity);
+      written_by_cpu(job.page != nullptr || job.background ? job.target : nullptr, job.target_capacity);
       job.ok = true;
     } else {
       ESP_LOGW(TAG, "%s: decoding failed", job.path.c_str());
@@ -1202,7 +1217,7 @@ void SimpleVideoPlayer::decode_job_(PictureJob &job) {
   if (pixels != nullptr && image->get_width() > 0 && image->get_height() > 0 && esp_ptr_external_ram(pixels)) {
     scale_rgb565(pixels, image->get_width(), image->get_height(), image->get_width_stride(), job.target, job.target_w,
                  job.target_h, job.target_stride, job.fit);
-    written_by_cpu(job.page != nullptr ? job.target : nullptr, job.target_capacity);
+    written_by_cpu(job.page != nullptr || job.background ? job.target : nullptr, job.target_capacity);
     job.ok = true;
   } else {
     ESP_LOGW(TAG, "%s: incomplete picture, or not in PSRAM", job.path.c_str());
@@ -1921,6 +1936,286 @@ bool SimpleVideoPlayer::request_thumbnail(size_t index) {
   this->queue_slot_(slot);
   return false;
 }
+
+//========================================================================
+// The page background (SVP_BACKGROUND): a file by path through the same read and decode
+//========================================================================
+
+#ifdef SVP_BACKGROUND
+static const char *const BG_TAG = "simple_video_player.background";
+
+static constexpr size_t BG_FILE_MAX = 4 * 1024 * 1024;  // a larger file is refused
+static constexpr size_t DMA_ALIGN = PsramPool::ALIGN;    // whole cache lines, as the JPEG unit needs
+
+static constexpr size_t bg_align(size_t value, size_t align) { return (value + align - 1) & ~(align - 1); }
+
+void SimpleVideoPlayer::set_background_path(const std::string &path) {
+  if (path.size() >= sizeof(this->bg_path_)) {
+    ESP_LOGW(BG_TAG, "Background path too long: %s", path.c_str());
+    return;
+  }
+  if (path == this->bg_path_)
+    return;
+  snprintf(this->bg_path_, sizeof(this->bg_path_), "%s", path.c_str());
+  this->bg_failed_ = false;
+  this->bg_reload_ = true;
+}
+
+void SimpleVideoPlayer::set_background_wanted(bool wanted) {
+  if (wanted && !this->bg_wanted_)
+    this->bg_failed_ = false;  // tried again on each showing of the page
+  this->bg_wanted_ = wanted;
+}
+
+// LVGL running: the canvas shows nothing (no longer reads the piece).
+void SimpleVideoPlayer::bg_detach_() {
+  if (!this->bg_attached_)
+    return;
+  lv_image_set_src(this->bg_canvas_, nullptr);
+  this->bg_attached_ = false;
+}
+
+// Main loop, nothing read or decoded meanwhile: the pieces back to the pool. The canvas lets go first
+// (at once while LVGL runs, else once it runs again).
+void SimpleVideoPlayer::release_background_() {
+  if (this->lvgl_component_ == nullptr || this->lvgl_component_->is_paused()) {
+    this->bg_detach_pending_ = this->bg_detach_pending_ || this->bg_attached_;
+  } else {
+    this->bg_detach_();
+  }
+  this->bg_shown_ = false;
+  this->pool_.free(this->bg_data_);
+  this->bg_data_ = nullptr;
+  this->bg_capacity_ = 0;
+  this->pool_.free(this->bg_file_);
+  this->bg_file_ = nullptr;
+  if (this->bg_scratch_) {
+    this->release_decode_();
+    this->bg_scratch_ = false;
+  }
+  this->bg_step_ = BgStep::IDLE;
+}
+
+// The rest of the file in one request; another only when the storage returned less.
+void SimpleVideoPlayer::bg_read_next_() {
+  const storage::StorageError err = storage::global_storage_worker->read_chunk(
+      this->bg_handle_, this->bg_file_ + this->bg_len_, this->bg_limit_ - this->bg_len_, &this->bg_chunk_,
+      [this](storage::StorageError result) {
+        if (result != storage::StorageError::STORAGE_ERROR_OK) {
+          this->bg_read_failed_ = true;
+          this->bg_finish_read_();
+          return;
+        }
+        this->bg_len_ += this->bg_chunk_;
+        if (this->bg_chunk_ == 0 || this->bg_len_ + 1 == this->bg_limit_) {
+          this->bg_finish_read_();  // end of file, or all of it
+        } else if (this->bg_len_ == this->bg_limit_) {
+          this->bg_read_failed_ = true;  // larger than when it was looked at
+          this->bg_finish_read_();
+        } else {
+          this->bg_read_next_();
+        }
+      });
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
+    this->bg_read_failed_ = true;
+    this->bg_finish_read_();
+  }
+}
+
+void SimpleVideoPlayer::bg_finish_read_() {
+  const storage::StorageError err = storage::global_storage_worker->end_read(
+      this->bg_handle_, [this](storage::StorageError) { this->bg_step_ = BgStep::READ; });
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
+    this->bg_step_ = BgStep::READ;
+}
+
+void SimpleVideoPlayer::background_loop_() {
+  if (this->bg_canvas_ == nullptr || !this->pic_ready_)
+    return;
+  // Nothing of LVGL while it is paused: everything waits for it.
+  if (this->lvgl_component_ == nullptr || this->lvgl_component_->is_paused())
+    return;
+  if (this->bg_detach_pending_) {
+    this->bg_detach_pending_ = false;
+    this->bg_detach_();
+  }
+  switch (this->bg_step_) {
+    case BgStep::IDLE: {
+      // Not wanted (the page left) or another file: what shows goes back
+      if ((!this->bg_wanted_ || this->bg_reload_) && (this->bg_data_ != nullptr || this->bg_attached_)) {
+        this->release_background_();
+        return;
+      }
+      this->bg_reload_ = false;
+      if (!this->bg_wanted_ || this->bg_shown_ || this->bg_failed_ || this->bg_path_[0] == '\0')
+        return;
+      // Not while a video plays or takes the pool, nor while a picture or cover art is read or decoded
+      if (this->pictures_held_() || this->pool_wanted_(POOL_PICTURES) || this->pic_read_.active)
+        return;
+#ifdef SVP_AUDIO_COVER
+      if (this->cover_step_ != CoverStep::IDLE)
+        return;
+#endif
+      const char *rel = nullptr;
+      storage::PathStorage *storage = nullptr;
+      storage::FileStat info{};
+      const char *why = nullptr;
+      if (storage::global_storage_registry == nullptr || storage::global_storage_worker == nullptr) {
+        why = "no storage";
+      } else if ((storage = storage::global_storage_registry->resolve_path(this->bg_path_, &rel)) == nullptr ||
+                 rel == nullptr || rel[0] == '\0') {
+        why = "storage not mounted";
+      } else if (storage::global_storage_worker->has_active_task_io(storage)) {
+        return;  // the worker is inside it: next loop
+      } else if (storage->stat(rel, &info) != storage::StorageError::STORAGE_ERROR_OK || info.is_dir) {
+        why = "not found";
+      } else if (info.size == 0 || info.size > BG_FILE_MAX) {
+        why = "empty or larger than 4 MB";
+      }
+      if (why != nullptr) {
+        ESP_LOGW(BG_TAG, "%s: %s", this->bg_path_, why);
+        this->bg_failed_ = true;
+        return;
+      }
+      // The canvas' size (the configuration's) and room for the decoder's whole MCUs at it
+      int32_t w = lv_obj_get_style_width(this->bg_canvas_, LV_PART_MAIN);
+      int32_t h = lv_obj_get_style_height(this->bg_canvas_, LV_PART_MAIN);
+      if (LV_COORD_IS_SPEC(w) || LV_COORD_IS_SPEC(h)) {
+        lv_obj_update_layout(this->bg_canvas_);
+        w = lv_obj_get_width(this->bg_canvas_);
+        h = lv_obj_get_height(this->bg_canvas_);
+      }
+      if (w <= 0 || h <= 0)
+        return;
+      this->bg_capacity_ = bg_align(bg_align(w, 16) * bg_align(h, 16) * 2, DMA_ALIGN);
+      this->bg_data_ = this->pool_take_(this->bg_capacity_, POOL_USER_PICTURES);
+      this->bg_limit_ = static_cast<size_t>(info.size) + 1;
+      this->bg_file_ = this->bg_data_ != nullptr
+                           ? this->pool_take_(bg_align(static_cast<size_t>(info.size) + 16, DMA_ALIGN), POOL_USER_PICTURES)
+                           : nullptr;
+      if (this->bg_file_ == nullptr) {
+        ESP_LOGW(BG_TAG, "%s: no room in the PSRAM pool", this->bg_path_);
+        this->release_background_();
+        this->bg_failed_ = true;
+        return;
+      }
+      this->bg_job_data_ = PictureJob{};
+      this->bg_job_data_.target_w = w;
+      this->bg_job_data_.target_h = h;
+      this->bg_len_ = 0;
+      this->bg_read_failed_ = false;
+      this->bg_step_ = BgStep::READING;
+      const storage::StorageError err =
+          storage::global_storage_worker->begin_read(storage, rel, &this->bg_handle_, [this](storage::StorageError result) {
+            if (result != storage::StorageError::STORAGE_ERROR_OK) {
+              this->bg_read_failed_ = true;
+              this->bg_step_ = BgStep::READ;
+              return;
+            }
+            this->bg_read_next_();
+          });
+      if (err != storage::StorageError::STORAGE_ERROR_OK) {
+        this->release_background_();
+        if (err != storage::StorageError::STORAGE_ERROR_NOT_READY)  // all streams busy: next loop
+          this->bg_failed_ = true;
+      }
+      return;
+    }
+
+    case BgStep::READING:
+      return;  // the worker's callbacks go on
+
+    case BgStep::READ: {
+      if (this->bg_read_failed_ || this->bg_len_ == 0 || !this->bg_wanted_ || this->bg_reload_) {
+        if (this->bg_read_failed_ || this->bg_len_ == 0) {
+          ESP_LOGW(BG_TAG, "Cannot read %s", this->bg_path_);
+          this->bg_failed_ = true;
+        }
+        this->release_background_();
+        return;
+      }
+      // The picture task: not while a picture or cover art decodes
+      if (this->pic_read_.decoding || this->pictures_held_() || this->pool_wanted_(POOL_PICTURES))
+        return;
+#ifdef SVP_AUDIO_COVER
+      if (this->cover_step_ == CoverStep::DECODING)
+        return;
+#endif
+      PictureJob &job = this->bg_job_data_;
+      job.data = this->bg_file_;
+      job.length = this->bg_len_;
+      job.path = this->bg_path_;
+      job.target = this->bg_data_;
+      job.target_capacity = this->bg_capacity_;
+      job.target_stride = static_cast<uint32_t>(bg_align(job.target_w, 16) * 2);
+      job.fit = this->fit_mode_;
+      job.background = true;
+      // A JPEG that does not go straight into the canvas' piece is decoded whole first: the pictures'
+      // decode piece, for this decode only
+      runtime_image::ImageFormat format;
+      jpeg_decode_picture_info_t info{};
+      if (picture_format(job.path, &format) && format == runtime_image::JPEG &&
+          jpeg_decoder_get_info(job.data, static_cast<uint32_t>(job.length), &info) == ESP_OK && info.width != 0 &&
+          info.height != 0) {
+        const bool wide = info.sample_method == JPEG_DOWN_SAMPLING_YUV422 || info.sample_method == JPEG_DOWN_SAMPLING_YUV420;
+        const size_t bytes = bg_align(info.width, wide ? 16 : 8) *
+                             bg_align(info.height, info.sample_method == JPEG_DOWN_SAMPLING_YUV420 ? 16 : 8) * 2;
+        const bool straight = static_cast<int32_t>(info.width) <= job.target_w &&
+                              static_cast<int32_t>(info.height) <= job.target_h &&
+                              bytes <= (job.target_capacity & ~(DMA_ALIGN - 1));
+        if (!straight) {
+          if (!this->reserve_decode_(bytes)) {
+            ESP_LOGW(BG_TAG, "%s: %ux%u needs %u bytes of the PSRAM pool to decode", this->bg_path_,
+                     static_cast<unsigned>(info.width), static_cast<unsigned>(info.height), static_cast<unsigned>(bytes));
+            this->bg_failed_ = true;
+            this->release_background_();
+            return;
+          }
+          this->bg_scratch_ = true;
+          job.scratch = this->pic_decode_buf_;
+          job.scratch_capacity = this->pic_decode_cap_;
+        }
+      }
+      bg_detach_();  // LVGL lets go of the piece before it is written
+      this->bg_decoded_.store(false, std::memory_order_relaxed);
+      this->bg_job_.store(true, std::memory_order_release);
+      this->bg_step_ = BgStep::DECODING;
+      xTaskNotifyGive(this->pic_task_);
+      return;
+    }
+
+    case BgStep::DECODING: {
+      if (!this->bg_decoded_.load(std::memory_order_acquire))
+        return;
+      this->bg_step_ = BgStep::IDLE;
+      // The file and the decode piece go at once; the canvas' piece stays while it shows
+      this->pool_.free(this->bg_file_);
+      this->bg_file_ = nullptr;
+      if (this->bg_scratch_) {
+        this->release_decode_();
+        this->bg_scratch_ = false;
+      }
+      const PictureJob &job = this->bg_job_data_;
+      if (!job.ok || !this->bg_wanted_ || this->bg_reload_) {
+        if (!job.ok)
+          this->bg_failed_ = true;
+        this->release_background_();
+        return;
+      }
+      const int32_t sw = job.direct ? job.width : job.target_w;
+      const int32_t sh = job.direct ? job.height : job.target_h;
+      const uint32_t stride = job.direct ? job.stride : job.target_stride;
+      lv_draw_buf_init(&this->bg_buf_, sw, sh, LV_COLOR_FORMAT_RGB565, stride, this->bg_data_, this->bg_capacity_);
+      lv_canvas_set_draw_buf(this->bg_canvas_, &this->bg_buf_);
+      lv_obj_invalidate(this->bg_canvas_);
+      this->bg_attached_ = true;
+      this->bg_shown_ = true;
+      ESP_LOGD(BG_TAG, "Showing %s (%" PRId32 "x%" PRId32 ")", this->bg_path_, sw, sh);
+      return;
+    }
+  }
+}
+#endif  // SVP_BACKGROUND
 
 }  // namespace esphome::simple_video_player
 

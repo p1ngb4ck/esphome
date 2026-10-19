@@ -445,6 +445,17 @@ class SimpleVideoPlayer : public Component
   void on_svp_audio_command(std::string command);
   void on_svp_set_volume(float volume);
 #endif
+#ifdef SVP_BACKGROUND
+  /// A picture file behind a page in this canvas (external_buffer), fitted as the pictures: decoded into
+  /// a piece of the pool (the pictures' share) while the page shows, given back when it is left or another
+  /// user needs the room (shown again the next time).
+  void set_background_canvas(lv_obj_t *canvas) { this->bg_canvas_ = canvas; }
+  /// The file (a full VFS path; "" none): shown anew when it changes.
+  void set_background_path(const std::string &path);
+  /// The page with the background shows (true) or is left (false: its piece goes back).
+  void set_background_wanted(bool wanted);
+  bool background_shown() const { return this->bg_shown_; }
+#endif
 #ifdef SVP_AUDIO_COVER
   /// The playing sound's cover art (svp_relay) shows in these canvases (external_buffer), each fitted
   /// into its own size; at most COVER_VIEWS.
@@ -2048,9 +2059,43 @@ class SimpleVideoPlayer : public Component
     bool direct{false};
     int32_t width{0}, height{0};
     uint32_t stride{0};
+    bool background{false};  // the page background's (written out to PSRAM as a picture is)
   };
 
   bool pic_ready_{false};
+#ifdef SVP_BACKGROUND
+  // The page background: its file read by the worker into a pool piece, decoded by the picture task
+  // (decode_job_) into the canvas' pool piece; both pieces of the pictures' share.
+  enum class BgStep : uint8_t { IDLE, READING, READ, DECODING };
+  lv_obj_t *bg_canvas_{nullptr};
+  char bg_path_[256]{};
+  bool bg_wanted_{false};
+  bool bg_reload_{false};    // another file: what shows goes, the new one comes
+  bool bg_failed_{false};    // this file did not show (not tried again until it or the page changes)
+  bool bg_shown_{false};
+  bool bg_attached_{false};  // the canvas reads the piece
+  bool bg_detach_pending_{false};  // given back while LVGL was paused: the canvas lets go once it runs
+  BgStep bg_step_{BgStep::IDLE};
+  uint8_t *bg_data_{nullptr};
+  size_t bg_capacity_{0};
+  uint8_t *bg_file_{nullptr};
+  size_t bg_len_{0};
+  size_t bg_limit_{0};
+  size_t bg_chunk_{0};
+  bool bg_read_failed_{false};
+  bool bg_scratch_{false};  // the pictures' decode piece reserved for this decode
+  storage::StreamHandle bg_handle_{};
+  lv_draw_buf_t bg_buf_{};
+  PictureJob bg_job_data_;
+  std::atomic<bool> bg_job_{false};
+  std::atomic<bool> bg_decoded_{false};
+  void background_loop_();
+  void release_background_();
+  void bg_detach_();
+  void bg_read_next_();
+  void bg_finish_read_();
+  bool bg_busy_() const { return this->bg_step_ == BgStep::READING || this->bg_step_ == BgStep::DECODING; }
+#endif
   lv_obj_t *pic_canvas_{nullptr};
   PsramVector<PsramString> pic_dirs_;
   std::string pic_dir_;                  // folder whose images_ are listed

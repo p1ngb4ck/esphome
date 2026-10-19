@@ -344,6 +344,9 @@ void SimpleVideoPlayer::loop() {
 #ifdef SVP_AUDIO_COVER
   this->cover_loop_();
 #endif
+#ifdef SVP_BACKGROUND
+  this->background_loop_();
+#endif
 #ifdef SVP_CAPTURE
   this->capture_loop_();
 #endif
