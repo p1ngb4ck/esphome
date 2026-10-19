@@ -41,7 +41,6 @@ SimpleVideoPlayer::~SimpleVideoPlayer() {
 }
 
 void SimpleVideoPlayer::setup() {
-  ESP_LOGCONFIG(TAG, "Setting up Simple Video Player...");
 #if defined(USE_AUDIO) && defined(SVP_AUDIO_SAMPLE_RATE)
   this->wanted_audio_rate_.store(AUDIO_SAMPLE_RATE, std::memory_order_release);
   this->wanted_audio_channels_.store(AUDIO_SOURCE_CHANNELS, std::memory_order_release);
@@ -265,23 +264,6 @@ void SimpleVideoPlayer::setup() {
 #endif
 #ifdef SVP_CAPTURE
   this->capture_setup_();
-#endif
-
-  ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
-  ESP_LOGCONFIG(TAG, "  PSRAM pool: %u bytes (PSRAM left: %u bytes, largest block %u)",
-                static_cast<unsigned>(this->pool_.size()),
-                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
-                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
-  ESP_LOGCONFIG(TAG,
-                "  Read-ahead ring and sound: up to %u bytes (prebuffer %" PRIu32 " ms, up to %" PRIu32
-                " ms; audio latency up to %" PRIu32 " ms), frame slot %u bytes",
-                static_cast<unsigned>(this->ring_room_), this->get_prebuffer(), this->max_prebuffer(),
-                this->max_audio_latency_ms_, static_cast<unsigned>(this->frame_bytes_));
-  ESP_LOGCONFIG(TAG, "  Target FPS: %.1f", this->target_fps_);
-#ifdef USE_AUDIO
-  if (this->speaker_ != nullptr) {
-    ESP_LOGCONFIG(TAG, "  Audio: Enabled");
-  }
 #endif
 }
 

@@ -576,10 +576,6 @@ void USBClient::dump_config() {
   ESP_LOGCONFIG(TAG, "USBClient %s", LOG_STR_ARG(this->get_component_log_str()));
   if (this->vid_ != 0 || this->pid_ != 0)
     ESP_LOGCONFIG(TAG, "  Vendor id %04X\n  Product id %04X", this->vid_, this->pid_);
-  for (const auto &m : this->class_matches_)
-    ESP_LOGCONFIG(TAG, "  Class %02X/%d/%d", m.cls, m.subclass, m.protocol);
-  for (const auto &m : this->vendor_matches_)
-    ESP_LOGCONFIG(TAG, "  Vendor %04X:%04X class %d", m.vid, m.pid, m.cls);
   char buf[DESC_STRING_BUF_SIZE];
   if (this->manufacturer_filter_ != nullptr) {
     ESP_LOGCONFIG(TAG, "  Manufacturer %s", filter_string(this->manufacturer_filter_, buf));

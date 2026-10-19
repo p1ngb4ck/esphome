@@ -377,12 +377,6 @@ void NFSClient::setup() {
 #ifdef USE_ESP32
   this->lock_ = xSemaphoreCreateRecursiveMutexStatic(&this->lock_storage_);
 #endif
-  ESP_LOGCONFIG(TAG, "Setting up NFS Client...");
-  ESP_LOGCONFIG(TAG, "  Server: %s:%u", this->server_.c_str(), this->port_);
-  ESP_LOGCONFIG(TAG, "  Export: %s", this->export_path_.c_str());
-  ESP_LOGCONFIG(TAG, "  UID: %" PRIu32 ", GID: %" PRIu32, this->uid_, this->gid_);
-  ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_);
-
   this->rpc_buf_ = alloc_rpc_buffer(RPC_RESPONSE_BUFFER_SIZE);
   if (this->rpc_buf_ == nullptr) {
     ESP_LOGE(TAG, "No memory for the %u KB RPC buffer", (unsigned) (RPC_RESPONSE_BUFFER_SIZE / 1024));

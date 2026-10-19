@@ -808,7 +808,7 @@ usb_host::MatchTier USBStorageClient::refine_match_(const usb_host::RoutedDevice
 // USBStorageDevice -- lifecycle
 // ─────────────────────────────────────────────────────────────────────────────
 
-void USBStorageDevice::setup() { ESP_LOGCONFIG(TAG, "Setting up USB Storage Device"); }
+void USBStorageDevice::setup() {}
 
 void USBStorageDevice::dump_config() {
   ESP_LOGCONFIG(TAG, "USB Storage Device:");

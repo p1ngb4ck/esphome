@@ -752,12 +752,7 @@ void BTHIDDevice::dump_config() {
   } else {
     strcpy(mac, "set by pairing");
   }
-  ESP_LOGCONFIG(TAG,
-                "Bluetooth Classic HID device:\n"
-                "  Address: %s\n"
-                "  Legacy PIN: %s\n"
-                "  Auto connect: %s",
-                mac, this->pin_.c_str(), YESNO(this->auto_connect_));
+  ESP_LOGCONFIG(TAG, "Bluetooth Classic HID device: %s, auto connect %s", mac, YESNO(this->auto_connect_));
 }
 
 void BTHIDDevice::connect() {
