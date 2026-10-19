@@ -1535,7 +1535,9 @@ LVHIDPointerListener::LVHIDPointerListener(hid::HIDInput *input, uint16_t long_p
       l->key_read_();
     data->point.x = l->x_;
     data->point.y = l->y_;
-    data->state = l->pressed_ || l->key_pressed_ || pad ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    data->state = l->pressed_ || l->press_unread_ || l->key_pressed_ || pad ? LV_INDEV_STATE_PRESSED
+                                                                            : LV_INDEV_STATE_RELEASED;
+    l->press_unread_ = false;
     if (l->hide_after_ != 0 && l->cursor_ != nullptr && !l->pressed_ && !pad &&
         millis() - l->last_motion_ > l->hide_after_ && !lv_obj_is_hidden(l->cursor_))
       lv_obj_set_hidden(l->cursor_, true);
@@ -1810,6 +1812,8 @@ void LVHIDPointerListener::move_(int16_t dx, int16_t dy, int16_t wheel, int16_t 
   this->x_ = std::clamp<int32_t>(this->x_ + mx, 0, lv_display_get_horizontal_resolution(disp) - 1);
   this->y_ = std::clamp<int32_t>(this->y_ + my, 0, lv_display_get_vertical_resolution(disp) - 1);
   this->pressed_ = (buttons & 0x01) != 0;
+  if (this->pressed_)
+    this->press_unread_ = true;
   if (wheel == 0 && pan == 0)
     return;
   if (this->reverse_wheel_)

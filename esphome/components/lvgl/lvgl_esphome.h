@@ -790,6 +790,9 @@ class LVHIDPointerListener final : public Parented<LvglComponent> {
   int32_t x_{0};
   int32_t y_{0};
   bool pressed_{false};
+  // A press LVGL has not read yet: a quick click's press and release can come between two reads
+  // (USB HID reports arrive together in one loop pass), so the press is held for one read.
+  bool press_unread_{false};
   lv_indev_t *drv_{};
   lv_obj_t *cursor_{};
   uint32_t hide_after_{0};
