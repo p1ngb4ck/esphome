@@ -54,6 +54,8 @@ class USBAudioSpeaker : public speaker::Speaker, public Component, public Parent
 
   bool pause_state_{false};
   bool finish_requested_{false};
+  // When audio was last handed over (play(), from the pipeline's task): see SELF_STOP_MS.
+  std::atomic<uint32_t> last_play_ms_{0};
   uint32_t finish_deadline_ms_{0};
   // Throughput window (see check_throughput_). start 0 means "not started yet".
   uint32_t rate_window_start_ms_{0};

@@ -32,6 +32,9 @@ constexpr uint32_t RATE_WINDOW_MS = 1000;
 constexpr uint32_t RATE_WARN_PERCENT = 80;
 // How long finish() waits for the queue to drain before stopping anyway.
 constexpr uint32_t FINISH_TIMEOUT_MS = 1000;
+// No audio handed over for this long: the speaker stops itself, as the I2S speaker does after its
+// timeout (a mixer never stops its output), so the stream's idle close can follow.
+constexpr uint32_t SELF_STOP_MS = 1000;
 }  // namespace
 
 void USBAudioSpeaker::setup() {
@@ -51,6 +54,9 @@ void USBAudioSpeaker::loop() {
       this->stop();
       this->finish_requested_ = false;
     }
+  } else if (this->state_ == speaker::STATE_RUNNING && !this->pause_state_ &&
+             millis() - this->last_play_ms_.load(std::memory_order_relaxed) > SELF_STOP_MS) {
+    this->stop();
   }
 }
 
@@ -58,6 +64,7 @@ void USBAudioSpeaker::start() {
   if (this->state_ == speaker::STATE_RUNNING) {
     return;
   }
+  this->last_play_ms_.store(millis(), std::memory_order_relaxed);
   if (!this->parent_->speaker_available()) {
     // No device, or an unusable format: a state to report once, not an error to repeat.
     if (!this->status_has_warning())
@@ -125,6 +132,7 @@ size_t USBAudioSpeaker::play(const uint8_t *data, size_t length) {
 }
 
 size_t USBAudioSpeaker::play_internal_(const uint8_t *data, size_t length, uint32_t time_budget_ms) {
+  this->last_play_ms_.store(millis(), std::memory_order_relaxed);
   if (!this->is_running()) {
     this->start();
   }
@@ -213,7 +221,13 @@ size_t USBAudioSpeaker::play_internal_(const uint8_t *data, size_t length, uint3
     }
   }
 
-  this->check_throughput_(total_written, bytes_per_ms);
+  // Only a stream that runs can fall behind; one still opening (or without a free host channel)
+  // takes nothing, which is not an underrun.
+  if (this->parent_->get_speaker_packet_bytes() != 0) {
+    this->check_throughput_(total_written, bytes_per_ms);
+  } else {
+    this->rate_window_start_ms_ = 0;
+  }
   return total_written;
 }
 
