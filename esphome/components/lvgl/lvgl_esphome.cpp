@@ -1861,7 +1861,7 @@ void LVHIDPointerListener::long_press_here() {
   if (obj == nullptr || obj == lv_layer_top())
     obj = lv_indev_search_obj(lv_screen_active(), &point);
   for (; obj != nullptr; obj = lv_obj_get_parent(obj)) {
-    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_CLICKABLE)) {
+    if (lv_obj_is_clickable(obj)) {
       lv_obj_send_event(obj, LV_EVENT_LONG_PRESSED, nullptr);
       return;
     }
