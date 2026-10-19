@@ -2060,6 +2060,29 @@ CONF_RINGBUF_IN_IRAM = "ringbuf_in_iram"
 CONF_HEAP_IN_IRAM = "heap_in_iram"
 CONF_LOOP_TASK_STACK_SIZE = "loop_task_stack_size"
 CONF_BOOT_RAM_PROBE = "boot_ram_probe"
+CONF_COMPONENTS_IN_PSRAM = "components_in_psram"
+KEY_COMPONENTS_IN_PSRAM = "components_in_psram"
+# The .bss of the generated main.cpp (every component object's static storage) in PSRAM: an IDF
+# component holding only this linker fragment (ESP-IDF's extern_ram target, as the bt fragment uses).
+_COMPONENTS_IN_PSRAM_LF = """[sections:esphome_main_bss]
+entries:
+    .bss+
+
+[sections:esphome_main_common]
+entries:
+    COMMON
+
+[scheme:esphome_main_extram_bss]
+entries:
+    esphome_main_bss -> extern_ram
+    esphome_main_common -> extern_ram
+
+[mapping:esphome_main_bss_psram]
+archive: libsrc.a
+entries:
+    if SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
+        main (esphome_main_extram_bss)
+"""
 CONF_USE_FULL_CERTIFICATE_BUNDLE = "use_full_certificate_bundle"
 CONF_DISABLE_DEBUG_STUBS = "disable_debug_stubs"
 CONF_DISABLE_OCD_AWARE = "disable_ocd_aware"
@@ -2355,6 +2378,10 @@ FRAMEWORK_SCHEMA = cv.Schema(
                 # A measurement: internal and internal DMA free RAM sampled every millisecond for the
                 # first 90 s, its changes logged afterwards (a task with its stack in PSRAM, gone then).
                 cv.Optional(CONF_BOOT_RAM_PROBE, default=False): cv.boolean,
+                # The component objects (their static storage, often 100 KB and more) in PSRAM instead
+                # of internal RAM. Needs PSRAM executing the firmware (execute_from_psram): a flash
+                # operation then does not turn the PSRAM cache off, so interrupts may still use them.
+                cv.Optional(CONF_COMPONENTS_IN_PSRAM, default=False): cv.boolean,
                 cv.Optional(CONF_ENABLE_OTA_ROLLBACK, default=True): cv.boolean,
                 cv.Optional(
                     CONF_ENABLE_OTA_DOWNGRADE_PROTECTION, default=False
@@ -3642,6 +3669,11 @@ async def to_code(config):
     cg.add_define("ESPHOME_LOOP_TASK_STACK_SIZE", advanced[CONF_LOOP_TASK_STACK_SIZE])
     if advanced[CONF_BOOT_RAM_PROBE]:
         cg.add_define("USE_ESP32_BOOT_RAM_PROBE")
+    if advanced[CONF_COMPONENTS_IN_PSRAM]:
+        if not advanced[CONF_EXECUTE_FROM_PSRAM]:
+            raise cv.Invalid(f"{CONF_COMPONENTS_IN_PSRAM} needs {CONF_EXECUTE_FROM_PSRAM}")
+        add_idf_sdkconfig_option("CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY", True)
+        CORE.data[KEY_ESP32][KEY_COMPONENTS_IN_PSRAM] = True
 
     cg.add_define(
         "USE_ESP_IDF_VERSION_CODE",
@@ -4203,6 +4235,13 @@ def _write_idf_component_yml():
             if component.get(KEY_OVERRIDE_PATH):
                 dependency["override_path"] = component[KEY_OVERRIDE_PATH]
             dependencies[name] = dependency
+
+    if CORE.data[KEY_ESP32].get(KEY_COMPONENTS_IN_PSRAM):
+        lf_dir = CORE.relative_build_path("component_stubs") / "esphome_bss_psram"
+        lf_dir.mkdir(parents=True, exist_ok=True)
+        write_file_if_changed(lf_dir / "linker.lf", _COMPONENTS_IN_PSRAM_LF)
+        write_file_if_changed(lf_dir / "CMakeLists.txt", 'idf_component_register(LDFRAGMENTS "linker.lf")' + chr(10))
+        dependencies["esphome_bss_psram"] = {"override_path": str(lf_dir)}
 
     contents = yaml_util.dump({"dependencies": dependencies}) if dependencies else ""
     if write_file_if_changed(yml_path, contents):
