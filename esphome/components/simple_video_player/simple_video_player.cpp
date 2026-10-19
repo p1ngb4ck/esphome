@@ -66,6 +66,12 @@ void SimpleVideoPlayer::setup() {
     this->mark_failed();
     return;
   }
+#ifdef SVP_BACKGROUND
+  // The background's storage may come after boot (a USB stick mounts later): a file that could
+  // not be had is tried again.
+  if (storage::global_storage_registry != nullptr)
+    storage::global_storage_registry->add_on_registered_callback([this](storage::Storage *) { this->bg_failed_ = false; });
+#endif
 
 #ifdef SVP_DSI_OUTPUT
   if (this->dsi_ != nullptr && !this->init_dsi_output_()) {
