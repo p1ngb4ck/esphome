@@ -4,6 +4,7 @@
 #include "esphome/core/defines.h"
 #include "esphome/core/helpers.h"
 #include "preferences.h"
+#include <atomic>
 #include <cstring>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -30,10 +31,46 @@ static StackType_t
 #ifdef USE_ESP32_BOOT_RAM_PROBE
 // Internal and internal DMA free RAM, sampled every millisecond for the first 90 s; each change of
 // 2 KB or more and each new low of the heap's own minimum are kept (on this task's PSRAM stack) and
-// logged once the 90 s are over, with when the component running then started its call.
+// logged once the 90 s are over, with the component running then: its name once setup() is complete
+// (App tracks the running component only for loop / scheduler dispatch), "setup" before, and when its
+// call started (the setup order resolves that one). Failed allocations in that time are kept too (size,
+// caps, the task and the component running): the hook only copies a few words into a static slot, in
+// the failing task's context.
+struct BootAllocFail {
+  uint32_t ms, size, caps;
+  Component *component;
+  char task[configMAX_TASK_NAME_LEN];  // copied: the task may be gone by the time the report is logged
+};
+static constexpr size_t BOOT_ALLOC_FAILS = 16;
+static BootAllocFail boot_alloc_fails[BOOT_ALLOC_FAILS];  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+static std::atomic<uint32_t> boot_alloc_fail_count{0};    // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+static std::atomic<bool> boot_alloc_watch{true};          // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
+static void boot_alloc_failed(size_t size, uint32_t caps, const char * /*function_name*/) {
+  if (!boot_alloc_watch.load(std::memory_order_relaxed))
+    return;
+  const uint32_t i = boot_alloc_fail_count.fetch_add(1, std::memory_order_relaxed);
+  if (i >= BOOT_ALLOC_FAILS)
+    return;
+  BootAllocFail &f = boot_alloc_fails[i];
+  f = {xTaskGetTickCount() * portTICK_PERIOD_MS, static_cast<uint32_t>(size), caps,
+       nullptr, {}};
+  // The running component is the main loop's: it only means something for a failure on that task.
+  if (App.is_setup_complete() && xTaskGetCurrentTaskHandle() == reinterpret_cast<TaskHandle_t>(&loop_task_tcb))
+    f.component = App.get_current_component();
+  const char *name = pcTaskGetName(nullptr);
+  if (name != nullptr)
+    strncpy(f.task, name, sizeof(f.task) - 1);
+}
+
+static const char *boot_component_name(Component *component) {
+  return component != nullptr ? LOG_STR_ARG(component->get_component_log_str()) : "setup";
+}
+
 static void boot_ram_probe(void *) {
   struct Sample {
     uint32_t ms, component_ms, internal, dma, dma_min;
+    Component *component;
   };
   static constexpr size_t SAMPLES = 100;
   static constexpr uint32_t STEP = 2048;
@@ -41,21 +78,25 @@ static void boot_ram_probe(void *) {
   size_t count = 0;
   bool full = false;
   uint32_t last_internal = 0, last_dma = 0, last_min = UINT32_MAX;
-  Sample low{0, 0, 0, UINT32_MAX, 0};  // the lowest internal DMA free seen
+  Sample low{0, 0, 0, UINT32_MAX, 0, nullptr};  // the lowest internal DMA free seen
+  uint32_t setup_done_ms = 0;
   const uint32_t dma_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA;
   while (xTaskGetTickCount() * portTICK_PERIOD_MS < 90000) {
     const uint32_t internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     const uint32_t dma = heap_caps_get_free_size(dma_caps);
     const uint32_t dma_min = heap_caps_get_minimum_free_size(dma_caps);
     const uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    Component *component = App.is_setup_complete() ? App.get_current_component() : nullptr;
+    if (setup_done_ms == 0 && component != nullptr)
+      setup_done_ms = now;
     if (dma < low.dma)
-      low = {now, App.get_loop_component_start_time(), internal, dma, dma_min};
+      low = {now, App.get_loop_component_start_time(), internal, dma, dma_min, component};
     // Drops of 2 KB, rises of 8 KB (a task's stack given back), each new low of the heap's minimum
     const bool moved = internal + STEP <= last_internal || last_internal + 4 * STEP <= internal ||
                        dma + STEP <= last_dma || last_dma + 4 * STEP <= dma || dma_min + 512 <= last_min;
     if (moved) {
       if (count < SAMPLES) {
-        samples[count++] = {now, App.get_loop_component_start_time(), internal, dma, dma_min};
+        samples[count++] = {now, App.get_loop_component_start_time(), internal, dma, dma_min, component};
       } else {
         full = true;
       }
@@ -65,17 +106,27 @@ static void boot_ram_probe(void *) {
     }
     vTaskDelay(1);
   }
-  ESP_LOGI("boot_ram", "Boot RAM (free bytes; the component's call started at):");
+  boot_alloc_watch.store(false, std::memory_order_relaxed);
+  ESP_LOGI("boot_ram", "Boot RAM (free bytes; the component running, since):");
   for (size_t i = 0; i < count; i++) {
     const Sample &s = samples[i];
-    ESP_LOGI("boot_ram", "%6" PRIu32 " ms (component since %6" PRIu32 "): internal %6" PRIu32 ", DMA %6" PRIu32
-                         ", DMA low %6" PRIu32, s.ms, s.component_ms, s.internal, s.dma, s.dma_min);
+    ESP_LOGI("boot_ram", "%6" PRIu32 " ms: internal %6" PRIu32 ", DMA %6" PRIu32 ", DMA low %6" PRIu32 "  %s (%" PRIu32
+                         " ms)",
+             s.ms, s.internal, s.dma, s.dma_min, boot_component_name(s.component), s.component_ms);
   }
   if (full)
     ESP_LOGI("boot_ram", "(more changes than %u kept)", static_cast<unsigned>(SAMPLES));
-  ESP_LOGI("boot_ram", "Lowest internal DMA free %" PRIu32 " at %" PRIu32 " ms (component since %" PRIu32
-                       "), internal then %" PRIu32 ", heap minimum %" PRIu32,
-           low.dma, low.ms, low.component_ms, low.internal, low.dma_min);
+  ESP_LOGI("boot_ram", "setup() complete by %" PRIu32 " ms", setup_done_ms);
+  ESP_LOGI("boot_ram", "Lowest internal DMA free %" PRIu32 " at %" PRIu32 " ms (%s), internal then %" PRIu32
+                       ", heap minimum %" PRIu32,
+           low.dma, low.ms, boot_component_name(low.component), low.internal, low.dma_min);
+  const uint32_t fails = boot_alloc_fail_count.load(std::memory_order_relaxed);
+  ESP_LOGI("boot_ram", "Failed allocations: %" PRIu32, fails);
+  for (uint32_t i = 0; i < fails && i < BOOT_ALLOC_FAILS; i++) {
+    const BootAllocFail &f = boot_alloc_fails[i];
+    ESP_LOGI("boot_ram", "%6" PRIu32 " ms: %6" PRIu32 " bytes, caps 0x%05" PRIx32 "  task %s, %s", f.ms, f.size,
+             f.caps, f.task, boot_component_name(f.component));
+  }
   vTaskDeleteWithCaps(nullptr);
 }
 #endif
@@ -109,6 +160,7 @@ extern "C" void app_main() {
   initArduino();
   esp32::setup_preferences();
 #ifdef USE_ESP32_BOOT_RAM_PROBE
+  heap_caps_register_failed_alloc_callback(boot_alloc_failed);
   xTaskCreatePinnedToCoreWithCaps(boot_ram_probe, "boot_ram", 6144, nullptr, 22, nullptr, 0, MALLOC_CAP_SPIRAM);
 #endif
 #if CONFIG_FREERTOS_UNICORE
