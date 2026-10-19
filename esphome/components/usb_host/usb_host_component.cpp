@@ -70,6 +70,11 @@ void USBHost::setup() {
   if (this->full_speed_only_)
     ESP_LOGI(TAG, "High-speed controller limited to full/low speed");
 #endif
+#ifdef USE_USB_HOST_CHANNEL_BUDGET
+  // Every device's host channels are counted before it is configured (channel_budget_cb)
+  config.enum_budget_cb = USBHost::channel_budget_cb;
+  config.enum_budget_cb_arg = this;
+#endif
   if (usb_host_install(&config) != ESP_OK) {
     this->status_set_error(LOG_STR("usb_host_install failed"));
     this->mark_failed();
@@ -538,15 +543,90 @@ bool USBHost::submit_transfer(TransferRequest *trq) {
 
 // -- Interface claim / release -------------------------------------------------
 
-bool USBHost::do_claim_interface(usb_host_client_handle_t client_handle, usb_device_handle_t device_handle,
-                                 uint8_t interface_num, uint8_t alt_setting) {
+// The driver's claim opens pipes only for the endpoints of the alt-setting it uses (skipped_endpoints_()).
+bool USBHost::do_claim_interface(USBClient *client, usb_host_client_handle_t client_handle,
+                                 usb_device_handle_t device_handle, uint8_t interface_num, uint8_t alt_setting) {
+#ifndef USE_USB_HOST_CHANNEL_BUDGET
   esp_err_t err = usb_host_interface_claim(client_handle, device_handle, interface_num, alt_setting);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "claim_interface %u alt %u failed: %s", interface_num, alt_setting, esp_err_to_name(err));
     return false;
   }
   return true;
+#else
+  uint32_t skip = 0;
+  const usb_device_desc_t *desc = nullptr;
+  const usb_config_desc_t *config = nullptr;
+  if (usb_host_get_device_descriptor(device_handle, &desc) == ESP_OK &&
+      usb_host_get_active_config_descriptor(device_handle, &config) == ESP_OK) {
+    int offset = 0;
+    const usb_intf_desc_t *alt = usb_parse_interface_descriptor(config, interface_num, alt_setting, &offset);
+    if (alt != nullptr)
+      skip = client->skipped_endpoints_(desc, config, alt);
+  }
+  esp_err_t err = usb_host_interface_claim_endpoints(client_handle, device_handle, interface_num, alt_setting, skip);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "claim_interface %u alt %u failed: %s", interface_num, alt_setting, esp_err_to_name(err));
+    return false;
+  }
+  if (skip != 0)
+    ESP_LOGD(TAG, "Interface %u alt %u claimed without endpoints 0x%08" PRIX32, interface_num, alt_setting, skip);
+  return true;
+#endif
 }
+
+// -- Host channel budget -------------------------------------------------------------
+#ifdef USE_USB_HOST_CHANNEL_BUDGET
+
+int USBHost::channel_budget_cb(const usb_device_desc_t *desc, const usb_config_desc_t *config, void *arg) {
+  return static_cast<USBHost *>(arg)->channel_need_(desc, config);
+}
+
+// The default pipe, then what routing would hand out: every interface the drivers would take (by the
+// same tiers as route_(), busy or not), each at its widest alternate setting without the endpoints its
+// driver skips. A hub's status pipe is the hub driver's; a device with a bulk mode switch claims a bulk
+// pair for it first.
+int USBHost::channel_need_(const usb_device_desc_t *desc, const usb_config_desc_t *config) const {
+  int need = 1;
+  auto endpoints_of_alt0 = [config](uint8_t number) {
+    int offset = 0;
+    const usb_intf_desc_t *intf = usb_parse_interface_descriptor(config, number, 0, &offset);
+    return intf != nullptr ? intf->bNumEndpoints : 0;
+  };
+  if (desc->bDeviceClass == USB_CLASS_HUB)
+    return need + endpoints_of_alt0(0);
+  RoutedDevice dev;
+  dev.desc = desc;
+  dev.config = config;
+  dev.strings_known = false;
+  bool named = false;
+  uint32_t interfaces;
+  for (auto *client : this->clients_) {
+    if (client->match_(dev, interfaces) == MatchTier::NAMED)
+      named = true;
+  }
+  int drivers = 0;
+  for (MatchTier tier : {MatchTier::NAMED, MatchTier::VENDOR, MatchTier::CLASS}) {
+    if (named && tier != MatchTier::NAMED)
+      break;
+    for (auto *client : this->clients_) {
+      if (client->match_(dev, interfaces) != tier)
+        continue;
+      const uint32_t free_interfaces = interfaces & ~dev.assigned;
+      dev.assigned |= free_interfaces;
+      for (uint8_t n = 0; n < 32; n++) {
+        if (free_interfaces & (1u << n))
+          drivers += client->interface_channels_(desc, config, n);
+      }
+    }
+  }
+  for (const auto &ms : this->mode_switches_) {
+    if (ms.vid == desc->idVendor && ms.pid == desc->idProduct && !ms.messages.empty())
+      drivers = std::max(drivers, 2);  // its bulk OUT / IN pair, claimed before any driver
+  }
+  return need + drivers;
+}
+#endif  // USE_USB_HOST_CHANNEL_BUDGET
 
 bool USBHost::do_release_interface(usb_host_client_handle_t client_handle, usb_device_handle_t device_handle,
                                    uint8_t interface_num) {
@@ -837,7 +917,7 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
     return ok;
   }
 
-  if (!this->do_claim_interface(client_handle, device_handle, stream.interface_num, stream.alt_setting)) {
+  if (!this->do_claim_interface(cb, client_handle, device_handle, stream.interface_num, stream.alt_setting)) {
     cb->on_stream_open(stream, false);
     return false;
   }

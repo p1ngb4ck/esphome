@@ -795,6 +795,330 @@ _USBH_CLEAR_ADDR_HEADER_REPLACEMENT = """esp_err_t usbh_dev_set_addr(usb_device_
  */
 esp_err_t usbh_dev_clear_addr(usb_device_handle_t dev_hdl);"""
 
+# -- Host channel budget and endpoint-subset claims ----------------------------------------------
+# Every pipe holds one of its controller's host channels from hcd_pipe_alloc() to hcd_pipe_free()
+# (8 on the P4's full-speed controller, 16 on the high-speed one), the default pipe of every device
+# included. A device that does not fit failed late: its driver's interface claim, or a stream the
+# driver opens when it is used, ran out of channels ("No more HCD channels available").
+#
+# Two additions, both opt-in at the call site:
+# - usb_host_interface_claim_endpoints(): a claim that leaves the endpoints in skip_endpoints
+#   (bit = endpoint number, +16 for IN) without a pipe; usb_host_interface_claim() is that claim
+#   with none skipped. A driver that never uses an endpoint (the interrupt OUT of a HID interface
+#   whose output reports go over SET_REPORT) does not hold a channel for it.
+# - usb_host_config_t::enum_budget_cb: asked for every device (hubs included) once its configuration
+#   descriptor is read, before SET_CONFIGURATION, for the channels it takes once configured. Its
+#   controller's commitments (usbh, per controller, given back when the device is freed) and that
+#   need have to fit the controller's channels, or the enumeration is cancelled: the device is closed
+#   (its default pipe and channel freed) and its port disabled, before any driver claims anything.
+_BUDGET_PUBLIC_TYPE_ANCHOR = """typedef bool (*usb_host_enum_filter_cb_t)(const usb_device_desc_t *dev_desc, uint8_t *bConfigurationValue);"""
+
+_BUDGET_PUBLIC_TYPE_REPLACEMENT = """typedef bool (*usb_host_enum_filter_cb_t)(const usb_device_desc_t *dev_desc, uint8_t *bConfigurationValue);
+
+/**
+ * @brief Host channels a device takes once configured
+ *
+ * Called for every device (hubs included) once its configuration descriptor is read, before
+ * SET_CONFIGURATION: its default pipe plus every pipe its drivers will open. A device that does not
+ * fit next to the devices already committed on its controller is not configured.
+ *
+ * @return Channels, or a negative value to take the device without counting it
+ */
+typedef int (*usb_host_enum_budget_cb_t)(const usb_device_desc_t *dev_desc, const usb_config_desc_t *config_desc,
+                                         void *arg);"""
+
+_BUDGET_PUBLIC_CONFIG_ANCHOR = """    usb_host_enum_filter_cb_t enum_filter_cb;   /**< Enumeration filter callback. Enable CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK
+                                                     to use this feature. Set to NULL otherwise. */"""
+
+_BUDGET_PUBLIC_CONFIG_REPLACEMENT = """    usb_host_enum_filter_cb_t enum_filter_cb;   /**< Enumeration filter callback. Enable CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK
+                                                     to use this feature. Set to NULL otherwise. */
+    usb_host_enum_budget_cb_t enum_budget_cb;   /**< Host channel budget callback, NULL: devices are not counted */
+    void *enum_budget_cb_arg;                   /**< Argument of enum_budget_cb */"""
+
+_CLAIM_PUBLIC_ANCHOR = """esp_err_t usb_host_interface_claim(usb_host_client_handle_t client_hdl, usb_device_handle_t dev_hdl, uint8_t bInterfaceNumber, uint8_t bAlternateSetting);"""
+
+_CLAIM_PUBLIC_REPLACEMENT = """esp_err_t usb_host_interface_claim(usb_host_client_handle_t client_hdl, usb_device_handle_t dev_hdl, uint8_t bInterfaceNumber, uint8_t bAlternateSetting);
+
+/**
+ * @brief usb_host_interface_claim() that opens no pipe for the endpoints in skip_endpoints
+ *
+ * @param[in] skip_endpoints Endpoints of the alternate setting left without a pipe (and host channel): bit
+ *                           (bEndpointAddress & 0x0F), plus 16 for an IN endpoint. 0 claims all of them.
+ */
+esp_err_t usb_host_interface_claim_endpoints(usb_host_client_handle_t client_hdl, usb_device_handle_t dev_hdl,
+                                             uint8_t bInterfaceNumber, uint8_t bAlternateSetting,
+                                             uint32_t skip_endpoints);
+
+/**
+ * @brief Host channels of a controller: allocated now, committed to configured devices, and its total
+ *
+ * @return ESP_ERR_INVALID_STATE until a device on that controller was counted
+ */
+esp_err_t usb_host_channel_usage(unsigned periph_idx, int *used, int *committed, int *total);"""
+
+_CLAIM_PRIVATE_SIG_ANCHOR = """static esp_err_t interface_claim(client_t *client_obj, usb_device_handle_t dev_hdl, const usb_config_desc_t *config_desc, uint8_t bInterfaceNumber, uint8_t bAlternateSetting, interface_t **intf_obj_ret)"""
+
+_CLAIM_PRIVATE_SIG_REPLACEMENT = """static esp_err_t interface_claim(client_t *client_obj, usb_device_handle_t dev_hdl, const usb_config_desc_t *config_desc, uint8_t bInterfaceNumber, uint8_t bAlternateSetting, uint32_t skip_endpoints, interface_t **intf_obj_ret)"""
+
+_CLAIM_SKIP_ANCHOR = """        // Allocate the endpoint wrapper item
+        ep_wrapper_t *ep_wrap;"""
+
+_CLAIM_SKIP_REPLACEMENT = """        // An endpoint the driver never uses gets no pipe (and no host channel); its slot stays NULL
+        const uint8_t ep_bit = (ep_desc->bEndpointAddress & 0x0F) + ((ep_desc->bEndpointAddress & 0x80) ? 16 : 0);
+        if (skip_endpoints & (1u << ep_bit)) {
+            continue;
+        }
+        // Allocate the endpoint wrapper item
+        ep_wrapper_t *ep_wrap;"""
+
+_CLAIM_INSERT_ANCHOR = """    for (int i = 0; i < intf_desc->bNumEndpoints; i++) {
+        TAILQ_INSERT_TAIL(&client_obj->dynamic.idle_ep_tailq, intf_obj->constant.endpoints[i], dynamic.tailq_entry);
+    }"""
+
+_CLAIM_INSERT_REPLACEMENT = """    for (int i = 0; i < intf_desc->bNumEndpoints; i++) {
+        if (intf_obj->constant.endpoints[i] != NULL) {
+            TAILQ_INSERT_TAIL(&client_obj->dynamic.idle_ep_tailq, intf_obj->constant.endpoints[i], dynamic.tailq_entry);
+        }
+    }"""
+
+_RELEASE_CHECK_ANCHOR = """        ep_wrapper_t *ep_wrap = intf_obj->constant.endpoints[i];
+        // Endpoint must not be on the pending list and must not have in-flight URBs"""
+
+_RELEASE_CHECK_REPLACEMENT = """        ep_wrapper_t *ep_wrap = intf_obj->constant.endpoints[i];
+        if (ep_wrap == NULL) {
+            continue;  // Skipped at the claim
+        }
+        // Endpoint must not be on the pending list and must not have in-flight URBs"""
+
+_RELEASE_REMOVE_ANCHOR = """    for (int i = 0; i < intf_obj->constant.intf_desc->bNumEndpoints; i++) {
+        TAILQ_REMOVE(&client_obj->dynamic.idle_ep_tailq, intf_obj->constant.endpoints[i], dynamic.tailq_entry);
+    }"""
+
+_RELEASE_REMOVE_REPLACEMENT = """    for (int i = 0; i < intf_obj->constant.intf_desc->bNumEndpoints; i++) {
+        if (intf_obj->constant.endpoints[i] != NULL) {
+            TAILQ_REMOVE(&client_obj->dynamic.idle_ep_tailq, intf_obj->constant.endpoints[i], dynamic.tailq_entry);
+        }
+    }"""
+
+_CLAIM_PUBLIC_IMPL_ANCHOR = """esp_err_t usb_host_interface_claim(usb_host_client_handle_t client_hdl, usb_device_handle_t dev_hdl, uint8_t bInterfaceNumber, uint8_t bAlternateSetting)
+{"""
+
+_CLAIM_PUBLIC_IMPL_REPLACEMENT = """esp_err_t usb_host_interface_claim(usb_host_client_handle_t client_hdl, usb_device_handle_t dev_hdl, uint8_t bInterfaceNumber, uint8_t bAlternateSetting)
+{
+    return usb_host_interface_claim_endpoints(client_hdl, dev_hdl, bInterfaceNumber, bAlternateSetting, 0);
+}
+
+esp_err_t usb_host_channel_usage(unsigned periph_idx, int *used, int *committed, int *total)
+{
+    HOST_CHECK(used != NULL && committed != NULL && total != NULL, ESP_ERR_INVALID_ARG);
+    return usbh_channel_usage(periph_idx, used, committed, total);
+}
+
+esp_err_t usb_host_interface_claim_endpoints(usb_host_client_handle_t client_hdl, usb_device_handle_t dev_hdl,
+                                             uint8_t bInterfaceNumber, uint8_t bAlternateSetting,
+                                             uint32_t skip_endpoints)
+{"""
+
+_CLAIM_PUBLIC_CALL_ANCHOR = """    ret = interface_claim(client_obj, dev_hdl, config_desc, bInterfaceNumber, bAlternateSetting, &intf_obj);"""
+
+_CLAIM_PUBLIC_CALL_REPLACEMENT = """    ret = interface_claim(client_obj, dev_hdl, config_desc, bInterfaceNumber, bAlternateSetting, skip_endpoints, &intf_obj);"""
+
+_BUDGET_INSTALL_ANCHOR = """        .enum_event_cb = enum_event_callback,
+        .enum_event_cb_arg = NULL,"""
+
+_BUDGET_INSTALL_REPLACEMENT = """        .enum_event_cb = enum_event_callback,
+        .enum_event_cb_arg = NULL,
+        .enum_budget_cb = config->enum_budget_cb,
+        .enum_budget_cb_arg = config->enum_budget_cb_arg,"""
+
+_BUDGET_ENUM_HEADER_ANCHOR = """    enum_event_cb_t enum_event_cb;                  /**< Enum event callback */
+    void *enum_event_cb_arg;                        /**< Enum event callback argument */"""
+
+_BUDGET_ENUM_HEADER_REPLACEMENT = """    enum_event_cb_t enum_event_cb;                  /**< Enum event callback */
+    void *enum_event_cb_arg;                        /**< Enum event callback argument */
+    usb_host_enum_budget_cb_t enum_budget_cb;       /**< Host channel budget callback, NULL: not counted */
+    void *enum_budget_cb_arg;                       /**< Host channel budget callback argument */"""
+
+_BUDGET_ENUM_FIELD_ANCHOR = """        enum_event_cb_t enum_event_cb;              /**< Enumeration driver event callback */
+        void *enum_event_cb_arg;                    /**< Enumeration driver event callback argument */"""
+
+_BUDGET_ENUM_FIELD_REPLACEMENT = """        enum_event_cb_t enum_event_cb;              /**< Enumeration driver event callback */
+        void *enum_event_cb_arg;                    /**< Enumeration driver event callback argument */
+        usb_host_enum_budget_cb_t enum_budget_cb;   /**< Host channel budget callback */
+        void *enum_budget_cb_arg;                   /**< Host channel budget callback argument */"""
+
+_BUDGET_ENUM_STORE_ANCHOR = """    enum_drv->constant.enum_event_cb_arg = config->enum_event_cb_arg;"""
+
+_BUDGET_ENUM_STORE_REPLACEMENT = """    enum_drv->constant.enum_event_cb_arg = config->enum_event_cb_arg;
+    enum_drv->constant.enum_budget_cb = config->enum_budget_cb;
+    enum_drv->constant.enum_budget_cb_arg = config->enum_budget_cb_arg;"""
+
+_BUDGET_ENUM_CHECK_ANCHOR = """    // Allocate Configuration descriptor and set it's value to device object
+    ret = usbh_dev_set_config_desc(dev_hdl, config_desc);
+
+exit:
+    return ret;
+}"""
+
+_BUDGET_ENUM_CHECK_REPLACEMENT = """    // Allocate Configuration descriptor and set it's value to device object
+    ret = usbh_dev_set_config_desc(dev_hdl, config_desc);
+    // Its host channels have to fit on its controller, or it is not configured (the stage fails: cancelled)
+    if (ret == ESP_OK && p_enum_driver->constant.enum_budget_cb != NULL) {
+        const usb_device_desc_t *dev_desc = NULL;
+        if (usbh_dev_get_desc(dev_hdl, &dev_desc) == ESP_OK && dev_desc != NULL) {
+            const int channels = p_enum_driver->constant.enum_budget_cb(dev_desc, config_desc,
+                                                                        p_enum_driver->constant.enum_budget_cb_arg);
+            if (channels >= 0) {
+                ret = usbh_dev_commit_channels(dev_hdl, channels);
+            }
+        }
+    }
+
+exit:
+    return ret;
+}"""
+
+_BUDGET_USBH_FIELD_ANCHOR = """        usb_str_desc_t *str_desc_ser_num;           /**< Device's Serial string descriptor pointer */
+    } constant;"""
+
+_BUDGET_USBH_FIELD_REPLACEMENT = """        usb_str_desc_t *str_desc_ser_num;           /**< Device's Serial string descriptor pointer */
+        uint8_t channels;                           /**< Host channels committed to the device (usbh_dev_commit_channels) */
+    } constant;"""
+
+_BUDGET_USBH_STATE_ANCHOR = """const char *USBH_TAG = "USBH";"""
+
+_BUDGET_USBH_STATE_REPLACEMENT = """const char *USBH_TAG = "USBH";
+
+// Host channels committed to the configured devices of each controller (usbh_dev_commit_channels()),
+// and a port of that controller to read its channel count from.
+static int s_channels_committed[SOC_USB_OTG_PERIPH_NUM];
+static hcd_port_handle_t s_channel_port[SOC_USB_OTG_PERIPH_NUM];"""
+
+_BUDGET_USBH_INCLUDE_ANCHOR = """#include "hcd.h"
+#include "usbh.h\""""
+
+_BUDGET_USBH_INCLUDE_REPLACEMENT = """#include "soc/soc_caps.h"
+#include "hcd.h"
+#include "usbh.h\""""
+
+_BUDGET_USBH_FREE_ANCHOR = """    ESP_ERROR_CHECK(hcd_pipe_free(dev_obj->constant.default_pipe));
+    heap_caps_free(dev_obj);
+}"""
+
+_BUDGET_USBH_FREE_REPLACEMENT = """    ESP_ERROR_CHECK(hcd_pipe_free(dev_obj->constant.default_pipe));
+    if (dev_obj->constant.channels != 0) {
+        const int periph = hcd_port_get_periph_idx(dev_obj->constant.port_hdl);
+        USBH_ENTER_CRITICAL();
+        s_channels_committed[periph] -= dev_obj->constant.channels;
+        USBH_EXIT_CRITICAL();
+    }
+    heap_caps_free(dev_obj);
+}"""
+
+_BUDGET_USBH_COMMIT_ANCHOR = """esp_err_t usbh_dev_set_desc(usb_device_handle_t dev_hdl, const usb_device_desc_t *device_desc)
+{"""
+
+_BUDGET_USBH_COMMIT_REPLACEMENT = """esp_err_t usbh_dev_commit_channels(usb_device_handle_t dev_hdl, int channels)
+{
+    USBH_CHECK(dev_hdl != NULL && channels >= 0 && channels <= UINT8_MAX, ESP_ERR_INVALID_ARG);
+    device_t *dev_obj = (device_t *)dev_hdl;
+    hcd_port_handle_t port_hdl = dev_obj->constant.port_hdl;
+    const int periph = hcd_port_get_periph_idx(port_hdl);
+    int used = 0;
+    int total = 0;
+    hcd_port_get_channels(port_hdl, &used, &total);
+
+    esp_err_t ret = ESP_OK;
+    USBH_ENTER_CRITICAL();
+    s_channel_port[periph] = port_hdl;
+    const int committed = s_channels_committed[periph] - dev_obj->constant.channels;
+    if (committed + channels > total) {
+        ret = ESP_ERR_NOT_SUPPORTED;
+    } else {
+        s_channels_committed[periph] = committed + channels;
+        dev_obj->constant.channels = (uint8_t)channels;
+    }
+    USBH_EXIT_CRITICAL();
+
+    const usb_device_desc_t *desc = dev_obj->constant.desc;
+    if (ret != ESP_OK) {
+        ESP_LOGW(USBH_TAG, "Device %04X:%04X needs %d host channels, %d of %d are committed on controller %d: not configured",
+                 desc ? desc->idVendor : 0, desc ? desc->idProduct : 0, channels, committed, total, periph);
+    } else {
+        ESP_LOGD(USBH_TAG, "Device %04X:%04X: %d host channels, controller %d %d of %d committed (%d allocated)",
+                 desc ? desc->idVendor : 0, desc ? desc->idProduct : 0, channels, periph, committed + channels, total, used);
+    }
+    return ret;
+}
+
+esp_err_t usbh_channel_usage(unsigned periph_idx, int *used, int *committed, int *total)
+{
+    USBH_CHECK(periph_idx < SOC_USB_OTG_PERIPH_NUM, ESP_ERR_INVALID_ARG);
+    USBH_ENTER_CRITICAL();
+    hcd_port_handle_t port_hdl = s_channel_port[periph_idx];
+    *committed = s_channels_committed[periph_idx];
+    USBH_EXIT_CRITICAL();
+    if (port_hdl == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    hcd_port_get_channels(port_hdl, used, total);
+    return ESP_OK;
+}
+
+esp_err_t usbh_dev_set_desc(usb_device_handle_t dev_hdl, const usb_device_desc_t *device_desc)
+{"""
+
+_BUDGET_USBH_HEADER_ANCHOR = """esp_err_t usbh_dev_set_addr(usb_device_handle_t dev_hdl, uint8_t dev_addr);"""
+
+_BUDGET_USBH_HEADER_REPLACEMENT = """esp_err_t usbh_dev_set_addr(usb_device_handle_t dev_hdl, uint8_t dev_addr);
+
+/**
+ * @brief Commit host channels to a device being enumerated
+ *
+ * They are given back when the device object is freed. ESP_ERR_NOT_SUPPORTED: they do not fit next to the
+ * channels committed on the device's controller (logged), nothing committed.
+ */
+esp_err_t usbh_dev_commit_channels(usb_device_handle_t dev_hdl, int channels);
+
+/**
+ * @brief Host channels of a controller: allocated, committed (usbh_dev_commit_channels), total
+ */
+esp_err_t usbh_channel_usage(unsigned periph_idx, int *used, int *committed, int *total);"""
+
+_BUDGET_HCD_HEADER_ANCHOR = """esp_err_t hcd_port_get_speed(hcd_port_handle_t port_hdl, usb_speed_t *speed);"""
+
+_BUDGET_HCD_HEADER_REPLACEMENT = """esp_err_t hcd_port_get_speed(hcd_port_handle_t port_hdl, usb_speed_t *speed);
+
+/**
+ * @brief Peripheral (controller) index of a port
+ */
+int hcd_port_get_periph_idx(hcd_port_handle_t port_hdl);
+
+/**
+ * @brief Host channels of a port's controller: allocated now (one per pipe) and in total
+ */
+void hcd_port_get_channels(hcd_port_handle_t port_hdl, int *used, int *total);"""
+
+_BUDGET_HCD_IMPL_ANCHOR = """hcd_port_event_t hcd_port_handle_event(hcd_port_handle_t port_hdl)
+{"""
+
+_BUDGET_HCD_IMPL_REPLACEMENT = """int hcd_port_get_periph_idx(hcd_port_handle_t port_hdl)
+{
+    return ((port_t *)port_hdl)->periph_idx;
+}
+
+void hcd_port_get_channels(hcd_port_handle_t port_hdl, int *used, int *total)
+{
+    port_t *port = (port_t *)port_hdl;
+    HCD_ENTER_CRITICAL();
+    *used = port->hal->channels.num_allocated;
+    *total = (int)port->hal->constant_config.chan_num_total;
+    HCD_EXIT_CRITICAL();
+}
+
+hcd_port_event_t hcd_port_handle_event(hcd_port_handle_t port_hdl)
+{"""
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -844,6 +1168,29 @@ PATCHES = (
     ("src/enum.c", _ENUM_PROBE_FAIL_ANCHOR, _ENUM_PROBE_FAIL_REPLACEMENT),
     ("src/usbh.c", _USBH_CLEAR_ADDR_ANCHOR, _USBH_CLEAR_ADDR_REPLACEMENT),
     ("private_include/usbh.h", _USBH_CLEAR_ADDR_HEADER_ANCHOR, _USBH_CLEAR_ADDR_HEADER_REPLACEMENT),
+    ("include/usb/usb_types_stack.h", _BUDGET_PUBLIC_TYPE_ANCHOR, _BUDGET_PUBLIC_TYPE_REPLACEMENT),
+    ("include/usb/usb_host.h", _BUDGET_PUBLIC_CONFIG_ANCHOR, _BUDGET_PUBLIC_CONFIG_REPLACEMENT),
+    ("include/usb/usb_host.h", _CLAIM_PUBLIC_ANCHOR, _CLAIM_PUBLIC_REPLACEMENT),
+    ("src/usb_host.c", _CLAIM_PRIVATE_SIG_ANCHOR, _CLAIM_PRIVATE_SIG_REPLACEMENT),
+    ("src/usb_host.c", _CLAIM_SKIP_ANCHOR, _CLAIM_SKIP_REPLACEMENT),
+    ("src/usb_host.c", _CLAIM_INSERT_ANCHOR, _CLAIM_INSERT_REPLACEMENT),
+    ("src/usb_host.c", _RELEASE_CHECK_ANCHOR, _RELEASE_CHECK_REPLACEMENT),
+    ("src/usb_host.c", _RELEASE_REMOVE_ANCHOR, _RELEASE_REMOVE_REPLACEMENT),
+    ("src/usb_host.c", _CLAIM_PUBLIC_IMPL_ANCHOR, _CLAIM_PUBLIC_IMPL_REPLACEMENT),
+    ("src/usb_host.c", _CLAIM_PUBLIC_CALL_ANCHOR, _CLAIM_PUBLIC_CALL_REPLACEMENT),
+    ("src/usb_host.c", _BUDGET_INSTALL_ANCHOR, _BUDGET_INSTALL_REPLACEMENT),
+    ("private_include/enum.h", _BUDGET_ENUM_HEADER_ANCHOR, _BUDGET_ENUM_HEADER_REPLACEMENT),
+    ("src/enum.c", _BUDGET_ENUM_FIELD_ANCHOR, _BUDGET_ENUM_FIELD_REPLACEMENT),
+    ("src/enum.c", _BUDGET_ENUM_STORE_ANCHOR, _BUDGET_ENUM_STORE_REPLACEMENT),
+    ("src/enum.c", _BUDGET_ENUM_CHECK_ANCHOR, _BUDGET_ENUM_CHECK_REPLACEMENT),
+    ("src/usbh.c", _BUDGET_USBH_INCLUDE_ANCHOR, _BUDGET_USBH_INCLUDE_REPLACEMENT),
+    ("src/usbh.c", _BUDGET_USBH_FIELD_ANCHOR, _BUDGET_USBH_FIELD_REPLACEMENT),
+    ("src/usbh.c", _BUDGET_USBH_STATE_ANCHOR, _BUDGET_USBH_STATE_REPLACEMENT),
+    ("src/usbh.c", _BUDGET_USBH_FREE_ANCHOR, _BUDGET_USBH_FREE_REPLACEMENT),
+    ("src/usbh.c", _BUDGET_USBH_COMMIT_ANCHOR, _BUDGET_USBH_COMMIT_REPLACEMENT),
+    ("private_include/usbh.h", _BUDGET_USBH_HEADER_ANCHOR, _BUDGET_USBH_HEADER_REPLACEMENT),
+    ("private_include/hcd.h", _BUDGET_HCD_HEADER_ANCHOR, _BUDGET_HCD_HEADER_REPLACEMENT),
+    ("src/hcd_dwc.c", _BUDGET_HCD_IMPL_ANCHOR, _BUDGET_HCD_IMPL_REPLACEMENT),
 )
 
 # Identifies an existing patched copy. It has to change whenever anything about that copy

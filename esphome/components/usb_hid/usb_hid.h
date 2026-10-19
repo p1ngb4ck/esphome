@@ -31,7 +31,7 @@ class USBHIDClient;
 // receivers that put several of them on one interface), and the gamepad driver of the pads it knows
 // (hid/gamepad.h). Its own key state (modifiers, keys held, Num Lock), its keys, text, pointer and controls
 // go to the client's input, which is what automations, sensors, LVGL and key_provider listen to.
-class USBHIDDevice : public hid::HIDInput {
+class USBHIDDevice final : public hid::HIDInput {
   friend class USBHIDClient;
   friend class MCEReceiverDriver;
 
@@ -138,6 +138,8 @@ class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
   };
 
   bool accepts_more_devices_() const override { return true; }
+  uint32_t skipped_endpoints_(const usb_device_desc_t *desc, const usb_config_desc_t *config,
+                              const usb_intf_desc_t *alt) const override;
   void on_device_connected(usb_host::UsbDevice &dev) override;
   void on_device_disconnected(usb_host::UsbDevice &dev) override;
   void free_device_context(usb_host::UsbDevice &dev) override;

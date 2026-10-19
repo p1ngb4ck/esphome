@@ -1148,4 +1148,10 @@ std::unique_ptr<GamepadDriver> make_gamepad_driver(HIDInput *input, HIDBus bus, 
   return nullptr;
 }
 
+// The drivers' constructors only keep the input, so one made without it answers the question; it is
+// dropped again at once (no timer of it started: that happens in start()).
+bool has_gamepad_driver(HIDBus bus, uint16_t vid, uint16_t pid) {
+  return make_gamepad_driver(nullptr, bus, vid, pid, 0) != nullptr;
+}
+
 }  // namespace esphome::hid

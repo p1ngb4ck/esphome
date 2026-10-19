@@ -515,7 +515,20 @@ static uint32_t interfaces_matching(const usb_config_desc_t *cfg, const UsbMatch
   return mask;
 }
 
+// The interfaces this driver leaves alone (interface blacklist) are never its, whatever it matches them by.
 MatchTier USBClient::match_(const RoutedDevice &dev, uint32_t &interfaces) const {
+  MatchTier tier = this->match_all_(dev, interfaces);
+  if constexpr (USB_INTERFACE_BLACKLIST_USED) {
+    if (tier != MatchTier::NONE) {
+      interfaces &= ~this->blacklisted_interfaces_(dev.desc);
+      if (interfaces == 0)
+        tier = MatchTier::NONE;
+    }
+  }
+  return tier;
+}
+
+MatchTier USBClient::match_all_(const RoutedDevice &dev, uint32_t &interfaces) const {
   interfaces = 0;
   // Blacklisted: never this driver's, whatever its class or tables say
   if (this->blacklisted_(dev.desc))
@@ -535,10 +548,11 @@ MatchTier USBClient::match_(const RoutedDevice &dev, uint32_t &interfaces) const
       // Named (whitelist): this device and no other, whatever its class says.
       if ((this->vid_ != 0 && dev.desc->idVendor != this->vid_) || (this->pid_ != 0 && dev.desc->idProduct != this->pid_))
         return MatchTier::NONE;
-      if (this->manufacturer_filter_ != nullptr &&
+      if (dev.strings_known && this->manufacturer_filter_ != nullptr &&
           !descriptor_string_equals(dev.info.str_desc_manufacturer, this->manufacturer_filter_))
         return MatchTier::NONE;
-      if (this->product_filter_ != nullptr && !descriptor_string_equals(dev.info.str_desc_product, this->product_filter_))
+      if (dev.strings_known && this->product_filter_ != nullptr &&
+          !descriptor_string_equals(dev.info.str_desc_product, this->product_filter_))
         return MatchTier::NONE;
       // Its own interfaces where its tables say which those are, so two drivers named to one
       // composite device (sound card with buttons) each get theirs; the whole device otherwise.
@@ -560,6 +574,27 @@ MatchTier USBClient::match_(const RoutedDevice &dev, uint32_t &interfaces) const
   if (tier == MatchTier::NONE)
     interfaces = 0;
   return tier;
+}
+
+uint8_t USBClient::interface_channels_(const usb_device_desc_t *desc, const usb_config_desc_t *config,
+                                       uint8_t interface_num) const {
+  uint8_t widest = 0;
+  int offset = 0;
+  const auto *next = reinterpret_cast<const usb_standard_desc_t *>(config);
+  while ((next = usb_parse_next_descriptor_of_type(next, config->wTotalLength, USB_B_DESCRIPTOR_TYPE_INTERFACE,
+                                                   &offset)) != nullptr) {
+    const auto *alt = reinterpret_cast<const usb_intf_desc_t *>(next);
+    if (alt->bInterfaceNumber != interface_num)
+      continue;
+    const uint32_t skip = this->skipped_endpoints_(desc, config, alt);
+    uint8_t channels = 0;
+    for_each_alt_endpoint(config, alt, [&](const usb_ep_desc_t *ep) {
+      if ((skip & endpoint_bit(ep)) == 0)
+        channels++;
+    });
+    widest = std::max(widest, channels);
+  }
+  return widest;
 }
 
 void USBClient::bind_(uint8_t addr, uint32_t interfaces) {
@@ -811,7 +846,7 @@ bool USBClient::set_interface(uint8_t interface_num, uint8_t alt_setting, const 
 #endif  // USE_USB_CONTROL_TRANSFERS
 
 bool USBClient::claim_interface(uint8_t interface_num, uint8_t alt_setting) {
-  return this->host_->do_claim_interface(this->handle_, this->device_handle_, interface_num, alt_setting);
+  return this->host_->do_claim_interface(this, this->handle_, this->device_handle_, interface_num, alt_setting);
 }
 
 bool USBClient::release_interface(uint8_t interface_num) {
@@ -883,7 +918,7 @@ bool USBClient::control_transfer(UsbDevice &dev, uint8_t type, uint8_t request, 
 #endif  // USE_USB_CONTROL_TRANSFERS
 
 bool USBClient::claim_interface(UsbDevice &dev, uint8_t interface_num, uint8_t alt_setting) {
-  return this->host_->do_claim_interface(this->handle_, dev.handle, interface_num, alt_setting);
+  return this->host_->do_claim_interface(this, this->handle_, dev.handle, interface_num, alt_setting);
 }
 
 bool USBClient::release_interface(UsbDevice &dev, uint8_t interface_num) {
@@ -909,6 +944,9 @@ bool USBClient::open_devices_() {
         this->drop_device_(dev);  // erases it: the same index is the next device
         continue;
       }
+      // on_device_connected() may have closed it again (erased too)
+      if (i >= this->devices_.size() || this->devices_[i].get() != dev)
+        continue;
     }
     i++;
   }

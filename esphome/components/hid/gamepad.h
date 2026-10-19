@@ -111,5 +111,8 @@ class GamepadDriver {
 /// alone describes it.
 std::unique_ptr<GamepadDriver> make_gamepad_driver(HIDInput *input, HIDBus bus, uint16_t vid, uint16_t pid,
                                                    uint16_t version);
+/// Whether make_gamepad_driver() has a driver for the pad: one that talks to it (its output reports), so
+/// a USB transport keeps the pad's interrupt OUT pipe.
+bool has_gamepad_driver(HIDBus bus, uint16_t vid, uint16_t pid);
 
 }  // namespace esphome::hid

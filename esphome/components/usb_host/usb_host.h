@@ -27,10 +27,32 @@ namespace esphome::usb_host {
 #ifndef USB_HOST_BLACKLIST
 #define USB_HOST_BLACKLIST 0
 #endif
+#ifndef USB_HOST_INTERFACE_BLACKLIST
+#define USB_HOST_INTERFACE_BLACKLIST 0
+#endif
 /// Some driver names its device by vid / pid / manufacturer / product (the whitelist, 0 = wildcard).
 static constexpr bool USB_WHITELIST_USED = USB_HOST_WHITELIST != 0;
 /// Some driver refuses listed devices (exact vid:pid pairs).
 static constexpr bool USB_BLACKLIST_USED = USB_HOST_BLACKLIST != 0;
+/// Some driver leaves single interfaces of listed devices alone (exact vid:pid plus interface numbers).
+static constexpr bool USB_INTERFACE_BLACKLIST_USED = USB_HOST_INTERFACE_BLACKLIST != 0;
+
+/// Bit of an endpoint in a skipped-endpoints mask (USBClient::skipped_endpoints_()): its number, plus 16 for IN.
+inline uint32_t endpoint_bit(const usb_ep_desc_t *ep) {
+  return 1u << ((ep->bEndpointAddress & 0x0F) + ((ep->bEndpointAddress & 0x80) ? 16 : 0));
+}
+
+/// Calls `fn` for each endpoint descriptor of one alternate setting (`alt` points into `config`).
+template<typename F> void for_each_alt_endpoint(const usb_config_desc_t *config, const usb_intf_desc_t *alt, F &&fn) {
+  int offset = reinterpret_cast<const uint8_t *>(alt) - reinterpret_cast<const uint8_t *>(config);
+  const auto *next = reinterpret_cast<const usb_standard_desc_t *>(alt);
+  while ((next = usb_parse_next_descriptor(next, config->wTotalLength, &offset)) != nullptr) {
+    if (next->bDescriptorType == USB_B_DESCRIPTOR_TYPE_INTERFACE)
+      return;
+    if (next->bDescriptorType == USB_B_DESCRIPTOR_TYPE_ENDPOINT)
+      fn(reinterpret_cast<const usb_ep_desc_t *>(next));
+  }
+}
 
 // THREADING MODEL:
 // This component uses a dedicated USB task for event processing to prevent data loss.
@@ -211,6 +233,9 @@ struct RoutedDevice {
   const usb_device_desc_t *desc{nullptr};
   const usb_config_desc_t *config{nullptr};
   usb_device_info_t info{};
+  // False while the device is still being enumerated (the host channel budget): its string descriptors are
+  // not read yet, so a manufacturer / product filter counts as matching.
+  bool strings_known{true};
   // Interfaces handed to drivers, one bit per bInterfaceNumber.
   uint32_t assigned{0};
   std::vector<USBClient *> bound{};
@@ -375,6 +400,12 @@ class USBClient : public Component {
     this->blacklist_ = pairs;
     this->blacklist_count_ = count;
   }
+  /// Single interfaces this driver leaves alone: `count` entries of two words, vid << 16 | pid and the
+  /// interfaces as a bit mask (bit = bInterfaceNumber), a codegen table in flash.
+  void set_interface_blacklist(const uint32_t *entries, uint8_t count) {
+    this->interface_blacklist_ = entries;
+    this->interface_blacklist_count_ = count;
+  }
   void set_manufacturer_filter(const char16_t *manufacturer) { this->manufacturer_filter_ = manufacturer; }
   void set_product_filter(const char16_t *product) { this->product_filter_ = product; }
 
@@ -533,8 +564,31 @@ class USBClient : public Component {
     }
     return false;
   }
+  /// The interfaces of the device this driver leaves alone (0 when no configuration lists any).
+  uint32_t blacklisted_interfaces_(const usb_device_desc_t *desc) const {
+    if constexpr (USB_INTERFACE_BLACKLIST_USED) {
+      const uint32_t id = (static_cast<uint32_t>(desc->idVendor) << 16) | desc->idProduct;
+      for (uint8_t i = 0; i < this->interface_blacklist_count_; i++) {
+        if (this->interface_blacklist_[2 * i] == id)
+          return this->interface_blacklist_[2 * i + 1];
+      }
+    }
+    return 0;
+  }
   // How this driver matches the device, and which of its interfaces it would serve.
   MatchTier match_(const RoutedDevice &dev, uint32_t &interfaces) const;
+  MatchTier match_all_(const RoutedDevice &dev, uint32_t &interfaces) const;
+  /// Endpoints of this alternate setting the driver never uses: its claim opens no pipe (and holds no host
+  /// channel) for them. Bit (bEndpointAddress & 0x0F), plus 16 for an IN endpoint. Decided from the
+  /// descriptors alone: the host channel budget asks the same while the device is still being enumerated.
+  virtual uint32_t skipped_endpoints_(const usb_device_desc_t *desc, const usb_config_desc_t *config,
+                                      const usb_intf_desc_t *alt) const {
+    return 0;
+  }
+  /// Host channels this driver's claims of an interface take at most: the endpoints of its widest
+  /// alternate setting, without the skipped ones.
+  uint8_t interface_channels_(const usb_device_desc_t *desc, const usb_config_desc_t *config,
+                              uint8_t interface_num) const;
   /// A driver's own say on a class or vendor match: NONE to pass the device by, NAMED when
   /// its configuration names it after all (a usb_storage mount with the stick's vid/pid).
   virtual MatchTier refine_match_(const RoutedDevice &dev, MatchTier tier) const { return tier; }
@@ -587,6 +641,8 @@ class USBClient : public Component {
   std::vector<std::unique_ptr<UsbDevice>> dead_devices_{};  // closed, transfers still out
   const uint16_t *blacklist_{nullptr};  // vid, pid pairs in flash (set_blacklist)
   uint8_t blacklist_count_{0};
+  const uint32_t *interface_blacklist_{nullptr};  // vid << 16 | pid, interface mask (set_interface_blacklist)
+  uint8_t interface_blacklist_count_{0};
   std::vector<UsbMatch> class_matches_{};
   std::vector<UsbMatch> vendor_matches_{};
   uint32_t routed_interfaces_{0};
@@ -647,7 +703,7 @@ class USBHost final : public Component {
 #endif
 
   // Interface claim / release -- always needed
-  bool do_claim_interface(usb_host_client_handle_t client_handle, usb_device_handle_t device_handle,
+  bool do_claim_interface(USBClient *client, usb_host_client_handle_t client_handle, usb_device_handle_t device_handle,
                           uint8_t interface_num, uint8_t alt_setting);
   bool do_release_interface(usb_host_client_handle_t client_handle, usb_device_handle_t device_handle,
                             uint8_t interface_num);
@@ -712,6 +768,13 @@ class USBHost final : public Component {
   void device_gone_(usb_device_handle_t handle);
   void route_(RoutedDevice &dev);
   RoutedDevice *find_device_(usb_device_handle_t handle);
+  /// Enumeration (the IDF, from usb_host_lib_handle_events() in loop()): the host channels a device takes
+  /// once configured - its default pipe and every pipe its drivers will open, streams opened only while
+  /// used included. A device that does not fit on its controller is not configured (patched espressif/usb).
+#ifdef USE_USB_HOST_CHANNEL_BUDGET
+  static int channel_budget_cb(const usb_device_desc_t *desc, const usb_config_desc_t *config, void *arg);
+  int channel_need_(const usb_device_desc_t *desc, const usb_config_desc_t *config) const;
+#endif
   bool start_mode_switch_(RoutedDevice &dev);
   bool submit_switch_step_(RoutedDevice &dev);
   static void switch_cb(usb_transfer_t *xfer);

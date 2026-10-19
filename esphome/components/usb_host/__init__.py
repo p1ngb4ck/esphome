@@ -110,8 +110,10 @@ _FILTER_WILDCARDS = {
 
 
 CONF_BLACKLIST = "blacklist"
+CONF_INTERFACES = "interfaces"
 KEY_WHITELIST_USED = "whitelist_used"
 KEY_BLACKLIST_USED = "blacklist_used"
+KEY_INTERFACE_BLACKLIST_USED = "interface_blacklist_used"
 
 
 def _blacklist_entry(value):
@@ -119,8 +121,16 @@ def _blacklist_entry(value):
         {
             cv.Required(CONF_VID): cv.hex_uint16_t,
             cv.Required(CONF_PID): cv.hex_uint16_t,
+            # Only these interfaces of the device (bInterfaceNumber): the driver leaves them alone and
+            # serves the rest. Without it the whole device.
+            cv.Optional(CONF_INTERFACES): cv.All(
+                cv.ensure_list(cv.int_range(min=0, max=31)), cv.Length(min=1)
+            ),
         }
     )(value)
+    if interfaces := value.get(CONF_INTERFACES):
+        if len(set(interfaces)) != len(interfaces):
+            raise cv.Invalid(f"interface listed twice in {interfaces}")
     if value[CONF_VID] == 0 or value[CONF_PID] == 0:
         raise cv.Invalid(
             "a wildcard has no place in a blacklist: it is a whitelist with only specific entries - "
@@ -129,7 +139,7 @@ def _blacklist_entry(value):
     return value
 
 
-# Every driver on USBClient: the devices it refuses, exact vid:pid pairs.
+# Every driver on USBClient: the devices it refuses, exact vid:pid pairs, or single interfaces of them.
 USB_BLACKLIST_SCHEMA = {
     cv.Optional(CONF_BLACKLIST): cv.ensure_list(_blacklist_entry),
 }
@@ -147,14 +157,29 @@ async def setup_usb_match(var: MockObj, config: ConfigType) -> None:
         or config.get(CONF_PRODUCT) is not None
     ):
         data[KEY_WHITELIST_USED] = True
-    if entries := config.get(CONF_BLACKLIST):
+    entries = config.get(CONF_BLACKLIST) or []
+    if devices := [e for e in entries if CONF_INTERFACES not in e]:
         data[KEY_BLACKLIST_USED] = True
-        pairs = [v for e in entries for v in (e[CONF_VID], e[CONF_PID])]
+        pairs = [v for e in devices for v in (e[CONF_VID], e[CONF_PID])]
         table_id = ID(
             f"{config[CONF_ID]}_usb_blacklist", is_declaration=True, type=cg.uint16
         )
         table = cg.static_const_array(table_id, cg.ArrayInitializer(*pairs))
-        cg.add(var.set_blacklist(table, len(entries)))
+        cg.add(var.set_blacklist(table, len(devices)))
+    if interfaces := [e for e in entries if CONF_INTERFACES in e]:
+        data[KEY_INTERFACE_BLACKLIST_USED] = True
+        # vid << 16 | pid, then the interfaces as a bit mask (bit = bInterfaceNumber)
+        words = []
+        for e in interfaces:
+            words.append((e[CONF_VID] << 16) | e[CONF_PID])
+            words.append(sum(1 << n for n in e[CONF_INTERFACES]))
+        table_id = ID(
+            f"{config[CONF_ID]}_usb_interface_blacklist",
+            is_declaration=True,
+            type=cg.uint32,
+        )
+        table = cg.static_const_array(table_id, cg.ArrayInitializer(*words))
+        cg.add(var.set_interface_blacklist(table, len(interfaces)))
 
 
 def note_usb_whitelist_used() -> None:
@@ -167,6 +192,10 @@ async def _usb_match_guards() -> None:
     data = CORE.data.get(DOMAIN, {})
     cg.add_define("USB_HOST_WHITELIST", 1 if data.get(KEY_WHITELIST_USED) else 0)
     cg.add_define("USB_HOST_BLACKLIST", 1 if data.get(KEY_BLACKLIST_USED) else 0)
+    cg.add_define(
+        "USB_HOST_INTERFACE_BLACKLIST",
+        1 if data.get(KEY_INTERFACE_BLACKLIST_USED) else 0,
+    )
 
 
 def usb_device_schema(
@@ -649,6 +678,9 @@ async def to_code(config: ConfigType) -> None:
             override_path=_sync_usb_component_override(),
         )
         cg.add_define("USE_USB_HOST_PER_PORT_FIFO_BIAS")
+        # The patched copy also counts every device's host channels before it is configured and claims
+        # interfaces without the endpoints their driver never uses (idf_usb_patch.py)
+        cg.add_define("USE_USB_HOST_CHANNEL_BUDGET")
 
     add_idf_sdkconfig_option("CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE", 1024)
     if config.get(CONF_ENABLE_HUBS):

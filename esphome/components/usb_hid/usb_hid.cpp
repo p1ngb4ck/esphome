@@ -66,6 +66,25 @@ void USBHIDClient::loop() {
   usb_host::USBClient::loop();
 }
 
+// A HID interface's output reports go over the control pipe (SET_REPORT): its interrupt OUT gets no pipe
+// (and holds no host channel) unless a pad driver talks to the device over it (hid/gamepad.h), or the
+// Thrustmaster wheel setup (thrustmaster_()). Vendor pad interfaces (Xbox, MCE) keep theirs.
+uint32_t USBHIDClient::skipped_endpoints_(const usb_device_desc_t *desc, const usb_config_desc_t *config,
+                                          const usb_intf_desc_t *alt) const {
+  if (alt->bInterfaceClass != USB_CLASS_HID)
+    return 0;
+  if ((desc->idVendor == 0x044F && desc->idProduct == 0xB65D) ||
+      hid::has_gamepad_driver(hid::HIDBus::USB, desc->idVendor, desc->idProduct))
+    return 0;
+  uint32_t skip = 0;
+  usb_host::for_each_alt_endpoint(config, alt, [&skip](const usb_ep_desc_t *ep) {
+    if ((ep->bEndpointAddress & 0x80) == 0 &&
+        (ep->bmAttributes & USB_BM_ATTRIBUTES_XFERTYPE_MASK) == USB_BM_ATTRIBUTES_XFER_INT)
+      skip |= usb_host::endpoint_bit(ep);
+  });
+  return skip;
+}
+
 void USBHIDClient::on_device_connected(usb_host::UsbDevice &dev) {
   auto *device = new USBHIDDevice(this, &dev, this->next_serial_++);  // NOLINT: freed in free_device_context
   dev.context = device;
@@ -308,6 +327,7 @@ bool USBHIDDevice::find_interfaces_() {
     return false;
   const uint8_t mce = MCEReceiverDriver::model(dev->idVendor, dev->idProduct);
   Interface *current = nullptr;
+  uint32_t skipped = 0;  // the current interface's endpoints its claim opens no pipe for
   int offset = 0;
   const auto *desc = reinterpret_cast<const usb_standard_desc_t *>(cfg);
   while ((desc = usb_parse_next_descriptor(desc, cfg->wTotalLength, &offset)) != nullptr) {
@@ -345,6 +365,7 @@ bool USBHIDDevice::find_interfaces_() {
       entry.vendor = vendor;
       this->interfaces_.push_back(std::move(entry));
       current = &this->interfaces_.back();
+      skipped = this->client_->skipped_endpoints_(dev, cfg, intf);
       continue;
     }
     if (current == nullptr)
@@ -377,7 +398,7 @@ bool USBHIDDevice::find_interfaces_() {
         current->in_ep = ep->bEndpointAddress;
         current->in_mps = USB_EP_DESC_GET_MPS(ep);
       }
-    } else if (current->out_ep == 0) {
+    } else if (current->out_ep == 0 && (skipped & usb_host::endpoint_bit(ep)) == 0) {
       current->out_ep = ep->bEndpointAddress;
     }
   }

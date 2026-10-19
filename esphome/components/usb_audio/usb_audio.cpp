@@ -58,6 +58,44 @@ static uint32_t uac_service_intervals_per_second(bool high_speed, uint8_t b_inte
 // Configuration setters
 // -----------------------------------------------------------------------------
 
+// The pipes (host channels) of what this configuration plays or records only: the streaming interface
+// of a direction without a speaker / microphone platform, the speaker's feedback endpoint while
+// feedback is off, and the AudioControl interface (never claimed, its requests go over EP0) get none.
+uint32_t USBAudioClient::skipped_endpoints_(const usb_device_desc_t *desc, const usb_config_desc_t *config,
+                                            const usb_intf_desc_t *alt) const {
+  static constexpr uint8_t SUBCLASS_AUDIOSTREAMING = 2;
+  static constexpr uint8_t USAGE_FEEDBACK = 1;  // bmAttributes bits 5..4
+  uint32_t all = 0;
+  bool data_out = false;
+  bool data_in = false;
+  uint32_t feedback = 0;
+  usb_host::for_each_alt_endpoint(config, alt, [&](const usb_ep_desc_t *ep) {
+    all |= usb_host::endpoint_bit(ep);
+    if ((ep->bmAttributes & USB_BM_ATTRIBUTES_XFERTYPE_MASK) != USB_BM_ATTRIBUTES_XFER_ISOC)
+      return;
+    if (((ep->bmAttributes >> 4) & 0x03) == USAGE_FEEDBACK) {
+      feedback |= usb_host::endpoint_bit(ep);
+    } else if (ep->bEndpointAddress & 0x80) {
+      data_in = true;
+    } else {
+      data_out = true;
+    }
+  });
+  if (alt->bInterfaceClass != USB_CLASS_AUDIO || alt->bInterfaceSubClass != SUBCLASS_AUDIOSTREAMING)
+    return all;
+  if (data_out) {
+    if (this->speaker_ == nullptr)
+      return all;
+    // UAC1 asynchronous OUT: the feedback endpoint may be marked as data (bSynchAddress names it)
+    if (!this->feedback_enabled_)
+      return feedback | (all & 0xFFFF0000u);
+    return 0;
+  }
+  if (data_in && this->microphone_ == nullptr)
+    return all;
+  return 0;
+}
+
 void USBAudioClient::set_microphone_params(uint8_t channels, uint16_t bits, uint32_t sample_rate) {
   this->mic_cfg_.channels = channels;
   this->mic_cfg_.bits_per_sample = bits;
