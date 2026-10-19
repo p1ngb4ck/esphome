@@ -13,7 +13,10 @@
 #include "esphome/core/application.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/preferences.h"
+#include <cstring>
 #include "esp_netif_net_stack.h"
+#include "lwip/dns.h"
+#include "lwip/ip_addr.h"
 #include "lwip/netif.h"
 #ifdef USE_ETHERNET
 #include "esphome/components/ethernet/ethernet_component.h"
@@ -113,6 +116,31 @@ static esp_netif_t *connected_netif(NetworkInterface interface) {
   }
 }
 
+#ifdef CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF
+// Whether lwIP's global DNS servers are the ones the netif holds. IDF clears the global servers
+// whenever any netif gets a static address or starts DHCP (dns_clear_servers), and writes a non-default
+// netif's servers only into that netif; the global ones come back only when the default netif is set.
+static bool dns_is_netifs(esp_netif_t *netif) {
+  for (int type = ESP_NETIF_DNS_MAIN; type <= ESP_NETIF_DNS_BACKUP; type++) {
+    esp_netif_dns_info_t own{};
+    if (esp_netif_get_dns_info(netif, static_cast<esp_netif_dns_type_t>(type), &own) != ESP_OK ||
+        ESP_IP_IS_ANY(own.ip))
+      continue;  // the netif has none here: whatever lwIP has stays
+    LwIPLock lock;
+    const ip_addr_t *global = dns_getserver(type);
+    if (own.ip.type == ESP_IPADDR_TYPE_V4) {
+      if (!IP_IS_V4(global) || ip_2_ip4(global)->addr != own.ip.u_addr.ip4.addr)
+        return false;
+#if LWIP_IPV6
+    } else if (!IP_IS_V6(global) || memcmp(ip_2_ip6(global)->addr, own.ip.u_addr.ip6.addr, sizeof(own.ip.u_addr.ip6.addr)) != 0) {
+      return false;
+#endif
+    }
+  }
+  return true;
+}
+#endif
+
 bool NetworkComponent::move_interface(NetworkInterface interface, int delta) {
   auto it = std::find(this->order_.begin(), this->order_.end(), interface);
   if (it == this->order_.end())
@@ -175,7 +203,17 @@ void NetworkComponent::loop() {
       LwIPLock lock;
       route_is_ours = static_cast<void *>(netif_default) == esp_netif_get_netif_impl(best);
     }
-    if (route_is_ours)
+    bool dns_ok = true;
+#ifdef CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF
+    // Another netif's address change cleared the global DNS servers: setting the default again
+    // gives them back (esp_netif_set_default_netif applies the winner's servers).
+    if (route_is_ours) {
+      dns_ok = dns_is_netifs(best);
+      if (!dns_ok)
+        ESP_LOGW(TAG, "DNS servers lost; restoring those of %s", esp_netif_get_desc(best));
+    }
+#endif
+    if (route_is_ours && dns_ok)
       return;
   }
   esp_err_t err = esp_netif_set_default_netif(best);

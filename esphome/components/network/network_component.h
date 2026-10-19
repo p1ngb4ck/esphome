@@ -58,7 +58,7 @@ class NetworkComponent final : public Component {
 #endif
 
  protected:
-  // Verify-lwIP-route interval for the settled state; keeps the global lwIP core
+  // Verify-lwIP-route (and its DNS servers) interval for the settled state; keeps the global lwIP core
   // mutex off the hot loop path.
   static constexpr uint32_t ROUTE_CHECK_INTERVAL_MS = 1000;
   // Last netif this component made the default; avoids redundant esp_netif calls.
