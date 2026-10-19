@@ -1014,6 +1014,14 @@ class SimpleVideoPlayer : public Component
   }
   CastState screencast_state() const { return this->cast_state_; }
   bool screencast_running() const { return this->cast_state_ != CAST_IDLE; }
+  /// Whether the running screencast records the microphone (configured, sound on, the microphone started).
+  bool screencast_mic_on() const {
+#ifdef SVP_CAPTURE_MIC
+    return this->cast_state_ == CAST_RUNNING && this->cap_mic_on_;
+#else
+    return false;
+#endif
+  }
   /// The screencast's file in the screencast folder ("" before its first one, or with target relay only).
   const std::string &get_screencast_path() const { return this->cast_path_; }
   /// The screenshot's file, "" when it failed.
