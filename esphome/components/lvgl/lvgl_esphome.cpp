@@ -1540,6 +1540,10 @@ LVHIDPointerListener::LVHIDPointerListener(hid::HIDInput *input, uint16_t long_p
         millis() - l->last_motion_ > l->hide_after_ && !lv_obj_is_hidden(l->cursor_))
       lv_obj_set_hidden(l->cursor_, true);
   });
+  this->add_input(input);
+}
+
+void LVHIDPointerListener::add_input(hid::HIDInput *input) {
   input->add_on_pointer_callback([this](int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
     this->move_(dx, dy, wheel, pan, buttons);
   });

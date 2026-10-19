@@ -183,7 +183,8 @@ HID_POINTERS_CONFIG = cv.ensure_list(
     cv.maybe_simple_value(
         {
             cv.GenerateID(): cv.declare_id(LVHIDPointerListener),
-            cv.Required(CONF_HID_ID): _hid_id,
+            # One input, or several (Bluetooth and USB mice) moving the same cursor.
+            cv.Required(CONF_HID_ID): cv.Any(_hid_id, cv.All(cv.ensure_list(_hid_id), cv.Length(min=1))),
             cv.Optional(CONF_CURSOR): lv_image,
             # The cursor hides when the pointer has not moved this long; the next motion shows it.
             cv.Optional(CONF_HIDE_AFTER): cv.positive_time_period_milliseconds,
@@ -268,7 +269,8 @@ async def hid_inputs_to_code(lv_component, config, default_group):
         lv.indev_set_group(listener.get_drv(), group)
     for conf in config.get(CONF_HID_POINTERS) or ():
         add_lv_use("HID")
-        hid = await cg.get_variable(conf[CONF_HID_ID])
+        hid_ids = conf[CONF_HID_ID] if isinstance(conf[CONF_HID_ID], list) else [conf[CONF_HID_ID]]
+        hid = await cg.get_variable(hid_ids[0])
         listener = cg.new_Pvariable(
             conf[CONF_ID],
             hid,
@@ -276,6 +278,8 @@ async def hid_inputs_to_code(lv_component, config, default_group):
             conf[CONF_LONG_PRESS_REPEAT_TIME].total_milliseconds,
             lv_component,
         )
+        for more in hid_ids[1:]:
+            cg.add(listener.add_input(await cg.get_variable(more)))
         if (cursor := conf.get(CONF_CURSOR)) is not None:
             add_lv_use("image")
             cg.add(listener.set_cursor_image(await lv_image.process(cursor)))

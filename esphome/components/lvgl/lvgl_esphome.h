@@ -720,6 +720,9 @@ class LVHIDPointerListener final : public Parented<LvglComponent> {
   void set_pad_touch(bool on) { this->pad_touch_ = on; }
   bool is_pad_touch() const { return this->pad_touch_; }
   void add_pad_touch_input(hid::HIDInput *input);
+  /// Another input moving this pointer (a USB mouse next to the Bluetooth ones): its motion,
+  /// buttons and wheel, and its touchpad as add_pad_touch_input().
+  void add_input(hid::HIDInput *input);
   void set_pad_touch_capture(lv_obj_t *widget) { this->pad_capture_ = widget; }
   /// From a keypad (LVGL thread): its key code pressed as a direction (LV_KEY_UP..LEFT) or
   /// LV_KEY_ENTER, or a key let go (any code; those not held are passed over).
