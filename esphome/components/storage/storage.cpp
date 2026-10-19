@@ -47,12 +47,14 @@ void StorageRegistry::note_dir_changed(const std::string &dir_raw) {
   size_t newest = (this->dir_changes_next_ + DIR_CHANGES_SIZE - 1) % DIR_CHANGES_SIZE;
   if (this->dir_changes_[newest].seq != 0 && this->dir_changes_[newest].dir == dir) {
     this->dir_changes_[newest].seq = ++this->change_seq_;
+    this->on_dir_changed_.call(dir);
     return;
   }
   auto &e = this->dir_changes_[this->dir_changes_next_];
   this->dir_changes_next_ = (this->dir_changes_next_ + 1) % DIR_CHANGES_SIZE;
   e.seq = ++this->change_seq_;
   e.dir = dir;
+  this->on_dir_changed_.call(dir);
 }
 
 void StorageRegistry::note_parent_changed(const std::string &path_raw) {

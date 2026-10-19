@@ -555,6 +555,9 @@ class StorageRegistry : public Component {
   void note_parent_changed(const std::string &path);
   uint32_t change_seq() const { return this->change_seq_; }
   const DirChange &dir_change(size_t index) const { return this->dir_changes_[index]; }
+  // Fired by note_dir_changed() with the (normalized) directory, on the main loop: for a consumer
+  // that reacts at once (a viewer following a file) instead of reading the feed later.
+  template<typename F> void add_on_dir_changed_callback(F &&cb) { this->on_dir_changed_.add(std::forward<F>(cb)); }
 #endif
 
  protected:
@@ -574,6 +577,9 @@ class StorageRegistry : public Component {
   LazyCallbackManager<void(Storage *)> on_registered_;
   LazyCallbackManager<void(Storage *)> on_unregistered_;
   LazyCallbackManager<void(Storage *)> on_quiesce_;
+#ifdef USE_STORAGE_CHANGE_FEED
+  LazyCallbackManager<void(const std::string &)> on_dir_changed_;
+#endif
 
   uint64_t max_blocking_transfer_size_{0};  // 0 = unlimited
   bool move_fallback_copy_{true};
