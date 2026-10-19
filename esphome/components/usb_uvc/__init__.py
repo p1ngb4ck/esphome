@@ -5,7 +5,7 @@ from esphome.components.esp32 import (
     VARIANT_ESP32S3,
     only_on_variant,
 )
-from esphome.components.usb_host import usb_host_ns
+from esphome.components.usb_host import USB_BLACKLIST_SCHEMA, setup_usb_match, usb_host_ns
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
 
@@ -43,6 +43,7 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(): cv.declare_id(UVCClient),
             cv.Optional(CONF_VID, default=0x0000): cv.hex_uint16_t,
             cv.Optional(CONF_PID, default=0x0000): cv.hex_uint16_t,
+            **USB_BLACKLIST_SCHEMA,
             cv.Optional(CONF_FORMAT, default="MJPEG"): cv.enum(UVC_FORMATS, upper=True),
             cv.Optional(CONF_WIDTH, default=0): cv.uint16_t,
             cv.Optional(CONF_HEIGHT, default=0): cv.uint16_t,
@@ -57,6 +58,7 @@ CONFIG_SCHEMA = cv.All(
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
+    await setup_usb_match(var, config)
 
     if vid := config.get(CONF_VID):
         cg.add(var.set_vid(vid))

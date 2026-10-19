@@ -494,6 +494,9 @@ static uint32_t interfaces_matching(const usb_config_desc_t *cfg, const UsbMatch
 
 MatchTier USBClient::match_(const RoutedDevice &dev, uint32_t &interfaces) const {
   interfaces = 0;
+  // Blacklisted: never this driver's, whatever its class or tables say
+  if (this->blacklisted_(dev.desc))
+    return MatchTier::NONE;
   const uint32_t all = interfaces_matching(dev.config, {0, 0, -1, -1, -1});
   uint32_t by_class = 0;
   for (const auto &m : this->class_matches_)
@@ -504,19 +507,21 @@ MatchTier USBClient::match_(const RoutedDevice &dev, uint32_t &interfaces) const
       continue;
     by_vendor |= m.cls < 0 ? all : interfaces_matching(dev.config, m);
   }
-  if (this->has_id_filter_()) {
-    // Named: this device and no other, whatever its class says.
-    if ((this->vid_ != 0 && dev.desc->idVendor != this->vid_) || (this->pid_ != 0 && dev.desc->idProduct != this->pid_))
-      return MatchTier::NONE;
-    if (this->manufacturer_filter_ != nullptr &&
-        !descriptor_string_equals(dev.info.str_desc_manufacturer, this->manufacturer_filter_))
-      return MatchTier::NONE;
-    if (this->product_filter_ != nullptr && !descriptor_string_equals(dev.info.str_desc_product, this->product_filter_))
-      return MatchTier::NONE;
-    // Its own interfaces where its tables say which those are, so two drivers named to one
-    // composite device (sound card with buttons) each get theirs; the whole device otherwise.
-    interfaces = (by_class | by_vendor) != 0 ? (by_class | by_vendor) : all;
-    return MatchTier::NAMED;
+  if constexpr (USB_WHITELIST_USED) {
+    if (this->has_id_filter_()) {
+      // Named (whitelist): this device and no other, whatever its class says.
+      if ((this->vid_ != 0 && dev.desc->idVendor != this->vid_) || (this->pid_ != 0 && dev.desc->idProduct != this->pid_))
+        return MatchTier::NONE;
+      if (this->manufacturer_filter_ != nullptr &&
+          !descriptor_string_equals(dev.info.str_desc_manufacturer, this->manufacturer_filter_))
+        return MatchTier::NONE;
+      if (this->product_filter_ != nullptr && !descriptor_string_equals(dev.info.str_desc_product, this->product_filter_))
+        return MatchTier::NONE;
+      // Its own interfaces where its tables say which those are, so two drivers named to one
+      // composite device (sound card with buttons) each get theirs; the whole device otherwise.
+      interfaces = (by_class | by_vendor) != 0 ? (by_class | by_vendor) : all;
+      return MatchTier::NAMED;
+    }
   }
   MatchTier tier = MatchTier::NONE;
   if (by_vendor != 0) {

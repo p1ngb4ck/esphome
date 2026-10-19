@@ -27,7 +27,12 @@ from esphome.components.storage import (
     validate_file_system_value,
     validate_mount_path,
 )
-from esphome.components.usb_host import usb_host_ns
+from esphome.components.usb_host import (
+    USB_BLACKLIST_SCHEMA,
+    note_usb_whitelist_used,
+    setup_usb_match,
+    usb_host_ns,
+)
 import esphome.config_validation as cv
 import esphome.final_validate as fv
 from esphome.const import CONF_DEVICES, CONF_ID, CONF_TRIGGER_ID
@@ -123,6 +128,8 @@ CONFIG_SCHEMA = cv.All(
             # Only exists together with esp32 enable_exfat -- see storage/__init__.py.
             FILE_SYSTEM_SCHEMA_ENTRY: validate_file_system_value,
             cv.Optional(CONF_DEVICES): cv.ensure_list(DEVICE_SCHEMA),
+            # Sticks / readers no client of this component takes (exact vid:pid pairs)
+            **USB_BLACKLIST_SCHEMA,
         }
     ),
     only_on_variant(
@@ -166,6 +173,9 @@ async def to_code(config):
         client_id = config[CONF_ID] if index == 0 else device[CONF_CLIENT_ID]
         var = cg.new_Pvariable(client_id)
         await cg.register_component(var, config)
+        await setup_usb_match(var, {**config, CONF_ID: client_id})
+        if device is not None and (device[CONF_VID] or device[CONF_PID]):
+            note_usb_whitelist_used()  # a mount entry names its stick
         await file_system_to_code(var, config)
         if device is not None:
             await register_usb_storage_device(device, var)

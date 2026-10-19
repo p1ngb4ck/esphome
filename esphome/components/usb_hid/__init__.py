@@ -3,6 +3,8 @@ import esphome.codegen as cg
 from esphome.components import esp32, text_sensor
 from esphome.components.hid import HID_INPUT_SCHEMA, HIDInput, setup_hid_input
 from esphome.components.usb_host import (
+    USB_BLACKLIST_SCHEMA,
+    setup_usb_match,
     USBClient,
     require_bulk_transfers,
     require_control_transfers,
@@ -104,6 +106,7 @@ CONFIG_SCHEMA = cv.All(
             # at once are several usb_hid entries.
             cv.Optional(CONF_VID, default=0x0000): cv.hex_uint16_t,
             cv.Optional(CONF_PID, default=0x0000): cv.hex_uint16_t,
+            **USB_BLACKLIST_SCHEMA,
             cv.Optional(CONF_RAW): RAW_SCHEMA,
             cv.Optional(CONF_DEVICE_NAME): text_sensor.text_sensor_schema(),
         }
@@ -115,6 +118,7 @@ CONFIG_SCHEMA = cv.All(
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID], config[CONF_VID], config[CONF_PID])
     await cg.register_component(var, config)
+    await setup_usb_match(var, config)
 
     await setup_hid_input(var, config)
 

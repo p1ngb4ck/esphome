@@ -496,8 +496,25 @@ void USBHost::route_(RoutedDevice &dev) {
   }
   if (!routed && dev.bound.empty() && !dev.reported_unrouted) {
     dev.reported_unrouted = true;
+    // Why nobody took it: refused by a blacklist, every driver of its kind busy, or none for it
+    USBClient *busy = nullptr;
+    USBClient *refused = nullptr;
+    for (auto *client : this->clients_) {
+      if (client->blacklisted_(dev.desc)) {
+        refused = client;
+      } else if (busy == nullptr && !client->is_free_() && client->match_(dev, interfaces) != MatchTier::NONE) {
+        busy = client;
+      }
+    }
     if (named) {
       ESP_LOGI(TAG, "%04X:%04X waits for the driver that names it", dev.desc->idVendor, dev.desc->idProduct);
+    } else if (busy != nullptr) {
+      ESP_LOGW(TAG, "%04X:%04X refused: every %s entry has a device (disallowed by config: a further device "
+                    "needs its own entry)",
+               dev.desc->idVendor, dev.desc->idProduct, LOG_STR_ARG(busy->get_component_log_str()));
+    } else if (refused != nullptr) {
+      ESP_LOGI(TAG, "%04X:%04X refused: on the blacklist of %s", dev.desc->idVendor, dev.desc->idProduct,
+               LOG_STR_ARG(refused->get_component_log_str()));
     } else {
       ESP_LOGI(TAG, "%04X:%04X: no driver", dev.desc->idVendor, dev.desc->idProduct);
     }

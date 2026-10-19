@@ -18,7 +18,7 @@ from esphome.components.esp32 import (
 )
 import esphome.config_validation as cv
 from esphome.const import CONF_DATA, CONF_DEVICES, CONF_ID, CONF_VALUE
-from esphome.core import CORE
+from esphome.core import CORE, ID
 from esphome.coroutine import CoroPriority, coroutine_with_priority
 from esphome.cpp_generator import MockObj
 from esphome.cpp_types import Component
@@ -109,6 +109,66 @@ _FILTER_WILDCARDS = {
 }
 
 
+CONF_BLACKLIST = "blacklist"
+KEY_WHITELIST_USED = "whitelist_used"
+KEY_BLACKLIST_USED = "blacklist_used"
+
+
+def _blacklist_entry(value):
+    value = cv.Schema(
+        {
+            cv.Required(CONF_VID): cv.hex_uint16_t,
+            cv.Required(CONF_PID): cv.hex_uint16_t,
+        }
+    )(value)
+    if value[CONF_VID] == 0 or value[CONF_PID] == 0:
+        raise cv.Invalid(
+            "a wildcard has no place in a blacklist: it is a whitelist with only specific entries - "
+            "name the devices this driver may take with vid / pid instead"
+        )
+    return value
+
+
+# Every driver on USBClient: the devices it refuses, exact vid:pid pairs.
+USB_BLACKLIST_SCHEMA = {
+    cv.Optional(CONF_BLACKLIST): cv.ensure_list(_blacklist_entry),
+}
+
+
+async def setup_usb_match(var: MockObj, config: ConfigType) -> None:
+    """The matching options of a driver on USBClient: its blacklist (a table in flash), and a note of
+    whether whitelisting (vid / pid / manufacturer / product) or blacklisting is used at all - the final
+    coroutine turns that into the guard defines once every driver registered."""
+    data = CORE.data.setdefault(DOMAIN, {})
+    if (
+        config.get(CONF_VID)
+        or config.get(CONF_PID)
+        or config.get(CONF_MANUFACTURER) is not None
+        or config.get(CONF_PRODUCT) is not None
+    ):
+        data[KEY_WHITELIST_USED] = True
+    if entries := config.get(CONF_BLACKLIST):
+        data[KEY_BLACKLIST_USED] = True
+        pairs = [v for e in entries for v in (e[CONF_VID], e[CONF_PID])]
+        table_id = ID(
+            f"{config[CONF_ID]}_usb_blacklist", is_declaration=True, type=cg.uint16
+        )
+        table = cg.static_const_array(table_id, cg.ArrayInitializer(*pairs))
+        cg.add(var.set_blacklist(table, len(entries)))
+
+
+def note_usb_whitelist_used() -> None:
+    """A driver whose own tables name devices by vid / pid (usb_storage's mount entries)."""
+    CORE.data.setdefault(DOMAIN, {})[KEY_WHITELIST_USED] = True
+
+
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _usb_match_guards() -> None:
+    data = CORE.data.get(DOMAIN, {})
+    cg.add_define("USB_HOST_WHITELIST", 1 if data.get(KEY_WHITELIST_USED) else 0)
+    cg.add_define("USB_HOST_BLACKLIST", 1 if data.get(KEY_BLACKLIST_USED) else 0)
+
+
 def usb_device_schema(
     cls=USBClient, vid: int | None = None, pid: int | None = None
 ) -> cv.Schema:
@@ -132,6 +192,7 @@ def usb_device_schema(
         {
             cv.Optional(CONF_MANUFACTURER): cv.string_strict,
             cv.Optional(CONF_PRODUCT): cv.string_strict,
+            **USB_BLACKLIST_SCHEMA,
         }
     )
 
@@ -572,6 +633,7 @@ async def register_usb_client(config: ConfigType) -> MockObj:
         )
     if (product := config.get(CONF_PRODUCT)) is not None:
         cg.add(var.set_product_filter(cg.RawExpression(cpp_u16string_escape(product))))
+    await setup_usb_match(var, config)
     return var
 
 
@@ -597,6 +659,7 @@ async def to_code(config: ConfigType) -> None:
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
+    CORE.add_job(_usb_match_guards)
 
     if (controllers := config.get(CONF_CONTROLLERS)) not in (
         None,

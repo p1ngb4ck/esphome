@@ -9,6 +9,8 @@ from esphome.components.esp32 import (
     request_bluetooth,
 )
 from esphome.components.usb_host import (
+    USB_BLACKLIST_SCHEMA,
+    setup_usb_match,
     CONF_PID,
     CONF_VID,
     USBClient,
@@ -64,6 +66,7 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(): cv.declare_id(USBBluetooth),
             cv.Optional(CONF_VID, default=0x0000): cv.hex_uint16_t,
             cv.Optional(CONF_PID, default=0x0000): cv.hex_uint16_t,
+            **USB_BLACKLIST_SCHEMA,
             # ESP-IDF's Bluedroid host stack, with the dongle as its controller.
             cv.Optional(CONF_BLUEDROID, default=False): cv.boolean,
             # Realtek firmware (linux-firmware rtl_bt/<chip>_fw.bin and, where the chip has one,
@@ -112,6 +115,7 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID], config[CONF_VID], config[CONF_PID])
     await cg.register_component(var, config)
+    await setup_usb_match(var, config)
     # HCI commands on endpoint 0, events on an interrupt IN endpoint, ACL data on bulk.
     require_control_transfers()
     require_bulk_transfers()

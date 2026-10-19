@@ -3,6 +3,8 @@ import logging
 import esphome.codegen as cg
 from esphome.components import esp32
 from esphome.components.usb_host import (
+    USB_BLACKLIST_SCHEMA,
+    setup_usb_match,
     fs_peripheral_index,
     per_port_fifo_bias_available,
     set_port_fifo_bias,
@@ -323,6 +325,7 @@ CONFIG_SCHEMA = cv.All(
             ),
             cv.Optional(CONF_VID, default=0x0000): cv.hex_uint16_t,
             cv.Optional(CONF_PID, default=0x0000): cv.hex_uint16_t,
+            **USB_BLACKLIST_SCHEMA,
             cv.Optional(CONF_FEEDBACK, default=True): cv.boolean,
             # A stream unused this long is closed and its pipes (USB host channels, a fixed
             # number per controller) go back to other devices; reopened when used (~30 ms).
@@ -341,6 +344,7 @@ CONFIG_SCHEMA = cv.All(
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
+    await setup_usb_match(var, config)
 
     cg.add(var.set_microphone_buffer_size(config[CONF_MICROPHONE_BUFFER_SIZE]))
     cg.add(var.set_speaker_buffer_size(config[CONF_SPEAKER_BUFFER_SIZE]))

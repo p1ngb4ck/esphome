@@ -19,6 +19,19 @@
 
 namespace esphome::usb_host {
 
+// Which matching the configuration uses, set by usb_host's final codegen coroutine once every driver has
+// registered its options (0 when unused: the code below compiles out through `if constexpr`).
+#ifndef USB_HOST_WHITELIST
+#define USB_HOST_WHITELIST 0
+#endif
+#ifndef USB_HOST_BLACKLIST
+#define USB_HOST_BLACKLIST 0
+#endif
+/// Some driver names its device by vid / pid / manufacturer / product (the whitelist, 0 = wildcard).
+static constexpr bool USB_WHITELIST_USED = USB_HOST_WHITELIST != 0;
+/// Some driver refuses listed devices (exact vid:pid pairs).
+static constexpr bool USB_BLACKLIST_USED = USB_HOST_BLACKLIST != 0;
+
 // THREADING MODEL:
 // This component uses a dedicated USB task for event processing to prevent data loss.
 // - USB Task (high priority): Handles USB events, executes transfer callbacks, releases transfer slots
@@ -336,6 +349,11 @@ class USBClient : public Component {
   void add_vendor_match(uint16_t vid, uint16_t pid, int16_t cls = -1, int16_t subclass = -1, int16_t protocol = -1) {
     this->vendor_matches_.push_back({vid, pid, cls, subclass, protocol});
   }
+  /// Devices this driver refuses: `count` vid, pid pairs (exact, no wildcard), a codegen table in flash.
+  void set_blacklist(const uint16_t *pairs, uint8_t count) {
+    this->blacklist_ = pairs;
+    this->blacklist_count_ = count;
+  }
   void set_manufacturer_filter(const char16_t *manufacturer) { this->manufacturer_filter_ = manufacturer; }
   void set_product_filter(const char16_t *product) { this->product_filter_ = product; }
 
@@ -450,6 +468,16 @@ class USBClient : public Component {
            this->product_filter_ != nullptr;
   }
   bool is_free_() const { return this->state_ == USB_CLIENT_INIT; }
+  /// The device is on this driver's blacklist (false when no configuration uses a blacklist).
+  bool blacklisted_(const usb_device_desc_t *desc) const {
+    if constexpr (USB_BLACKLIST_USED) {
+      for (uint8_t i = 0; i < this->blacklist_count_; i++) {
+        if (this->blacklist_[2 * i] == desc->idVendor && this->blacklist_[2 * i + 1] == desc->idProduct)
+          return true;
+      }
+    }
+    return false;
+  }
   // How this driver matches the device, and which of its interfaces it would serve.
   MatchTier match_(const RoutedDevice &dev, uint32_t &interfaces) const;
   /// A driver's own say on a class or vendor match: NONE to pass the device by, NAMED when
@@ -500,6 +528,8 @@ class USBClient : public Component {
   const char16_t *product_filter_{nullptr};
   uint16_t vid_{};
   uint16_t pid_{};
+  const uint16_t *blacklist_{nullptr};  // vid, pid pairs in flash (set_blacklist)
+  uint8_t blacklist_count_{0};
   std::vector<UsbMatch> class_matches_{};
   std::vector<UsbMatch> vendor_matches_{};
   uint32_t routed_interfaces_{0};

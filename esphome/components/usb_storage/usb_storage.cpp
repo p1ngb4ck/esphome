@@ -575,9 +575,11 @@ bool USBStorageClient::scsi_write_(uint32_t lba, const uint8_t *buf, uint32_t co
 // The entry naming this stick, else one without vid/pid: an entry that names it wins over
 // any wildcard listed before it.
 USBStorageDevice *USBStorageClient::find_device_(uint16_t vid, uint16_t pid) const {
-  for (auto *device : this->devices_) {
-    if (device->vid_ == vid && device->pid_ == pid && (vid != 0 || pid != 0) && !device->is_mounted())
-      return device;
+  if constexpr (usb_host::USB_WHITELIST_USED) {
+    for (auto *device : this->devices_) {
+      if (device->vid_ == vid && device->pid_ == pid && (vid != 0 || pid != 0) && !device->is_mounted())
+        return device;
+    }
   }
   for (auto *device : this->devices_) {
     if (device->vid_ == 0 && device->pid_ == 0 && !device->is_mounted())
@@ -797,8 +799,9 @@ usb_host::MatchTier USBStorageClient::refine_match_(const usb_host::RoutedDevice
   for (const auto *device : this->devices_) {
     if (device->vid_ == 0 && device->pid_ == 0) {
       any = true;
-    } else if (device->vid_ == dev.desc->idVendor && device->pid_ == dev.desc->idProduct) {
-      return usb_host::MatchTier::NAMED;
+    } else if constexpr (usb_host::USB_WHITELIST_USED) {
+      if (device->vid_ == dev.desc->idVendor && device->pid_ == dev.desc->idProduct)
+        return usb_host::MatchTier::NAMED;
     }
   }
   return any ? tier : usb_host::MatchTier::NONE;
