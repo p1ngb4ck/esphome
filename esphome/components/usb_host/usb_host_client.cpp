@@ -2,6 +2,7 @@
 #if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || \
     defined(USE_ESP32_VARIANT_ESP32S31) || defined(USE_ESP32_VARIANT_ESP32H4)
 #include "usb_host.h"
+#include <freertos/idf_additions.h>
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/application.h"
@@ -313,7 +314,14 @@ void USBClient::setup() {
   // bulk packets where one on the full-speed controller sees 64, and both run at the same
   // time from this same code. The pool is allocated in handle_open_state_() once the
   // descriptors say what this device needs, and released again in disconnect().
+#if defined(CONFIG_SPIRAM_XIP_FROM_PSRAM)
+  // Stack and TCB in PSRAM: one task per client, a dozen of them in internal RAM was ~60 KB. With XIP from
+  // PSRAM a flash operation does not turn the PSRAM cache off, so the task may run during one.
+  xTaskCreateWithCaps(usb_task_fn, "usb_task", USB_TASK_STACK_SIZE, this, USB_TASK_PRIORITY, &this->usb_task_handle_,
+                      MALLOC_CAP_SPIRAM);
+#else
   xTaskCreate(usb_task_fn, "usb_task", USB_TASK_STACK_SIZE, this, USB_TASK_PRIORITY, &this->usb_task_handle_);
+#endif
   if (this->usb_task_handle_ == nullptr) {
     ESP_LOGE(TAG, "Failed to create USB task");
     this->mark_failed();
