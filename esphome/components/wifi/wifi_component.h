@@ -691,6 +691,13 @@ class WiFiComponent final : public Component {
     this->scan_results_listeners_.push_back(listener);
   }
 #endif  // USE_WIFI_SCAN_RESULTS_LISTENERS
+  /// The WiFi start-up is done (main loop, once per boot): connected, or the first attempt ended without a
+  /// connection (cooldown, AP), or WiFi is disabled at boot. Components that must not overlap WiFi's start
+  /// (its RAM peak on the shared co-processor) start on it instead of a time.
+  template<typename F> void add_on_startup_done_callback(F &&callback) {
+    this->startup_done_callback_.add(std::forward<F>(callback));
+  }
+  bool is_startup_done() const { return this->startup_done_; }
 #ifdef USE_WIFI_CONNECT_STATE_LISTENERS
   /** Add a listener for WiFi connection state changes.
    * Listener receives: SSID, BSSID
@@ -1104,6 +1111,14 @@ class WiFiComponent final : public Component {
   // 1-byte members so they pack into its trailing bytes instead of padding after it
   WiFiAP ap_;
 #endif  // USE_WIFI_AP
+  void startup_done_() {
+    if (this->startup_done_)
+      return;
+    this->startup_done_ = true;
+    this->startup_done_callback_.call();
+  }
+  LazyCallbackManager<void()> startup_done_callback_;
+  bool startup_done_{false};
 #ifdef USE_WIFI_DPP
   const char *dpp_key_{nullptr};
   const char *dpp_device_info_{nullptr};

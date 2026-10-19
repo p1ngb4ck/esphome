@@ -103,8 +103,18 @@ class ESP32BLE final : public Component {
   }
   uint32_t get_advertising_cycle_time() const { return this->advertising_cycle_time_; }
 
-  void enable() { this->request_state_(true); }
-  void disable() { this->request_state_(false); }
+  /// A start while the start gate is closed (WiFi still starting on the shared co-processor) waits for it.
+  void enable() {
+    if (!this->start_gate_open_) {
+      this->start_pending_ = true;
+      return;
+    }
+    this->request_state_(true);
+  }
+  void disable() {
+    this->start_pending_ = false;
+    this->request_state_(false);
+  }
   /// Tears the stack down and brings it up again (e.g. for another controller); a no-op unless active.
   void restart() {
     if (this->state_ == BLE_COMPONENT_STATE_ACTIVE) {
@@ -253,6 +263,8 @@ class ESP32BLE final : public Component {
   BLEComponentState state_{BLE_COMPONENT_STATE_OFF};  // 1 byte (uint8_t enum)
   bool restart_requested_{false};                     // restart(): brought up again once down
   bool enable_on_boot_{};                             // 1 byte
+  bool start_gate_open_{true};  // closed in setup() until WiFi's start-up is done (USE_WIFI)
+  bool start_pending_{false};   // an enable() came while the gate was closed
 #ifdef USE_ESP32_BLE_ADVERTISING
   uint8_t advertising_ref_count_{0};  // 1 byte, number of components requesting advertising
 #endif

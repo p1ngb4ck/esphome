@@ -1,5 +1,9 @@
 #include "ble.h"
 
+#ifdef USE_WIFI
+#include "esphome/components/wifi/wifi_component.h"
+#endif
+
 #ifdef USE_ESP32
 
 #include "esphome/core/application.h"
@@ -89,6 +93,21 @@ void ESP32BLE::setup() {
   }
 
   this->state_ = BLE_COMPONENT_STATE_DISABLED;
+#ifdef USE_WIFI
+  // Bluedroid's start and WiFi's start-up both take their RAM at once otherwise (the internal DMA low of the
+  // boot, 2026-10-19): the stack starts once WiFi reports its start-up done - connected, the first attempt
+  // over, or WiFi disabled. Event-driven; an enable() before that (enable_on_boot, the USB dongle) waits.
+  if (wifi::global_wifi_component != nullptr && !wifi::global_wifi_component->is_startup_done()) {
+    this->start_gate_open_ = false;
+    wifi::global_wifi_component->add_on_startup_done_callback([this]() {
+      this->start_gate_open_ = true;
+      if (this->start_pending_) {
+        this->start_pending_ = false;
+        this->request_state_(true);
+      }
+    });
+  }
+#endif
   if (this->enable_on_boot_) {
     this->enable();
   }
