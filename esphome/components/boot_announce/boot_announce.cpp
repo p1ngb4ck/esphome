@@ -33,8 +33,8 @@ void BootAnnounce::watch() {
 }
 
 void BootAnnounce::setup() {
-  if (s_armed != ARMED) {
-    this->disable_loop();  // nobody waits: nothing to do
+  if (s_armed != ARMED || this->udp_->is_failed()) {
+    this->disable_loop();  // nobody waits (or no udp socket): nothing to do
     return;
   }
   s_armed = 0;  // once: a later boot is announced only when armed again

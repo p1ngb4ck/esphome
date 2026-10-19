@@ -14,7 +14,9 @@ class BootAnnounce final : public Component {
   void setup() override;
   void loop() override;
   void dump_config() override;
-  float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
+  // After the udp component (AFTER_WIFI): its send socket exists only once its setup() ran, and a loop() of
+  // ours before that would send through a null socket.
+  float get_setup_priority() const override { return setup_priority::AFTER_CONNECTION; }
 
   /// A receiver waits for the next boot: the mark in RTC memory (kept over a restart, a crash, an OTA reboot).
   void watch();
