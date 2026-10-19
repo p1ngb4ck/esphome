@@ -408,9 +408,14 @@ void WebServerFileApi::handle_list_(AsyncWebServerRequest *request) {
   }
   std::string path = param->value();
   normalize_vfs_path(path);
+  // Paging: the entries from this index on (directory order), max_dir_entries per answer; "truncated"
+  // says there are more. Skipped entries are counted, not kept: no buffer per request.
+  uint32_t offset = 0;
+  if (auto *off = request->getParam("offset"); off != nullptr)
+    offset = strtoul(off->value().c_str(), nullptr, 10);
   std::string json;
   storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
-  bool ok = this->run_on_loop_([this, &path, &json, &err]() {
+  bool ok = this->run_on_loop_([this, &path, &json, &err, offset]() {
     const char *rel = nullptr;
     storage::PathStorage *ps = this->resolve_(path.c_str(), &rel);
     if (ps == nullptr) {
@@ -420,14 +425,19 @@ void WebServerFileApi::handle_list_(AsyncWebServerRequest *request) {
     struct Ctx {
       std::string *out;
       uint16_t remaining;
+      uint32_t skip;
       bool truncated{false};
       bool first{true};
-    } ctx{&json, this->max_dir_entries_};
+    } ctx{&json, this->max_dir_entries_, offset};
     json = "{\"entries\":[";
     err = ps->list_dir(
         rel,
         [](const storage::FileStat *entry, void *c) -> bool {
           auto *ctx = static_cast<Ctx *>(c);
+          if (ctx->skip > 0) {
+            ctx->skip--;  // before this page
+            return true;
+          }
           if (ctx->remaining == 0) {
             ctx->truncated = true;
             return false;  // stop enumeration -- not an error per the list_dir contract
