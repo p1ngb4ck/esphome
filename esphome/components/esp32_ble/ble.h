@@ -103,13 +103,21 @@ class ESP32BLE final : public Component {
   }
   uint32_t get_advertising_cycle_time() const { return this->advertising_cycle_time_; }
 
-  /// A start while the start gate is closed (WiFi still starting on the shared co-processor) waits for it.
+  /// A start before its conditions (WiFi's start-up done; with usb_bluetooth in the config, its dongle fully
+  /// initialized) waits for them: Bluedroid then starts once, on every controller it is meant to have.
   void enable() {
-    if (!this->start_gate_open_) {
+    if (!this->start_allowed_()) {
       this->start_pending_ = true;
       return;
     }
     this->request_state_(true);
+  }
+  /// Codegen: usb_bluetooth (bluedroid: true) is in the config - Bluedroid starts only with its dongle ready.
+  void set_wait_for_usb_bluetooth(bool wait) { this->wait_usb_bt_ = wait; }
+  /// usb_bluetooth: its dongle is fully initialized (firmware loaded, HCI attached).
+  void usb_bluetooth_ready() {
+    this->usb_bt_ready_ = true;
+    this->start_if_allowed_();
   }
   void disable() {
     this->start_pending_ = false;
@@ -263,8 +271,17 @@ class ESP32BLE final : public Component {
   BLEComponentState state_{BLE_COMPONENT_STATE_OFF};  // 1 byte (uint8_t enum)
   bool restart_requested_{false};                     // restart(): brought up again once down
   bool enable_on_boot_{};                             // 1 byte
-  bool start_gate_open_{true};  // closed in setup() until WiFi's start-up is done (USE_WIFI)
-  bool start_pending_{false};   // an enable() came while the gate was closed
+  bool start_allowed_() const { return this->wifi_done_ && (!this->wait_usb_bt_ || this->usb_bt_ready_); }
+  void start_if_allowed_() {
+    if (this->start_pending_ && this->start_allowed_()) {
+      this->start_pending_ = false;
+      this->request_state_(true);
+    }
+  }
+  bool wifi_done_{true};        // false in setup() until WiFi's start-up is done (USE_WIFI)
+  bool wait_usb_bt_{false};     // usb_bluetooth in the config: wait for its dongle
+  bool usb_bt_ready_{false};
+  bool start_pending_{false};   // an enable() came before the conditions were met
 #ifdef USE_ESP32_BLE_ADVERTISING
   uint8_t advertising_ref_count_{0};  // 1 byte, number of components requesting advertising
 #endif

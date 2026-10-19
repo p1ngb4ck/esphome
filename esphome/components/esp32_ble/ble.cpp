@@ -98,13 +98,10 @@ void ESP32BLE::setup() {
   // boot, 2026-10-19): the stack starts once WiFi reports its start-up done - connected, the first attempt
   // over, or WiFi disabled. Event-driven; an enable() before that (enable_on_boot, the USB dongle) waits.
   if (wifi::global_wifi_component != nullptr && !wifi::global_wifi_component->is_startup_done()) {
-    this->start_gate_open_ = false;
+    this->wifi_done_ = false;
     wifi::global_wifi_component->add_on_startup_done_callback([this]() {
-      this->start_gate_open_ = true;
-      if (this->start_pending_) {
-        this->start_pending_ = false;
-        this->request_state_(true);
-      }
+      this->wifi_done_ = true;
+      this->start_if_allowed_();
     });
   }
 #endif

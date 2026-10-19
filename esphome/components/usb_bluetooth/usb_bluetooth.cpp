@@ -293,8 +293,8 @@ void USBBluetooth::to_stack_(uint8_t *h4, size_t len) {
 }
 
 #ifdef USE_USB_BLUETOOTH_HCI_SPLIT
-// Bluedroid runs with esp32_ble on the co-processor's controller from boot. It reads the
-// controllers once, when it starts: with the dongle ready it is started again, now on both.
+// With usb_bluetooth in the config, esp32_ble waits for the dongle (codegen): Bluedroid starts once, on both
+// controllers. A dongle plugged after that (or replugged) restarts it: it reads its controllers only at start.
 void USBBluetooth::start_split_() {
   hci_split::set_br(this);
   this->stack_attached_.store(true, std::memory_order_release);
@@ -307,11 +307,13 @@ void USBBluetooth::start_split_() {
   });
   if (esp32_ble::global_ble == nullptr)
     return;
+  esp32_ble::global_ble->usb_bluetooth_ready();
   if (esp32_ble::global_ble->is_active()) {
+    // Plugged after Bluedroid came up (or replugged): it reads its controllers only at its start
     ESP_LOGI(TAG, "Restarting Bluedroid for the dongle (BR/EDR)");
     esp32_ble::global_ble->restart();
   } else {
-    esp32_ble::global_ble->enable();
+    esp32_ble::global_ble->enable();  // the one start, on both controllers, once WiFi's start-up is done
   }
 }
 #endif

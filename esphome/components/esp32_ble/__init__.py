@@ -527,6 +527,10 @@ async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID])
     cg.add(var.set_enable_on_boot(config[CONF_ENABLE_ON_BOOT]))
     cg.add(var.set_io_capability(config[CONF_IO_CAPABILITY]))
+    # A USB Bluetooth dongle running Bluedroid in this config: Bluedroid starts once with it ready (on both
+    # controllers) instead of on the co-processor first and again for the dongle
+    if any(c.get("bluedroid") for c in (CORE.config.get("usb_bluetooth") or [])):
+        cg.add(var.set_wait_for_usb_bluetooth(True))
 
     if (
         CONF_AUTH_REQ_MODE in config
