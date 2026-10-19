@@ -20,6 +20,7 @@ static const char *const TAG = "boot_announce";
 
 static constexpr uint32_t ARMED = 0xB0075EE5;
 static constexpr uint32_t RESEND_MS = 2000;  // without an answer, while the network is up
+static constexpr uint32_t RESEND_ID = 0;
 
 #ifdef USE_ESP32
 static RTC_NOINIT_ATTR uint32_t s_armed;  // kept over a restart, a crash, an OTA reboot; random at power-on
@@ -33,36 +34,43 @@ void BootAnnounce::watch() {
 }
 
 void BootAnnounce::setup() {
-  if (s_armed != ARMED || this->udp_->is_failed()) {
-    this->disable_loop();  // nobody waits (or no udp socket): nothing to do
-    return;
-  }
+  if (s_armed != ARMED || this->udp_->is_failed())
+    return;  // nobody waits (or no udp): nothing runs
   s_armed = 0;  // once: a later boot is announced only when armed again
+  this->waiting_ = true;
   this->udp_->add_listener([this](std::span<const uint8_t> data) {
     static constexpr char ACK[] = " boot ack";
     const StringRef name = App.get_name();
-    if (data.size() == name.size() + sizeof(ACK) - 1 && memcmp(data.data(), name.c_str(), name.size()) == 0 &&
+    if (this->waiting_ && data.size() == name.size() + sizeof(ACK) - 1 &&
+        memcmp(data.data(), name.c_str(), name.size()) == 0 &&
         memcmp(data.data() + name.size(), ACK, sizeof(ACK) - 1) == 0) {
-      this->acked_ = true;
-      this->enable_loop_soon_any_context();
+      ESP_LOGD(TAG, "Boot acknowledged");
+      this->waiting_ = false;
+      this->stop_();
     }
   });
+  // Online already (the network came up during setup): the event for it has passed
+  if (network::is_connected())
+    this->start_();
 }
 
-void BootAnnounce::loop() {
-  if (this->acked_) {
-    ESP_LOGD(TAG, "Boot acknowledged");
-    this->disable_loop();
+void BootAnnounce::on_active_interface(network::NetworkInterface interface) {
+  if (!this->waiting_)
     return;
+  if (interface == network::NetworkInterface::NETWORK_INTERFACE_NONE) {
+    this->stop_();  // offline: nothing would arrive; the next online event starts again
+  } else {
+    this->start_();
   }
-  if (!network::is_connected())
-    return;
-  const uint32_t now = millis();
-  if (this->last_send_ != 0 && now - this->last_send_ < RESEND_MS)
-    return;
-  this->last_send_ = now;
-  this->send_();
 }
+
+void BootAnnounce::start_() {
+  this->send_();
+  // UDP has no delivery: resent until the receiver's ack cancels it
+  this->set_interval(RESEND_ID, RESEND_MS, [this]() { this->send_(); });
+}
+
+void BootAnnounce::stop_() { this->cancel_interval(RESEND_ID); }
 
 void BootAnnounce::send_() {
   char built[Application::BUILD_TIME_STR_SIZE];

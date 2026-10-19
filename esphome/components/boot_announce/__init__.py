@@ -4,11 +4,13 @@ A receiver (a flashing tool, a test) arms it before it restarts or flashes the d
 boot_announce.watch, e.g. from an API action). The mark lives in RTC memory, which a restart, a crash or an
 OTA reboot keep and a power cycle clears. After a boot with the mark set, once the network is up, the
 device sends "<name> boot built=... reset=... uptime_ms=..." through the udp component until the receiver
-answers "<name> boot ack"; then the mark is cleared. Unarmed it does nothing (its loop stays off).
+answers "<name> boot ack". Sending starts on the network component's online event (active interface) and is
+resent by the scheduler only until the ack; unarmed nothing runs.
 """
 
 from esphome import automation
 import esphome.codegen as cg
+from esphome.components import network
 from esphome.components.udp import CONF_UDP_ID, UDPComponent
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
@@ -28,6 +30,18 @@ CONFIG_SCHEMA = cv.Schema(
 ).extend(cv.COMPONENT_SCHEMA)
 
 
+def _final_validate(config):
+    if not network.has_active_interface():
+        raise cv.Invalid(
+            "boot_announce starts on the network component's online event: it needs network: priority: "
+            "with more than one interface"
+        )
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate
+
+
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
@@ -38,6 +52,8 @@ async def to_code(config):
     # send_packet() runs on a null socket.
     cg.add(udp_var.set_should_broadcast())
     cg.add(udp_var.set_should_listen())
+    # Sending starts on the network component's online event, not by polling (checked in _final_validate)
+    await network.register_active_interface_listener(var)
 
 
 @automation.register_action(
