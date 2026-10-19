@@ -11,8 +11,10 @@
 // file). Completions on the main loop. No UI here: a consumer (e.g. an LVGL page) shows doc().
 //
 // RAM: the buffer is PSRAM only (ALLOC_EXTERNAL, no internal fallback; ensure_memory() is false without
-// PSRAM), EDIT_MAX + 1 bytes, allocated on first use and kept. Only Doc's few fields are internal.
+// PSRAM), EDIT_MAX + 1 bytes, allocated on first use and kept; the undo step (UNDO_MAX) and the view
+// buffer (VIEW_MAX, filtered log text) the same way when first used. Only Doc's few fields are internal.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -31,6 +33,9 @@ namespace st = esphome::storage;
 static constexpr size_t EDIT_MAX = 256 * 1024;   // a file up to this is read whole and editable
 static constexpr size_t WINDOW_MAX = 32 * 1024;  // a larger one: a read-only window this big
 static constexpr size_t CHUNK = 16 * 1024;       // per read_chunk / write_chunk
+static constexpr size_t UNDO_MAX = 4 * 1024;     // the text one undo step can bring back
+static constexpr size_t VIEW_MAX = 64 * 1024;    // the filtered text a log view shows
+static constexpr uint32_t UNDO_MERGE_MS = 2000;  // typing within this joins the same undo step
 
 using Done = std::function<void(st::StorageError)>;
 
@@ -43,6 +48,7 @@ struct Doc {
   bool editable{false};      // read whole, no NUL bytes
   bool binary{false};        // NUL bytes found (shown as '.')
   bool busy{false};          // a load / follow / save runs
+  bool dirty{false};         // changed since it was read or saved (track())
   st::StorageError last{st::StorageError::STORAGE_ERROR_OK};
 #ifdef USE_STORAGE_WORKER
   // The running operation
@@ -105,6 +111,8 @@ inline void clean_(char *p, size_t n, bool &binary) {
 inline void finish_(st::StorageError err) {
   Doc &d = doc();
   d.busy = false;
+  if (err == st::StorageError::STORAGE_ERROR_OK)
+    d.dirty = false;
   d.last = err;
   d.buf[d.len] = '\0';
   Done done = std::move(d.done);
@@ -394,6 +402,258 @@ inline st::StorageError save(const std::string &path, const char *text, size_t l
 #else
   return st::StorageError::STORAGE_ERROR_NOT_READY;
 #endif
+}
+
+// ---- Editing: the buffer follows the text area; one undo step ----------------------------------------
+
+struct Undo {
+  size_t pos;          // where the change happened
+  size_t inserted;     // bytes the change put in at pos
+  size_t removed_len;  // bytes it took out (kept in removed)
+  uint32_t at_ms;      // when it was last extended
+  bool valid;
+  char removed[UNDO_MAX];
+};
+
+inline Undo *undo_() {
+  static Undo *u = nullptr;
+  if (u == nullptr) {
+    esphome::RAMAllocator<Undo> alloc(esphome::RAMAllocator<Undo>::ALLOC_EXTERNAL);
+    u = alloc.allocate(1);
+    if (u != nullptr)
+      u->valid = false;
+  }
+  return u;
+}
+
+// The text area's text now (`now`, n bytes): the buffer takes it, the difference becomes the undo step
+// (joined with the step before while typing goes on at its end, or backspacing / deleting at its start,
+// within UNDO_MERGE_MS). A change larger than UNDO_MAX cannot be undone.
+inline void track(const char *now, size_t n, uint32_t now_ms) {
+  Doc &d = doc();
+  if (d.buf == nullptr || now == nullptr || n > EDIT_MAX)
+    return;
+  size_t pre = 0;
+  const size_t shorter = std::min(d.len, n);
+  while (pre < shorter && d.buf[pre] == now[pre])
+    pre++;
+  size_t suf = 0;
+  while (suf < shorter - pre && d.buf[d.len - 1 - suf] == now[n - 1 - suf])
+    suf++;
+  const size_t removed = d.len - pre - suf;
+  const size_t inserted = n - pre - suf;
+  if (removed == 0 && inserted == 0)
+    return;
+  Undo *u = undo_();
+  if (u != nullptr) {
+    const bool recent = u->valid && now_ms - u->at_ms < UNDO_MERGE_MS;
+    if (recent && removed == 0 && pre == u->pos + u->inserted) {
+      u->inserted += inserted;  // typing on
+    } else if (recent && inserted == 0 && u->inserted == 0 && pre + removed == u->pos &&
+               u->removed_len + removed <= UNDO_MAX) {
+      memmove(u->removed + removed, u->removed, u->removed_len);  // backspacing on
+      memcpy(u->removed, d.buf + pre, removed);
+      u->removed_len += removed;
+      u->pos = pre;
+    } else if (recent && inserted == 0 && u->inserted == 0 && pre == u->pos &&
+               u->removed_len + removed <= UNDO_MAX) {
+      memcpy(u->removed + u->removed_len, d.buf + pre, removed);  // deleting forward on
+      u->removed_len += removed;
+    } else if (removed <= UNDO_MAX) {
+      u->pos = pre;
+      u->inserted = inserted;
+      u->removed_len = removed;
+      memcpy(u->removed, d.buf + pre, removed);
+      u->valid = true;
+    } else {
+      u->valid = false;
+    }
+    u->at_ms = now_ms;
+  }
+  memmove(d.buf + pre + inserted, d.buf + d.len - suf, suf);
+  memcpy(d.buf + pre, now + pre, inserted);
+  d.len = n;
+  d.buf[n] = '\0';
+  d.dirty = true;
+}
+
+inline bool can_undo() {
+  Undo *u = undo_();
+  return u != nullptr && u->valid;
+}
+
+// Takes the last step back in the buffer; the caller shows the buffer again. Returns where the cursor
+// goes (the end of what came back), or -1 when there is nothing to undo.
+inline int64_t undo() {
+  Doc &d = doc();
+  Undo *u = undo_();
+  if (u == nullptr || !u->valid || d.buf == nullptr || u->pos + u->inserted > d.len ||
+      d.len - u->inserted + u->removed_len > EDIT_MAX)
+    return -1;
+  const size_t tail = d.len - u->pos - u->inserted;
+  memmove(d.buf + u->pos + u->removed_len, d.buf + u->pos + u->inserted, tail);
+  memcpy(d.buf + u->pos, u->removed, u->removed_len);
+  d.len = d.len - u->inserted + u->removed_len;
+  d.buf[d.len] = '\0';
+  u->valid = false;
+  d.dirty = true;
+  return static_cast<int64_t>(u->pos + u->removed_len);
+}
+
+inline void forget_undo() {
+  Undo *u = undo_();
+  if (u != nullptr)
+    u->valid = false;
+}
+
+// ---- Search and replace (in the buffer; case-insensitive for ASCII) ----------------------------------
+
+inline bool match_(const char *p, const char *needle, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    char a = p[i], b = needle[i];
+    if (a >= 'A' && a <= 'Z')
+      a = static_cast<char>(a + 32);
+    if (b >= 'A' && b <= 'Z')
+      b = static_cast<char>(b + 32);
+    if (a != b)
+      return false;
+  }
+  return true;
+}
+
+// The next match at or after `from` (forward) or before `from` (backward), wrapping round; -1 none.
+inline int64_t find(const char *needle, size_t from, bool forward) {
+  const Doc &d = doc();
+  const size_t n = needle == nullptr ? 0 : strlen(needle);
+  if (d.buf == nullptr || n == 0 || n > d.len)
+    return -1;
+  const size_t count = d.len - n + 1;  // positions a match can start at
+  from = std::min(from, count);
+  for (size_t k = 0; k < count; k++) {
+    const size_t i = forward ? (from + k) % count : (from + 2 * count - 1 - k) % count;
+    if (match_(d.buf + i, needle, n))
+      return static_cast<int64_t>(i);
+  }
+  return -1;
+}
+
+// Replaces the match at `pos` (it must match `needle`); false when it does not fit
+inline bool replace_at(size_t pos, const char *needle, const char *with) {
+  Doc &d = doc();
+  const size_t n = strlen(needle), m = strlen(with);
+  if (d.buf == nullptr || n == 0 || pos + n > d.len || !match_(d.buf + pos, needle, n) || d.len - n + m > EDIT_MAX)
+    return false;
+  memmove(d.buf + pos + m, d.buf + pos + n, d.len - pos - n);
+  memcpy(d.buf + pos, with, m);
+  d.len = d.len - n + m;
+  d.buf[d.len] = '\0';
+  d.dirty = true;
+  forget_undo();
+  return true;
+}
+
+// Every match replaced; returns how many
+inline size_t replace_all(const char *needle, const char *with) {
+  const size_t n = needle == nullptr ? 0 : strlen(needle), m = strlen(with);
+  if (n == 0)
+    return 0;
+  size_t count = 0, pos = 0;
+  Doc &d = doc();
+  while (pos + n <= d.len) {
+    if (match_(d.buf + pos, needle, n)) {
+      if (!replace_at(pos, needle, with))
+        break;
+      count++;
+      pos += m;
+    } else {
+      pos++;
+    }
+  }
+  return count;
+}
+
+// Line and column (1-based) of byte `pos`
+inline void line_col(size_t pos, size_t *line, size_t *col) {
+  const Doc &d = doc();
+  size_t l = 1, c = 1;
+  for (size_t i = 0; d.buf != nullptr && i < pos && i < d.len; i++) {
+    if (d.buf[i] == '\n') {
+      l++;
+      c = 1;
+    } else {
+      c++;
+    }
+  }
+  *line = l;
+  *col = c;
+}
+
+// ---- Log text: lines filtered by level into the view buffer -------------------------------------------
+
+inline char *view_buffer() {
+  static char *v = nullptr;
+  if (v == nullptr) {
+    esphome::RAMAllocator<char> alloc(esphome::RAMAllocator<char>::ALLOC_EXTERNAL);
+    v = alloc.allocate(VIEW_MAX + 1);
+    if (v != nullptr)
+      v[0] = '\0';
+  }
+  return v;
+}
+
+// An ESPHome log line's level: the letter in its first "[X]" (E W I C D V -> 1..6); 0 none (always shown)
+inline uint8_t line_level(const char *p, size_t n) {
+  for (size_t i = 0; i + 2 < n && i < 40; i++) {
+    if (p[i] == '[' && p[i + 2] == ']') {
+      switch (p[i + 1]) {
+        case 'E':
+          return 1;
+        case 'W':
+          return 2;
+        case 'I':
+          return 3;
+        case 'C':
+          return 4;
+        case 'D':
+          return 5;
+        case 'V':
+          return 6;
+        default:
+          return 0;
+      }
+    }
+  }
+  return 0;
+}
+
+// The document's lines with a level up to `max_level` (1 E .. 6 V; lines without one always) into the
+// view buffer, the newest that fit; returns the view (NUL terminated) or nullptr without PSRAM.
+inline const char *filter_levels(uint8_t max_level) {
+  const Doc &d = doc();
+  char *v = view_buffer();
+  if (v == nullptr || d.buf == nullptr)
+    return nullptr;
+  size_t out = 0;
+  size_t i = 0;
+  while (i < d.len) {
+    size_t end = i;
+    while (end < d.len && d.buf[end] != '\n')
+      end++;
+    const size_t line = end - i + (end < d.len ? 1 : 0);
+    if (line_level(d.buf + i, end - i) <= max_level) {
+      if (out + line > VIEW_MAX) {  // keep the newest: drop the oldest half
+        const size_t drop = std::min(out, std::max(out / 2, out + line - VIEW_MAX));
+        memmove(v, v + drop, out - drop);
+        out -= drop;
+      }
+      const size_t take = std::min(line, VIEW_MAX - out);
+      memcpy(v + out, d.buf + i, take);
+      out += take;
+    }
+    i = end + 1;
+  }
+  v[out] = '\0';
+  return v;
 }
 
 // Lines in the buffer, and the byte where line n (0-based) starts (for "go to line")
