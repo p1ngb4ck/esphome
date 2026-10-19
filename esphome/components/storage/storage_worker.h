@@ -563,6 +563,17 @@ class StorageWorker : public PollingComponent {
   // endpoint caches it web-side) and use polling only for progress.
   bool get_transfer_status(TransferJob job, TransferStatus *out) const;
 
+  // Progress without polling: `cb(ctx)` is called on the main loop while transfers run, at most every
+  // PROGRESS_INTERVAL_MS and only when their progress changed (also when one starts or ends); the
+  // listener reads get_transfer_status() for the jobs it shows. One listener: a second call replaces it,
+  // nullptr removes it.
+  static constexpr uint32_t PROGRESS_INTERVAL_MS = 250;
+  using ProgressListener = void (*)(void *ctx);
+  void set_progress_listener(ProgressListener cb, void *ctx) {
+    this->progress_cb_ = cb;
+    this->progress_ctx_ = ctx;
+  }
+
   // True if any active (PENDING/RUNNING/CANCELLED) transfer references `storage` as source or
   // destination, or any stream has it open (anything other than FREE/DONE). Main-loop-only,
   // like all control-plane queries. Used by a removable device to defer its unmount until no
@@ -666,6 +677,10 @@ class StorageWorker : public PollingComponent {
   uint8_t *chunk_buffer_(bool on_task, size_t *size_out);
   void check_stalled_();
   uint32_t last_stall_check_ms_{0};
+  ProgressListener progress_cb_{nullptr};
+  void *progress_ctx_{nullptr};
+  uint32_t progress_last_ms_{0};
+  uint64_t progress_mark_{0};
   bool is_task_safe_(const StreamRequest &req) const;
   // Same contention question overlaps_active_() answers for transfers, asked for a stream:
   // does anything else currently drive this storage's data plane? Keeps a stream step off the

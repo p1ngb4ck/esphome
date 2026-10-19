@@ -1000,6 +1000,22 @@ void StorageWorker::update() {
     this->check_stalled_();
   }
 
+  // The progress listener (a UI's progress bar without polling): at most every PROGRESS_INTERVAL_MS,
+  // and only when the running transfers moved -- or one started or ended.
+  if (this->progress_cb_ != nullptr && now_wd - this->progress_last_ms_ >= PROGRESS_INTERVAL_MS) {
+    this->progress_last_ms_ = now_wd;
+    uint64_t mark = 0;
+    for (const TransferRequest &req : this->pool_) {
+      const RequestState st = req.state.load();
+      if (st == RequestState::RUNNING || st == RequestState::CANCELLED)
+        mark += req.bytes_done.load() + req.file_done.load() + 1;
+    }
+    if (mark != this->progress_mark_) {
+      this->progress_mark_ = mark;
+      this->progress_cb_(this->progress_ctx_);
+    }
+  }
+
   this->deliver_completions_();
 
   if (this->loop_active_index_ == SIZE_MAX) {

@@ -98,6 +98,10 @@ struct State {
   st::TransferJob job_id{st::INVALID_TRANSFER_JOB};
 #endif
   std::string job_text;     // what it does, for the transfer line
+  bool job_overlay_hidden{false};  // the UI's job overlay put away by the user (until the job ends)
+  uint64_t rate_done{0};    // the rate's last sample (rate()): bytes done then, and when
+  uint32_t rate_ms{0};
+  uint32_t rate_bps{0};     // bytes per second, smoothed
   std::string job_error;    // the last job's result ("" ok)
   size_t paste_next{0};     // paste: the clipboard entry going now
   bool paste_overwrite{false};
@@ -350,6 +354,26 @@ inline bool list(const std::string &dir, size_t page, std::function<void(bool)> 
 #else
   return false;
 #endif
+}
+
+// Feeds the job's bytes done (from the worker's progress) and returns the smoothed bytes per second;
+// a new job (done went back) starts over.
+inline uint32_t rate(uint64_t done, uint32_t now_ms) {
+  State &s = state();
+  if (done < s.rate_done || s.rate_ms == 0) {
+    s.rate_done = done;
+    s.rate_ms = now_ms;
+    s.rate_bps = 0;
+    return 0;
+  }
+  const uint32_t dt = now_ms - s.rate_ms;
+  if (dt >= 200) {
+    const uint32_t now_bps = static_cast<uint32_t>((done - s.rate_done) * 1000 / dt);
+    s.rate_bps = s.rate_bps == 0 ? now_bps : (s.rate_bps * 3 + now_bps) / 4;
+    s.rate_done = done;
+    s.rate_ms = now_ms;
+  }
+  return s.rate_bps;
 }
 
 inline size_t page_count() {

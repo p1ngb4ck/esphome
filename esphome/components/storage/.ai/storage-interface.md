@@ -53,6 +53,8 @@ loop-sliced. Two engines share one queue. Completions ALWAYS fire on the main lo
 - Streaming API (one pooled `StreamHandle`, sequenced by completions):
   `begin_read/read_chunk/end_read`, `begin_write/write_chunk/end_write`, `seek`, `tell`.
   storage_worker.h:573-608
+- Progress event: `set_progress_listener(cb, ctx)` -- one listener, called on the main loop from
+  update() at most every 250 ms when running transfers moved (or one started/ended); no polling needed.
 - Status/contention: `get_transfer_status` (progress bars), `is_busy_with`, `has_active_task_io`
   (cross-engine serialization — never two threads in one medium). storage_worker.h:549-566
 - Chunk buffers: `chunk_buffer_()` (storage_worker.cpp:1190) allocs via `alloc_dma_capable` —
