@@ -74,7 +74,7 @@ void USBAudioSpeaker::stop() {
   if (this->state_ == speaker::STATE_STOPPED) {
     return;
   }
-  this->parent_->suspend_speaker();
+  this->parent_->release_speaker();
   this->state_ = speaker::STATE_STOPPED;
   this->finish_requested_ = false;
   this->pause_state_ = false;

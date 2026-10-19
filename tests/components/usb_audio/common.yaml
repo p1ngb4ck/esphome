@@ -4,6 +4,7 @@ usb_audio:
   microphone_buffer_size: 6400
   channel_pair: front
   feedback: true
+  stream_idle_timeout: 30s
   volume_curve: logarithmic
   device_quirks:
     - vid: 0x8087

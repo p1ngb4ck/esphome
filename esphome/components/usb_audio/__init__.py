@@ -42,6 +42,7 @@ CONF_USB_AUDIO_ID = "usb_audio_id"
 CONF_MICROPHONE_BUFFER_SIZE = "microphone_buffer_size"
 CONF_SPEAKER_BUFFER_SIZE = "speaker_buffer_size"
 CONF_FEEDBACK = "feedback"
+CONF_STREAM_IDLE_TIMEOUT = "stream_idle_timeout"
 CONF_VOLUME_CURVE = "volume_curve"
 CONF_CHANNEL_PAIR = "channel_pair"
 CONF_VID = "vid"
@@ -323,6 +324,10 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_VID, default=0x0000): cv.hex_uint16_t,
             cv.Optional(CONF_PID, default=0x0000): cv.hex_uint16_t,
             cv.Optional(CONF_FEEDBACK, default=True): cv.boolean,
+            # A stream unused this long is closed and its pipes (USB host channels, a fixed
+            # number per controller) go back to other devices; reopened when used (~30 ms).
+            # 0s keeps the streams open while the device is connected.
+            cv.Optional(CONF_STREAM_IDLE_TIMEOUT, default="30s"): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_VOLUME_CURVE, default="linear"): cv.enum(
                 VOLUME_CURVES, lower=True
             ),
@@ -342,6 +347,7 @@ async def to_code(config):
     cg.add(var.set_vid(config[CONF_VID]))
     cg.add(var.set_pid(config[CONF_PID]))
     cg.add(var.set_feedback_enabled(config[CONF_FEEDBACK]))
+    cg.add(var.set_stream_idle_timeout(config[CONF_STREAM_IDLE_TIMEOUT]))
     cg.add(var.set_volume_curve(config[CONF_VOLUME_CURVE]))
     cg.add(var.set_channel_pair(config[CONF_CHANNEL_PAIR]))
     for quirk in config.get(CONF_DEVICE_QUIRKS, []):

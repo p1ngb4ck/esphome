@@ -154,6 +154,9 @@ class USBAudioClient : public usb_host::USBClient {
   void set_speaker_params(uint8_t channels, uint16_t bits, uint32_t sample_rate);
   // Use an asynchronous OUT endpoint's feedback stream to pace playback (default on).
   void set_feedback_enabled(bool enabled) { this->feedback_enabled_ = enabled; }
+  // A stream not used for this long is closed, giving its pipes (host channels) back; 0 keeps
+  // the streams open from connect to disconnect.
+  void set_stream_idle_timeout(uint32_t ms) { this->stream_idle_timeout_ms_ = ms; }
   void set_volume_curve(VolumeCurve curve) { this->volume_curve_ = curve; }
   // Register a per-device quirk, matched against the device descriptor on connection.
   void add_device_quirk(uint16_t vid, uint16_t pid, VolumeEncoding encoding) {
@@ -171,6 +174,8 @@ class USBAudioClient : public usb_host::USBClient {
   bool ensure_started_microphone();
   void resume_speaker();
   void suspend_speaker();
+  // The speaker stopped (not paused): its stream closes once idle for stream_idle_timeout.
+  void release_speaker();
   // True when the stream is open or opening; on_stream_event() then reports the outcome.
   bool resume_microphone();
   void suspend_microphone();
@@ -362,6 +367,14 @@ class USBAudioClient : public usb_host::USBClient {
   // -- Playback state --------------------------------------------------------
   bool spk_suspended_{false};   // true when speaker is explicitly paused
   bool mic_suspended_{false};   // true when microphone is explicitly paused
+  // Started and not stopped: with an idle timeout only a wanted stream is opened or kept.
+  bool spk_wanted_{false};
+  bool mic_wanted_{false};
+  uint32_t stream_idle_timeout_ms_{0};
+  static constexpr uint32_t SPK_IDLE_TIMEOUT_ID = 0;
+  static constexpr uint32_t MIC_IDLE_TIMEOUT_ID = 1;
+  void close_idle_speaker_();
+  void close_idle_microphone_();
   std::atomic<bool> device_connected_{false};
 
   // -- Volume mapping --------------------------------------------------------

@@ -127,6 +127,17 @@ void USBAudioClient::loop() {
     this->note_open_result_(false, this->mic_reopen_at_ms_, this->mic_open_fails_);
   }
 
+  // A stream in use but not open: its open failed (no free host channel, a died stream) or
+  // it was started again while an idle close still drained. Opened again, paced by the
+  // backoff, once the previous one is fully closed.
+  if (this->spk_wanted_ && !this->spk_stream_open_ && this->device_connected_ && this->spk_cfg_.configured &&
+      this->spk_format_ok_ && this->spk_alt_.valid && this->spk_stream_.is_closed() &&
+      this->spk_fb_stream_.is_closed() && this->reopen_due_(this->spk_reopen_at_ms_, this->spk_open_fails_))
+    this->ensure_started_speaker();
+  if (this->mic_wanted_ && !this->mic_stream_open_ && this->device_connected_ && this->mic_cfg_.configured &&
+      this->mic_format_ok_ && this->mic_alt_.valid && this->mic_stream_.is_closed() &&
+      this->reopen_due_(this->mic_reopen_at_ms_, this->mic_open_fails_))
+    this->ensure_started_microphone();
 }
 
 // Backoff helpers. next_attempt_ms is an absolute millis() deadline; fail_count only sets
@@ -1808,9 +1819,13 @@ void USBAudioClient::finish_connect_() {
     this->post_controls_();
 
   // Open whichever streams are needed immediately.
-  if (this->spk_cfg_.configured && this->spk_format_ok_ && !this->spk_suspended_)
+  // With an idle timeout only a stream already in use; the others open when started.
+  const bool idle_close = this->stream_idle_timeout_ms_ != 0;
+  if (this->spk_cfg_.configured && this->spk_format_ok_ && !this->spk_suspended_ &&
+      (!idle_close || this->spk_wanted_))
     this->note_open_result_(this->open_speaker_stream_(), this->spk_reopen_at_ms_, this->spk_open_fails_);
-  if (this->mic_cfg_.configured && this->mic_format_ok_ && !this->mic_suspended_)
+  if (this->mic_cfg_.configured && this->mic_format_ok_ && !this->mic_suspended_ &&
+      (!idle_close || this->mic_wanted_))
     this->note_open_result_(this->open_microphone_stream_(), this->mic_reopen_at_ms_, this->mic_open_fails_);
 }
 
@@ -1823,6 +1838,8 @@ void USBAudioClient::on_disconnected() {
   this->setup_pending_ = false;
   this->close_speaker_stream_();
   this->close_microphone_stream_();
+  this->cancel_timeout(SPK_IDLE_TIMEOUT_ID);
+  this->cancel_timeout(MIC_IDLE_TIMEOUT_ID);
   this->device_connected_ = false;
   // The next device has to be told the state from scratch.
   this->spk_ctl_.volume_sent = false;
@@ -2083,12 +2100,22 @@ void USBAudioClient::finish_speaker_open_() {
   this->spk_stream_open_ = true;
   this->note_open_result_(true, this->spk_reopen_at_ms_, this->spk_open_fails_);
   ESP_LOGI(TAG, "Speaker stream open");
+  // Streams that open and close while connected: some devices reset volume and mute when the
+  // alt-setting changes, so they are told again.
+  if (this->stream_idle_timeout_ms_ != 0) {
+    this->ctrl_pending_.fetch_or(PENDING_SPK_VOLUME | PENDING_SPK_MUTE);
+    this->post_controls_();
+  }
 }
 
 void USBAudioClient::finish_microphone_open_() {
   this->mic_stream_open_ = true;
   this->note_open_result_(true, this->mic_reopen_at_ms_, this->mic_open_fails_);
   ESP_LOGI(TAG, "Microphone stream open");
+  if (this->stream_idle_timeout_ms_ != 0) {
+    this->ctrl_pending_.fetch_or(PENDING_MIC_VOLUME | PENDING_MIC_MUTE);
+    this->post_controls_();
+  }
   if (this->microphone_ != nullptr)
     this->microphone_->on_stream_event(MicStreamEvent::OPEN);
 }
@@ -2123,6 +2150,8 @@ bool USBAudioClient::ensure_started_microphone() {
 
 void USBAudioClient::resume_speaker() {
   this->spk_suspended_ = false;
+  this->spk_wanted_ = true;
+  this->cancel_timeout(SPK_IDLE_TIMEOUT_ID);
   this->ensure_started_speaker();
 }
 
@@ -2130,13 +2159,46 @@ void USBAudioClient::suspend_speaker() {
   this->spk_suspended_ = true;
 }
 
+void USBAudioClient::release_speaker() {
+  this->spk_suspended_ = true;
+  this->spk_wanted_ = false;
+  if (this->stream_idle_timeout_ms_ != 0)
+    this->set_timeout(SPK_IDLE_TIMEOUT_ID, this->stream_idle_timeout_ms_, [this]() { this->close_idle_speaker_(); });
+}
+
+// Main loop, the speaker stopped for the idle timeout: its pipes go back to the host.
+void USBAudioClient::close_idle_speaker_() {
+  if (this->spk_wanted_ || this->spk_stream_.is_closed())
+    return;
+  this->close_speaker_stream_();
+  // What the stopped speaker left queued would otherwise play at the next start. Suspended,
+  // the USB task reads nothing more from it.
+  if (this->spk_rb_ != nullptr) {
+    size_t received = 0;
+    void *item;
+    while ((item = xRingbufferReceiveUpTo(this->spk_rb_, &received, 0, this->spk_buf_size_)) != nullptr)
+      vRingbufferReturnItem(this->spk_rb_, item);
+  }
+}
+
+void USBAudioClient::close_idle_microphone_() {
+  if (this->mic_wanted_ || this->mic_stream_.is_closed())
+    return;
+  this->close_microphone_stream_();
+}
+
 bool USBAudioClient::resume_microphone() {
   this->mic_suspended_ = false;
+  this->mic_wanted_ = true;
+  this->cancel_timeout(MIC_IDLE_TIMEOUT_ID);
   return this->ensure_started_microphone();
 }
 
 void USBAudioClient::suspend_microphone() {
   this->mic_suspended_ = true;
+  this->mic_wanted_ = false;
+  if (this->stream_idle_timeout_ms_ != 0)
+    this->set_timeout(MIC_IDLE_TIMEOUT_ID, this->stream_idle_timeout_ms_, [this]() { this->close_idle_microphone_(); });
 }
 
 // Take a volume or mute request for one direction. A request that cannot change what the
