@@ -60,16 +60,12 @@ void StorageWorker::dump_config() {
   // budget); the worker task on S3/P4 stages a 64 kB (P4) / 32 kB (S3) chunk in DMA-capable PSRAM.
   const size_t chunk = STORAGE_COPY_CHUNK_SIZE;
 #if defined(USE_ESP32_VARIANT_ESP32S3)
-  const char *platform = "ESP32-S3";
   const bool psram_dma_capable = true;
 #elif defined(USE_ESP32_VARIANT_ESP32P4)
-  const char *platform = "ESP32-P4";
   const bool psram_dma_capable = true;
 #elif defined(USE_ESP32_VARIANT_ESP32)
-  const char *platform = "ESP32";
   const bool psram_dma_capable = false;
 #else
-  const char *platform = "generic";
   const bool psram_dma_capable = false;
 #endif
   ESP_LOGCONFIG(TAG, "Storage worker:");
@@ -84,7 +80,6 @@ void StorageWorker::dump_config() {
   } else {
     ESP_LOGCONFIG(TAG, "  Task chunk: %u bytes (internal RAM, DMA-capable)", (unsigned) chunk);
   }
-  ESP_LOGCONFIG(TAG, "  Platform: %s (PSRAM-DMA %s)", platform, psram_dma_capable ? "yes" : "no");
 }
 
 void StorageWorker::ensure_started_() {

@@ -64,8 +64,6 @@ void TransferBuffer::dump_config() {
   ESP_LOGCONFIG(TAG, "Transfer buffer:");
   ESP_LOGCONFIG(TAG, "  Size: %u bytes (%s)", (unsigned) this->size_,
                 this->buf_ != nullptr ? "allocated in PSRAM" : "ALLOCATION FAILED -- disabled");
-  if (this->buf_ != nullptr)
-    ESP_LOGCONFIG(TAG, "  DMA-capable: %s", this->dma_capable_ ? "yes (S3/P4)" : "no (memcpy staging)");
 }
 
 uint8_t *TransferBuffer::try_acquire(size_t need) {

@@ -813,7 +813,11 @@ void USBStorageDevice::setup() {}
 void USBStorageDevice::dump_config() {
   ESP_LOGCONFIG(TAG, "USB Storage Device:");
   ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_ ? this->mount_path_ : "(none)");
-  ESP_LOGCONFIG(TAG, "  VID: 0x%04X  PID: 0x%04X", this->vid_, this->pid_);
+  if (this->vid_ == 0 && this->pid_ == 0) {
+    ESP_LOGCONFIG(TAG, "  Device: any");
+  } else {
+    ESP_LOGCONFIG(TAG, "  VID: 0x%04X  PID: 0x%04X", this->vid_, this->pid_);
+  }
 }
 
 void USBStorageDevice::on_device_connected(const char *mount_path) {
