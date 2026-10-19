@@ -2,6 +2,8 @@
 #if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || \
     defined(USE_ESP32_VARIANT_ESP32S31) || defined(USE_ESP32_VARIANT_ESP32H4)
 #include "usb_host.h"
+
+#include <algorithm>
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/application.h"
@@ -196,6 +198,21 @@ static bool descriptor_string_equals(const usb_str_desc_t *desc, const char16_t 
   return expected[char_count] == u'\0';
 }
 
+bool USBClient::get_device_info(const UsbDevice &dev, UsbDeviceInfo &info) const {
+  if (!dev.opened || dev.desc == nullptr)
+    return false;
+  info.vendor_id = dev.desc->idVendor;
+  info.product_id = dev.desc->idProduct;
+  info.bcd_device = dev.desc->bcdDevice;
+  usb_device_info_t dev_info;
+  if (usb_host_device_info(dev.handle, &dev_info) != ESP_OK)
+    return false;
+  copy_descriptor_string(dev_info.str_desc_manufacturer, info.manufacturer);
+  copy_descriptor_string(dev_info.str_desc_product, info.product);
+  copy_descriptor_string(dev_info.str_desc_serial_num, info.serial_number);
+  return true;
+}
+
 bool USBClient::get_device_info(UsbDeviceInfo &info) const {
   if (!this->is_connected())
     return false;
@@ -346,6 +363,10 @@ bool USBClient::process_usb_events_() {
     had_work = true;
     this->handle_open_state_();
   }
+  if (this->accepts_more_devices_() && this->open_devices_())
+    had_work = true;
+  if (!this->dead_devices_.empty() && this->reap_devices_())
+    had_work = true;
   return had_work;
 }
 
@@ -419,18 +440,18 @@ void USBClient::report_connected_() {
   this->connection_callback_.call(true);
 }
 
-size_t USBClient::transfer_buffer_size_() const {
+static size_t buffer_size_for(const usb_device_desc_t *device_desc, const usb_config_desc_t *config_desc) {
   // Every endpoint of the active configuration, not only the ones this driver claims: the
   // pool is shared across them and a driver may claim another interface later. This is what
   // lets the same code serve a device on the high-speed controller and one on the
   // full-speed controller at the same time, each with the packet size it actually declares.
   // USB_EP_DESC_GET_MPS() masks off the high-speed multiplier bits, which is what a single
   // packet holds; the isochronous path allocates its own transfers and handles MULT itself.
-  size_t largest = this->device_desc_ != nullptr ? this->device_desc_->bMaxPacketSize0 : 0;
-  if (this->config_desc_ != nullptr) {
+  size_t largest = device_desc != nullptr ? device_desc->bMaxPacketSize0 : 0;
+  if (config_desc != nullptr) {
     int offset = 0;
-    const usb_standard_desc_t *next = reinterpret_cast<const usb_standard_desc_t *>(this->config_desc_);
-    while ((next = usb_parse_next_descriptor_of_type(next, this->config_desc_->wTotalLength, USB_W_VALUE_DT_ENDPOINT,
+    const usb_standard_desc_t *next = reinterpret_cast<const usb_standard_desc_t *>(config_desc);
+    while ((next = usb_parse_next_descriptor_of_type(next, config_desc->wTotalLength, USB_W_VALUE_DT_ENDPOINT,
                                                      &offset)) != nullptr) {
       const size_t mps = USB_EP_DESC_GET_MPS(reinterpret_cast<const usb_ep_desc_t *>(next));
       if (mps > largest)
@@ -446,6 +467,8 @@ size_t USBClient::transfer_buffer_size_() const {
   // capped below one packet. That bites on a 64 byte device, where it would leave 56.
   return SETUP_PACKET_SIZE + largest;
 }
+
+size_t USBClient::transfer_buffer_size_() const { return buffer_size_for(this->device_desc_, this->config_desc_); }
 
 bool USBClient::alloc_transfer_pool_() {
   const size_t size = this->transfer_buffer_size_();
@@ -547,6 +570,15 @@ void USBClient::bind_(uint8_t addr, uint32_t interfaces) {
 }
 
 void USBClient::on_removed(usb_device_handle_t handle) {
+  if (this->accepts_more_devices_()) {
+    for (auto &dev : this->devices_) {
+      if (dev->handle == handle) {
+        this->drop_device_(dev.get());
+        return;
+      }
+    }
+    return;
+  }
   if (this->device_handle_ == handle)
     this->disconnect();
 }
@@ -623,9 +655,39 @@ TransferRequest *USBClient::get_trq_() {
   }
 }
 
+// A free slot of a further device's pool (several-devices drivers); null when all are in use.
+static TransferRequest *device_trq(UsbDevice &dev) {
+  trq_bitmask_t mask = dev.in_use.load(std::memory_order_acquire);
+  for (;;) {
+    if (mask == ALL_REQUESTS_IN_USE) {
+      ESP_LOGE(TAG, "All %zu transfer slots of device %d in use", MAX_REQUESTS, dev.addr);
+      return nullptr;
+    }
+    const trq_bitmask_t lsb = ~mask & (mask + 1);
+    if (dev.in_use.compare_exchange_weak(mask, mask | lsb, std::memory_order_acquire)) {
+      auto *trq = &dev.requests[__builtin_ctz(lsb)];
+      trq->transfer->context = trq;
+      trq->transfer->device_handle = dev.handle;
+      return trq;
+    }
+  }
+}
+
 void USBClient::release_trq(TransferRequest *trq) {
   if (trq == nullptr)
     return;
+  if (trq->device != nullptr) {
+    // A further device's pool (several-devices drivers)
+    UsbDevice *dev = trq->device;
+    const size_t at = trq - dev->requests;
+    if (at < MAX_REQUESTS) {
+      const trq_bitmask_t bit = static_cast<trq_bitmask_t>(1) << at;
+      const trq_bitmask_t left = dev->in_use.fetch_and(~bit, std::memory_order_acq_rel) & ~bit;
+      if (left == 0 && dev->dead)
+        this->enable_loop_soon_any_context();  // its memory can go now (reap_devices_, main loop)
+    }
+    return;
+  }
   size_t index = trq - this->requests_;
   if (index >= MAX_REQUESTS) {
     ESP_LOGE(TAG, "Invalid TransferRequest pointer");
@@ -691,15 +753,13 @@ bool USBClient::transfer_out(uint8_t ep_address, const transfer_cb_t &callback, 
 
 #ifdef USE_USB_CONTROL_TRANSFERS
 
-bool USBClient::control_transfer(uint8_t type, uint8_t request, uint16_t value, uint16_t index,
-                                 const transfer_cb_t &callback, const std::vector<uint8_t> &data, int32_t w_length) {
-  auto *trq = this->get_trq_();
-  if (trq == nullptr)
-    return false;
+// The setup packet and data stage of a control transfer into a slot; false when the data does not fit
+// (the caller releases the slot).
+static bool fill_control(TransferRequest *trq, uint8_t type, uint8_t request, uint16_t value, uint16_t index,
+                         const transfer_cb_t &callback, const std::vector<uint8_t> &data, int32_t w_length) {
   auto length = data.size();
   if (length > trq->transfer->data_buffer_size - SETUP_PACKET_SIZE) {
     ESP_LOGE(TAG, "control_transfer: data too large: %u", length);
-    this->release_trq(trq);
     return false;
   }
   const size_t setup_length = (w_length < 0) ? length : static_cast<size_t>(w_length);
@@ -707,7 +767,6 @@ bool USBClient::control_transfer(uint8_t type, uint8_t request, uint16_t value, 
     // The device is being told it may send or receive more than the buffer holds.
     ESP_LOGE(TAG, "control_transfer: wLength %u exceeds the %u byte buffer", static_cast<unsigned>(setup_length),
              static_cast<unsigned>(length));
-    this->release_trq(trq);
     return false;
   }
   auto control_packet = ByteBuffer(SETUP_PACKET_SIZE, LITTLE);
@@ -723,6 +782,18 @@ bool USBClient::control_transfer(uint8_t type, uint8_t request, uint16_t value, 
   trq->transfer->bEndpointAddress = type & USB_DIR_MASK;
   trq->transfer->num_bytes = static_cast<int>(length + SETUP_PACKET_SIZE);
   trq->transfer->callback = reinterpret_cast<usb_transfer_cb_t>(control_callback);
+  return true;
+}
+
+bool USBClient::control_transfer(uint8_t type, uint8_t request, uint16_t value, uint16_t index,
+                                 const transfer_cb_t &callback, const std::vector<uint8_t> &data, int32_t w_length) {
+  auto *trq = this->get_trq_();
+  if (trq == nullptr)
+    return false;
+  if (!fill_control(trq, type, request, value, index, callback, data, w_length)) {
+    this->release_trq(trq);
+    return false;
+  }
   if (!this->host_->submit_control(this->handle_, trq)) {
     this->release_trq(trq);
     return false;
@@ -745,6 +816,190 @@ bool USBClient::claim_interface(uint8_t interface_num, uint8_t alt_setting) {
 
 bool USBClient::release_interface(uint8_t interface_num) {
   return this->host_->do_release_interface(this->handle_, this->device_handle_, interface_num);
+}
+
+// -- Several devices per client ---------------------------------------------------
+
+#ifdef USE_USB_BULK_TRANSFERS
+bool USBClient::transfer_in(UsbDevice &dev, uint8_t ep_address, const transfer_cb_t &callback, uint16_t length) {
+  auto *trq = device_trq(dev);
+  if (trq == nullptr)
+    return false;
+  if (length > trq->transfer->data_buffer_size) {
+    ESP_LOGE(TAG, "transfer_in: length %u > buffer %u", length, trq->transfer->data_buffer_size);
+    this->release_trq(trq);
+    return false;
+  }
+  trq->callback = callback;
+  trq->transfer->callback = transfer_callback;
+  trq->transfer->bEndpointAddress = ep_address | USB_DIR_IN;
+  trq->transfer->num_bytes = length;
+  if (!this->host_->submit_transfer(trq)) {
+    this->release_trq(trq);
+    return false;
+  }
+  return true;
+}
+
+bool USBClient::transfer_out(UsbDevice &dev, uint8_t ep_address, const transfer_cb_t &callback, const uint8_t *data,
+                             uint16_t length) {
+  auto *trq = device_trq(dev);
+  if (trq == nullptr)
+    return false;
+  if (length > trq->transfer->data_buffer_size) {
+    ESP_LOGE(TAG, "transfer_out: length %u > buffer %u", length, trq->transfer->data_buffer_size);
+    this->release_trq(trq);
+    return false;
+  }
+  trq->callback = callback;
+  trq->transfer->callback = transfer_callback;
+  trq->transfer->bEndpointAddress = ep_address | USB_DIR_OUT;
+  trq->transfer->num_bytes = length;
+  memcpy(trq->transfer->data_buffer, data, length);
+  if (!this->host_->submit_transfer(trq)) {
+    this->release_trq(trq);
+    return false;
+  }
+  return true;
+}
+#endif  // USE_USB_BULK_TRANSFERS
+
+#ifdef USE_USB_CONTROL_TRANSFERS
+bool USBClient::control_transfer(UsbDevice &dev, uint8_t type, uint8_t request, uint16_t value, uint16_t index,
+                                 const transfer_cb_t &callback, const std::vector<uint8_t> &data, int32_t w_length) {
+  auto *trq = device_trq(dev);
+  if (trq == nullptr)
+    return false;
+  if (!fill_control(trq, type, request, value, index, callback, data, w_length)) {
+    this->release_trq(trq);
+    return false;
+  }
+  if (!this->host_->submit_control(this->handle_, trq)) {
+    this->release_trq(trq);
+    return false;
+  }
+  return true;
+}
+#endif  // USE_USB_CONTROL_TRANSFERS
+
+bool USBClient::claim_interface(UsbDevice &dev, uint8_t interface_num, uint8_t alt_setting) {
+  return this->host_->do_claim_interface(this->handle_, dev.handle, interface_num, alt_setting);
+}
+
+bool USBClient::release_interface(UsbDevice &dev, uint8_t interface_num) {
+  return this->host_->do_release_interface(this->handle_, dev.handle, interface_num);
+}
+
+// Routing (main loop) handed a further device over; it is opened on this client's next loop pass.
+void USBClient::bind_device_(uint8_t addr, uint32_t interfaces) {
+  auto dev = std::make_unique<UsbDevice>();
+  dev->addr = addr;
+  dev->interfaces = interfaces;
+  this->devices_.push_back(std::move(dev));
+  this->enable_loop();
+}
+
+bool USBClient::open_devices_() {
+  bool work = false;
+  for (size_t i = 0; i < this->devices_.size();) {
+    UsbDevice *dev = this->devices_[i].get();
+    if (!dev->opened) {
+      work = true;
+      if (!this->open_device_(*dev)) {
+        this->drop_device_(dev);  // erases it: the same index is the next device
+        continue;
+      }
+    }
+    i++;
+  }
+  return work;
+}
+
+bool USBClient::open_device_(UsbDevice &dev) {
+  esp_err_t err = usb_host_device_open(this->handle_, dev.addr, &dev.handle);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Device %d open failed: %s", dev.addr, esp_err_to_name(err));
+    dev.handle = nullptr;
+    return false;
+  }
+  if (usb_host_get_device_descriptor(dev.handle, &dev.desc) != ESP_OK ||
+      usb_host_get_active_config_descriptor(dev.handle, &dev.config) != ESP_OK) {
+    ESP_LOGW(TAG, "Device %d: descriptors not readable", dev.addr);
+    return false;
+  }
+  // Sized for this device, as the single-device pool is (alloc_transfer_pool_)
+  const size_t size = buffer_size_for(dev.desc, dev.config);
+  for (auto &request : dev.requests) {
+    if (usb_host_transfer_alloc(size, 0, &request.transfer) != ESP_OK) {
+      ESP_LOGE(TAG, "Device %d: transfer buffer alloc failed", dev.addr);
+      return false;
+    }
+    request.client = this;
+    request.device = &dev;
+  }
+  dev.opened = true;
+  ESP_LOGD(TAG, "Device %d (%04X:%04X) opened by %s", dev.addr, dev.desc->idVendor, dev.desc->idProduct,
+           LOG_STR_ARG(this->get_component_log_str()));
+  this->on_device_connected(dev);
+  // The connection callbacks: the first device of the client came (on_device_connected may have closed it)
+  if (!this->connection_reported_ && !this->devices_.empty()) {
+    this->connection_reported_ = true;
+    this->connection_callback_.call(true);
+  }
+  return true;
+}
+
+void USBClient::close_device(UsbDevice &dev) { this->drop_device_(&dev); }
+
+// Main loop: the let-go devices whose transfers are all back - their buffers, the driver's context, the record.
+bool USBClient::reap_devices_() {
+  bool any = false;
+  for (size_t i = 0; i < this->dead_devices_.size();) {
+    UsbDevice *dev = this->dead_devices_[i].get();
+    if (dev->in_use.load(std::memory_order_acquire) != 0) {
+      i++;
+      continue;
+    }
+    for (auto &request : dev->requests) {
+      if (request.transfer != nullptr) {
+        usb_host_transfer_free(request.transfer);
+        request.transfer = nullptr;
+      }
+    }
+    this->free_device_context(*dev);
+    this->dead_devices_.erase(this->dead_devices_.begin() + i);
+    any = true;
+  }
+  return any;
+}
+
+void USBClient::drop_device_(UsbDevice *dev) {
+  auto it = std::find_if(this->devices_.begin(), this->devices_.end(),
+                         [dev](const std::unique_ptr<UsbDevice> &d) { return d.get() == dev; });
+  if (it == this->devices_.end())
+    return;
+  if (dev->opened) {
+    dev->opened = false;
+    this->on_device_disconnected(*dev);
+  }
+  if (dev->handle != nullptr) {
+    const esp_err_t err = usb_host_device_close(this->handle_, dev->handle);
+    if (err != ESP_OK)
+      ESP_LOGE(TAG, "Device %d close failed: %s", dev->addr, esp_err_to_name(err));
+  }
+  const int addr = dev->addr;
+  // Its memory waits until no transfer of it is out (a flushed transfer still completes on the USB task):
+  // the last one coming back wakes the loop, reap_devices_() frees it.
+  dev->dead = true;
+  this->dead_devices_.push_back(std::move(*it));
+  this->devices_.erase(it);
+  this->reap_devices_();
+  if (this->devices_.empty() && this->connection_reported_) {
+    this->connection_reported_ = false;
+    this->connection_callback_.call(false);
+  }
+  if (addr >= 0)
+    this->host_->client_released(this, addr);
 }
 
 // -- Isochronous thin forwarders -----------------------------------------------

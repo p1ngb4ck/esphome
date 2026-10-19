@@ -490,7 +490,11 @@ void USBHost::route_(RoutedDevice &dev) {
                free_interfaces, LOG_STR_ARG(client->get_component_log_str()));
       dev.assigned |= free_interfaces;
       dev.bound.push_back(client);
-      client->bind_(dev.addr, free_interfaces);
+      if (client->accepts_more_devices_()) {
+        client->bind_device_(dev.addr, free_interfaces);
+      } else {
+        client->bind_(dev.addr, free_interfaces);
+      }
       routed = true;
     }
   }

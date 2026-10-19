@@ -53,7 +53,6 @@ static constexpr uint8_t MCE_PACKET_LENGTH_MASK = 0x1f;
 static constexpr uint32_t MCE_TIME_UNIT = 50;  // us
 static constexpr uint32_t RX_TIMEOUT_US = 100000;
 static constexpr uint32_t KEY_UP_MS = 250;
-static const char *const KEY_UP = "mce_key_up";
 
 // Length of the data of a command response (mceusb_cmd_datasize()).
 static uint8_t datasize(uint8_t cmd, uint8_t subcmd) {
@@ -95,10 +94,11 @@ static uint8_t datasize(uint8_t cmd, uint8_t subcmd) {
   }
 }
 
-MCEReceiverDriver::MCEReceiverDriver(USBHIDClient *client, uint8_t flags)
+MCEReceiverDriver::MCEReceiverDriver(USBHIDDevice *client, uint8_t flags)
     : GamepadDriver(client), client_(client), flags_(flags) {}
 
-MCEReceiverDriver::~MCEReceiverDriver() { App.scheduler.cancel_timeout(this->client_, KEY_UP); }
+// The key-up timer keyed by this driver: several receivers can be plugged at once.
+MCEReceiverDriver::~MCEReceiverDriver() { App.scheduler.cancel_timeout(this); }
 
 void MCEReceiverDriver::command_(const uint8_t *cmd, size_t len) { this->input_->send_output_report(cmd, len); }
 
@@ -110,7 +110,7 @@ void MCEReceiverDriver::start() {
   if (this->flags_ & GEN1) {
     // What Windows sends the original receiver: a vendor "set address" read, 38400 bps, 8 bit
     // characters, DTR/DSR handshake.
-    const usb_device_desc_t *dev = this->client_->get_device_desc_();
+    const usb_device_desc_t *dev = this->client_->device_desc();
     const uint16_t mps0 = dev != nullptr ? dev->bMaxPacketSize0 : 8;
     this->client_->control_transfer(0xC0, 5, 0, 0, [](const usb_host::TransferStatus &) {},
                                     std::vector<uint8_t>(mps0), 2);
@@ -360,7 +360,7 @@ static constexpr MCEKey MCE_KEYS[] = {
 // A held key repeats with the same toggle; the next press flips it.
 void MCEReceiverDriver::scancode_(uint32_t scancode, bool toggle) {
   if (this->held_ && this->held_scancode_ == scancode && this->held_toggle_ == toggle) {
-    App.scheduler.set_timeout(this->client_, KEY_UP, KEY_UP_MS, [this]() { this->release_(); });
+    App.scheduler.set_timeout(this, KEY_UP_MS, [this]() { this->release_(); });
     return;
   }
   this->release_();
@@ -382,7 +382,7 @@ void MCEReceiverDriver::scancode_(uint32_t scancode, bool toggle) {
   this->held_page_ = page;
   this->held_usage_ = usage;
   this->input_->driver_key(page, usage, true);
-  App.scheduler.set_timeout(this->client_, KEY_UP, KEY_UP_MS, [this]() { this->release_(); });
+  App.scheduler.set_timeout(this, KEY_UP_MS, [this]() { this->release_(); });
 }
 
 void MCEReceiverDriver::release_() {

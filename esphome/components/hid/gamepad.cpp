@@ -13,7 +13,6 @@ static const char *const TAG = "hid.gamepad";
 static constexpr uint16_t PAGE_SIMULATION = 0x02;
 static constexpr uint16_t AXIS_USAGES[PAD_AXIS_COUNT] = {0x30, 0x31, 0x33, 0x34, 0x32, 0x35};
 static constexpr uint16_t USAGE_DPAD_UP = 0x90;
-static const char *const RUMBLE_TIMEOUT = "hid_rumble";
 
 int32_t pad_stick(int32_t v, int32_t min, int32_t max) {
   if (max <= min)
@@ -172,13 +171,12 @@ void HIDInput::rumble(uint8_t strong, uint8_t weak, uint32_t duration_ms) {
   this->pad_outputs_.weak = weak;
   if (this->pad_ != nullptr)
     this->pad_->outputs(this->pad_outputs_);
-  Component *component = this->hid_component();
-  if (component == nullptr)
-    return;
+  // Keyed by this input, not its component: a component can carry several inputs (usb_hid, one per
+  // device), and the timer must die with the input (gamepad_detach_)
   if (duration_ms != 0 && (strong != 0 || weak != 0)) {
-    App.scheduler.set_timeout(component, RUMBLE_TIMEOUT, duration_ms, [this]() { this->rumble(0, 0, 0); });
+    App.scheduler.set_timeout(this, duration_ms, [this]() { this->rumble(0, 0, 0); });
   } else {
-    App.scheduler.cancel_timeout(component, RUMBLE_TIMEOUT);
+    App.scheduler.cancel_timeout(this);
   }
 }
 
@@ -216,8 +214,7 @@ void HIDInput::gamepad_start_() {
 void HIDInput::gamepad_detach_() {
   this->gamepad_state(GamepadState{});
   this->pad_.reset();
-  if (Component *component = this->hid_component())
-    App.scheduler.cancel_timeout(component, RUMBLE_TIMEOUT);
+  App.scheduler.cancel_timeout(this);  // the rumble timer
 }
 
 bool HIDInput::gamepad_report_(const uint8_t *data, size_t len) {

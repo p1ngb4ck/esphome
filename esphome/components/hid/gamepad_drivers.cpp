@@ -525,8 +525,9 @@ class SwitchProDriver : public GamepadDriver {
         return;
     }
     // A command the pad dropped is sent once more, then the step is given up.
-    if (Component *component = this->input_->hid_component()) {
-      App.scheduler.set_timeout(component, "switch_init", 1000, [this]() {
+    {
+      // Keyed by this driver: several pads can sit on one component (usb_hid), the timer dies with it
+      App.scheduler.set_timeout(this, 1000, [this]() {
         if (this->retried_) {
           ESP_LOGW(TAG, "Switch Pro Controller: no answer to init step %u", this->step_);
           this->next_();
@@ -549,10 +550,7 @@ class SwitchProDriver : public GamepadDriver {
     this->send_step_();
   }
 
-  void cancel_timeout_() {
-    if (Component *component = this->input_->hid_component())
-      App.scheduler.cancel_timeout(component, "switch_init");
-  }
+  void cancel_timeout_() { App.scheduler.cancel_timeout(this); }
 
   // Subcommand reply data: for an SPI read, address (4), size (1), then the bytes.
   void reply_(const uint8_t *data, size_t len) {

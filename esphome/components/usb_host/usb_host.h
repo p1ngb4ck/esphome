@@ -122,11 +122,32 @@ using transfer_cb_t = std::function<void(const TransferStatus &)>;
 // TransferRequest -- our URB equivalent.
 // Client owns the pool, fills a slot, passes it to USBHost::submit_*().
 // USBHost never allocates or frees these.
+struct UsbDevice;
+
 struct TransferRequest {
   usb_transfer_t *transfer;
   transfer_cb_t callback;
   TransferStatus status;
   USBClient *client;
+  UsbDevice *device{nullptr};  // the pool it belongs to: a further device's (null: the client's first device)
+};
+
+/// One device of a client that serves several (USBClient::accepts_more_devices_(): usb_hid, usb_storage):
+/// its handle, descriptors, routed interfaces and its own transfer pool. Allocated when routing hands the
+/// device over, freed when it is gone; the driver keeps its per-device state in `context`.
+struct UsbDevice {
+  int addr{-1};
+  usb_device_handle_t handle{nullptr};
+  const usb_device_desc_t *desc{nullptr};
+  const usb_config_desc_t *config{nullptr};
+  uint32_t interfaces{0};
+  bool opened{false};
+  std::atomic<bool> dead{false};  // let go (unplugged / closed): freed once no transfer of it is out any more
+  void *context{nullptr};
+  TransferRequest requests[MAX_REQUESTS]{};
+  std::atomic<trq_bitmask_t> in_use{0};
+  /// Whether routing handed this interface of the device to its driver.
+  bool interface_routed(uint8_t number) const { return number < 32 && (this->interfaces & (1u << number)) != 0; }
 };
 
 // A client only hears about the devices it opened: which device a driver gets is decided
@@ -364,6 +385,24 @@ class USBClient : public Component {
   /// Returns false when no device is connected or the host stack refused the query.
   bool get_device_info(UsbDeviceInfo &info) const;
 
+  // -- Several devices per client (drivers with accepts_more_devices_()): the same calls for one of them --
+#ifdef USE_USB_BULK_TRANSFERS
+  bool transfer_in(UsbDevice &dev, uint8_t ep_address, const transfer_cb_t &callback, uint16_t length);
+  bool transfer_out(UsbDevice &dev, uint8_t ep_address, const transfer_cb_t &callback, const uint8_t *data,
+                    uint16_t length);
+#endif
+#ifdef USE_USB_CONTROL_TRANSFERS
+  bool control_transfer(UsbDevice &dev, uint8_t type, uint8_t request, uint16_t value, uint16_t index,
+                        const transfer_cb_t &callback, const std::vector<uint8_t> &data = {}, int32_t w_length = -1);
+#endif
+  bool claim_interface(UsbDevice &dev, uint8_t interface_num, uint8_t alt_setting = 0);
+  bool release_interface(UsbDevice &dev, uint8_t interface_num);
+  bool get_device_info(const UsbDevice &dev, UsbDeviceInfo &info) const;
+  /// The driver gives one device up (declined, or done with it): closed and handed back to routing.
+  void close_device(UsbDevice &dev);
+  /// The devices this client serves (several-devices drivers), main loop.
+  const std::vector<std::unique_ptr<UsbDevice>> &devices() const { return this->devices_; }
+
   /// Register a callback for the device this client claims being connected (true) or
   /// removed (false). Fires only for a device that was fully opened, so a device another
   /// client claims is never reported. Called from the main loop: connected once the device
@@ -467,7 +506,23 @@ class USBClient : public Component {
     return this->vid_ != 0 || this->pid_ != 0 || this->manufacturer_filter_ != nullptr ||
            this->product_filter_ != nullptr;
   }
-  bool is_free_() const { return this->state_ == USB_CLIENT_INIT; }
+  bool is_free_() const { return this->accepts_more_devices_() || this->state_ == USB_CLIENT_INIT; }
+  /// A driver that serves any number of devices at once (no device-specific configuration needed or one
+  /// it derives): each device gets a UsbDevice; the single-device members below stay unused for it.
+  virtual bool accepts_more_devices_() const { return false; }
+  /// Several-devices drivers: a device opened (descriptors read, transfer pool ready) - main loop.
+  virtual void on_device_connected(UsbDevice &dev) {}
+  /// Several-devices drivers: a device is gone or being closed - stop its endpoints and release its
+  /// interfaces here; nothing new may be submitted for it afterwards. Its context stays valid until
+  /// free_device_context(), which comes once no transfer of it is out any more.
+  virtual void on_device_disconnected(UsbDevice &dev) {}
+  /// Several-devices drivers: the device's memory goes now (main loop) - free what `context` points to.
+  virtual void free_device_context(UsbDevice &dev) {}
+  bool reap_devices_();
+  void bind_device_(uint8_t addr, uint32_t interfaces);
+  bool open_devices_();
+  bool open_device_(UsbDevice &dev);
+  void drop_device_(UsbDevice *dev);
   /// The device is on this driver's blacklist (false when no configuration uses a blacklist).
   bool blacklisted_(const usb_device_desc_t *desc) const {
     if constexpr (USB_BLACKLIST_USED) {
@@ -528,6 +583,8 @@ class USBClient : public Component {
   const char16_t *product_filter_{nullptr};
   uint16_t vid_{};
   uint16_t pid_{};
+  std::vector<std::unique_ptr<UsbDevice>> devices_{};  // several-devices drivers: one per device
+  std::vector<std::unique_ptr<UsbDevice>> dead_devices_{};  // closed, transfers still out
   const uint16_t *blacklist_{nullptr};  // vid, pid pairs in flash (set_blacklist)
   uint8_t blacklist_count_{0};
   std::vector<UsbMatch> class_matches_{};

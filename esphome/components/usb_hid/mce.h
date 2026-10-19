@@ -7,7 +7,7 @@
 
 namespace esphome::usb_hid {
 
-class USBHIDClient;
+class USBHIDDevice;
 
 // Windows Media Center eHome IR receivers (Linux mceusb.c), which are not HID: raw IR samples,
 // decoded as RC6 (ir-rc6-decoder.c), MCE remote codes reported as keys (rc-rc6-mce.c).
@@ -19,7 +19,7 @@ class MCEReceiverDriver : public hid::GamepadDriver {
   /// Every receiver, for the USB matches.
   template<typename F> static void for_each(F &&f);
 
-  MCEReceiverDriver(USBHIDClient *client, uint8_t flags);
+  MCEReceiverDriver(USBHIDDevice *client, uint8_t flags);
   ~MCEReceiverDriver() override;
   const char *name() const override { return "MCE IR receiver"; }
   void start() override;
@@ -46,7 +46,7 @@ class MCEReceiverDriver : public hid::GamepadDriver {
   void scancode_(uint32_t scancode, bool toggle);
   void release_();
 
-  USBHIDClient *client_;
+  USBHIDDevice *client_;
   uint8_t flags_;
   // mceusb parser
   Parser parser_{CMD_HEADER};
