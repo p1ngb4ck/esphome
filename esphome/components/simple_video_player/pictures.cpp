@@ -1989,10 +1989,8 @@ void SimpleVideoPlayer::release_background_() {
   this->bg_capacity_ = 0;
   this->pool_.free(this->bg_file_);
   this->bg_file_ = nullptr;
-  if (this->bg_scratch_) {
-    this->release_decode_();
-    this->bg_scratch_ = false;
-  }
+  this->pool_.free(this->bg_scratch_);
+  this->bg_scratch_ = nullptr;
   this->bg_step_ = BgStep::IDLE;
 }
 
@@ -2164,16 +2162,18 @@ void SimpleVideoPlayer::background_loop_() {
                               static_cast<int32_t>(info.height) <= job.target_h &&
                               bytes <= (job.target_capacity & ~(DMA_ALIGN - 1));
         if (!straight) {
-          if (!this->reserve_decode_(bytes)) {
+          // A piece of its own for this decode (the picture viewer's pages and files stay untouched)
+          const size_t scratch = bg_align(bytes, DMA_ALIGN);
+          this->bg_scratch_ = this->pool_take_(scratch, POOL_USER_PICTURES);
+          if (this->bg_scratch_ == nullptr) {
             ESP_LOGW(BG_TAG, "%s: %ux%u needs %u bytes of the PSRAM pool to decode", this->bg_path_,
                      static_cast<unsigned>(info.width), static_cast<unsigned>(info.height), static_cast<unsigned>(bytes));
             this->bg_failed_ = true;
             this->release_background_();
             return;
           }
-          this->bg_scratch_ = true;
-          job.scratch = this->pic_decode_buf_;
-          job.scratch_capacity = this->pic_decode_cap_;
+          job.scratch = this->bg_scratch_;
+          job.scratch_capacity = scratch;
         }
       }
       bg_detach_();  // LVGL lets go of the piece before it is written
@@ -2191,10 +2191,8 @@ void SimpleVideoPlayer::background_loop_() {
       // The file and the decode piece go at once; the canvas' piece stays while it shows
       this->pool_.free(this->bg_file_);
       this->bg_file_ = nullptr;
-      if (this->bg_scratch_) {
-        this->release_decode_();
-        this->bg_scratch_ = false;
-      }
+      this->pool_.free(this->bg_scratch_);
+      this->bg_scratch_ = nullptr;
       const PictureJob &job = this->bg_job_data_;
       if (!job.ok || !this->bg_wanted_ || this->bg_reload_) {
         if (!job.ok)

@@ -2083,7 +2083,7 @@ class SimpleVideoPlayer : public Component
   size_t bg_limit_{0};
   size_t bg_chunk_{0};
   bool bg_read_failed_{false};
-  bool bg_scratch_{false};  // the pictures' decode piece reserved for this decode
+  uint8_t *bg_scratch_{nullptr};  // a JPEG larger than the canvas: decoded whole here first (this decode only)
   storage::StreamHandle bg_handle_{};
   lv_draw_buf_t bg_buf_{};
   PictureJob bg_job_data_;
