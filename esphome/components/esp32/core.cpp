@@ -34,23 +34,27 @@ static void boot_ram_probe(void *) {
   struct Sample {
     uint32_t ms, component_ms, internal, dma, dma_min;
   };
-  static constexpr size_t SAMPLES = 40;
+  static constexpr size_t SAMPLES = 100;
   static constexpr uint32_t STEP = 2048;
   Sample samples[SAMPLES];
   size_t count = 0;
   bool full = false;
   uint32_t last_internal = 0, last_dma = 0, last_min = UINT32_MAX;
+  Sample low{0, 0, 0, UINT32_MAX, 0};  // the lowest internal DMA free seen
   const uint32_t dma_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA;
   while (xTaskGetTickCount() * portTICK_PERIOD_MS < 90000) {
     const uint32_t internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     const uint32_t dma = heap_caps_get_free_size(dma_caps);
     const uint32_t dma_min = heap_caps_get_minimum_free_size(dma_caps);
-    const bool moved = internal + STEP <= last_internal || last_internal + STEP <= internal ||
-                       dma + STEP <= last_dma || last_dma + STEP <= dma || dma_min + 512 <= last_min;
+    const uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    if (dma < low.dma)
+      low = {now, App.get_loop_component_start_time(), internal, dma, dma_min};
+    // Drops of 2 KB, rises of 8 KB (a task's stack given back), each new low of the heap's minimum
+    const bool moved = internal + STEP <= last_internal || last_internal + 4 * STEP <= internal ||
+                       dma + STEP <= last_dma || last_dma + 4 * STEP <= dma || dma_min + 512 <= last_min;
     if (moved) {
       if (count < SAMPLES) {
-        samples[count++] = {xTaskGetTickCount() * portTICK_PERIOD_MS, App.get_loop_component_start_time(),
-                            internal, dma, dma_min};
+        samples[count++] = {now, App.get_loop_component_start_time(), internal, dma, dma_min};
       } else {
         full = true;
       }
@@ -68,6 +72,9 @@ static void boot_ram_probe(void *) {
   }
   if (full)
     ESP_LOGI("boot_ram", "(more changes than %u kept)", static_cast<unsigned>(SAMPLES));
+  ESP_LOGI("boot_ram", "Lowest internal DMA free %" PRIu32 " at %" PRIu32 " ms (component since %" PRIu32
+                       "), internal then %" PRIu32 ", heap minimum %" PRIu32,
+           low.dma, low.ms, low.component_ms, low.internal, low.dma_min);
   vTaskDeleteWithCaps(nullptr);
 }
 #endif
@@ -90,7 +97,7 @@ extern "C" void app_main() {
   initArduino();
   esp32::setup_preferences();
 #ifdef USE_ESP32_BOOT_RAM_PROBE
-  xTaskCreatePinnedToCoreWithCaps(boot_ram_probe, "boot_ram", 4096, nullptr, 22, nullptr, 0, MALLOC_CAP_SPIRAM);
+  xTaskCreatePinnedToCoreWithCaps(boot_ram_probe, "boot_ram", 6144, nullptr, 22, nullptr, 0, MALLOC_CAP_SPIRAM);
 #endif
 #if CONFIG_FREERTOS_UNICORE
   xTaskCreateStatic(loop_task, "loopTask", ESPHOME_LOOP_TASK_STACK_SIZE, nullptr, 1, loop_task_stack, &loop_task_tcb);
