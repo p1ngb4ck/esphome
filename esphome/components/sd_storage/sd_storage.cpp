@@ -227,7 +227,7 @@ storage::StorageError SdMmc::mount() {
   // host.dma_aligned_buffer before allocating a temporary internal DMA buffer).
   // Aligned to 128 bytes: the largest PSRAM cache line (the P4's L2 line is 64 or 128 bytes; the
   // driver's check wants the line's alignment, esp_cache_get_alignment() is private in IDF 6.1).
-  static constexpr size_t BOUNCE_BLOCKS = 32;  // 16 KB
+  static constexpr size_t BOUNCE_BLOCKS = 1;  // one sector: an unaligned transfer goes through it sector by sector
   static constexpr size_t BOUNCE_ALIGN = 128;
   if (this->dma_bounce_ == nullptr) {
     this->dma_bounce_ = heap_caps_aligned_alloc(BOUNCE_ALIGN, BOUNCE_BLOCKS * 512, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);

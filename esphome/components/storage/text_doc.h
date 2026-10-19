@@ -3,16 +3,18 @@
 // WARNING: This component is EXPERIMENTAL. The API may change at any time
 // without following the normal breaking changes policy. Use at your own risk.
 
-// A text document model for an editor / log viewer UI on top of the storage interface and its worker:
-// one file at a time, read through a worker stream into one PSRAM buffer; a file up to EDIT_MAX whole
-// (editable), a larger one as a read-only window of WINDOW_MAX bytes at an offset (paged); a log file
-// followed while it grows (the bytes past what was read are appended, the oldest dropped); saved as
-// <name>.tmp and renamed over the file only once it is written whole (a failed save never leaves half a
-// file). Completions on the main loop. No UI here: a consumer (e.g. an LVGL page) shows doc().
+// A text file for an editor / log viewer UI on top of the storage interface and its worker - without a
+// buffer of its own: the text lives where the UI shows it (an LVGL text area or label keeps its own copy).
+// Reading borrows the transfer buffer (global_transfer_buffer, PSRAM) for the read only: the text is
+// handed to the caller, which takes it (LVGL copies it), then the buffer goes back. Saving streams the
+// caller's text (it stays unchanged until the save is done) to <name>.tmp and renames it over the file
+// (a failed save never leaves half a file). A file up to EDIT_MAX is read whole (editable), a larger one
+// as its last WINDOW_MAX bytes (read only). Text helpers (search, replace into a borrowed buffer, lines,
+// UTF-8 positions, log lines by level) work on any text. Completions on the main loop.
 //
-// RAM: the buffer is PSRAM only (ALLOC_EXTERNAL, no internal fallback; ensure_memory() is false without
-// PSRAM), EDIT_MAX + 1 bytes, allocated on first use and kept; the undo step (UNDO_MAX) and the view
-// buffer (VIEW_MAX, filtered log text) the same way when first used. Only Doc's few fields are internal.
+// RAM: nothing kept. The transfer buffer is borrowed during a read and while replace_all / a log filter
+// builds its result (the caller gives it back); Doc's few fields and the undo record (UNDO_MAX, PSRAM,
+// taken on the first edit) stay.
 
 #include <algorithm>
 #include <cstdint>
@@ -25,42 +27,44 @@
 #ifdef USE_STORAGE_WORKER
 #include "storage_worker.h"
 #endif
+#ifdef USE_STORAGE_TRANSFER_BUFFER
+#include "transfer_buffer.h"
+#endif
 
 namespace esphome::storage::text {
 
 namespace st = esphome::storage;
 
 static constexpr size_t EDIT_MAX = 256 * 1024;   // a file up to this is read whole and editable
-static constexpr size_t WINDOW_MAX = 32 * 1024;  // a larger one: a read-only window this big
+static constexpr size_t WINDOW_MAX = 32 * 1024;  // a larger one: its last bytes, read only
 static constexpr size_t CHUNK = 16 * 1024;       // per read_chunk / write_chunk
-static constexpr size_t UNDO_MAX = 4 * 1024;     // the text one undo step can bring back
-static constexpr size_t VIEW_MAX = 64 * 1024;    // the filtered text a log view shows
+static constexpr size_t UNDO_MAX = 256;          // the text one undo step can bring back
 static constexpr uint32_t UNDO_MERGE_MS = 2000;  // typing within this joins the same undo step
 
 using Done = std::function<void(st::StorageError)>;
+// The text read (NUL terminated, in the borrowed buffer: take it before returning), or an error
+using Read = std::function<void(st::StorageError, const char *text, size_t len)>;
 
 struct Doc {
-  char *buf{nullptr};  // PSRAM, EDIT_MAX + 1 (always NUL terminated at len)
-  size_t len{0};
-  std::string path;          // the full VFS path of the file shown
-  uint64_t file_size{0};     // as last read
-  uint64_t offset{0};        // where buf starts in the file (0 unless a window)
-  bool editable{false};      // read whole, no NUL bytes
-  bool binary{false};        // NUL bytes found (shown as '.')
-  bool busy{false};          // a load / follow / save runs
-  bool dirty{false};         // changed since it was read or saved (track())
-  st::StorageError last{st::StorageError::STORAGE_ERROR_OK};
+  std::string path;       // the file shown (full VFS path)
+  uint64_t file_size{0};  // as last read or written
+  uint64_t offset{0};     // where the text shown starts in the file (0 unless a window)
+  bool editable{false};   // read whole, no NUL bytes
+  bool binary{false};     // NUL bytes found (shown as '.')
+  bool busy{false};       // a read or save runs
+  bool dirty{false};      // changed since read or saved (the UI marks it)
 #ifdef USE_STORAGE_WORKER
-  // The running operation
   st::StreamHandle stream{};
   st::PathStorage *ps{nullptr};
   std::string rel;
   std::string tmp_rel;
+  uint8_t *buf{nullptr};    // the borrowed transfer buffer while a read runs
+  const char *src{nullptr};  // the caller's text while a save runs
+  size_t len{0};
   size_t want{0};
-  size_t got{0};
   size_t step{0};
-  bool append{false};
-  Done done;
+  Read read_done;
+  Done save_done;
 #endif
 };
 
@@ -69,15 +73,21 @@ inline Doc &doc() {
   return d;
 }
 
-inline bool ensure_memory() {
-  Doc &d = doc();
-  if (d.buf == nullptr) {
-    esphome::RAMAllocator<char> alloc(esphome::RAMAllocator<char>::ALLOC_EXTERNAL);
-    d.buf = alloc.allocate(EDIT_MAX + 1);
-    if (d.buf != nullptr)
-      d.buf[0] = '\0';
-  }
-  return d.buf != nullptr;
+// ---- The transfer buffer, borrowed ----------------------------------------------------------------------
+
+inline uint8_t *borrow(size_t need) {
+#ifdef USE_STORAGE_TRANSFER_BUFFER
+  return st::global_transfer_buffer != nullptr ? st::global_transfer_buffer->try_acquire(need) : nullptr;
+#else
+  return nullptr;
+#endif
+}
+
+inline void give_back() {
+#ifdef USE_STORAGE_TRANSFER_BUFFER
+  if (st::global_transfer_buffer != nullptr)
+    st::global_transfer_buffer->release();
+#endif
 }
 
 inline st::PathStorage *resolve_(const std::string &path, std::string *rel) {
@@ -98,63 +108,53 @@ inline bool task_busy_(const st::Storage *s) {
 #endif
 }
 
-// NUL bytes would end LVGL's text: shown as '.', the document then read only
-inline void clean_(char *p, size_t n, bool &binary) {
-  for (size_t i = 0; i < n; i++) {
-    if (p[i] == '\0') {
-      p[i] = '.';
-      binary = true;
-    }
-  }
-}
+#ifdef USE_STORAGE_WORKER
+// ---- Reading ---------------------------------------------------------------------------------------------
 
-inline void finish_(st::StorageError err) {
+inline void read_finish_(st::StorageError err) {
   Doc &d = doc();
   d.busy = false;
+  char *text = reinterpret_cast<char *>(d.buf);
+  if (text != nullptr) {
+    text[d.len] = '\0';
+    for (size_t i = 0; i < d.len; i++) {  // NUL bytes would end LVGL's text
+      if (text[i] == '\0') {
+        text[i] = '.';
+        d.binary = true;
+      }
+    }
+  }
+  if (d.binary)
+    d.editable = false;
   if (err == st::StorageError::STORAGE_ERROR_OK)
     d.dirty = false;
-  d.last = err;
-  d.buf[d.len] = '\0';
-  Done done = std::move(d.done);
-  d.done = nullptr;
+  Read done = std::move(d.read_done);
+  d.read_done = nullptr;
   if (done)
-    done(err);
+    done(err, text != nullptr ? text : "", text != nullptr ? d.len : 0);
+  d.buf = nullptr;
+  give_back();
 }
 
-#ifdef USE_STORAGE_WORKER
-inline void read_step_();
-
 inline void read_close_(st::StorageError err) {
-  Doc &d = doc();
-  st::global_storage_worker->end_read(d.stream, [err](st::StorageError) { finish_(err); });
+  st::global_storage_worker->end_read(doc().stream, [err](st::StorageError) { read_finish_(err); });
 }
 
 inline void read_step_() {
   Doc &d = doc();
-  if (d.got >= d.want) {
+  if (d.len >= d.want) {
     read_close_(st::StorageError::STORAGE_ERROR_OK);
     return;
   }
-  const size_t n = std::min(CHUNK, d.want - d.got);
-  // A follow that outgrows the buffer drops the oldest half first
-  if (d.len + n > EDIT_MAX) {
-    const size_t drop = std::max(d.len / 2, d.len + n - EDIT_MAX);
-    memmove(d.buf, d.buf + drop, d.len - drop);
-    d.len -= drop;
-    d.offset += drop;
-    d.editable = false;
-  }
   d.step = 0;
   const st::StorageError err = st::global_storage_worker->read_chunk(
-      d.stream, reinterpret_cast<uint8_t *>(d.buf + d.len), n, &d.step, [](st::StorageError e) {
+      d.stream, d.buf + d.len, std::min(CHUNK, d.want - d.len), &d.step, [](st::StorageError e) {
         Doc &d = doc();
         if (e != st::StorageError::STORAGE_ERROR_OK) {
           read_close_(e);
           return;
         }
-        clean_(d.buf + d.len, d.step, d.binary);
         d.len += d.step;
-        d.got += d.step;
         if (d.step == 0) {  // EOF before what stat said: the file shrank
           read_close_(st::StorageError::STORAGE_ERROR_OK);
           return;
@@ -164,169 +164,121 @@ inline void read_step_() {
   if (err != st::StorageError::STORAGE_ERROR_OK)
     read_close_(err);
 }
-
-// Opens d.rel on d.ps, seeks to `from`, reads d.want bytes into the buffer (after d.len)
-inline st::StorageError read_range_(uint64_t from) {
-  Doc &d = doc();
-  const st::StorageError err =
-      st::global_storage_worker->begin_read(d.ps, d.rel.c_str(), &d.stream, [from](st::StorageError e) {
-        Doc &d = doc();
-        if (e != st::StorageError::STORAGE_ERROR_OK) {
-          finish_(e);
-          return;
-        }
-        if (from == 0) {
-          read_step_();
-          return;
-        }
-        const st::StorageError s = st::global_storage_worker->seek(
-            d.stream, static_cast<int64_t>(from), st::SeekMode::SEEK_MODE_SET, [](st::StorageError e2) {
-              if (e2 != st::StorageError::STORAGE_ERROR_OK) {
-                read_close_(e2);
-                return;
-              }
-              read_step_();
-            });
-        if (s != st::StorageError::STORAGE_ERROR_OK)
-          read_close_(s);
-      });
-  return err;
-}
 #endif
 
-// The file's size and kind now (blocking stat, guarded like the actions)
-inline st::StorageError stat_(const std::string &path, st::PathStorage **ps, std::string *rel, st::FileStat *info) {
-  *ps = resolve_(path, rel);
-  if (*ps == nullptr)
-    return st::StorageError::STORAGE_ERROR_NOT_FOUND;
-  if (task_busy_(*ps))
-    return st::StorageError::STORAGE_ERROR_NOT_READY;
-  const st::StorageError err = (*ps)->stat(rel->c_str(), info);
-  if (err == st::StorageError::STORAGE_ERROR_OK && info->is_dir)
-    return st::StorageError::STORAGE_ERROR_INVALID_ARGS;
-  return err;
-}
-
-// Loads `path`: whole when it is up to EDIT_MAX, else the window at `from` (-1: its end). `done` fires
-// once on the main loop unless an immediate error is returned.
-inline st::StorageError load(const std::string &path, int64_t from, Done done) {
+// Reads `path`: whole when it is up to EDIT_MAX, else its last WINDOW_MAX bytes (read only). `done` gets the
+// text once (main loop) unless an immediate error is returned (NOT_READY also when the transfer buffer is
+// in use).
+inline st::StorageError load(const std::string &path, Read done) {
 #ifdef USE_STORAGE_WORKER
   Doc &d = doc();
-  if (d.busy)
+  if (d.busy || st::global_storage_worker == nullptr)
     return st::StorageError::STORAGE_ERROR_NOT_READY;
-  if (!ensure_memory() || st::global_storage_worker == nullptr)
+  std::string rel;
+  st::PathStorage *ps = resolve_(path, &rel);
+  if (ps == nullptr)
+    return st::StorageError::STORAGE_ERROR_NOT_FOUND;
+  if (task_busy_(ps))
     return st::StorageError::STORAGE_ERROR_NOT_READY;
   st::FileStat info{};
-  st::PathStorage *ps = nullptr;
-  std::string rel;
-  const st::StorageError err = stat_(path, &ps, &rel, &info);
+  st::StorageError err = ps->stat(rel.c_str(), &info);
   if (err != st::StorageError::STORAGE_ERROR_OK)
     return err;
+  if (info.is_dir)
+    return st::StorageError::STORAGE_ERROR_INVALID_ARGS;
+  const bool whole = info.size <= EDIT_MAX;
+  const size_t want = whole ? static_cast<size_t>(info.size) : WINDOW_MAX;
+  uint8_t *buf = borrow(want + 1);
+  if (buf == nullptr)
+    return st::StorageError::STORAGE_ERROR_NOT_READY;
   d.path = path;
   d.ps = ps;
   d.rel = rel;
   d.file_size = info.size;
+  d.offset = whole ? 0 : info.size - WINDOW_MAX;
+  d.editable = whole;
   d.binary = false;
+  d.buf = buf;
   d.len = 0;
-  d.got = 0;
-  d.buf[0] = '\0';
-  uint64_t start = 0;
-  if (info.size <= EDIT_MAX) {
-    d.want = static_cast<size_t>(info.size);
-    d.editable = true;
-  } else {
-    const uint64_t last = info.size - WINDOW_MAX;
-    start = from < 0 ? last : std::min<uint64_t>(static_cast<uint64_t>(from), last);
-    d.want = WINDOW_MAX;
-    d.editable = false;
-  }
-  d.offset = start;
-  d.done = [done = std::move(done)](st::StorageError e) {
-    Doc &d = doc();
-    if (d.binary)
-      d.editable = false;
-    if (done)
-      done(e);
-  };
+  d.want = want;
+  d.read_done = std::move(done);
   d.busy = true;
-  const st::StorageError r = read_range_(start);
-  if (r != st::StorageError::STORAGE_ERROR_OK) {
+  const uint64_t from = d.offset;
+  err = st::global_storage_worker->begin_read(ps, rel.c_str(), &d.stream, [from](st::StorageError e) {
+    if (e != st::StorageError::STORAGE_ERROR_OK) {
+      read_finish_(e);
+      return;
+    }
+    if (from == 0) {
+      read_step_();
+      return;
+    }
+    const st::StorageError s = st::global_storage_worker->seek(doc().stream, static_cast<int64_t>(from),
+                                                              st::SeekMode::SEEK_MODE_SET, [](st::StorageError e2) {
+                                                                if (e2 != st::StorageError::STORAGE_ERROR_OK) {
+                                                                  read_close_(e2);
+                                                                  return;
+                                                                }
+                                                                read_step_();
+                                                              });
+    if (s != st::StorageError::STORAGE_ERROR_OK)
+      read_close_(s);
+  });
+  if (err != st::StorageError::STORAGE_ERROR_OK) {
     d.busy = false;
-    d.done = nullptr;
+    d.read_done = nullptr;
+    d.buf = nullptr;
+    give_back();
   }
-  return r;
+  return err;
 #else
   return st::StorageError::STORAGE_ERROR_NOT_READY;
 #endif
 }
 
-// The bytes the file got since it was read (a log that grows) appended; the oldest dropped when the
-// buffer is full (the document then read only). OK with nothing new: done(OK) at once is not called -
-// the return is ALREADY_EXISTS ("nothing to read").
-inline st::StorageError follow(Done done) {
+// ---- Saving: the caller's text, unchanged until done -------------------------------------------------------
+
 #ifdef USE_STORAGE_WORKER
+inline void save_finish_(st::StorageError err) {
   Doc &d = doc();
-  if (d.busy || d.buf == nullptr || d.path.empty())
-    return st::StorageError::STORAGE_ERROR_NOT_READY;
-  st::FileStat info{};
-  st::PathStorage *ps = nullptr;
-  std::string rel;
-  const st::StorageError err = stat_(d.path, &ps, &rel, &info);
-  if (err != st::StorageError::STORAGE_ERROR_OK)
-    return err;
-  const uint64_t end = d.offset + d.len;
-  if (info.size < end)  // truncated or replaced: read it again from the start of its last window
-    return load(d.path, -1, std::move(done));
-  if (info.size == end)
-    return st::StorageError::STORAGE_ERROR_ALREADY_EXISTS;
-  d.ps = ps;
-  d.rel = rel;
-  d.file_size = info.size;
-  d.want = static_cast<size_t>(std::min<uint64_t>(info.size - end, EDIT_MAX));
-  d.got = 0;
-  d.done = std::move(done);
-  d.busy = true;
-  const st::StorageError r = read_range_(info.size - d.want);
-  if (r != st::StorageError::STORAGE_ERROR_OK) {
-    d.busy = false;
-    d.done = nullptr;
-  }
-  return r;
-#else
-  return st::StorageError::STORAGE_ERROR_NOT_READY;
-#endif
+  d.busy = false;
+  d.src = nullptr;
+  if (err == st::StorageError::STORAGE_ERROR_OK)
+    d.dirty = false;
+  Done done = std::move(d.save_done);
+  d.save_done = nullptr;
+  if (done)
+    done(err);
 }
 
-#ifdef USE_STORAGE_WORKER
 inline void save_fail_(st::StorageError err) {
-  Doc &d = doc();
-  st::global_storage_worker->end_write(d.stream, [err](st::StorageError) {
+  st::global_storage_worker->end_write(doc().stream, [err](st::StorageError) {
     Doc &d = doc();
     if (!task_busy_(d.ps))
       d.ps->remove(d.tmp_rel.c_str());
-    finish_(err);
+    save_finish_(err);
   });
 }
 
 inline void save_step_() {
   Doc &d = doc();
-  if (d.got >= d.len) {
+  if (d.step >= d.len) {
     st::global_storage_worker->end_write(d.stream, [](st::StorageError e) {
       Doc &d = doc();
       if (e != st::StorageError::STORAGE_ERROR_OK) {
-        finish_(e);
+        save_finish_(e);
         return;
       }
       // Written whole: the old file goes, the new one takes its name (FAT's rename does not replace)
       if (task_busy_(d.ps)) {
-        finish_(st::StorageError::STORAGE_ERROR_NOT_READY);
+        save_finish_(st::StorageError::STORAGE_ERROR_NOT_READY);
         return;
       }
       st::FileStat old{};
       if (d.ps->stat(d.rel.c_str(), &old) == st::StorageError::STORAGE_ERROR_OK) {
         const st::StorageError r = d.ps->remove(d.rel.c_str());
         if (r != st::StorageError::STORAGE_ERROR_OK) {
-          finish_(r);
+          save_finish_(r);
           return;
         }
       }
@@ -338,18 +290,18 @@ inline void save_step_() {
         st::global_storage_registry->note_parent_changed(d.path);
 #endif
       }
-      finish_(r);
+      save_finish_(r);
     });
     return;
   }
-  const size_t n = std::min(CHUNK, d.len - d.got);
+  const size_t n = std::min(CHUNK, d.len - d.step);
   const st::StorageError err = st::global_storage_worker->write_chunk(
-      d.stream, reinterpret_cast<const uint8_t *>(d.buf + d.got), n, [n](st::StorageError e) {
+      d.stream, reinterpret_cast<const uint8_t *>(d.src + d.step), n, [n](st::StorageError e) {
         if (e != st::StorageError::STORAGE_ERROR_OK) {
           save_fail_(e);
           return;
         }
-        doc().got += n;
+        doc().step += n;
         save_step_();
       });
   if (err != st::StorageError::STORAGE_ERROR_OK)
@@ -357,46 +309,40 @@ inline void save_step_() {
 }
 #endif
 
-// Saves `text` (len bytes, copied into the document's buffer first) to `path` (a new path: save as).
+// Saves `text` (len bytes; it must stay unchanged until `done`) to `path`; the document is that file then.
 inline st::StorageError save(const std::string &path, const char *text, size_t len, Done done) {
 #ifdef USE_STORAGE_WORKER
   Doc &d = doc();
-  if (d.busy)
+  if (d.busy || st::global_storage_worker == nullptr || text == nullptr)
     return st::StorageError::STORAGE_ERROR_NOT_READY;
-  if (!ensure_memory() || st::global_storage_worker == nullptr)
-    return st::StorageError::STORAGE_ERROR_NOT_READY;
-  if (len > EDIT_MAX)
-    return st::StorageError::STORAGE_ERROR_INVALID_ARGS;
   std::string rel;
   st::PathStorage *ps = resolve_(path, &rel);
   if (ps == nullptr)
     return st::StorageError::STORAGE_ERROR_NOT_FOUND;
   if (task_busy_(ps))
     return st::StorageError::STORAGE_ERROR_NOT_READY;
-  if (text != d.buf)
-    memmove(d.buf, text, len);
-  d.buf[len] = '\0';
-  d.len = len;
   d.path = path;
   d.ps = ps;
   d.rel = rel;
   d.tmp_rel = rel + ".tmp";
-  d.got = 0;
+  d.src = text;
+  d.len = len;
+  d.step = 0;
   d.editable = true;
   d.binary = false;
-  d.done = std::move(done);
+  d.save_done = std::move(done);
   d.busy = true;
-  const st::StorageError err =
-      st::global_storage_worker->begin_write(ps, d.tmp_rel.c_str(), &d.stream, [](st::StorageError e) {
-        if (e != st::StorageError::STORAGE_ERROR_OK) {
-          finish_(e);
-          return;
-        }
-        save_step_();
-      });
+  const st::StorageError err = st::global_storage_worker->begin_write(ps, d.tmp_rel.c_str(), &d.stream, [](st::StorageError e) {
+    if (e != st::StorageError::STORAGE_ERROR_OK) {
+      save_finish_(e);
+      return;
+    }
+    save_step_();
+  });
   if (err != st::StorageError::STORAGE_ERROR_OK) {
     d.busy = false;
-    d.done = nullptr;
+    d.src = nullptr;
+    d.save_done = nullptr;
   }
   return err;
 #else
@@ -404,13 +350,13 @@ inline st::StorageError save(const std::string &path, const char *text, size_t l
 #endif
 }
 
-// ---- Editing: the buffer follows the text area; one undo step ----------------------------------------
+// ---- Undo: one step, recorded from the text area's own insert events (no copy of the text) -----------------
 
 struct Undo {
-  size_t pos;          // where the change happened
-  size_t inserted;     // bytes the change put in at pos
-  size_t removed_len;  // bytes it took out (kept in removed)
-  uint32_t at_ms;      // when it was last extended
+  uint32_t pos;          // character where the step happened
+  uint32_t inserted;     // characters it put in at pos
+  uint32_t removed_len;  // bytes it took out (kept in removed)
+  uint32_t at_ms;
   bool valid;
   char removed[UNDO_MAX];
 };
@@ -426,78 +372,88 @@ inline Undo *undo_() {
   return u;
 }
 
-// The text area's text now (`now`, n bytes): the buffer takes it, the difference becomes the undo step
-// (joined with the step before while typing goes on at its end, or backspacing / deleting at its start,
-// within UNDO_MERGE_MS). A change larger than UNDO_MAX cannot be undone.
-inline void track(const char *now, size_t n, uint32_t now_ms) {
-  Doc &d = doc();
-  if (d.buf == nullptr || now == nullptr || n > EDIT_MAX)
-    return;
-  size_t pre = 0;
-  const size_t shorter = std::min(d.len, n);
-  while (pre < shorter && d.buf[pre] == now[pre])
-    pre++;
-  size_t suf = 0;
-  while (suf < shorter - pre && d.buf[d.len - 1 - suf] == now[n - 1 - suf])
-    suf++;
-  const size_t removed = d.len - pre - suf;
-  const size_t inserted = n - pre - suf;
-  if (removed == 0 && inserted == 0)
-    return;
+inline uint32_t utf8_chars_(const char *s, size_t n) {
+  uint32_t c = 0;
+  for (size_t i = 0; i < n; i++)
+    c += (static_cast<uint8_t>(s[i]) & 0xC0) != 0x80;
+  return c;
+}
+
+// Before an insertion of `added` at character `cursor` of `text` (the text area's text now)
+inline void note_insert(const char *text, uint32_t cursor, const char *added, uint32_t now_ms) {
+  (void) text;
   Undo *u = undo_();
-  if (u != nullptr) {
-    const bool recent = u->valid && now_ms - u->at_ms < UNDO_MERGE_MS;
-    if (recent && removed == 0 && pre == u->pos + u->inserted) {
-      u->inserted += inserted;  // typing on
-    } else if (recent && inserted == 0 && u->inserted == 0 && pre + removed == u->pos &&
-               u->removed_len + removed <= UNDO_MAX) {
-      memmove(u->removed + removed, u->removed, u->removed_len);  // backspacing on
-      memcpy(u->removed, d.buf + pre, removed);
-      u->removed_len += removed;
-      u->pos = pre;
-    } else if (recent && inserted == 0 && u->inserted == 0 && pre == u->pos &&
-               u->removed_len + removed <= UNDO_MAX) {
-      memcpy(u->removed + u->removed_len, d.buf + pre, removed);  // deleting forward on
-      u->removed_len += removed;
-    } else if (removed <= UNDO_MAX) {
-      u->pos = pre;
-      u->inserted = inserted;
-      u->removed_len = removed;
-      memcpy(u->removed, d.buf + pre, removed);
-      u->valid = true;
-    } else {
-      u->valid = false;
-    }
-    u->at_ms = now_ms;
+  if (u == nullptr || added == nullptr)
+    return;
+  const uint32_t n = utf8_chars_(added, strlen(added));
+  if (u->valid && now_ms - u->at_ms < UNDO_MERGE_MS && cursor == u->pos + u->inserted) {
+    u->inserted += n;  // typing on
+  } else {
+    u->pos = cursor;
+    u->inserted = n;
+    u->removed_len = 0;
+    u->valid = true;
   }
-  memmove(d.buf + pre + inserted, d.buf + d.len - suf, suf);
-  memcpy(d.buf + pre, now + pre, inserted);
-  d.len = n;
-  d.buf[n] = '\0';
-  d.dirty = true;
+  u->at_ms = now_ms;
+}
+
+// Before the character in front of `cursor` is deleted (backspace; a forward delete arrives the same way)
+inline void note_delete(const char *text, uint32_t cursor, uint32_t now_ms) {
+  Undo *u = undo_();
+  if (u == nullptr || text == nullptr || cursor == 0)
+    return;
+  // The character's bytes: from the start of character cursor - 1 to the start of character cursor
+  size_t i = 0, start = 0, end = 0;
+  uint32_t c = 0;
+  for (; text[i] != '\0'; i++) {
+    if ((static_cast<uint8_t>(text[i]) & 0xC0) != 0x80) {
+      if (c == cursor - 1)
+        start = i;
+      if (c == cursor) {
+        end = i;
+        break;
+      }
+      c++;
+    }
+  }
+  if (text[i] == '\0')
+    end = i;
+  const size_t n = end - start;
+  const bool recent = u->valid && now_ms - u->at_ms < UNDO_MERGE_MS;
+  if (recent && u->inserted > 0 && cursor == u->pos + u->inserted) {
+    u->inserted--;  // taking back what was just typed
+  } else if (recent && u->inserted == 0 && cursor == u->pos && u->removed_len + n <= UNDO_MAX) {
+    memmove(u->removed + n, u->removed, u->removed_len);  // backspacing on
+    memcpy(u->removed, text + start, n);
+    u->removed_len += n;
+    u->pos = cursor - 1;
+  } else if (n <= UNDO_MAX) {
+    u->pos = cursor - 1;
+    u->inserted = 0;
+    memcpy(u->removed, text + start, n);
+    u->removed_len = n;
+    u->valid = true;
+  } else {
+    u->valid = false;
+  }
+  u->at_ms = now_ms;
 }
 
 inline bool can_undo() {
   Undo *u = undo_();
-  return u != nullptr && u->valid;
+  return u != nullptr && u->valid && (u->inserted > 0 || u->removed_len > 0);
 }
 
-// Takes the last step back in the buffer; the caller shows the buffer again. Returns where the cursor
-// goes (the end of what came back), or -1 when there is nothing to undo.
-inline int64_t undo() {
-  Doc &d = doc();
+// The last step: characters to take out at pos (first), the text to put back there (then); false: nothing
+inline bool take_undo(uint32_t *pos, uint32_t *remove, std::string *restore) {
   Undo *u = undo_();
-  if (u == nullptr || !u->valid || d.buf == nullptr || u->pos + u->inserted > d.len ||
-      d.len - u->inserted + u->removed_len > EDIT_MAX)
-    return -1;
-  const size_t tail = d.len - u->pos - u->inserted;
-  memmove(d.buf + u->pos + u->removed_len, d.buf + u->pos + u->inserted, tail);
-  memcpy(d.buf + u->pos, u->removed, u->removed_len);
-  d.len = d.len - u->inserted + u->removed_len;
-  d.buf[d.len] = '\0';
+  if (u == nullptr || !u->valid)
+    return false;
+  *pos = u->pos;
+  *remove = u->inserted;
+  restore->assign(u->removed, u->removed_len);
   u->valid = false;
-  d.dirty = true;
-  return static_cast<int64_t>(u->pos + u->removed_len);
+  return true;
 }
 
 inline void forget_undo() {
@@ -506,7 +462,7 @@ inline void forget_undo() {
     u->valid = false;
 }
 
-// ---- Search and replace (in the buffer; case-insensitive for ASCII) ----------------------------------
+// ---- Text helpers (any text; case-insensitive search for ASCII) --------------------------------------------
 
 inline bool match_(const char *p, const char *needle, size_t n) {
   for (size_t i = 0; i < n; i++) {
@@ -527,7 +483,7 @@ inline int64_t find_in(const char *text, size_t len, const char *needle, size_t 
   const size_t n = needle == nullptr ? 0 : strlen(needle);
   if (text == nullptr || n == 0 || n > len)
     return -1;
-  const size_t count = len - n + 1;  // positions a match can start at
+  const size_t count = len - n + 1;
   from = std::min(from, count);
   for (size_t k = 0; k < count; k++) {
     const size_t i = forward ? (from + k) % count : (from + 2 * count - 1 - k) % count;
@@ -537,13 +493,68 @@ inline int64_t find_in(const char *text, size_t len, const char *needle, size_t 
   return -1;
 }
 
-inline int64_t find(const char *needle, size_t from, bool forward) {
-  const Doc &d = doc();
-  return find_in(d.buf, d.len, needle, from, forward);
+// `text` with every match replaced, into `out` (cap bytes, e.g. a borrowed buffer); its length, or -1 when
+// it does not fit. *count: the matches replaced.
+inline int64_t replace_all(const char *text, size_t len, const char *needle, const char *with, char *out, size_t cap,
+                           size_t *count) {
+  const size_t n = needle == nullptr ? 0 : strlen(needle), m = with == nullptr ? 0 : strlen(with);
+  *count = 0;
+  if (text == nullptr || out == nullptr || n == 0)
+    return -1;
+  size_t o = 0;
+  for (size_t i = 0; i < len;) {
+    if (i + n <= len && match_(text + i, needle, n)) {
+      if (o + m >= cap)
+        return -1;
+      memcpy(out + o, with, m);
+      o += m;
+      i += n;
+      (*count)++;
+    } else {
+      if (o + 1 >= cap)
+        return -1;
+      out[o++] = text[i++];
+    }
+  }
+  out[o] = '\0';
+  return static_cast<int64_t>(o);
 }
 
-// UTF-8: the character index of byte `byte`, and the byte of character `index` (LVGL's cursor and
-// letter positions count characters)
+inline size_t line_count(const char *text) {
+  if (text == nullptr || text[0] == '\0')
+    return 0;
+  size_t n = 1;
+  for (const char *p = text; *p != '\0'; p++)
+    n += *p == '\n';
+  return n;
+}
+
+// The byte where line `line` (0-based) starts
+inline size_t line_start(const char *text, size_t line) {
+  size_t pos = 0;
+  for (size_t n = 0; text != nullptr && n < line && text[pos] != '\0'; pos++) {
+    if (text[pos] == '\n')
+      n++;
+  }
+  return pos;
+}
+
+// Line and column (1-based) of byte `pos`
+inline void line_col(const char *text, size_t pos, size_t *line, size_t *col) {
+  size_t l = 1, c = 1;
+  for (size_t i = 0; text != nullptr && i < pos && text[i] != '\0'; i++) {
+    if (text[i] == '\n') {
+      l++;
+      c = 1;
+    } else {
+      c++;
+    }
+  }
+  *line = l;
+  *col = c;
+}
+
+// UTF-8: the character index of byte `byte`, and the byte of character `index` (LVGL counts characters)
 inline uint32_t char_index(const char *text, size_t byte) {
   uint32_t n = 0;
   for (size_t i = 0; text != nullptr && i < byte && text[i] != '\0'; i++)
@@ -563,70 +574,6 @@ inline size_t byte_of(const char *text, uint32_t index) {
     i++;
   }
   return i;
-}
-
-// Replaces the match at `pos` (it must match `needle`); false when it does not fit
-inline bool replace_at(size_t pos, const char *needle, const char *with) {
-  Doc &d = doc();
-  const size_t n = strlen(needle), m = strlen(with);
-  if (d.buf == nullptr || n == 0 || pos + n > d.len || !match_(d.buf + pos, needle, n) || d.len - n + m > EDIT_MAX)
-    return false;
-  memmove(d.buf + pos + m, d.buf + pos + n, d.len - pos - n);
-  memcpy(d.buf + pos, with, m);
-  d.len = d.len - n + m;
-  d.buf[d.len] = '\0';
-  d.dirty = true;
-  forget_undo();
-  return true;
-}
-
-// Every match replaced; returns how many
-inline size_t replace_all(const char *needle, const char *with) {
-  const size_t n = needle == nullptr ? 0 : strlen(needle), m = strlen(with);
-  if (n == 0)
-    return 0;
-  size_t count = 0, pos = 0;
-  Doc &d = doc();
-  while (pos + n <= d.len) {
-    if (match_(d.buf + pos, needle, n)) {
-      if (!replace_at(pos, needle, with))
-        break;
-      count++;
-      pos += m;
-    } else {
-      pos++;
-    }
-  }
-  return count;
-}
-
-// Line and column (1-based) of byte `pos`
-inline void line_col(size_t pos, size_t *line, size_t *col) {
-  const Doc &d = doc();
-  size_t l = 1, c = 1;
-  for (size_t i = 0; d.buf != nullptr && i < pos && i < d.len; i++) {
-    if (d.buf[i] == '\n') {
-      l++;
-      c = 1;
-    } else {
-      c++;
-    }
-  }
-  *line = l;
-  *col = c;
-}
-
-// ---- Log text: lines filtered by level into the view buffer -------------------------------------------
-
-inline char *view_buffer() {
-  static char *v = nullptr;
-  if (v == nullptr) {
-    esphome::RAMAllocator<char> alloc(esphome::RAMAllocator<char>::ALLOC_EXTERNAL);
-    v = alloc.allocate(VIEW_MAX + 1);
-    if (v != nullptr)
-      v[0] = '\0';
-  }
-  return v;
 }
 
 // An ESPHome log line's level: the letter in its first "[X]" (E W I C D V -> 1..6); 0 none (always shown)
@@ -654,55 +601,23 @@ inline uint8_t line_level(const char *p, size_t n) {
   return 0;
 }
 
-// The document's lines with a level up to `max_level` (1 E .. 6 V; lines without one always) into the
-// view buffer, the newest that fit; returns the view (NUL terminated) or nullptr without PSRAM.
-inline const char *filter_levels(uint8_t max_level) {
-  const Doc &d = doc();
-  char *v = view_buffer();
-  if (v == nullptr || d.buf == nullptr)
-    return nullptr;
-  size_t out = 0;
-  size_t i = 0;
-  while (i < d.len) {
+// The lines of `text` (in place: the buffer the text was read into) with a level up to `max_level`
+// (1 E .. 6 V; lines without one always); returns the new length (NUL terminated).
+inline size_t filter_levels(char *text, size_t len, uint8_t max_level) {
+  size_t out = 0, i = 0;
+  while (i < len) {
     size_t end = i;
-    while (end < d.len && d.buf[end] != '\n')
+    while (end < len && text[end] != '\n')
       end++;
-    const size_t line = end - i + (end < d.len ? 1 : 0);
-    if (line_level(d.buf + i, end - i) <= max_level) {
-      if (out + line > VIEW_MAX) {  // keep the newest: drop the oldest half
-        const size_t drop = std::min(out, std::max(out / 2, out + line - VIEW_MAX));
-        memmove(v, v + drop, out - drop);
-        out -= drop;
-      }
-      const size_t take = std::min(line, VIEW_MAX - out);
-      memcpy(v + out, d.buf + i, take);
-      out += take;
+    const size_t line = end - i + (end < len ? 1 : 0);
+    if (line_level(text + i, end - i) <= max_level) {
+      memmove(text + out, text + i, line);
+      out += line;
     }
     i = end + 1;
   }
-  v[out] = '\0';
-  return v;
-}
-
-// Lines in the buffer, and the byte where line n (0-based) starts (for "go to line")
-inline size_t line_count() {
-  const Doc &d = doc();
-  if (d.buf == nullptr || d.len == 0)
-    return 0;
-  size_t n = 1;
-  for (size_t i = 0; i < d.len; i++)
-    n += d.buf[i] == '\n';
-  return n;
-}
-
-inline size_t line_start(size_t line) {
-  const Doc &d = doc();
-  size_t pos = 0;
-  for (size_t n = 0; n < line && pos < d.len; pos++) {
-    if (d.buf[pos] == '\n')
-      n++;
-  }
-  return pos;
+  text[out] = '\0';
+  return out;
 }
 
 }  // namespace esphome::storage::text
