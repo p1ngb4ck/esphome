@@ -10,8 +10,8 @@
 // consumer (e.g. an LVGL page) draws browse::state() and calls these.
 //
 // RAM: the two pages, the clipboard and the delete list are PSRAM only (ALLOC_EXTERNAL, no internal
-// fallback; ensure_memory() is false without PSRAM), allocated on first use and kept. Only State's few
-// fields are internal.
+// fallback; ensure_memory() is false without PSRAM), taken while the page is open and given back when it
+// is left (release_memory(); a clipboard holding something stays). Only State's few fields are internal.
 
 #include <algorithm>
 #include <cinttypes>
@@ -140,6 +140,30 @@ inline bool ensure_memory() {
   if (s.work == nullptr)
     s.work = psram_new<Clip>();
   return s.ready();
+}
+
+template<typename T> void psram_delete(T *&p) {
+  if (p == nullptr)
+    return;
+  esphome::RAMAllocator<T> alloc(esphome::RAMAllocator<T>::ALLOC_EXTERNAL);
+  alloc.deallocate(p, 1);
+  p = nullptr;
+}
+
+// The PSRAM parts given back when the page is left: the pages and the delete list once no listing or job
+// uses them, the clipboard once it is empty (what is copied stays until it is pasted). ensure_memory()
+// takes them again on the next opening.
+inline void release_memory() {
+  State &s = state();
+  if (s.list_busy || s.job != JOB_NONE)
+    return;
+  psram_delete(s.shown);
+  psram_delete(s.listing);
+  psram_delete(s.work);
+  if (s.clip != nullptr && s.clip->count == 0)
+    psram_delete(s.clip);
+  s.selecting = false;
+  s.selected = 0;
 }
 
 // ---- text ----------------------------------------------------------------------------------------
