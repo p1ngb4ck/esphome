@@ -703,6 +703,18 @@ class LVHIDPointerListener final : public Parented<LvglComponent> {
   /// A wheel step scrolls this many lines (WHEEL_LINE each).
   void set_wheel_lines(uint8_t lines) { this->wheel_lines_ = lines; }
   void set_reverse_wheel(bool reverse) { this->reverse_wheel_ = reverse; }
+  /// The built-in cursor's look (not a configured cursor image): style 0 dot, 1 ring, 2 arrow;
+  /// size 0 small, 1 medium, 2 large. Drawn by LVGL itself: no image, no buffer.
+  void set_cursor_look(uint8_t style, uint8_t size);
+  /// Left-handed: the right button presses, the left one is the second button.
+  void set_left_handed(bool on) { this->left_handed_ = on; }
+  /// How long a press is held before it is a long press.
+  void set_long_press_time(uint16_t ms) { lv_indev_set_long_press_time(this->drv_, ms); }
+  /// The other buttons, pressed (true) and let go: 2 the second of left / right, 3 the middle one,
+  /// 4 and 5 the side buttons. Called where the HID input reports (main loop).
+  template<typename F> void add_on_button_callback(F &&cb) { this->button_cb_.add(std::forward<F>(cb)); }
+  /// A long press on what is under the pointer (the clickable object or its clickable parent).
+  void long_press_here();
   /// Key mode (remote controls): the keypads' direction keys move the pointer, Enter clicks.
   void set_key_mode(bool on);
   bool is_key_mode() const { return this->key_mode_; }
@@ -793,6 +805,14 @@ class LVHIDPointerListener final : public Parented<LvglComponent> {
   // A press LVGL has not read yet: a quick click's press and release can come between two reads
   // (USB HID reports arrive together in one loop pass), so the press is held for one read.
   bool press_unread_{false};
+  bool left_handed_{false};
+  bool own_cursor_{false};  // the built-in cursor (set_cursor_look() may change it)
+  bool look_pending_{false};  // changed while LVGL was paused: made at the next motion
+  uint8_t look_style_{0};
+  uint8_t look_size_{1};
+  void apply_look_();
+  uint8_t last_buttons_{0};
+  CallbackManager<void(uint8_t, bool)> button_cb_{};
   lv_indev_t *drv_{};
   lv_obj_t *cursor_{};
   uint32_t hide_after_{0};

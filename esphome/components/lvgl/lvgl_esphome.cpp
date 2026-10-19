@@ -1776,15 +1776,96 @@ void LVHIDPointerListener::set_cursor_image(const void *src) {
 #endif
 
 void LVHIDPointerListener::set_default_cursor() {
+  this->own_cursor_ = true;
+  this->set_cursor_look(0, 1);
+}
+
+// The arrow cursor: a white triangle on a dark one a pixel larger, its tip at the pointer.
+static void draw_arrow_cursor(lv_event_t *e) {
+  lv_obj_t *obj = lv_event_get_current_target_obj(e);
+  lv_layer_t *layer = lv_event_get_layer(e);
+  lv_area_t a;
+  lv_obj_get_coords(obj, &a);
+  const int32_t h = lv_area_get_height(&a) - 3;
+  const int32_t w = h * 3 / 4;
+  lv_draw_triangle_dsc_t dsc;
+  lv_draw_triangle_dsc_init(&dsc);
+  dsc.opa = LV_OPA_COVER;
+  for (int32_t edge = 1; edge >= 0; edge--) {
+    dsc.color = edge != 0 ? lv_color_black() : lv_color_white();
+    dsc.p[0].x = a.x1 + 1 - edge;
+    dsc.p[0].y = a.y1 + 1 - 2 * edge;
+    dsc.p[1].x = a.x1 + 1 - edge;
+    dsc.p[1].y = a.y1 + 1 + h + edge;
+    dsc.p[2].x = a.x1 + 1 + w + 2 * edge;
+    dsc.p[2].y = a.y1 + 1 + w + edge;
+    lv_draw_triangle(layer, &dsc);
+  }
+}
+
+void LVHIDPointerListener::set_cursor_look(uint8_t style, uint8_t size) {
+  if (!this->own_cursor_)
+    return;  // a configured cursor image stays as it is
+  this->look_style_ = style;
+  this->look_size_ = std::min<uint8_t>(size, 2);
+  // Nothing of LVGL while it is paused: the next motion (LVGL runs again) makes it.
+  this->look_pending_ = this->parent_->is_paused();
+  if (!this->look_pending_)
+    this->apply_look_();
+}
+
+void LVHIDPointerListener::apply_look_() {
+  this->look_pending_ = false;
+  const uint8_t style = this->look_style_;
+  static constexpr int32_t DIAMETER[3] = {10, 14, 20};
+  const int32_t d = DIAMETER[this->look_size_];
+  lv_obj_t *old = this->cursor_;
+  const bool shown = old != nullptr && !lv_obj_is_hidden(old);
   lv_obj_t *cursor = lv_obj_create(lv_layer_sys());
   lv_obj_remove_style_all(cursor);
-  lv_obj_set_size(cursor, 12, 12);
-  lv_obj_set_style_radius(cursor, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_opa(cursor, LV_OPA_COVER, 0);
-  lv_obj_set_style_bg_color(cursor, lv_color_white(), 0);
-  lv_obj_set_style_border_width(cursor, 2, 0);
-  lv_obj_set_style_border_color(cursor, lv_color_black(), 0);
+  if (style >= 2) {
+    const int32_t h = d * 3 / 2;
+    lv_obj_set_size(cursor, h * 3 / 4 + 4, h + 4);
+    lv_obj_add_event_cb(cursor, draw_arrow_cursor, LV_EVENT_DRAW_MAIN, nullptr);
+  } else {
+    // Dot and ring: centred on the point
+    lv_obj_set_size(cursor, d, d);
+    lv_obj_set_style_translate_x(cursor, -d / 2, 0);
+    lv_obj_set_style_translate_y(cursor, -d / 2, 0);
+    lv_obj_set_style_radius(cursor, LV_RADIUS_CIRCLE, 0);
+    if (style == 0) {
+      lv_obj_set_style_bg_opa(cursor, LV_OPA_COVER, 0);
+      lv_obj_set_style_bg_color(cursor, lv_color_white(), 0);
+      lv_obj_set_style_border_width(cursor, 2, 0);
+      lv_obj_set_style_border_color(cursor, lv_color_black(), 0);
+    } else {
+      lv_obj_set_style_border_width(cursor, 3, 0);
+      lv_obj_set_style_border_color(cursor, lv_color_white(), 0);
+      lv_obj_set_style_outline_width(cursor, 1, 0);
+      lv_obj_set_style_outline_color(cursor, lv_color_black(), 0);
+      lv_obj_set_style_outline_opa(cursor, LV_OPA_COVER, 0);
+    }
+  }
   this->set_cursor_(cursor);
+  if (shown)
+    lv_obj_set_hidden(cursor, false);
+  if (old != nullptr)
+    lv_obj_delete(old);
+}
+
+void LVHIDPointerListener::long_press_here() {
+  if (this->parent_->is_paused())
+    return;
+  lv_point_t point{this->x_, this->y_};
+  lv_obj_t *obj = lv_indev_search_obj(lv_layer_top(), &point);
+  if (obj == nullptr || obj == lv_layer_top())
+    obj = lv_indev_search_obj(lv_screen_active(), &point);
+  for (; obj != nullptr; obj = lv_obj_get_parent(obj)) {
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_CLICKABLE)) {
+      lv_obj_send_event(obj, LV_EVENT_LONG_PRESSED, nullptr);
+      return;
+    }
+  }
 }
 
 void LVHIDPointerListener::move_(int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
@@ -1799,6 +1880,8 @@ void LVHIDPointerListener::move_(int16_t dx, int16_t dy, int16_t wheel, int16_t 
   this->last_motion_ = millis();
   if (this->cursor_ != nullptr && lv_obj_is_hidden(this->cursor_))
     lv_obj_set_hidden(this->cursor_, false);
+  if (this->look_pending_)
+    this->apply_look_();
   lv_display_t *disp = this->parent_->get_disp();
   float factor = this->speed_;
   if (this->acceleration_)
@@ -1811,9 +1894,19 @@ void LVHIDPointerListener::move_(int16_t dx, int16_t dy, int16_t wheel, int16_t 
   this->rest_y_ = fy - my;
   this->x_ = std::clamp<int32_t>(this->x_ + mx, 0, lv_display_get_horizontal_resolution(disp) - 1);
   this->y_ = std::clamp<int32_t>(this->y_ + my, 0, lv_display_get_vertical_resolution(disp) - 1);
-  this->pressed_ = (buttons & 0x01) != 0;
+  const uint8_t primary = this->left_handed_ ? 0x02 : 0x01;
+  const uint8_t second = this->left_handed_ ? 0x01 : 0x02;
+  this->pressed_ = (buttons & primary) != 0;
   if (this->pressed_)
     this->press_unread_ = true;
+  const uint8_t changed = buttons ^ this->last_buttons_;
+  this->last_buttons_ = buttons;
+  if (changed & second)
+    this->button_cb_.call(2, (buttons & second) != 0);
+  for (uint8_t bit = 2; bit < 5; bit++) {  // middle, side 4, side 5
+    if (changed & (1u << bit))
+      this->button_cb_.call(bit + 1, ((buttons >> bit) & 1) != 0);
+  }
   if (wheel == 0 && pan == 0)
     return;
   if (this->reverse_wheel_)
