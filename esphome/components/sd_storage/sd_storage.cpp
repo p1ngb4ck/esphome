@@ -22,6 +22,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_idf_version.h"
+#include "esp_heap_caps.h"
+#if __has_include("esp_cache.h")
+#include "esp_cache.h"
+#endif
 #include "esphome/components/storage/storage.h"
 
 namespace esphome::sd_storage {
@@ -221,6 +225,23 @@ storage::StorageError SdMmc::mount() {
   host.max_freq_khz = static_cast<int>(this->data_rate_khz_);
   host.flags = this->mode_1bit_ ? SDMMC_HOST_FLAG_1BIT : SDMMC_HOST_FLAG_4BIT;
   host.slot = this->slot_;
+#if defined(SOC_SDMMC_PSRAM_DMA_CAPABLE) && SOC_SDMMC_PSRAM_DMA_CAPABLE && __has_include("esp_cache.h")
+  // Unaligned transfers go through this one PSRAM buffer (sdmmc_write_sectors / _read_sectors use
+  // host.dma_aligned_buffer before allocating a temporary internal DMA buffer).
+  static constexpr size_t BOUNCE_BLOCKS = 32;  // 16 KB
+  if (this->dma_bounce_ == nullptr) {
+    size_t alignment = 0;
+    if (esp_cache_get_alignment(MALLOC_CAP_SPIRAM, &alignment) != ESP_OK || alignment == 0)
+      alignment = 64;
+    this->dma_bounce_ = heap_caps_aligned_alloc(alignment, BOUNCE_BLOCKS * 512, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (this->dma_bounce_ == nullptr)
+      ESP_LOGW(TAG, "No PSRAM bounce buffer: unaligned transfers take internal DMA RAM");
+  }
+  if (this->dma_bounce_ != nullptr) {
+    host.dma_aligned_buffer = this->dma_bounce_;
+    host.unaligned_multi_block_rw_max_chunk_size = BOUNCE_BLOCKS;
+  }
+#endif
 
   sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
   slot_config.width = this->mode_1bit_ ? 1 : 4;
