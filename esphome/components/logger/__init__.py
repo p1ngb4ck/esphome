@@ -73,6 +73,7 @@ CONF_UART = "uart"
 CONF_BOOT_BUFFER_SIZE = "boot_buffer_size"
 CONF_LIVE_BUFFER_SIZE = "live_buffer_size"
 CONF_BOOT_HOLD = "boot_hold"
+CONF_LOG_RING_SIZE = "log_ring_size"
 
 
 def _auto_load() -> list[str]:
@@ -286,6 +287,11 @@ CONFIG_SCHEMA = cv.All(
                 cv.validate_bytes, cv.int_range(min=160, max=65535)
             ),
             cv.Optional(CONF_DEASSERT_RTS_DTR, default=False): cv.boolean,
+            # The recent lines in a PSRAM ring for viewers (logger::LogRing), taken when a viewer
+            # first enables it; 0: none.
+            cv.Optional(CONF_LOG_RING_SIZE, default=0): cv.All(
+                cv.validate_bytes, cv.Any(cv.int_(0), cv.int_range(min=4096, max=1048576))
+            ),
             cv.SplitDefault(
                 CONF_TASK_LOG_BUFFER_SIZE,
                 esp32=768,  # Default: 768 bytes (~5-6 messages with 70-byte text plus thread names)
@@ -463,6 +469,10 @@ async def to_code(config: ConfigType) -> None:
         settings_key = fnv1_hash(f"logger_uart:{uart_conf[CONF_ID].id}")
         cg.add(log_uart.set_settings_key(settings_key))
         cg.add(log_uart.attach(log))
+    if config[CONF_LOG_RING_SIZE] > 0:
+        cg.add_define("USE_LOGGER_LOG_RING")
+        request_log_listener()
+        cg.add(cg.RawExpression(f"logger::LogRing::instance().set_size({config[CONF_LOG_RING_SIZE]})"))
     # pre_setup() sets global_logger and must run before any other code
     # that may call ESP_LOG* (e.g. setup_preferences contains ESP_LOGVV).
     cg.add(log.pre_setup())
