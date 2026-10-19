@@ -116,6 +116,20 @@ static esp_netif_t *connected_netif(NetworkInterface interface) {
   }
 }
 
+void restore_default_dns(esp_netif_t *changed) {
+#ifdef CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF
+  esp_netif_t *def = esp_netif_get_default_netif();
+  if (def == nullptr || def == changed)
+    return;
+  for (int type = ESP_NETIF_DNS_MAIN; type <= ESP_NETIF_DNS_BACKUP; type++) {
+    esp_netif_dns_info_t dns{};
+    // The default netif's own servers, written to lwIP again (it is the default).
+    if (esp_netif_get_dns_info(def, static_cast<esp_netif_dns_type_t>(type), &dns) == ESP_OK && !ESP_IP_IS_ANY(dns.ip))
+      esp_netif_set_dns_info(def, static_cast<esp_netif_dns_type_t>(type), &dns);
+  }
+#endif
+}
+
 #ifdef CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF
 // Whether lwIP's global DNS servers are the ones the netif holds. IDF clears the global servers
 // whenever any netif gets a static address or starts DHCP (dns_clear_servers), and writes a non-default

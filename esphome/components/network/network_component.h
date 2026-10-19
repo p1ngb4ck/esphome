@@ -14,6 +14,11 @@ using esp_netif_t = struct esp_netif_obj;
 namespace esphome::network {
 
 #ifdef USE_NETWORK_DEFAULT_ROUTE
+/// Call right after `changed` got a static address or (re)started its DHCP client: ESP-IDF then
+/// clears lwIP's global DNS servers, and when `changed` is not the default interface nothing
+/// writes them again. Puts the default interface's servers back at once.
+void restore_default_dns(esp_netif_t *changed);
+
 /// The interface holding the default route. Lists only the interfaces loop() arbitrates
 /// (ARBITRATED_NETWORK_TYPES in __init__.py); extend both together.
 enum class NetworkInterface : uint8_t {

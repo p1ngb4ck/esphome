@@ -3,6 +3,9 @@
 #if defined(USE_ETHERNET) && defined(USE_ESP32)
 
 #include "esphome/components/network/util.h"
+#ifdef USE_NETWORK_DEFAULT_ROUTE
+#include "esphome/components/network/network_component.h"
+#endif
 #include "esphome/core/application.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
@@ -1039,6 +1042,10 @@ void EthernetComponent::start_connect_() {
       ESPHL_ERROR_CHECK(err, "DHCPC start error");
     }
   }
+#ifdef USE_NETWORK_DEFAULT_ROUTE
+  // The address change above cleared the DNS servers of the interface that routes (WiFi).
+  network::restore_default_dns(this->eth_netif_);
+#endif
 #if USE_NETWORK_IPV6
   // Attempt to create IPv6 link-local address
   // We MUST attempt this here, not just in finish_connect_(), because with
