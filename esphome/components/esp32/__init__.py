@@ -3137,6 +3137,12 @@ async def _finalize_arduino_aware_flags():
 
 async def to_code(config):
     framework_ver: cv.Version = CORE.data[KEY_CORE][KEY_FRAMEWORK_VERSION]
+    if get_esp32_variant() == VARIANT_ESP32P4:
+        # esp_restart_noos() resets the other core before stalling it; a cache sync of that core in flight then
+        # faults the restart's own Cache_WriteBack_All (store access fault on CACHE_SYNC_MAP_REG) or hangs it
+        # (espressif/esp-idf#19171). restart_fix.cpp stalls it and waits for the sync engine first.
+        cg.add_build_flag("-Wl,--wrap=esp_restart_noos")
+        cg.add_define("USE_ESP32_P4_RESTART_FIX")
     conf = config[CONF_FRAMEWORK]
 
     # Check if using ESP-IDF toolchain
