@@ -3,6 +3,7 @@
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 #include <cinttypes>
+#include <cmath>
 
 namespace esphome::es8311 {
 
@@ -54,20 +55,39 @@ void ES8311::dump_config() {
                 "  Use MCLK: %s\n"
                 "  Use Microphone: %s\n"
                 "  DAC Bits per Sample: %" PRIu8 "\n"
-                "  Sample Rate: %" PRIu32,
-                YESNO(this->use_mclk_), YESNO(this->use_mic_), this->resolution_out_, this->sample_frequency_);
+                "  Sample Rate: %" PRIu32 "\n"
+                "  Volume range: %.1f dB .. %.1f dB",
+                YESNO(this->use_mclk_), YESNO(this->use_mic_), this->resolution_out_, this->sample_frequency_,
+                this->volume_min_db_, this->volume_max_db_);
 }
 
+// REG32 is the DAC volume in 0.5 dB steps: 0 = -95.5 dB, 0xBF = 0 dB, 0xFF = +32 dB (datasheet). The volume
+// 0..1 spans volume_min_db_..volume_max_db_ linearly in dB (the defaults give the whole register, 0.75 = 0 dB);
+// 0 is the register's lowest step.
 bool ES8311::set_volume(float volume) {
   volume = clamp(volume, 0.0f, 1.0f);
-  uint8_t reg32 = remap<uint8_t, float>(volume, 0.0f, 1.0f, 0, 255);
+  uint8_t reg32 = 0;
+  if (volume > 0.0f) {
+    const float db = this->volume_min_db_ + volume * (this->volume_max_db_ - this->volume_min_db_);
+    reg32 = static_cast<uint8_t>(clamp(std::lround((db + 95.5f) * 2.0f), 0L, 255L));
+  }
   return this->write_byte(ES8311_REG32_DAC, reg32);
 }
 
 float ES8311::volume() {
   uint8_t reg32;
   this->read_byte(ES8311_REG32_DAC, &reg32);
-  return remap<float, uint8_t>(reg32, 0, 255, 0.0f, 1.0f);
+  if (reg32 == 0)
+    return 0.0f;
+  const float db = reg32 * 0.5f - 95.5f;
+  return clamp((db - this->volume_min_db_) / (this->volume_max_db_ - this->volume_min_db_), 0.0f, 1.0f);
+}
+
+void ES8311::set_mic_gain(ES8311MicGain mic_gain) {
+  this->mic_gain_ = mic_gain;
+  // After setup: the ADC's PGA scale at once (REG16, as configure_mic_ writes it)
+  if (this->is_ready())
+    this->write_byte(ES8311_REG16_ADC, this->mic_gain_);
 }
 
 uint8_t ES8311::calculate_resolution_value(ES8311Resolution resolution) {
