@@ -85,6 +85,15 @@ uint32_t USBHIDClient::skipped_endpoints_(const usb_device_desc_t *desc, const u
   return skip;
 }
 
+USBHIDDevice *USBHIDClient::find_device(uint16_t vid, uint16_t pid) const {
+  for (auto *device : this->hid_devices_) {
+    const usb_device_desc_t *desc = device->device_desc();
+    if (desc != nullptr && desc->idVendor == vid && desc->idProduct == pid)
+      return device;
+  }
+  return nullptr;
+}
+
 void USBHIDClient::on_device_connected(usb_host::UsbDevice &dev) {
   auto *device = new USBHIDDevice(this, &dev, this->next_serial_++);  // NOLINT: freed in free_device_context
   dev.context = device;
@@ -478,6 +487,16 @@ void USBHIDDevice::descriptor_done_(size_t index, const uint8_t *data, size_t le
   if (length == 0) {
     ESP_LOGW(TAG, "Interface %u: no report descriptor", intf.number);
   } else {
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
+    // The raw descriptor, once per connect: output / feature reports the parser does not list (stack, no heap)
+    for (size_t pos = 0; pos < length; pos += 32) {
+      char hex[32 * 3 + 1];
+      size_t n = 0;
+      for (size_t i = pos; i < length && i < pos + 32; i++)
+        n += snprintf(hex + n, sizeof(hex) - n, "%02X ", data[i]);
+      ESP_LOGD(TAG, "Interface %u report descriptor [%u]: %s", intf.number, static_cast<unsigned>(pos), hex);
+    }
+#endif
     intf.map.reset(hid::HIDReportMap::parse_report_map_data(data, length));
     if (intf.map == nullptr) {
       ESP_LOGW(TAG, "Interface %u: report descriptor (%u bytes) not understood", intf.number,

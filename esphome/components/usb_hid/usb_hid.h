@@ -109,6 +109,8 @@ class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
   float get_setup_priority() const override { return setup_priority::IO; }
 
   void register_raw_driver(RawHIDDriver *driver) { this->raw_driver_ = driver; }
+  /// The connected device with this vid:pid (the first one), or nullptr: for lambdas (control transfers to it).
+  USBHIDDevice *find_device(uint16_t vid, uint16_t pid) const;
   /// Main loop.
   uint8_t get_device_kinds() const override;
   /// The devices connected.
