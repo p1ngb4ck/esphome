@@ -152,6 +152,11 @@ void EthernetComponent::loop() {
 #ifdef USE_ETHERNET_CONNECT_TRIGGER
         this->connect_trigger_.trigger();
 #endif
+      } else if (!this->link_up_) {
+        // No cable link: restarting DHCP cannot get an address, and every restart clears the
+        // DNS servers. The link-up event wakes the loop; the wait for an address starts then.
+        this->connect_begin_ = now;
+        this->disable_loop();
       } else if (now - this->connect_begin_ > 15000) {
         ESP_LOGW(TAG, "Connecting failed; reconnecting");
         this->start_connect_();
@@ -839,10 +844,13 @@ void EthernetComponent::eth_event_handler(void *arg, esp_event_base_t event_base
       event_name = "ETH stopped";
       global_eth_component->started_ = false;
       global_eth_component->connected_ = false;
+      global_eth_component->link_up_ = false;
       global_eth_component->enable_loop_soon_any_context();  // Enable loop when connection state changes
       break;
     case ETHERNET_EVENT_CONNECTED:
       event_name = "ETH connected";
+      global_eth_component->link_up_ = true;
+      global_eth_component->enable_loop_soon_any_context();  // the wait for an address starts
       // For static IP configurations, GOT_IP event may not fire, so notify IP listeners here
 #if defined(USE_ETHERNET_IP_STATE_LISTENERS) && defined(USE_ETHERNET_MANUAL_IP)
       if (global_eth_component->manual_ip_.has_value()) {
@@ -860,6 +868,7 @@ void EthernetComponent::eth_event_handler(void *arg, esp_event_base_t event_base
     case ETHERNET_EVENT_DISCONNECTED:
       event_name = "ETH disconnected";
       global_eth_component->connected_ = false;
+      global_eth_component->link_up_ = false;
       global_eth_component->enable_loop_soon_any_context();  // Enable loop when connection state changes
       break;
     default:

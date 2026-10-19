@@ -358,6 +358,8 @@ class EthernetComponent final : public Component {
   EthernetComponentState state_{EthernetComponentState::STOPPED};
   bool started_{false};
   bool connected_{false};
+  // The PHY reports a link (cable in): ETHERNET_EVENT_CONNECTED / _DISCONNECTED.
+  bool link_up_{false};
   bool got_ipv4_address_{false};
   // Codegen-time YAML option. When false, setup() defers esp_eth_start().
   bool enable_on_boot_{true};
