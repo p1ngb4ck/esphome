@@ -71,7 +71,7 @@ class SdMmc : public SdStorageBase {
   sdmmc_card_t *card_{nullptr};
   // The driver's bounce buffer for transfers from / to buffers it cannot DMA directly (not cache
   // aligned: FATFS's sector window, partial chunks). Without it every such transfer allocates an
-  // internal DMA buffer, which fails while internal RAM is short (audio playing). One sector (512 B) of
+  // internal DMA buffer, which fails while internal RAM is short (audio playing). 16 KB of
   // PSRAM (the P4's SDMMC DMAs from it when cache aligned); taken at the first mount, kept.
   void *dma_bounce_{nullptr};
 #ifdef USE_STORAGE_FILE_SYSTEM_SELECT

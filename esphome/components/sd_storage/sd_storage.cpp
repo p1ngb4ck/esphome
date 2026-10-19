@@ -227,7 +227,10 @@ storage::StorageError SdMmc::mount() {
   // host.dma_aligned_buffer before allocating a temporary internal DMA buffer).
   // Aligned to 128 bytes: the largest PSRAM cache line (the P4's L2 line is 64 or 128 bytes; the
   // driver's check wants the line's alignment, esp_cache_get_alignment() is private in IDF 6.1).
-  static constexpr size_t BOUNCE_BLOCKS = 1;  // one sector: an unaligned transfer goes through it sector by sector
+  // 32 sectors (16 KB of PSRAM): an unaligned transfer goes through it in 16 KB steps. One sector (1b0b1afa4)
+  // made every unaligned read a command per 512 B: the player's SD reads and AVI index 4x slower, USB audio
+  // starved meanwhile (2026-10-19).
+  static constexpr size_t BOUNCE_BLOCKS = 32;
   static constexpr size_t BOUNCE_ALIGN = 128;
   if (this->dma_bounce_ == nullptr) {
     this->dma_bounce_ = heap_caps_aligned_alloc(BOUNCE_ALIGN, BOUNCE_BLOCKS * 512, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
