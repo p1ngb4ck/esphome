@@ -2059,6 +2059,7 @@ CONF_FREERTOS_IN_IRAM = "freertos_in_iram"
 CONF_RINGBUF_IN_IRAM = "ringbuf_in_iram"
 CONF_HEAP_IN_IRAM = "heap_in_iram"
 CONF_LOOP_TASK_STACK_SIZE = "loop_task_stack_size"
+CONF_BOOT_RAM_PROBE = "boot_ram_probe"
 CONF_USE_FULL_CERTIFICATE_BUNDLE = "use_full_certificate_bundle"
 CONF_DISABLE_DEBUG_STUBS = "disable_debug_stubs"
 CONF_DISABLE_OCD_AWARE = "disable_ocd_aware"
@@ -2351,6 +2352,9 @@ FRAMEWORK_SCHEMA = cv.Schema(
                 cv.Optional(CONF_LOOP_TASK_STACK_SIZE, default=8192): cv.int_range(
                     min=8192, max=32768
                 ),
+                # A measurement: internal and internal DMA free RAM sampled every millisecond for the
+                # first 90 s, its changes logged afterwards (a task with its stack in PSRAM, gone then).
+                cv.Optional(CONF_BOOT_RAM_PROBE, default=False): cv.boolean,
                 cv.Optional(CONF_ENABLE_OTA_ROLLBACK, default=True): cv.boolean,
                 cv.Optional(
                     CONF_ENABLE_OTA_DOWNGRADE_PROTECTION, default=False
@@ -3636,6 +3640,8 @@ async def to_code(config):
         )
 
     cg.add_define("ESPHOME_LOOP_TASK_STACK_SIZE", advanced[CONF_LOOP_TASK_STACK_SIZE])
+    if advanced[CONF_BOOT_RAM_PROBE]:
+        cg.add_define("USE_ESP32_BOOT_RAM_PROBE")
 
     cg.add_define(
         "USE_ESP_IDF_VERSION_CODE",
