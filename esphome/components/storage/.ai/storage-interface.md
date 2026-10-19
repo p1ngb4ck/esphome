@@ -9,6 +9,9 @@ Everything here is our own code unless a claim is tagged with an esp-idf source.
 - `storage_worker.h` / `.cpp` — async worker (transfers + streaming), own FreeRTOS task on task-safe media.
 - `transfer_buffer.h` / `.cpp` — optional DMA-capable PSRAM staging arena.
 - `automation.{h,cpp}`, `fatfs_select.h`, `__init__.py` (codegen/defines).
+- `browse.h` — header-only browse model for file manager UIs (`storage::browse`): one page of a
+  folder at a time (PSRAM, the rest counted), sort within the page, selection, clipboard + paste via the
+  worker (copy/move, "already there" asked about), guarded single calls (mkdir/rename/delete/stat).
 
 ## Core abstractions (`storage.h`)
 - `Storage` (base): `get_info`, `get_storage_type`, `get_capabilities`, `format`.
