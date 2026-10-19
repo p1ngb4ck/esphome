@@ -521,20 +521,48 @@ inline bool match_(const char *p, const char *needle, size_t n) {
   return true;
 }
 
-// The next match at or after `from` (forward) or before `from` (backward), wrapping round; -1 none.
-inline int64_t find(const char *needle, size_t from, bool forward) {
-  const Doc &d = doc();
+// The next match in `text` (len bytes) at or after `from` (forward) or before `from` (backward), wrapping
+// round; -1 none.
+inline int64_t find_in(const char *text, size_t len, const char *needle, size_t from, bool forward) {
   const size_t n = needle == nullptr ? 0 : strlen(needle);
-  if (d.buf == nullptr || n == 0 || n > d.len)
+  if (text == nullptr || n == 0 || n > len)
     return -1;
-  const size_t count = d.len - n + 1;  // positions a match can start at
+  const size_t count = len - n + 1;  // positions a match can start at
   from = std::min(from, count);
   for (size_t k = 0; k < count; k++) {
     const size_t i = forward ? (from + k) % count : (from + 2 * count - 1 - k) % count;
-    if (match_(d.buf + i, needle, n))
+    if (match_(text + i, needle, n))
       return static_cast<int64_t>(i);
   }
   return -1;
+}
+
+inline int64_t find(const char *needle, size_t from, bool forward) {
+  const Doc &d = doc();
+  return find_in(d.buf, d.len, needle, from, forward);
+}
+
+// UTF-8: the character index of byte `byte`, and the byte of character `index` (LVGL's cursor and
+// letter positions count characters)
+inline uint32_t char_index(const char *text, size_t byte) {
+  uint32_t n = 0;
+  for (size_t i = 0; text != nullptr && i < byte && text[i] != '\0'; i++)
+    n += (static_cast<uint8_t>(text[i]) & 0xC0) != 0x80;
+  return n;
+}
+
+inline size_t byte_of(const char *text, uint32_t index) {
+  size_t i = 0;
+  uint32_t n = 0;
+  while (text != nullptr && text[i] != '\0') {
+    if ((static_cast<uint8_t>(text[i]) & 0xC0) != 0x80) {
+      if (n == index)
+        return i;
+      n++;
+    }
+    i++;
+  }
+  return i;
 }
 
 // Replaces the match at `pos` (it must match `needle`); false when it does not fit
