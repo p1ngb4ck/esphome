@@ -2063,7 +2063,9 @@ CONF_BOOT_RAM_PROBE = "boot_ram_probe"
 CONF_COMPONENTS_IN_PSRAM = "components_in_psram"
 KEY_COMPONENTS_IN_PSRAM = "components_in_psram"
 # The .bss of the generated main.cpp (every component object's static storage) in PSRAM: an IDF
-# component holding only this linker fragment (ESP-IDF's extern_ram target, as the bt fragment uses).
+# component holding only this linker fragment. ESP-IDF's PSRAM noinit section (extram_noinit), not its
+# PSRAM .bss: turning that on moves Bluetooth's and lwIP's .bss too (they get slower there). Noinit is not
+# zeroed at startup, so app_main() zeroes the range between the SURROUND symbols first.
 _COMPONENTS_IN_PSRAM_LF = """[sections:esphome_main_bss]
 entries:
     .bss+
@@ -2072,16 +2074,18 @@ entries:
 entries:
     COMMON
 
-[scheme:esphome_main_extram_bss]
+[scheme:esphome_main_extram_noinit]
 entries:
-    esphome_main_bss -> extern_ram
-    esphome_main_common -> extern_ram
+    esphome_main_bss -> extram_noinit
+    esphome_main_common -> extram_noinit
 
 [mapping:esphome_main_bss_psram]
 archive: libsrc.a
 entries:
-    if SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
-        main (esphome_main_extram_bss)
+    if SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY = y:
+        main (esphome_main_extram_noinit);
+            esphome_main_bss -> extram_noinit ALIGN(4) ALIGN(4, post) SURROUND(esphome_main_bss),
+            esphome_main_common -> extram_noinit ALIGN(4) ALIGN(4, post) SURROUND(esphome_main_common)
 """
 CONF_USE_FULL_CERTIFICATE_BUNDLE = "use_full_certificate_bundle"
 CONF_DISABLE_DEBUG_STUBS = "disable_debug_stubs"
@@ -3672,7 +3676,8 @@ async def to_code(config):
     if advanced[CONF_COMPONENTS_IN_PSRAM]:
         if not advanced[CONF_EXECUTE_FROM_PSRAM]:
             raise cv.Invalid(f"{CONF_COMPONENTS_IN_PSRAM} needs {CONF_EXECUTE_FROM_PSRAM}")
-        add_idf_sdkconfig_option("CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY", True)
+        add_idf_sdkconfig_option("CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY", True)
+        cg.add_define("USE_ESP32_COMPONENTS_IN_PSRAM")
         CORE.data[KEY_ESP32][KEY_COMPONENTS_IN_PSRAM] = True
 
     cg.add_define(

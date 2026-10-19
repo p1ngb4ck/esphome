@@ -4,6 +4,7 @@
 #include "esphome/core/defines.h"
 #include "esphome/core/helpers.h"
 #include "preferences.h"
+#include <cstring>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #ifdef USE_ESP32_BOOT_RAM_PROBE
@@ -86,7 +87,18 @@ void loop_task(void *pv_params) {
   }
 }
 
+#ifdef USE_ESP32_COMPONENTS_IN_PSRAM
+// The component objects' storage, placed in PSRAM's noinit section (esp32 components_in_psram): zeroed
+// here as .bss would be, before setup() constructs the objects in it.
+extern "C" uint8_t _esphome_main_bss_start, _esphome_main_bss_end;        // NOLINT
+extern "C" uint8_t _esphome_main_common_start, _esphome_main_common_end;  // NOLINT
+#endif
+
 extern "C" void app_main() {
+#ifdef USE_ESP32_COMPONENTS_IN_PSRAM
+  memset(&_esphome_main_bss_start, 0, &_esphome_main_bss_end - &_esphome_main_bss_start);
+  memset(&_esphome_main_common_start, 0, &_esphome_main_common_end - &_esphome_main_common_start);
+#endif
   // Apply the custom eFuse MAC (if burned and valid) as the base MAC before any
   // interface (Wi-Fi, Ethernet, Bluetooth, 802.15.4) derives its address from it.
   // The logger does not exist yet, so only log-free helpers may be used here.
