@@ -31,7 +31,13 @@ CONFIG_SCHEMA = cv.Schema(
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
-    cg.add(var.set_udp(await cg.get_variable(config[CONF_UDP_ID])))
+    udp_var = await cg.get_variable(config[CONF_UDP_ID])
+    cg.add(var.set_udp(udp_var))
+    # The udp component creates only the sockets its users request (as udp.write and packet_transport do):
+    # the send socket for the boot packets, the listen socket for the receiver's ack. Without them
+    # send_packet() runs on a null socket.
+    cg.add(udp_var.set_should_broadcast())
+    cg.add(udp_var.set_should_listen())
 
 
 @automation.register_action(
