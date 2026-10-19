@@ -13,7 +13,8 @@ import esphome.codegen as cg
 from esphome.components import network
 from esphome.components.udp import CONF_UDP_ID, UDPComponent
 import esphome.config_validation as cv
-from esphome.const import CONF_ID
+from esphome.const import CONF_ID, CONF_PRIORITY
+import esphome.final_validate as fv
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["network", "udp"]
@@ -31,7 +32,10 @@ CONFIG_SCHEMA = cv.Schema(
 
 
 def _final_validate(config):
-    if not network.has_active_interface():
+    # CORE.config does not exist yet here (network.has_active_interface() reads it): the same condition on the
+    # final-validate view of the configuration
+    full = fv.full_config.get()
+    if len(full.get(network.DOMAIN, {}).get(CONF_PRIORITY, [])) <= 1:
         raise cv.Invalid(
             "boot_announce starts on the network component's online event: it needs network: priority: "
             "with more than one interface"
