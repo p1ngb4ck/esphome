@@ -1821,6 +1821,20 @@ void USBAudioClient::finish_connect_() {
   // Open whichever streams are needed immediately.
   // With an idle timeout only a stream already in use; the others open when started.
   const bool idle_close = this->stream_idle_timeout_ms_ != 0;
+  if (idle_close) {
+    // Their ring buffers still now, as the open at connect takes them without the timeout: not
+    // first at a playback, when internal RAM may no longer have the block.
+    if (this->spk_cfg_.configured && this->spk_format_ok_ && this->spk_rb_ == nullptr) {
+      this->spk_rb_ = xRingbufferCreate(this->spk_buf_size_, RINGBUF_TYPE_BYTEBUF);
+      if (this->spk_rb_ == nullptr)
+        this->set_stream_error_("Failed to allocate speaker ring buffer");
+    }
+    if (this->mic_cfg_.configured && this->mic_format_ok_ && this->mic_rb_ == nullptr) {
+      this->mic_rb_ = xRingbufferCreate(this->mic_buf_size_, RINGBUF_TYPE_BYTEBUF);
+      if (this->mic_rb_ == nullptr)
+        this->set_stream_error_("Failed to allocate microphone ring buffer");
+    }
+  }
   if (this->spk_cfg_.configured && this->spk_format_ok_ && !this->spk_suspended_ &&
       (!idle_close || this->spk_wanted_))
     this->note_open_result_(this->open_speaker_stream_(), this->spk_reopen_at_ms_, this->spk_open_fails_);
@@ -2148,11 +2162,12 @@ bool USBAudioClient::ensure_started_microphone() {
   return ok;
 }
 
+// Any task (the speaker's start comes from the audio pipeline's): only marks the stream as
+// wanted. Opening it is USB host work, done by loop() on the main loop.
 void USBAudioClient::resume_speaker() {
   this->spk_suspended_ = false;
   this->spk_wanted_ = true;
   this->cancel_timeout(SPK_IDLE_TIMEOUT_ID);
-  this->ensure_started_speaker();
 }
 
 void USBAudioClient::suspend_speaker() {

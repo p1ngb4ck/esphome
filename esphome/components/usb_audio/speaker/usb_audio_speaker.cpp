@@ -58,13 +58,13 @@ void USBAudioSpeaker::start() {
   if (this->state_ == speaker::STATE_RUNNING) {
     return;
   }
-  if (!this->ensure_started_()) {
-    // No device, an unusable format, or the backoff after a failed open. Opening is
-    // retried from the parent, so this is a state to report, not an error to repeat.
+  if (!this->parent_->speaker_available()) {
+    // No device, or an unusable format: a state to report, not an error to repeat.
     ESP_LOGW(TAG_SPK, "USB audio stream not available yet");
     this->status_set_warning();
     return;
   }
+  // The parent opens the stream on its main loop; writes wait for it (play() returns 0).
   this->parent_->resume_speaker();
   this->state_ = speaker::STATE_RUNNING;
   this->status_clear_warning();
