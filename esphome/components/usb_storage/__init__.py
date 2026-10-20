@@ -76,6 +76,8 @@ DeviceMountedCondition = usb_storage_ns.class_(
 # in flash.
 DEVICE_SCHEMA = cv.Schema(
     {
+        # Names the entry in the config only (no object behind it)
+        cv.Optional(CONF_ID): cv.declare_id(USBStorageEntry),
         cv.Required(CONF_MOUNT_PATH): validate_mount_path,
         cv.Optional(CONF_VID, default=0x0000): cv.hex_uint16_t,
         cv.Optional(CONF_PID, default=0x0000): cv.hex_uint16_t,
