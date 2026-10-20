@@ -26,10 +26,8 @@ static constexpr size_t FILE_API_CHUNK = 4096;
 
 void WebServerFileApi::setup() {
   // Async downloads (tier 1): bounded pipeline of one transfer task + small pointer queue.
+  // The transfer task exists only while downloads are queued (download_task_running_()).
   this->dl_queue_ = xQueueCreate(DL_QUEUE_DEPTH, sizeof(DownloadJob *));
-  if (this->dl_queue_ != nullptr) {
-    xTaskCreate(WebServerFileApi::download_task_trampoline_, "fileapi_dl", 6144, this, 3, &this->dl_task_);
-  }
   this->op_done_ = xSemaphoreCreateBinary();
   this->base_->add_handler(this);
 }
@@ -95,7 +93,7 @@ void WebServerFileApi::handleRequest(AsyncWebServerRequest *request) {
 
         httpd_req_t *areq = *request;
         httpd_req_t *async_req = nullptr;
-        if (this->dl_task_ == nullptr || httpd_req_async_handler_begin(areq, &async_req) != ESP_OK) {
+        if (this->dl_queue_ == nullptr || httpd_req_async_handler_begin(areq, &async_req) != ESP_OK) {
           // No async slot -- degrade to a synchronous chunked pump (still not a single-shot send).
           job->req = areq;
           this->pump_download_(job);
@@ -109,6 +107,7 @@ void WebServerFileApi::handleRequest(AsyncWebServerRequest *request) {
           delete job;  // NOLINT(cppcoreguidelines-owning-memory)
           return;
         }
+        this->download_task_running_();
         return;
       }
       if (asset->flash == nullptr) {
@@ -1150,7 +1149,7 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
 
   httpd_req_t *req = *request;
   httpd_req_t *async_req = nullptr;
-  if (this->dl_task_ == nullptr || httpd_req_async_handler_begin(req, &async_req) != ESP_OK) {
+  if (this->dl_queue_ == nullptr || httpd_req_async_handler_begin(req, &async_req) != ESP_OK) {
     // No async slot (or no pipeline) -- degrade gracefully to the old synchronous pump.
     // The server blocks for this one transfer, but the download still succeeds.
     job->req = req;
@@ -1166,6 +1165,7 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
     delete job;  // NOLINT(cppcoreguidelines-owning-memory)
     return;
   }
+  this->download_task_running_();
   // Handler returns immediately; the transfer task finishes the response and calls
   // httpd_req_async_handler_complete().
 }
@@ -1290,10 +1290,27 @@ void WebServerFileApi::pump_download_(DownloadJob *job) {
 
 void WebServerFileApi::download_task_trampoline_(void *arg) { static_cast<WebServerFileApi *>(arg)->download_task_(); }
 
+// The transfer task while downloads are queued: started with the first, ends itself when the queue is empty.
+void WebServerFileApi::download_task_running_() {
+  if (this->dl_running_.exchange(true))
+    return;  // runs: it takes the job
+  if (xTaskCreate(WebServerFileApi::download_task_trampoline_, "fileapi_dl", 6144, this, 3, nullptr) != pdPASS) {
+    this->dl_running_.store(false);
+    ESP_LOGE(TAG, "No room for the download task");
+  }
+}
+
 void WebServerFileApi::download_task_() {
   for (;;) {
     DownloadJob *job = nullptr;
-    if (xQueueReceive(this->dl_queue_, &job, portMAX_DELAY) != pdTRUE || job == nullptr)
+    if (xQueueReceive(this->dl_queue_, &job, 0) != pdTRUE) {
+      // Empty: the task ends; a job queued meanwhile is taken by this task or by the one its sender starts
+      this->dl_running_.store(false);
+      if (uxQueueMessagesWaiting(this->dl_queue_) == 0 || this->dl_running_.exchange(true))
+        vTaskDelete(nullptr);
+      continue;
+    }
+    if (job == nullptr)
       continue;
     this->pump_download_(job);
     httpd_req_async_handler_complete(job->req);

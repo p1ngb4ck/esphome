@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "esphome/core/defines.h"
 
 // Compiled in only when `web_server: file_api:` is configured (codegen sets the define) and
@@ -224,7 +226,8 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   static void download_task_trampoline_(void *arg);
   void download_task_();
   QueueHandle_t dl_queue_{nullptr};
-  TaskHandle_t dl_task_{nullptr};
+  std::atomic<bool> dl_running_{false};  // the transfer task exists (only while jobs are queued)
+  void download_task_running_();
 
   struct UploadState {
     bool active{false};
