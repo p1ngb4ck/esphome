@@ -1152,7 +1152,8 @@ static void written_by_cpu(uint8_t *page, size_t capacity) {
 bool SimpleVideoPlayer::show_camera_frame(const uint8_t *data, size_t length, CameraFrameFormat format,
                                           uint16_t width, uint16_t height, uint8_t *target, size_t target_capacity,
                                           int32_t target_w, int32_t target_h, std::function<void(bool)> &&done) {
-  if (this->pic_task_ == nullptr || this->cam_busy_ || data == nullptr || target == nullptr || length == 0)
+  if (this->pic_task_ == nullptr || this->cam_busy_ || data == nullptr || length == 0 ||
+      (target == nullptr && format != CameraFrameFormat::MJPEG))
     return false;
 #ifndef SVP_CAPTURE
   if (format != CameraFrameFormat::MJPEG)
@@ -1167,7 +1168,7 @@ bool SimpleVideoPlayer::show_camera_frame(const uint8_t *data, size_t length, Ca
       return false;
     uint32_t pw = 0;
     const size_t bytes = jpeg_decoded_size(info, &pw);
-    const bool direct = info.width <= static_cast<uint32_t>(target_w) &&
+    const bool direct = target != nullptr && info.width <= static_cast<uint32_t>(target_w) &&
                         info.height <= static_cast<uint32_t>(target_h) && pw == static_cast<uint32_t>(target_w) &&
                         bytes <= dma_usable(target_capacity);
     if (!direct && bytes > dma_usable(this->cam_scratch_capacity_)) {
@@ -1306,7 +1307,7 @@ void SimpleVideoPlayer::camera_decode_() {
     cfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
     const uint32_t stream = static_cast<uint32_t>(align_up(job.length, 16));
     uint32_t out = 0;
-    const bool direct = info.width <= static_cast<uint32_t>(job.target_w) &&
+    const bool direct = job.target != nullptr && info.width <= static_cast<uint32_t>(job.target_w) &&
                         info.height <= static_cast<uint32_t>(job.target_h) &&
                         pw == static_cast<uint32_t>(job.target_w) && bytes <= dma_usable(job.target_capacity);
     if (direct) {
@@ -1327,6 +1328,16 @@ void SimpleVideoPlayer::camera_decode_() {
                              static_cast<uint32_t>(dma_usable(this->cam_scratch_capacity_)), &out) != ESP_OK ||
         out == 0)
       return;
+    if (job.target == nullptr) {  // the reader takes it from the scratch (camera_decoded)
+      job.pic_w = static_cast<uint16_t>(pw);
+      job.pic_h = static_cast<uint16_t>(bytes / (static_cast<size_t>(pw) * 2));
+      job.out_x = 0;
+      job.out_y = 0;
+      job.out_w = static_cast<int32_t>(info.width);
+      job.out_h = static_cast<int32_t>(info.height);
+      job.ok = true;
+      return;
+    }
 #ifdef SVP_CAPTURE
     // Scaled by the PPA (DMA): the decoder's rows are pw wide, the picture info.width of them
     if (this->camera_ppa_fit_(this->cam_scratch_, PPA_SRM_COLOR_MODE_RGB565, pw, info.height, info.width,

@@ -904,13 +904,27 @@ class SimpleVideoPlayer : public Component
   /// A camera's frame for the camera page (a UVC camera): decoded (MJPEG, the HW JPEG decoder) or converted (YUYV /
   /// UYVY, the PPA) and fit into target (RGB565, target_w x target_h, a pool piece) by the picture task. done(ok)
   /// on the main loop once the frame is no longer read. False: the task is busy, or the format is not shown here -
-  /// the frame was not taken.
+  /// the frame was not taken. target nullptr (MJPEG only): decoded into the scratch piece only, camera_decoded()
+  /// gives its pixels (valid until the next frame or camera_preview_end()).
   enum class CameraFrameFormat : uint8_t { MJPEG, YUYV, UYVY };
   bool show_camera_frame(const uint8_t *data, size_t length, CameraFrameFormat format, uint16_t width,
                          uint16_t height, uint8_t *target, size_t target_capacity, int32_t target_w, int32_t target_h,
                          std::function<void(bool)> &&done);
   /// The camera's picture ends (main loop): its scratch piece back to the pool once no frame is decoded.
   void camera_preview_end();
+  /// The last frame decoded without a target (RGB565): pic_w x pic_h rows (the decoder's padding), w x h of it the
+  /// picture. False: none.
+  bool camera_decoded(const uint8_t *&pixels, uint16_t &pic_w, uint16_t &pic_h, uint16_t &w, uint16_t &h) const {
+    const CameraJob &job = this->cam_job_data_;
+    if (job.target != nullptr || !job.ok || this->cam_scratch_ == nullptr)
+      return false;
+    pixels = this->cam_scratch_;
+    pic_w = job.pic_w;
+    pic_h = job.pic_h;
+    w = static_cast<uint16_t>(job.out_w);
+    h = static_cast<uint16_t>(job.out_h);
+    return true;
+  }
   /// Where in the target the last camera frame went (target pixels): what to redraw.
   void camera_frame_rect(int32_t &x, int32_t &y, int32_t &w, int32_t &h) const {
     x = this->cam_job_data_.out_x;
@@ -2175,6 +2189,7 @@ class SimpleVideoPlayer : public Component
     int32_t target_w{0}, target_h{0};
     bool ok{false};
     int32_t out_x{0}, out_y{0}, out_w{0}, out_h{0};  // the picture's rectangle in the target
+    uint16_t pic_w{0}, pic_h{0};                     // no target: the decoded rows in the scratch
   };
   CameraJob cam_job_data_{};
   std::atomic<bool> cam_job_{false};
