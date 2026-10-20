@@ -901,6 +901,16 @@ class SimpleVideoPlayer : public Component
   /// No picture shown any more: the slideshow stops, the canvas empties, the pictures' buffers go back
   /// to the pool (once nothing is read or decoded).
   void close_picture();
+  /// A camera's frame for the camera page (a UVC camera): decoded (MJPEG, the HW JPEG decoder) or converted (YUYV /
+  /// UYVY, the PPA) and fit into target (RGB565, target_w x target_h, a pool piece) by the picture task. done(ok)
+  /// on the main loop once the frame is no longer read. False: the task is busy, or the format is not shown here -
+  /// the frame was not taken.
+  enum class CameraFrameFormat : uint8_t { MJPEG, YUYV, UYVY };
+  bool show_camera_frame(const uint8_t *data, size_t length, CameraFrameFormat format, uint16_t width,
+                         uint16_t height, uint8_t *target, size_t target_capacity, int32_t target_w, int32_t target_h,
+                         std::function<void(bool)> &&done);
+  /// The camera's picture ends (main loop): its scratch piece back to the pool once no frame is decoded.
+  void camera_preview_end();
   void start_slideshow();
   void stop_slideshow();
   void pause_slideshow();
@@ -2147,6 +2157,28 @@ class SimpleVideoPlayer : public Component
   uint8_t *pic_decode_buf_{nullptr};  // pool, grown in 1MB steps for a larger picture
   size_t pic_decode_cap_{0};
   std::atomic<bool> pic_decoded_{false};
+  // A camera frame for the camera page (show_camera_frame): its job on the picture task, done on the main loop
+  struct CameraJob {
+    const uint8_t *data{nullptr};
+    size_t length{0};
+    CameraFrameFormat format{CameraFrameFormat::MJPEG};
+    uint16_t width{0}, height{0};
+    uint8_t *target{nullptr};
+    size_t target_capacity{0};
+    int32_t target_w{0}, target_h{0};
+    bool ok{false};
+  };
+  CameraJob cam_job_data_{};
+  std::atomic<bool> cam_job_{false};
+  std::atomic<bool> cam_decoded_{false};
+  bool cam_busy_{false};
+  bool cam_end_pending_{false};  // camera_preview_end() while a frame was decoded: the scratch goes after it
+  std::function<void(bool)> cam_done_{};
+  // A JPEG larger than the canvas is decoded whole here, then scaled (pool, while the camera's picture shows)
+  uint8_t *cam_scratch_{nullptr};
+  size_t cam_scratch_capacity_{0};
+  // The canvas' black around a YUV frame the PPA fits in: drawn once per size
+  uint32_t cam_cleared_key_{0};
   int pic_render_{-1};                    // image to decode again (overlay, canvas size), -1 none
   PicPage pic_pages_[PIC_PAGE_COUNT];
   PicPage *pic_shown_{nullptr};
@@ -2246,6 +2278,8 @@ class SimpleVideoPlayer : public Component
   void apply_picture_size_();
   static void picture_task_entry_(void *arg);
   void decode_job_(PictureJob &job);
+  void camera_decode_();   // picture task
+  void camera_service_();  // main loop
   void render_current_();
   void finish_picture_();
   void show_overlay_icon_(bool playing);

@@ -275,6 +275,7 @@ void SimpleVideoPlayer::loop() {
     this->audio_file_reader_->service();
 #endif
   this->pool_service_();
+  this->camera_service_();
   if (this->finished_pending_.exchange(false, std::memory_order_acq_rel))
     this->on_finished_callbacks_.call();
 #ifdef SVP_AUDIO_FILES

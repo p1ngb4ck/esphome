@@ -1083,6 +1083,12 @@ void SimpleVideoPlayer::picture_task_entry_(void *arg) {
       continue;
     }
 #endif
+    if (self->cam_job_.exchange(false, std::memory_order_acq_rel)) {
+      self->camera_decode_();
+      self->cam_decoded_.store(true, std::memory_order_release);
+      self->enable_loop_soon_any_context();  // done() on the main loop
+      continue;
+    }
     self->decode_job_(self->pic_job_);
     self->pic_decoded_.store(true, std::memory_order_release);
   }
@@ -1140,6 +1146,179 @@ static void scale_rgb565(const uint8_t *src, int32_t iw, int32_t ih, uint32_t sr
 static void written_by_cpu(uint8_t *page, size_t capacity) {
   if (page != nullptr)
     esp_cache_msync(page, dma_usable(capacity), ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+}
+
+bool SimpleVideoPlayer::show_camera_frame(const uint8_t *data, size_t length, CameraFrameFormat format,
+                                          uint16_t width, uint16_t height, uint8_t *target, size_t target_capacity,
+                                          int32_t target_w, int32_t target_h, std::function<void(bool)> &&done) {
+  if (this->pic_task_ == nullptr || this->cam_busy_ || data == nullptr || target == nullptr || length == 0)
+    return false;
+#ifndef SVP_CAPTURE
+  if (format != CameraFrameFormat::MJPEG)
+    return false;  // the PPA client is screen capture's
+#endif
+  if (format == CameraFrameFormat::MJPEG) {
+    // A frame larger than the canvas needs the scratch piece of its decoded size (kept while the picture shows)
+    jpeg_decode_picture_info_t info{};
+    if (this->hw_jpeg_decoder_ == nullptr ||
+        jpeg_decoder_get_info(data, static_cast<uint32_t>(length), &info) != ESP_OK || info.width == 0 ||
+        info.height == 0)
+      return false;
+    uint32_t pw = 0;
+    const size_t bytes = jpeg_decoded_size(info, &pw);
+    const bool direct = info.width <= static_cast<uint32_t>(target_w) &&
+                        info.height <= static_cast<uint32_t>(target_h) && pw == static_cast<uint32_t>(target_w) &&
+                        bytes <= dma_usable(target_capacity);
+    if (!direct && bytes > dma_usable(this->cam_scratch_capacity_)) {
+      if (this->cam_scratch_ != nullptr)
+        this->pool_.free(this->cam_scratch_);
+      this->cam_scratch_capacity_ = align_up(bytes, PsramPool::ALIGN);
+      this->cam_scratch_ = this->pool_.alloc(this->cam_scratch_capacity_);
+      if (this->cam_scratch_ == nullptr) {
+        ESP_LOGW(TAG, "No room in the pool for the camera's %u byte picture", static_cast<unsigned>(bytes));
+        this->cam_scratch_capacity_ = 0;
+        return false;
+      }
+    }
+  }
+  CameraJob &job = this->cam_job_data_;
+  job.data = data;
+  job.length = length;
+  job.format = format;
+  job.width = width;
+  job.height = height;
+  job.target = target;
+  job.target_capacity = target_capacity;
+  job.target_w = target_w;
+  job.target_h = target_h;
+  job.ok = false;
+  this->cam_done_ = std::move(done);
+  this->cam_busy_ = true;
+  this->cam_decoded_.store(false, std::memory_order_relaxed);
+  this->cam_job_.store(true, std::memory_order_release);
+  xTaskNotifyGive(this->pic_task_);
+  return true;
+}
+
+void SimpleVideoPlayer::camera_preview_end() {
+  if (this->cam_busy_) {
+    this->cam_end_pending_ = true;
+    return;
+  }
+  if (this->cam_scratch_ != nullptr)
+    this->pool_.free(this->cam_scratch_);
+  this->cam_scratch_ = nullptr;
+  this->cam_scratch_capacity_ = 0;
+  this->cam_cleared_key_ = 0;
+}
+
+void SimpleVideoPlayer::camera_service_() {
+  if (!this->cam_busy_ || !this->cam_decoded_.exchange(false, std::memory_order_acq_rel))
+    return;
+  this->cam_busy_ = false;
+  auto done = std::move(this->cam_done_);
+  this->cam_done_ = nullptr;
+  if (this->cam_end_pending_) {
+    this->cam_end_pending_ = false;
+    this->camera_preview_end();
+  }
+  if (done)
+    done(this->cam_job_data_.ok);
+}
+
+// Picture task: the frame fit into the canvas piece, black around it
+void SimpleVideoPlayer::camera_decode_() {
+  CameraJob &job = this->cam_job_data_;
+  if (job.format == CameraFrameFormat::MJPEG) {
+    jpeg_decode_picture_info_t info{};
+    if (jpeg_decoder_get_info(job.data, static_cast<uint32_t>(job.length), &info) != ESP_OK || info.width == 0 ||
+        info.height == 0)
+      return;
+    uint32_t pw = 0;
+    const size_t bytes = jpeg_decoded_size(info, &pw);
+    jpeg_decode_cfg_t cfg{};
+    cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
+    cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;  // little-endian RGB565, as LVGL's
+    cfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
+    const uint32_t stream = static_cast<uint32_t>(align_up(job.length, 16));
+    uint32_t out = 0;
+    const bool direct = info.width <= static_cast<uint32_t>(job.target_w) &&
+                        info.height <= static_cast<uint32_t>(job.target_h) &&
+                        pw == static_cast<uint32_t>(job.target_w) && bytes <= dma_usable(job.target_capacity);
+    if (direct) {
+      esp_cache_msync(job.target, dma_usable(job.target_capacity),
+                      ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+      job.ok = jpeg_decoder_process(this->hw_jpeg_decoder_, &cfg, job.data, stream, job.target,
+                                    static_cast<uint32_t>(dma_usable(job.target_capacity)), &out) == ESP_OK &&
+               out != 0;
+      return;
+    }
+    if (this->cam_scratch_ == nullptr || bytes > dma_usable(this->cam_scratch_capacity_))
+      return;
+    if (jpeg_decoder_process(this->hw_jpeg_decoder_, &cfg, job.data, stream, this->cam_scratch_,
+                             static_cast<uint32_t>(dma_usable(this->cam_scratch_capacity_)), &out) != ESP_OK ||
+        out == 0)
+      return;
+    scale_rgb565(this->cam_scratch_, static_cast<int32_t>(info.width), static_cast<int32_t>(info.height), pw * 2,
+                 job.target, job.target_w, job.target_h, static_cast<uint32_t>(job.target_w) * 2,
+                 ImageFitMode::SCALE_TO_FIT);
+    written_by_cpu(job.target, job.target_capacity);
+    job.ok = true;
+    return;
+  }
+#ifdef SVP_CAPTURE
+  // YUV422: the PPA converts and scales it straight into the canvas (screen capture's client)
+  if (this->cap_ppa_ == nullptr) {
+    ppa_client_config_t pcfg{};
+    pcfg.oper_type = PPA_OPERATION_SRM;
+    pcfg.max_pending_trans_num = 1;
+    if (ppa_register_client(&pcfg, &this->cap_ppa_) != ESP_OK) {
+      this->cap_ppa_ = nullptr;
+      return;
+    }
+  }
+  if (job.width == 0 || job.height == 0)
+    return;
+  const float sx = static_cast<float>(job.target_w) / static_cast<float>(job.width);
+  const float sy = static_cast<float>(job.target_h) / static_cast<float>(job.height);
+  const float scale = std::min(sx, sy);
+  const int32_t ow = static_cast<int32_t>(static_cast<float>(job.width) * scale) & ~1;
+  const int32_t oh = static_cast<int32_t>(static_cast<float>(job.height) * scale);
+  const int32_t dx = ((job.target_w - ow) / 2) & ~1;
+  const int32_t dy = (job.target_h - oh) / 2;
+  // The black around the picture: once per frame size
+  const uint32_t key = (static_cast<uint32_t>(job.width) << 16) | job.height;
+  if (this->cam_cleared_key_ != key) {
+    memset(job.target, 0, static_cast<size_t>(job.target_w) * job.target_h * 2);
+    written_by_cpu(job.target, job.target_capacity);
+    this->cam_cleared_key_ = key;
+  }
+  // The USB task wrote the frame by CPU: out to PSRAM before the PPA reads it
+  esp_cache_msync(const_cast<uint8_t *>(job.data), job.length,
+                  ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+  ppa_srm_oper_config_t cfg{};
+  cfg.in.buffer = job.data;
+  cfg.in.pic_w = job.width;
+  cfg.in.pic_h = job.height;
+  cfg.in.block_w = job.width;
+  cfg.in.block_h = job.height;
+  cfg.in.srm_cm =
+      job.format == CameraFrameFormat::YUYV ? PPA_SRM_COLOR_MODE_YUV422_YUYV : PPA_SRM_COLOR_MODE_YUV422_UYVY;
+  cfg.in.yuv_range = PPA_COLOR_RANGE_LIMIT;
+  cfg.in.yuv_std = PPA_COLOR_CONV_STD_RGB_YUV_BT601;
+  cfg.out.buffer = job.target;
+  cfg.out.buffer_size = dma_usable(job.target_capacity);
+  cfg.out.pic_w = static_cast<uint32_t>(job.target_w);
+  cfg.out.pic_h = static_cast<uint32_t>(job.target_h);
+  cfg.out.block_offset_x = static_cast<uint32_t>(dx);
+  cfg.out.block_offset_y = static_cast<uint32_t>(dy);
+  cfg.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+  cfg.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
+  cfg.scale_x = scale;
+  cfg.scale_y = scale;
+  cfg.mode = PPA_TRANS_MODE_BLOCKING;
+  job.ok = ppa_do_scale_rotate_mirror(this->cap_ppa_, &cfg) == ESP_OK;
+#endif
 }
 
 // As the old picture_viewer: the whole file, the hardware decoder's RGB565, the canvas. A picture

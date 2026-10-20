@@ -42,7 +42,8 @@ void UVCClient::loop() {
       const UvcFrameInfo &info = cam->frames[cam->selected];
       for (auto &cb : this->frame_callbacks_)
         cb(static_cast<uint8_t>(cam->dev->addr), data, cam->ready_len, info);
-      cam->ready.store(false, std::memory_order_release);
+      if (!cam->held)
+        cam->ready.store(false, std::memory_order_release);
     }
     // A stream that stopped by itself (its URBs refused): closed like a stopped one
     if (cam->state == StreamState::STREAMING && cam->stream.died.exchange(false, std::memory_order_acq_rel)) {
@@ -51,7 +52,7 @@ void UVCClient::loop() {
       this->close_(*cam);
     }
     // A closed stream: its buffers back; a switch opens it again in the new selection
-    if (cam->state == StreamState::CLOSING && cam->stream.is_closed()) {
+    if (cam->state == StreamState::CLOSING && cam->stream.is_closed() && !cam->held) {
       this->free_buffers_(*cam);
       cam->state = StreamState::IDLE;
       if (cam->reopen && cam->wanted) {
@@ -106,6 +107,31 @@ uint32_t UVCClient::selected_interval(uint8_t camera) const {
 bool UVCClient::is_streaming(uint8_t camera) const {
   const Camera *cam = this->find_(camera);
   return cam != nullptr && cam->state == StreamState::STREAMING;
+}
+
+uint32_t UVCClient::hold_frame(uint8_t camera) {
+  Camera *cam = this->find_(camera);
+  if (cam == nullptr || !cam->ready.load(std::memory_order_acquire))
+    return 0;
+  cam->held = true;
+  return cam->id;
+}
+
+void UVCClient::release_frame(uint32_t token) {
+  Camera *cam = this->find_camera_(token);
+  if (cam != nullptr) {
+    cam->held = false;
+    cam->ready.store(false, std::memory_order_release);
+    this->enable_loop();  // a stream closing meanwhile gives its buffers back now
+    return;
+  }
+  for (auto *gone : this->gone_) {
+    if (gone->id == token) {
+      gone->held = false;
+      this->enable_loop();  // the reap frees it now (device_busy_)
+      return;
+    }
+  }
 }
 
 bool UVCClient::select(uint8_t camera, size_t index, uint32_t interval) {
@@ -522,6 +548,8 @@ void UVCClient::on_device_disconnected(usb_host::UsbDevice &dev) {
   this->stream_close(cam->stream);
   cam->ready.store(false, std::memory_order_release);
   this->cameras_.erase(std::remove(this->cameras_.begin(), this->cameras_.end(), cam), this->cameras_.end());
+  if (cam->held)
+    this->gone_.push_back(cam);  // its frame is still read: freed once released
   ESP_LOGI(TAG, "Camera disconnected");
   for (auto &cb : this->camera_callbacks_)
     cb(static_cast<uint8_t>(dev.addr), false);
@@ -529,11 +557,13 @@ void UVCClient::on_device_disconnected(usb_host::UsbDevice &dev) {
 
 bool UVCClient::device_busy_(const usb_host::UsbDevice &dev) const {
   const auto *cam = static_cast<const Camera *>(dev.context);
-  return cam != nullptr && !cam->stream.is_closed();
+  return cam != nullptr && (!cam->stream.is_closed() || cam->held);
 }
 
 void UVCClient::free_device_context(usb_host::UsbDevice &dev) {
-  this->destroy_(static_cast<Camera *>(dev.context));
+  auto *cam = static_cast<Camera *>(dev.context);
+  this->gone_.erase(std::remove(this->gone_.begin(), this->gone_.end(), cam), this->gone_.end());
+  this->destroy_(cam);
   dev.context = nullptr;
 }
 

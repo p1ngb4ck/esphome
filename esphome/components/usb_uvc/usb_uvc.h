@@ -91,6 +91,11 @@ class UVCClient : public usb_host::USBClient {
   void start(uint8_t camera);
   void stop(uint8_t camera);
   bool is_streaming(uint8_t camera) const;
+  /// In a frame callback: the frame stays (its buffer is not refilled, the next one waits) until release_frame() with
+  /// the token returned (0: no frame being delivered). For a consumer that reads it on another task.
+  uint32_t hold_frame(uint8_t camera);
+  /// Main loop: a held frame is done with; the camera may be gone meanwhile.
+  void release_frame(uint32_t token);
 
  protected:
   struct AltSetting {
@@ -134,6 +139,7 @@ class UVCClient : public usb_host::USBClient {
     uint8_t ready_index{0};
     size_t ready_len{0};
     std::atomic<bool> ready{false};  // set by the USB task, cleared by the main loop
+    bool held{false};                // a consumer reads the ready frame (hold_frame / release_frame)
   };
 
   bool accepts_more_devices_() const override { return true; }
@@ -165,6 +171,7 @@ class UVCClient : public usb_host::USBClient {
   void destroy_(Camera *cam);
 
   std::vector<Camera *> cameras_{};
+  std::vector<Camera *> gone_{};  // unplugged while a frame of theirs is held: freed once it is released
   uint32_t next_id_{0};
 
   UvcFormat req_format_{UvcFormat::MJPEG};
