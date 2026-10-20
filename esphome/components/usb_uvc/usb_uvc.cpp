@@ -590,12 +590,13 @@ void UVCClient::destroy_(Camera *cam) {
 
 // -- Frame assembly (USB task) -------------------------------------------------------------
 
-void UVCClient::on_stream_packet(usb_host::IsocStream &stream, const uint8_t *data, size_t len, bool error) {
+void UVCClient::on_stream_packet(usb_host::IsocStream &stream, const uint8_t *data, size_t len, bool error,
+                                 bool skipped) {
   if (stream.device == nullptr)
     return;
   auto &cam = *static_cast<Camera *>(stream.device->context);
-  // A lost packet leaves a hole in the frame: that frame is not delivered (a decoder would choke on it)
-  if (error) {
+  // A lost or skipped packet leaves a hole in the frame: that frame is not delivered (a decoder would choke on it)
+  if (error || skipped) {
     cam.skip_frame = true;
     return;
   }
@@ -624,6 +625,21 @@ void UVCClient::on_stream_packet(usb_host::IsocStream &stream, const uint8_t *da
   }
 
   if (hdr->bm_header_info.end_of_frame) {
+    // An MJPEG frame must be whole: SOI first, EOI last (padding after it allowed). Anything else never reaches a
+    // decoder (a broken stream can leave the P4's JPEG engine and its 2D-DMA stuck)
+    if (!cam.skip_frame && cam.fill_len > 0 && cam.selected >= 0 &&
+        cam.frames[cam.selected].format == UvcFormat::MJPEG) {
+      const uint8_t *f = cam.buffers[cam.fill];
+      bool eoi = false;
+      for (size_t i = cam.fill_len; i >= 2 && i + 32 > cam.fill_len; i--) {
+        if (f[i - 2] == 0xFF && f[i - 1] == 0xD9) {
+          eoi = true;
+          break;
+        }
+      }
+      if (cam.fill_len < 4 || f[0] != 0xFF || f[1] != 0xD8 || !eoi)
+        cam.skip_frame = true;
+    }
     // Handed over only while the main loop is done with the previous frame; otherwise this
     // one is not delivered and its buffer takes the next frame.
     if (!cam.skip_frame && cam.fill_len > 0 && !cam.ready.load(std::memory_order_acquire)) {

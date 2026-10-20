@@ -521,8 +521,9 @@ class USBClient : public Component {
   // Override in subclass to consume one received isochronous packet (IN endpoints).
   // Called from USB-task context -- must be fast and non-blocking.
   virtual void on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t len, bool error) {}
-  // The same with its stream (several-devices drivers: stream.device says whose); by default on_isoc_packet().
-  virtual void on_stream_packet(IsocStream &stream, const uint8_t *data, size_t len, bool error) {
+  // The same with its stream (several-devices drivers: stream.device says whose) and whether the host skipped the
+  // packet's (micro)frame (no data, not an error for on_isoc_packet); by default on_isoc_packet().
+  virtual void on_stream_packet(IsocStream &stream, const uint8_t *data, size_t len, bool error, bool skipped) {
     this->on_isoc_packet(stream.ep_addr, data, len, error);
   }
   // Override in subclass to produce one isochronous packet (OUT endpoints). max_len is what

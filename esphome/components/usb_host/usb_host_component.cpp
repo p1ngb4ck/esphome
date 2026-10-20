@@ -788,7 +788,8 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
         if (written < fill)
           memset(payload + written, 0, fill - written);
       } else {
-        client->on_stream_packet(*stream, payload, desc->actual_num_bytes, error);
+        client->on_stream_packet(*stream, payload, desc->actual_num_bytes, error,
+                                 desc->status == USB_TRANSFER_STATUS_SKIPPED);
       }
       desc->num_bytes = fill;
       payload += fill;

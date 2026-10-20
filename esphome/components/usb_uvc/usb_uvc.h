@@ -154,7 +154,8 @@ class UVCClient : public usb_host::USBClient {
   bool device_busy_(const usb_host::UsbDevice &dev) const override;
   void on_stream_open(usb_host::IsocStream &stream, bool ok) override;
   // USB task.
-  void on_stream_packet(usb_host::IsocStream &stream, const uint8_t *data, size_t len, bool error) override;
+  void on_stream_packet(usb_host::IsocStream &stream, const uint8_t *data, size_t len, bool error,
+                        bool skipped) override;
 
   bool parse_descriptors_(Camera &cam);
   void select_default_(Camera &cam);
