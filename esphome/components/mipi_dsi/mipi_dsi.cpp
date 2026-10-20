@@ -143,57 +143,17 @@ void MipiDsi::setup() {
   }
   // need to know when the display is ready for SLPOUT command - will be 120ms after reset
   auto when = millis() + 120;
+  // A bridge takes its setup in command mode, before esp_lcd_panel_init() starts the video (as IDF's own panel
+  // drivers and Linux send it); DCS panels get theirs after it, as before.
+  if (this->generic_commands_ && !this->send_init_sequence_(when))
+    return;
   err = esp_lcd_panel_init(this->handle_);
   if (err != ESP_OK) {
     this->smark_failed(LOG_STR("esp_lcd_init failed"), err);
     return;
   }
-  size_t index = 0;
-  const uint8_t *seq = this->init_sequence_;
-  const size_t len = this->init_sequence_len_;
-  while (index != len) {
-    if (len - index < 2) {
-      this->mark_failed(LOG_STR("Malformed init sequence"));
-      return;
-    }
-    uint8_t cmd = seq[index++];
-    uint8_t x = seq[index++];
-    if (x == DELAY_FLAG) {
-      ESP_LOGD(TAG, "Delay %dms", cmd);
-      delay(cmd);
-    } else {
-      uint8_t num_args = x & 0x7F;
-      if (len - index < num_args) {
-        this->mark_failed(LOG_STR("Malformed init sequence"));
-        return;
-      }
-      if (cmd == SLEEP_OUT && !this->generic_commands_) {
-        // are we ready, boots?
-        int duration = when - millis();
-        if (duration > 0) {
-          delay(duration);
-        }
-      }
-      const auto *ptr = seq + index;
-#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERY_VERBOSE
-      char hex_buf[format_hex_pretty_size(MIPI_DSI_MAX_CMD_LOG_BYTES)];
-#endif
-      ESP_LOGVV(TAG, "Command %02X, length %d, byte(s) %s", cmd, num_args,
-                format_hex_pretty_to(hex_buf, ptr, num_args, '.'));
-      index += num_args;
-      if (this->generic_commands_) {
-        this->write_generic_(cmd, ptr, num_args);
-        continue;
-      }
-      err = esp_lcd_panel_io_tx_param(this->io_handle_, cmd, ptr, num_args);
-      if (err != ESP_OK) {
-        this->smark_failed(LOG_STR("lcd_panel_io_tx_param failed"), err);
-        return;
-      }
-      if (cmd == SLEEP_OUT)
-        delay(10);
-    }
-  }
+  if (!this->generic_commands_ && !this->send_init_sequence_(when))
+    return;
   this->io_lock_ = xSemaphoreCreateBinary();
   this->flip_sem_ = xSemaphoreCreateBinary();
   esp_lcd_dpi_panel_event_callbacks_t cbs = {};
@@ -510,6 +470,57 @@ int MipiDsi::get_height() {
     default:
       return this->get_width_internal();
   }
+}
+
+bool MipiDsi::send_init_sequence_(uint32_t when) {
+  esp_err_t err;
+  size_t index = 0;
+  const uint8_t *seq = this->init_sequence_;
+  const size_t len = this->init_sequence_len_;
+  while (index != len) {
+    if (len - index < 2) {
+      this->mark_failed(LOG_STR("Malformed init sequence"));
+      return false;
+    }
+    uint8_t cmd = seq[index++];
+    uint8_t x = seq[index++];
+    if (x == DELAY_FLAG) {
+      ESP_LOGD(TAG, "Delay %dms", cmd);
+      delay(cmd);
+    } else {
+      uint8_t num_args = x & 0x7F;
+      if (len - index < num_args) {
+        this->mark_failed(LOG_STR("Malformed init sequence"));
+        return false;
+      }
+      if (cmd == SLEEP_OUT && !this->generic_commands_) {
+        // are we ready, boots?
+        int duration = when - millis();
+        if (duration > 0) {
+          delay(duration);
+        }
+      }
+      const auto *ptr = seq + index;
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERY_VERBOSE
+      char hex_buf[format_hex_pretty_size(MIPI_DSI_MAX_CMD_LOG_BYTES)];
+#endif
+      ESP_LOGVV(TAG, "Command %02X, length %d, byte(s) %s", cmd, num_args,
+                format_hex_pretty_to(hex_buf, ptr, num_args, '.'));
+      index += num_args;
+      if (this->generic_commands_) {
+        this->write_generic_(cmd, ptr, num_args);
+        continue;
+      }
+      err = esp_lcd_panel_io_tx_param(this->io_handle_, cmd, ptr, num_args);
+      if (err != ESP_OK) {
+        this->smark_failed(LOG_STR("lcd_panel_io_tx_param failed"), err);
+        return false;
+      }
+      if (cmd == SLEEP_OUT)
+        delay(10);
+    }
+  }
+  return true;
 }
 
 // esp_lcd's DBI io sends DCS packets only; bridge chips (TC358762) take their register writes as generic writes.
