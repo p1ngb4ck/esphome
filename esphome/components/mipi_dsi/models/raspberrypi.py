@@ -35,9 +35,9 @@ DsiDriverChip(
     lp_horizontal_blanking=False,
     command_mode="generic",
     no_transform=True,
-    # Read back after the init: IDREG, DSI_LANEENABLE, LCDCTRL, SYSCTRL (written), SYSSTAT, DSI_LANESTATUS0/1,
-    # DSI_INTSTATUS, DSIERRCNT
-    read_registers=[0x04A0, 0x0210, 0x0420, 0x0464, 0x0460, 0x0214, 0x0218, 0x0220, 0x0300],
+    # No read_registers, no ack, no frame ack: the TC358762 does not answer a bus turnaround - lane 0 stays reversed
+    # (DSI host PHY_STATUS phy_direction 1, gen_rd_cmd_busy, IDF runs without timeouts) and nothing is sent after
+    # it, not even video (seen 2026-10-21). Linux never reads it.
     initsequence=[
         (0x10, 0x02, 0x03, 0x00, 0x00, 0x00),  # DSI_LANEENABLE: clock lane + data lane 0
         (0x64, 0x01, 0x05, 0x00, 0x00, 0x00),  # PPI_D0S_CLRSIPOCOUNT
