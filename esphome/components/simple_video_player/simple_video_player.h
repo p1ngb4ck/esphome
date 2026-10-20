@@ -1025,6 +1025,9 @@ class SimpleVideoPlayer : public Component
   }
   CastState screencast_state() const { return this->cast_state_; }
   bool screencast_running() const { return this->cast_state_ != CAST_IDLE; }
+  /// The HW JPEG encoder engine (the screen capture's; created on first use, kept): for other components' encodes.
+  /// jpeg_encoder_process() holds the codec's mutex for the whole encode, so callers on other tasks are serialized.
+  jpeg_encoder_handle_t shared_jpeg_encoder();
   /// Whether the running screencast records the microphone (configured, sound on, the microphone started).
   bool screencast_mic_on() const {
 #ifdef SVP_CAPTURE_MIC
