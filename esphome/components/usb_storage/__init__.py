@@ -17,7 +17,6 @@ from esphome.components.esp32 import (
 from esphome.components.storage import (
     CONF_MOUNT_PATH,
     FILE_SYSTEM_SCHEMA_ENTRY,
-    MountableStorage,
     file_system_to_code,
     final_validate_file_system,
     register_mount_path,
@@ -36,6 +35,7 @@ from esphome.components.usb_host import (
 import esphome.config_validation as cv
 import esphome.final_validate as fv
 from esphome.const import CONF_DEVICES, CONF_ID, CONF_TRIGGER_ID
+from esphome.core import ID
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32"]
@@ -46,6 +46,9 @@ CONF_VID = "vid"
 CONF_PID = "pid"
 CONF_ON_MOUNTED = "on_mounted"
 CONF_FORMAT_ON_MISMATCH = "format_on_mismatch"
+CONF_MAX_DEVICES = "max_devices"
+# A stick without an entry: /usb, then /usb2 .. /usb9 while the path before is taken
+DEFAULT_MOUNT_PATH = "/usb"
 
 usb_storage_ns = cg.esphome_ns.namespace("usb_storage")
 
@@ -54,11 +57,7 @@ USBStorageClient = usb_storage_ns.class_(
     usb_host_ns.class_("USBClient"),
     cg.Component,
 )
-USBStorageDevice = usb_storage_ns.class_(
-    "USBStorageDevice",
-    cg.Component,
-    MountableStorage,
-)
+USBStorageEntry = usb_storage_ns.struct("USBStorageEntry")
 
 # Automation classes
 DeviceMountedTrigger = usb_storage_ns.class_(
@@ -72,43 +71,11 @@ DeviceMountedCondition = usb_storage_ns.class_(
 )
 
 
-async def register_usb_storage_device(device_config, storage_client):
-    var = cg.new_Pvariable(device_config[CONF_ID])
-    await cg.register_component(var, device_config)
-    cg.add(var.set_client(storage_client))
-    cg.add(var.set_mount_path(device_config[CONF_MOUNT_PATH]))
-    # Full VFS paths carry the mount point; the storage component sizes its buffers from the
-    # paths registered here.
-    register_mount_path(device_config[CONF_MOUNT_PATH])
-    cg.add(var.set_storage_id(str(device_config[CONF_ID])))
-    cg.add(var.set_vid(device_config[CONF_VID]))
-    cg.add(var.set_pid(device_config[CONF_PID]))
-    cg.add(storage_client.add_device(var))
-
-    request_storage_device()
-    # Bounded by FATFS long filenames, i.e. by CONFIG_FATFS_MAX_LFN -- resolved at codegen
-    # time rather than baked in, so a user who lowers it gets a matching API bound.
-    request_fatfs_path_length()
-    # USB MSC transfers are self-contained (own endpoint transfers via a FreeRTOS semaphore, no
-    # shared bus with other main-loop-driven components) -- task-safe, unlike e.g. SdSpi.
-    request_storage_worker(task_safe=True)
-
-    for conf in device_config.get(CONF_ON_MOUNTED, []):
-        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
-        await automation.build_automation(
-            trigger, [(cg.const_char_ptr, "mount_path")], conf
-        )
-
-    return var
-
-
-CONF_CLIENT_ID = "client_id"
-
-DEVICE_SCHEMA = cv.COMPONENT_SCHEMA.extend(
+# Optional: a stick it names (vid / pid) or any stick (0 / 0) gets this mount path; a
+# stick without an entry is mounted at the default path. No object per entry - a table
+# in flash.
+DEVICE_SCHEMA = cv.Schema(
     {
-        cv.GenerateID(): cv.declare_id(USBStorageDevice),
-        # The MSC client serving this entry (the first entry is served by the usb_storage id).
-        cv.GenerateID(CONF_CLIENT_ID): cv.declare_id(USBStorageClient),
         cv.Required(CONF_MOUNT_PATH): validate_mount_path,
         cv.Optional(CONF_VID, default=0x0000): cv.hex_uint16_t,
         cv.Optional(CONF_PID, default=0x0000): cv.hex_uint16_t,
@@ -121,6 +88,17 @@ DEVICE_SCHEMA = cv.COMPONENT_SCHEMA.extend(
     }
 )
 
+
+def _max_devices(config):
+    # Room for every entry at once at least
+    entries = len(config.get(CONF_DEVICES) or [])
+    if config[CONF_MAX_DEVICES] < entries:
+        raise cv.Invalid(
+            f"max_devices ({config[CONF_MAX_DEVICES]}) is below the {entries} device entries"
+        )
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.COMPONENT_SCHEMA.extend(
         {
@@ -128,10 +106,14 @@ CONFIG_SCHEMA = cv.All(
             # Only exists together with esp32 enable_exfat -- see storage/__init__.py.
             FILE_SYSTEM_SCHEMA_ENTRY: validate_file_system_value,
             cv.Optional(CONF_DEVICES): cv.ensure_list(DEVICE_SCHEMA),
+            # Sticks plugged at the same time (FATFS volumes, storage registry slots); nothing of a
+            # stick exists before it is plugged in
+            cv.Optional(CONF_MAX_DEVICES, default=4): cv.int_range(min=1, max=9),
             # Sticks / readers no client of this component takes (exact vid:pid pairs)
             **USB_BLACKLIST_SCHEMA,
         }
     ),
+    _max_devices,
     only_on_variant(
         supported=[
             VARIANT_ESP32H4,
@@ -162,24 +144,59 @@ async def to_code(config):
     # LFN mode/length and volume count are set as user-overridable defaults by the esp32
     # platform once any component calls require_fatfs() -- see
     # _reconcile_vfs_fatfs_sdkconfig(). Override via esp32 framework sdkconfig_options.
-    require_fatfs(len(config.get(CONF_DEVICES) or [None]))
+    max_devices = config[CONF_MAX_DEVICES]
+    require_fatfs(max_devices)
     include_builtin_idf_component("fatfs")
     include_builtin_idf_component("esp_vfs_fat")
 
-    # One MSC client per device entry, so every stick is served at the same time; the
-    # entry's own id names the first one.
-    devices = config.get(CONF_DEVICES) or [None]
-    for index, device in enumerate(devices):
-        client_id = config[CONF_ID] if index == 0 else device[CONF_CLIENT_ID]
-        var = cg.new_Pvariable(client_id)
-        await cg.register_component(var, config)
-        await setup_usb_match(var, {**config, CONF_ID: client_id})
-        if device is not None and (device[CONF_VID] or device[CONF_PID]):
+    # One MSC client for every stick: a stick's state is made when it is plugged in
+    var = cg.new_Pvariable(config[CONF_ID])
+    await cg.register_component(var, config)
+    await setup_usb_match(var, config)
+    await file_system_to_code(var, config)
+    cg.add(var.set_max_devices(max_devices))
+
+    devices = config.get(CONF_DEVICES) or []
+    bases = {DEFAULT_MOUNT_PATH}
+    rows = []
+    for device in devices:
+        if device[CONF_VID] or device[CONF_PID]:
             note_usb_whitelist_used()  # a mount entry names its stick
-        await file_system_to_code(var, config)
-        if device is not None:
-            await register_usb_storage_device(device, var)
-            cg.add(var.set_format_on_mismatch(device[CONF_FORMAT_ON_MISMATCH]))
+        bases.add(device[CONF_MOUNT_PATH])
+        rows.append(
+            cg.StructInitializer(
+                USBStorageEntry,
+                ("vid", device[CONF_VID]),
+                ("pid", device[CONF_PID]),
+                ("mount_path", device[CONF_MOUNT_PATH]),
+                ("format_on_mismatch", device[CONF_FORMAT_ON_MISMATCH]),
+            )
+        )
+    if rows:
+        table_id = ID(
+            f"{config[CONF_ID]}_entries", is_declaration=True, type=USBStorageEntry
+        )
+        table = cg.static_const_array(table_id, cg.ArrayInitializer(*rows))
+        cg.add(var.set_entries(table, len(rows)))
+    for index, device in enumerate(devices):
+        for conf in device.get(CONF_ON_MOUNTED, []):
+            trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var, index)
+            await automation.build_automation(
+                trigger, [(cg.const_char_ptr, "mount_path")], conf
+            )
+
+    # Full VFS paths carry the mount point; the storage component sizes its buffers from the
+    # paths registered here - the longest a stick can get is a base path with a number.
+    for base in bases:
+        register_mount_path(base + "9")
+    for _ in range(max_devices):
+        request_storage_device()
+    # Bounded by FATFS long filenames, i.e. by CONFIG_FATFS_MAX_LFN -- resolved at codegen
+    # time rather than baked in, so a user who lowers it gets a matching API bound.
+    request_fatfs_path_length()
+    # USB MSC transfers are self-contained (own endpoint transfers via a FreeRTOS semaphore, no
+    # shared bus with other main-loop-driven components) -- task-safe, unlike e.g. SdSpi.
+    request_storage_worker(task_safe=True)
 
     cg.add_define("USE_USB_BULK_TRANSFERS")
     cg.add_define("USE_USB_CONTROL_TRANSFERS")
@@ -188,10 +205,11 @@ async def to_code(config):
         add_idf_sdkconfig_option("CONFIG_USB_HOST_DWC_DMA_CAP_MEMORY_IN_PSRAM", True)
 
 
-# Actions
+# Actions: the stick at a mount path (none: the first mounted one)
 USB_STORAGE_ACTION_SCHEMA = automation.maybe_simple_id(
     {
-        cv.Required(CONF_ID): cv.use_id(USBStorageDevice),
+        cv.GenerateID(): cv.use_id(USBStorageClient),
+        cv.Optional(CONF_MOUNT_PATH, default=""): cv.string,
     }
 )
 
@@ -204,7 +222,7 @@ USB_STORAGE_ACTION_SCHEMA = automation.maybe_simple_id(
 )
 async def usb_storage_remount_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
-    return cg.new_Pvariable(action_id, template_arg, paren)
+    return cg.new_Pvariable(action_id, template_arg, paren, config[CONF_MOUNT_PATH])
 
 
 @automation.register_action(
@@ -215,12 +233,13 @@ async def usb_storage_remount_to_code(config, action_id, template_arg, args):
 )
 async def usb_storage_unmount_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
-    return cg.new_Pvariable(action_id, template_arg, paren)
+    return cg.new_Pvariable(action_id, template_arg, paren, config[CONF_MOUNT_PATH])
 
 
 LIST_FILES_SCHEMA = cv.Schema(
     {
-        cv.Required(CONF_ID): cv.use_id(USBStorageDevice),
+        cv.GenerateID(): cv.use_id(USBStorageClient),
+        cv.Optional(CONF_MOUNT_PATH, default=""): cv.string,
         cv.Optional("path", default=""): cv.templatable(cv.string),
     }
 )
@@ -234,7 +253,7 @@ LIST_FILES_SCHEMA = cv.Schema(
 )
 async def usb_storage_list_files_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
-    var = cg.new_Pvariable(action_id, template_arg, parent)
+    var = cg.new_Pvariable(action_id, template_arg, parent, config[CONF_MOUNT_PATH])
     if "path" in config:
         template_ = await cg.templatable(config["path"], args, cg.const_char_ptr)
         cg.add(var.set_path(template_))
@@ -247,4 +266,4 @@ async def usb_storage_list_files_to_code(config, action_id, template_arg, args):
 )
 async def usb_storage_is_mounted_to_code(config, condition_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
-    return cg.new_Pvariable(condition_id, template_arg, paren)
+    return cg.new_Pvariable(condition_id, template_arg, paren, config[CONF_MOUNT_PATH])

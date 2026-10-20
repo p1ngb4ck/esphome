@@ -9,11 +9,11 @@
 
 namespace esphome::usb_storage {
 
-class USBStorageClient;
+class USBStorageDevice;
 
-// Register/unregister a USBStorageClient as a FATFS DISKIO drive.
+// Register/unregister a plugged stick as a FATFS DISKIO drive.
 // Returns the assigned drive number (0-based), or -1 on failure.
-int usb_diskio_register(USBStorageClient *client);
+int usb_diskio_register(USBStorageDevice *stick);
 void usb_diskio_unregister(int drive);
 
 }  // namespace esphome::usb_storage

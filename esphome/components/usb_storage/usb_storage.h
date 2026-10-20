@@ -18,6 +18,7 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include <atomic>
 #include <vector>
 
 namespace esphome::usb_storage {
@@ -28,37 +29,104 @@ class USBStorageDevice;
 class USBStorageClient;
 template<typename... Ts> class ListFilesAction;
 
+/// An optional entry of the YAML: the mount path (and format_on_mismatch) for the stick it names (vid / pid) or for
+/// any stick (0 / 0). A codegen table in flash; a stick without an entry gets the default mount path.
+struct USBStorageEntry {
+  uint16_t vid;
+  uint16_t pid;
+  const char *mount_path;
+  bool format_on_mismatch;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // USBStorageClient
 //
-// Single USBClient subclass that owns the full MSC Bulk-Only Transport stack.
-//
-// Lifecycle:
-//   setup()           -- register FATFS DISKIO driver, create transfer semaphore
-//   on_connected()    -- parse bulk endpoints, run SCSI INQUIRY, wait for the unit to be
-//                       ready (TEST UNIT READY / REQUEST SENSE), then READ CAPACITY,
-//                       mount FAT filesystem, notify USBStorageDevice instances
-//   on_disconnected() -- unmount filesystem, reset drive slot
+// One USBClient serving any number of sticks at once (accepts_more_devices_()). Nothing of a
+// stick exists before it is plugged in: on_device_connected() makes its USBStorageDevice (MSC
+// state, FATFS drive, data transfers, file handles), free_device_context() deletes it once the
+// stick is gone and none of its transfers is out any more.
 // ─────────────────────────────────────────────────────────────────────────────
 class USBStorageClient : public usb_host::USBClient {
  public:
+  USBStorageClient() : usb_host::USBClient(0, 0) { this->add_class_match(USB_CLASS_MASS_STORAGE); }
+
 #ifdef USE_STORAGE_FILE_SYSTEM_SELECT
   // file_system option (only exists with esp32 enable_exfat): 0 auto, 1 fat32, 2 exfat --
   // values from storage/__init__.py file_system_to_code().
   void set_requested_file_system(uint8_t fs) { this->requested_file_system_ = fs; }
 #endif
-  // Tear down the FAT mount + VFS registration without touching the USB level.
-  // Used by USBStorageDevice::unmount_device() (safe eject): after this the mount
-  // path is gone from the VFS entirely; the next physical (re)insertion runs the
-  // normal connect flow and mounts again.
-  void unmount_filesystem();
-  USBStorageClient() : usb_host::USBClient(0, 0) { this->add_class_match(USB_CLASS_MASS_STORAGE); }
+  void set_entries(const USBStorageEntry *entries, uint8_t count) {
+    this->entries_ = entries;
+    this->entry_count_ = count;
+  }
+  void set_max_devices(uint8_t max_devices) { this->max_devices_ = max_devices; }
 
-  void setup() override;
   void loop() override;
-  float get_setup_priority() const override { return setup_priority::IO; }
 
-  void add_device(USBStorageDevice *device) { this->devices_.push_back(device); }
+  /// A stick is mounted (any, or the one at @p mount_path).
+  bool is_mounted() const { return this->find_mounted(nullptr) != nullptr; }
+  bool is_mounted(const char *mount_path) const { return this->find_mounted(mount_path) != nullptr; }
+  /// The mounted stick at @p mount_path; nullptr or "" : the first mounted one.
+  USBStorageDevice *find_mounted(const char *mount_path) const;
+
+  /// on_mounted of an entry: (entry index, mount path) of a stick mounted by an entry.
+  template<typename F> void add_on_mounted_callback(F &&cb) { this->on_mounted_.add(std::forward<F>(cb)); }
+
+ protected:
+  friend class USBStorageDevice;
+
+  bool accepts_more_devices_() const override { return true; }
+  void on_device_connected(usb_host::UsbDevice &dev) override;
+  void on_device_disconnected(usb_host::UsbDevice &dev) override;
+  void free_device_context(usb_host::UsbDevice &dev) override;
+  usb_host::MatchTier refine_match_(const usb_host::RoutedDevice &dev, usb_host::MatchTier tier) const override;
+
+  /// The entry naming this stick, else one for any stick, whose mount path is free (-1: none).
+  int find_entry_(uint16_t vid, uint16_t pid) const;
+  bool path_in_use_(const char *mount_path) const;
+
+  const USBStorageEntry *entries_{nullptr};
+  uint8_t entry_count_{0};
+  uint8_t max_devices_{1};
+#ifdef USE_STORAGE_FILE_SYSTEM_SELECT
+  uint8_t requested_file_system_{0};  // FS_SELECT_AUTO
+#endif
+  std::vector<USBStorageDevice *> sticks_{};
+  LazyCallbackManager<void(int, const char *)> on_mounted_;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USBFileHandle -- extends storage::FileHandle with no extra fields needed;
+// the base FILE *file is sufficient since FAT is VFS-backed.
+// ─────────────────────────────────────────────────────────────────────────────
+struct USBFileHandle : public esphome::storage::FileHandle {
+  char path_buf[(ESP_VFS_PATH_MAX + storage::STORAGE_PATH_MAX + 1)]{};
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USBStorageDevice
+//
+// One plugged stick: the MSC Bulk-Only Transport stack on its UsbDevice and the FilesystemStorage
+// it is in the StorageRegistry as. Made by the client when the stick connects, deleted after it
+// is gone; all file ops go through POSIX (FAT is VFS-registered on the stick's mount path).
+//
+//   start_()  -- semaphores, data transfers, FATFS drive, bulk endpoints, claim, SCSI INQUIRY,
+//                then check_ready_() (TEST UNIT READY / REQUEST SENSE) and finish_connect_()
+//                (READ CAPACITY, mount, StorageRegistry)
+//   stop_()   -- StorageRegistry, unmount, transfers back, interface released
+// ─────────────────────────────────────────────────────────────────────────────
+class USBStorageDevice : public esphome::storage::FilesystemStorage, public esphome::storage::MountableStorage {
+  friend class USBStorageClient;
+
+ public:
+  static constexpr int MAX_OPEN_FILES = 4;
+
+  USBStorageDevice(USBStorageClient *client, usb_host::UsbDevice *dev) : client_(client), dev_(dev) {}
+  ~USBStorageDevice() override;
+
+  bool is_mounted() const { return this->fs_mounted_; }
+  bool remount_device();
+  void unmount_device();
 
   // Called from DISKIO driver (FATFS context) -- blocking SCSI transfers
   bool scsi_read(uint32_t lba, uint8_t *buf, uint32_t count);
@@ -66,18 +134,50 @@ class USBStorageClient : public usb_host::USBClient {
   uint32_t get_sector_count() const { return this->sector_count_; }
   uint32_t get_sector_size() const { return this->sector_size_; }
   bool is_disk_ready() const { return this->disk_ready_; }
-  int get_fatfs_drive() const { return this->fatfs_drive_; }
-  void set_format_on_mismatch(bool format_on_mismatch) { this->format_on_mismatch_ = format_on_mismatch; }
+
+  // storage::FilesystemStorage interface
+  storage::StorageError get_info(storage::StorageInfo *info) override;
+  storage::StorageError mount() override;
+  storage::StorageError unmount() override;
+
+  // No-RTTI downcast hook -- see PathStorage::as_mountable().
+  storage::MountableStorage *as_mountable() override { return this; }
+  // The FAT mount lifecycle is owned by the USB hotplug client -- insertion auto-mounts, so
+  // only the safe-eject direction may be invoked externally (mount() below is a status no-op).
+  uint8_t get_mount_caps() const override { return storage::MountableStorage::MOUNT_CAP_UNMOUNT; }
+  storage::StorageError format() override;
+  storage::StorageError sync() override;
+  storage::StorageError open(const char *path, storage::FileHandle *&handle, storage::OpenMode mode) override;
+  storage::StorageError close(storage::FileHandle *handle) override;
+  storage::StorageError read(storage::FileHandle *handle, uint8_t *buf, size_t len, size_t *bytes_transferred) override;
+  storage::StorageError write(storage::FileHandle *handle, const uint8_t *buf, size_t len,
+                              size_t *bytes_transferred) override;
+  storage::StorageError seek(storage::FileHandle *handle, int64_t offset, storage::SeekMode mode) override;
+  storage::StorageError tell(storage::FileHandle *handle, uint64_t *position) override;
+  storage::StorageError stat(const char *path, storage::FileStat *stat) override;
+  storage::StorageError list_dir(const char *path, bool (*callback)(const storage::FileStat *entry, void *ctx),
+                                 void *ctx) override;
+  storage::StorageError mkdir(const char *path) override;
+  storage::StorageError rmdir(const char *path) override;
+  storage::StorageError remove(const char *path) override;
+  storage::StorageError rename(const char *old_path, const char *new_path) override;
+
+  // USB stack transfers are self-contained (own endpoint transfers via a FreeRTOS semaphore,
+  // no shared bus with other main-loop-driven components) -- safe for the async worker to drive
+  // from a background task, same as SdMmc's dedicated SDIO controller.
+  uint8_t get_capabilities() const override { return storage::StorageCaps::STORAGE_CAP_IO_TASK_SAFE; }
 
  protected:
-  void on_connected() override;
-  // Connected once the medium is ready and mounted (check_ready_() / finish_connect_())
-  bool reports_connection_itself() const override { return true; }
+  template<typename... Ts> friend class ListFilesAction;
+
+  // Main loop, from the client
+  void start_();
+  void stop_();
   void check_ready_();
   void finish_connect_();
-  void on_disconnected() override;
-  void on_removed(usb_device_handle_t handle) override;
-  usb_host::MatchTier refine_match_(const usb_host::RoutedDevice &dev, usb_host::MatchTier tier) const override;
+  void unmount_filesystem_();
+  /// The deferred unmount, once nothing references the stick; false while it still waits.
+  bool try_unmount_();
 
   bool alloc_data_();
   void free_data_();
@@ -127,13 +227,26 @@ class USBStorageClient : public usb_host::USBClient {
   bool recv_csw_(uint32_t expected_tag, bool check_condition_expected = false);
 
   bool wait_transfer_(uint32_t timeout_ms = 5000);
-  static void transfer_done_cb(const usb_host::TransferStatus &status, USBStorageClient *client);
+  static void transfer_done_cb(const usb_host::TransferStatus &status, USBStorageDevice *device);
 
-  USBStorageDevice *find_device_(uint16_t vid, uint16_t pid) const;
-  void notify_connected_(uint16_t vid, uint16_t pid);
-  void notify_disconnected_();
+  USBFileHandle *alloc_handle_();
+  void free_handle_(USBFileHandle *handle);
+  void build_path_(char *out, size_t out_size, const char *path) const;
 
-  std::vector<USBStorageDevice *> devices_{};
+  // Builds a FATFS-native path ("N:/dir/file") from a path relative to this device's mount
+  // point, using fatfs_drive_str_. Returns false if the result would exceed out_size.
+  bool build_fatfs_path_(const char *rel_path, char *out, size_t out_size) const;
+
+  void log_list_dir_start_(const char *path) const;
+  // Matches the list_dir() callback signature (bool return = keep enumerating).
+  static bool log_list_dir_entry(const storage::FileStat *entry, void *ctx);
+
+  // A file handle is open: the worker keeps one open for a transfer's whole duration.
+  bool has_open_handles_() const;
+
+  USBStorageClient *client_;
+  usb_host::UsbDevice *dev_;
+  int entry_{-1};  // the YAML entry whose mount path it has (-1: none, a default mount path)
 
   uint8_t bulk_in_ep_{0};
   uint8_t bulk_out_ep_{0};
@@ -149,13 +262,16 @@ class USBStorageClient : public usb_host::USBClient {
   uint32_t cbw_tag_{1};
 
   int fatfs_drive_{-1};
+  char fatfs_drive_str_[4]{};  // "N:"
   bool disk_ready_{false};
-  bool mounted_{false};
+  bool mounted_{false};     // FAT mounted and VFS-registered
+  bool fs_mounted_{false};  // in the StorageRegistry
   bool format_on_mismatch_{false};
-#ifdef USE_STORAGE_FILE_SYSTEM_SELECT
-  uint8_t requested_file_system_{0};  // FS_SELECT_AUTO
-#endif
-  const char *mount_path_{nullptr};
+  // Deferred unmount: unmount() only requests it (any task); the client's loop syncs and unmounts
+  // once no file handle is open and no worker job still touches this stick. is_mounted() stays
+  // true until then, so an interval-based remount check does not race the pending unmount.
+  std::atomic<bool> unmount_pending_{false};
+  char mount_buf_[ESP_VFS_PATH_MAX + 1]{};
 
   SemaphoreHandle_t transfer_sem_{nullptr};
   bool transfer_ok_{false};
@@ -164,117 +280,8 @@ class USBStorageClient : public usb_host::USBClient {
   uint8_t ready_tries_{0};
   DataXfer data_[DATA_XFERS]{};
   SemaphoreHandle_t io_lock_{nullptr};  // SCSI commands of the storage worker against the transfers' lifetime
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// USBFileHandle -- extends storage::FileHandle with no extra fields needed;
-// the base FILE *file is sufficient since FAT is VFS-backed.
-// ─────────────────────────────────────────────────────────────────────────────
-struct USBFileHandle : public esphome::storage::FileHandle {
-  char path_buf[(ESP_VFS_PATH_MAX + storage::STORAGE_PATH_MAX + 1)]{};
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// USBStorageDevice
-//
-// User-facing device instance. Extends FilesystemStorage so it participates
-// in the StorageRegistry. Mount/unmount are driven by USBStorageClient events;
-// all file ops go through POSIX (FAT is already VFS-registered by the client).
-// ─────────────────────────────────────────────────────────────────────────────
-class USBStorageDevice : public esphome::storage::FilesystemStorage, public esphome::storage::MountableStorage {
-  friend class USBStorageClient;
-
- public:
-  static constexpr int MAX_OPEN_FILES = 4;
-
-  void setup() override;
-  void loop() override;
-  void dump_config() override;
-  float get_setup_priority() const override { return setup_priority::DATA; }
-
-  void set_client(USBStorageClient *client) { this->client_ = client; }
-  void set_mount_path(const char *mount_path) { this->set_mount_path_(mount_path); }
-  void set_vid(uint16_t vid) { this->vid_ = vid; }
-  void set_pid(uint16_t pid) { this->pid_ = pid; }
-  void set_storage_id(const char *id) { this->storage_id_ = id; }
-
-  // Called by USBStorageClient on connect/disconnect events
-  void on_device_connected(const char *mount_path);
-  void on_device_disconnected();
-
-  template<typename F> void add_on_mounted_callback(F &&cb) { this->on_mounted_.add(std::forward<F>(cb)); }
-  bool is_mounted() const { return this->fs_mounted_; }
-
-  bool remount_device();
-  void unmount_device();
-
-  // storage::FilesystemStorage interface
-  storage::StorageError get_info(storage::StorageInfo *info) override;
-  storage::StorageError mount() override;
-  storage::StorageError unmount() override;
-
-  // No-RTTI downcast hook -- see PathStorage::as_mountable().
-  storage::MountableStorage *as_mountable() override { return this; }
-  // The FAT mount lifecycle is owned by the USB hotplug client -- insertion auto-mounts, so
-  // only the safe-eject direction may be invoked externally (mount() below is a status no-op).
-  uint8_t get_mount_caps() const override { return storage::MountableStorage::MOUNT_CAP_UNMOUNT; }
-  storage::StorageError format() override;
-  storage::StorageError sync() override;
-  storage::StorageError open(const char *path, storage::FileHandle *&handle, storage::OpenMode mode) override;
-  storage::StorageError close(storage::FileHandle *handle) override;
-  storage::StorageError read(storage::FileHandle *handle, uint8_t *buf, size_t len, size_t *bytes_transferred) override;
-  storage::StorageError write(storage::FileHandle *handle, const uint8_t *buf, size_t len,
-                              size_t *bytes_transferred) override;
-  storage::StorageError seek(storage::FileHandle *handle, int64_t offset, storage::SeekMode mode) override;
-  storage::StorageError tell(storage::FileHandle *handle, uint64_t *position) override;
-  storage::StorageError stat(const char *path, storage::FileStat *stat) override;
-  storage::StorageError list_dir(const char *path, bool (*callback)(const storage::FileStat *entry, void *ctx),
-                                 void *ctx) override;
-  storage::StorageError mkdir(const char *path) override;
-  storage::StorageError rmdir(const char *path) override;
-  storage::StorageError remove(const char *path) override;
-  storage::StorageError rename(const char *old_path, const char *new_path) override;
-
-  // USB stack transfers are self-contained (own endpoint transfers via a FreeRTOS semaphore,
-  // no shared bus with other main-loop-driven components) -- safe for the async worker to drive
-  // from a background task, same as SdMmc's dedicated SDIO controller.
-  uint8_t get_capabilities() const override { return storage::StorageCaps::STORAGE_CAP_IO_TASK_SAFE; }
-
- protected:
-  template<typename... Ts> friend class ListFilesAction;
-
-  USBFileHandle *alloc_handle_();
-  void free_handle_(USBFileHandle *handle);
-  void build_path_(char *out, size_t out_size, const char *path) const;
-
-  // Builds a FATFS-native path ("N:/dir/file") from a path relative to this device's mount
-  // point, using fatfs_drive_ (captured from the client at connect time -- see
-  // on_device_connected()). Returns false if the result would exceed out_size.
-  bool build_fatfs_path_(const char *rel_path, char *out, size_t out_size) const;
-
-  void log_list_dir_start_(const char *path) const;
-  // Matches the list_dir() callback signature (bool return = keep enumerating).
-  static bool log_list_dir_entry(const storage::FileStat *entry, void *ctx);
-
-  USBStorageClient *client_{nullptr};
-  uint16_t vid_{0};
-  uint16_t pid_{0};
-  const char *storage_id_{nullptr};
-  bool fs_mounted_{false};
-  // Deferred-unmount state: unmount() only requests the unmount (sets this flag); loop()
-  // performs the actual sync + unmount once no file handle is open and no worker job still
-  // touches this device. is_mounted() stays true until then, so an interval-based remount
-  // check does not race the pending unmount.
-  bool unmount_pending_{false};
-  // True while a worker job that references this device is in flight -- the worker cannot be
-  // queried for "jobs touching storage X" cheaply, so the device tracks it via open handles
-  // (every transfer holds a handle open for its duration) plus this guard for the brief
-  // windows around open/close. Open-handle count is derived from handle_pool_.
-  bool has_open_handles_() const;
-  char fatfs_drive_[3]{};  // "N:" -- captured from client_->get_fatfs_drive() on connect
 
   USBFileHandle handle_pool_[MAX_OPEN_FILES]{};
-  LazyCallbackManager<void(const char *)> on_mounted_;
 };
 
 }  // namespace esphome::usb_storage

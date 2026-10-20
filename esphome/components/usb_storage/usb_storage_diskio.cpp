@@ -12,24 +12,24 @@ constexpr const char *TAG = "usb_diskio";
 namespace esphome::usb_storage {
 static constexpr int MAX_DRIVES = FF_VOLUMES;
 
-static USBStorageClient **get_clients() {
-  static USBStorageClient *clients[MAX_DRIVES] = {};
-  return clients;
+static USBStorageDevice **get_sticks() {
+  static USBStorageDevice *sticks[MAX_DRIVES] = {};
+  return sticks;
 }
 
 // DISKIO callbacks -- called from FATFS context (may be main loop or a dedicated task).
 // All calls that do actual I/O block on a semaphore until the USB transfer callback fires.
 
 static DSTATUS diskio_initialize(BYTE drive) {
-  if (drive >= MAX_DRIVES || get_clients()[drive] == nullptr)
+  if (drive >= MAX_DRIVES || get_sticks()[drive] == nullptr)
     return STA_NOINIT;
   return 0;  // RDY
 }
 
 static DSTATUS diskio_status(BYTE drive) {
-  if (drive >= MAX_DRIVES || get_clients()[drive] == nullptr)
+  if (drive >= MAX_DRIVES || get_sticks()[drive] == nullptr)
     return STA_NOINIT;
-  return get_clients()[drive]->is_disk_ready() ? 0 : STA_NOINIT;
+  return get_sticks()[drive]->is_disk_ready() ? 0 : STA_NOINIT;
 }
 
 // Sector parameters are uint32_t by ESP-IDF's ff_diskio_impl_t contract -- the glue layer is
@@ -37,30 +37,30 @@ static DSTATUS diskio_status(BYTE drive) {
 // the same 32-bit type, so this compiles identically in both builds). Practical ceiling:
 // 2 TiB at 512-byte sectors, far beyond any MSC medium this drives.
 static DRESULT diskio_read(BYTE drive, BYTE *buf, uint32_t sector, UINT count) {
-  if (drive >= MAX_DRIVES || get_clients()[drive] == nullptr)
+  if (drive >= MAX_DRIVES || get_sticks()[drive] == nullptr)
     return RES_NOTRDY;
-  return get_clients()[drive]->scsi_read(sector, buf, count) ? RES_OK : RES_ERROR;
+  return get_sticks()[drive]->scsi_read(sector, buf, count) ? RES_OK : RES_ERROR;
 }
 
 static DRESULT diskio_write(BYTE drive, const BYTE *buf, uint32_t sector, UINT count) {
-  if (drive >= MAX_DRIVES || get_clients()[drive] == nullptr)
+  if (drive >= MAX_DRIVES || get_sticks()[drive] == nullptr)
     return RES_NOTRDY;
-  return get_clients()[drive]->scsi_write(sector, buf, count) ? RES_OK : RES_ERROR;
+  return get_sticks()[drive]->scsi_write(sector, buf, count) ? RES_OK : RES_ERROR;
 }
 
 static DRESULT diskio_ioctl(BYTE drive, BYTE cmd, void *buf) {
-  if (drive >= MAX_DRIVES || get_clients()[drive] == nullptr)
+  if (drive >= MAX_DRIVES || get_sticks()[drive] == nullptr)
     return RES_NOTRDY;
 
-  USBStorageClient *client = get_clients()[drive];
+  USBStorageDevice *stick = get_sticks()[drive];
   switch (cmd) {
     case CTRL_SYNC:
       return RES_OK;
     case GET_SECTOR_COUNT:
-      *reinterpret_cast<LBA_t *>(buf) = client->get_sector_count();
+      *reinterpret_cast<LBA_t *>(buf) = stick->get_sector_count();
       return RES_OK;
     case GET_SECTOR_SIZE:
-      *reinterpret_cast<WORD *>(buf) = static_cast<WORD>(client->get_sector_size());
+      *reinterpret_cast<WORD *>(buf) = static_cast<WORD>(stick->get_sector_size());
       return RES_OK;
     case GET_BLOCK_SIZE:
       *reinterpret_cast<DWORD *>(buf) = 1;  // erase block size in sectors -- 1 = unknown
@@ -79,13 +79,13 @@ static const ff_diskio_impl_t USB_DISKIO_DRIVER = {
 };
 
 // A drive no one else has (SD cards take theirs from the same table).
-int usb_diskio_register(USBStorageClient *client) {
+int usb_diskio_register(USBStorageDevice *stick) {
   BYTE drive = 0xFF;
   if (ff_diskio_get_drive(&drive) != ESP_OK || drive >= MAX_DRIVES) {
     ESP_LOGE(TAG, "No free FATFS drive slots (max %d)", MAX_DRIVES);
     return -1;
   }
-  get_clients()[drive] = client;
+  get_sticks()[drive] = stick;
   ff_diskio_register(drive, &USB_DISKIO_DRIVER);
   ESP_LOGD(TAG, "Registered USB DISKIO on drive %d", drive);
   return drive;
@@ -94,7 +94,7 @@ int usb_diskio_register(USBStorageClient *client) {
 void usb_diskio_unregister(int drive) {
   if (drive < 0 || drive >= MAX_DRIVES)
     return;
-  get_clients()[drive] = nullptr;
+  get_sticks()[drive] = nullptr;
   ff_diskio_register(static_cast<BYTE>(drive), nullptr);
   ESP_LOGD(TAG, "Unregistered USB DISKIO on drive %d", drive);
 }

@@ -7,63 +7,79 @@
 
 namespace esphome::usb_storage {
 
-// Triggers
+// Triggers: an entry's stick was mounted
 class DeviceMountedTrigger : public Trigger<const char *> {
  public:
-  explicit DeviceMountedTrigger(USBStorageDevice *parent) {
-    parent->add_on_mounted_callback([this](const char *mount_path) { this->trigger(mount_path); });
+  DeviceMountedTrigger(USBStorageClient *parent, int entry) {
+    parent->add_on_mounted_callback([this, entry](int mounted_entry, const char *mount_path) {
+      if (mounted_entry == entry)
+        this->trigger(mount_path);
+    });
   }
 };
 
-// Actions
+// Actions and the condition: the stick mounted at a path ("" : the first mounted one); none mounted, nothing done
 template<typename... Ts> class RemountDeviceAction : public Action<Ts...> {
  public:
-  explicit RemountDeviceAction(USBStorageDevice *device) : device_(device) {}
+  RemountDeviceAction(USBStorageClient *client, const char *mount_path) : client_(client), mount_path_(mount_path) {}
 
-  void play(Ts... x) override { this->device_->remount_device(); }
+  void play(Ts... x) override {
+    if (USBStorageDevice *stick = this->client_->find_mounted(this->mount_path_))
+      stick->remount_device();
+  }
 
  protected:
-  USBStorageDevice *device_;
+  USBStorageClient *client_;
+  const char *mount_path_;
 };
 
 template<typename... Ts> class UnmountDeviceAction : public Action<Ts...> {
  public:
-  explicit UnmountDeviceAction(USBStorageDevice *device) : device_(device) {}
+  UnmountDeviceAction(USBStorageClient *client, const char *mount_path) : client_(client), mount_path_(mount_path) {}
 
-  void play(Ts... x) override { this->device_->unmount_device(); }
+  void play(Ts... x) override {
+    if (USBStorageDevice *stick = this->client_->find_mounted(this->mount_path_))
+      stick->unmount_device();
+  }
 
  protected:
-  USBStorageDevice *device_;
+  USBStorageClient *client_;
+  const char *mount_path_;
 };
 
 template<typename... Ts> class ListFilesAction : public Action<Ts...> {
  public:
-  explicit ListFilesAction(USBStorageDevice *device) : device_(device) {}
+  ListFilesAction(USBStorageClient *client, const char *mount_path) : client_(client), mount_path_(mount_path) {}
 
   TEMPLATABLE_VALUE(const char *, path)
 
   void play(Ts... x) override {
+    USBStorageDevice *stick = this->client_->find_mounted(this->mount_path_);
+    if (stick == nullptr)
+      return;
     const char *path = this->path_.value(x...);
     if (path == nullptr || path[0] == '\0')
-      path = this->device_->get_mount_path();
+      path = stick->get_mount_path();
 
-    this->device_->log_list_dir_start_(path);
-    this->device_->list_dir(path, &USBStorageDevice::log_list_dir_entry, nullptr);
+    stick->log_list_dir_start_(path);
+    stick->list_dir(path, &USBStorageDevice::log_list_dir_entry, nullptr);
   }
 
  protected:
-  USBStorageDevice *device_;
+  USBStorageClient *client_;
+  const char *mount_path_;
 };
 
 // Conditions
 template<typename... Ts> class DeviceMountedCondition : public Condition<Ts...> {
  public:
-  explicit DeviceMountedCondition(USBStorageDevice *device) : device_(device) {}
+  DeviceMountedCondition(USBStorageClient *client, const char *mount_path) : client_(client), mount_path_(mount_path) {}
 
-  bool check(Ts... x) override { return this->device_->is_mounted(); }
+  bool check(Ts... x) override { return this->client_->is_mounted(this->mount_path_); }
 
  protected:
-  USBStorageDevice *device_;
+  USBStorageClient *client_;
+  const char *mount_path_;
 };
 
 }  // namespace esphome::usb_storage
