@@ -407,6 +407,23 @@ class LvglComponent final : public PollingComponent {
   /// LVGL does not draw into the display's frame buffers itself.
   bool copy_shown(uint8_t *dst);
 #endif
+#if defined(USE_ESP32_VARIANT_ESP32P4)
+  /// A camera's picture straight into the display's frame buffers (scanout with the PPA only), not drawn by LVGL:
+  /// each frame converted, fit (1/16 steps) and rotated by one PPA pass into the marker object's rectangle, then
+  /// presented. Only while LVGL runs, the marker shows and nothing of the top layer lies over it. Main loop.
+  /// False: no scanout or no PPA.
+  bool camera_layer_start(lv_obj_t *marker);
+  /// The layer ends: a pending frame is dropped (its done() called), the marker drawn by LVGL again.
+  void camera_layer_stop();
+  /// A frame: a pic_w x pic_h picture (colour mode cm, a ppa_srm_color_mode_t), its top-left w x h block shown.
+  /// done() once the frame is not read any more (drawn, dropped, or replaced by a newer one). False: not taken (no
+  /// layer, LVGL paused, the marker not shown or covered), done() is not called.
+  bool camera_layer_frame(const void *data, uint16_t pic_w, uint16_t pic_h, uint16_t w, uint16_t h,
+                          ppa_srm_color_mode_t cm, std::function<void()> &&done);
+  /// The pending frame dropped now (its done() called): its buffer goes away.
+  void camera_layer_drop();
+  bool camera_layer_running() const { return this->cam_marker_ != nullptr; }
+#endif
 
  protected:
   void set_resolution_() const;
@@ -504,6 +521,28 @@ class LvglComponent final : public PollingComponent {
   uint32_t scanout_presented_{};
   FrameCapture *frame_capture_{nullptr};
   void capture_area_(const lv_area_t *area, const uint8_t *src);
+#endif
+#if defined(USE_ESP32_VARIANT_ESP32P4)
+  bool cam_layer_shown_() const;
+  void cam_layer_service_();
+  void cam_layer_draw_();
+  void cam_layer_reset_();
+  void cam_layer_restore_();
+  ppa_srm_rotation_angle_t scanout_angle_() const;
+  struct CamFrame {
+    const void *data;
+    uint16_t pic_w, pic_h, w, h;
+    ppa_srm_color_mode_t cm;
+  };
+  lv_obj_t *cam_marker_{nullptr};
+  CamFrame cam_frame_{};
+  std::function<void()> cam_done_{};
+  bool cam_pending_{false};
+  bool cam_shown_{false};
+  uint32_t cam_seq_[2]{};  // the picture each frame buffer holds, 0: none
+  uint32_t cam_latest_{0};
+  lv_area_t cam_box_{};  // the marker's area at the last frame (LVGL coordinates)
+  lv_area_t cam_pic_{0, 0, -1, -1};  // the newest picture's area, empty: none
 #endif
 };
 
