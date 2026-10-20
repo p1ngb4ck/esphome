@@ -15,7 +15,7 @@ ESPHOME_LOG_TAG(TAG, "resampler.microphone");
 static constexpr uint32_t BUFFER_DURATION_MS = 16;
 
 void ResamplerMicrophone::setup() {
-  const audio::AudioStreamInfo input_stream_info = this->source_->get_audio_stream_info();
+  const audio::AudioStreamInfo input_stream_info = this->sources_[0]->get_audio_stream_info();
   this->audio_stream_info_ = audio::AudioStreamInfo(input_stream_info.get_bits_per_sample(),
                                                     input_stream_info.get_channels(), this->target_sample_rate_);
 
@@ -25,7 +25,12 @@ void ResamplerMicrophone::setup() {
     return;
   }
 
-  this->source_->add_data_callback([this](const std::vector<uint8_t> &data) { this->process_audio_(data); });
+  for (size_t i = 0; i < this->sources_.size(); i++) {
+    this->sources_[i]->add_data_callback([this, i](const std::vector<uint8_t> &data) {
+      if (this->active_.load() == static_cast<int>(i))
+        this->process_audio_(i, data);
+    });
+  }
 
   this->disable_loop();
 }
@@ -35,8 +40,30 @@ void ResamplerMicrophone::dump_config() {
                 "Resampler Microphone:\n"
                 "  Target Sample Rate: %" PRIu32 " Hz\n"
                 "  Taps: %u\n"
-                "  Filters: %u",
-                this->target_sample_rate_, this->taps_, this->filters_);
+                "  Filters: %u\n"
+                "  Sources: %u, active %d",
+                this->target_sample_rate_, this->taps_, this->filters_, static_cast<unsigned>(this->sources_.size()),
+                this->active_.load());
+}
+
+void ResamplerMicrophone::set_source(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= this->sources_.size())
+    index = -1;
+  const int old = this->active_.load();
+  if (index == old)
+    return;
+  // Nothing of the old one passed on from here; the new one's first chunk sets the resampler up for its rate
+  this->active_.store(-1);
+  if (this->state_ != microphone::STATE_STOPPED) {
+    if (old >= 0)
+      this->sources_[old]->stop();
+    if (index >= 0)
+      this->sources_[index]->start();
+    this->state_ = microphone::STATE_STARTING;
+  }
+  this->active_.store(index);
+  ESP_LOGD(TAG, "Source %d", index);
+  this->enable_loop();
 }
 
 void ResamplerMicrophone::start() {
@@ -54,9 +81,11 @@ void ResamplerMicrophone::stop() {
 }
 
 void ResamplerMicrophone::loop() {
+  microphone::MicrophoneSource *source = this->active_source_();
   if (this->active_listeners_ == 0) {
     if (this->state_ != microphone::STATE_STOPPED) {
-      this->source_->stop();
+      if (source != nullptr)
+        source->stop();
       this->state_ = microphone::STATE_STOPPED;
     }
     this->disable_loop();
@@ -65,17 +94,19 @@ void ResamplerMicrophone::loop() {
 
   switch (this->state_) {
     case microphone::STATE_STOPPED:
-      this->source_->start();
+      if (source != nullptr)
+        source->start();
       this->state_ = microphone::STATE_STARTING;
       break;
     case microphone::STATE_STARTING:
-      if (this->source_->is_running()) {
+      // No source: running without audio (the users wait for no microphone)
+      if (source == nullptr || source->is_running()) {
         this->state_ = microphone::STATE_RUNNING;
       }
       break;
     case microphone::STATE_RUNNING:
       // Follow the source if it restarts, e.g. after a driver error
-      if (!this->source_->is_running()) {
+      if (source != nullptr && !source->is_running()) {
         this->state_ = microphone::STATE_STARTING;
       }
       break;
@@ -127,8 +158,15 @@ bool ResamplerMicrophone::init_resampler_(const audio::AudioStreamInfo &input_st
   return true;
 }
 
-void ResamplerMicrophone::process_audio_(const std::vector<uint8_t> &data) {
-  const audio::AudioStreamInfo input_stream_info = this->source_->get_audio_stream_info();
+void ResamplerMicrophone::process_audio_(size_t index, const std::vector<uint8_t> &data) {
+  if (this->processing_.exchange(true))
+    return;
+  this->process_chunk_(index, data);
+  this->processing_.store(false);
+}
+
+void ResamplerMicrophone::process_chunk_(size_t index, const std::vector<uint8_t> &data) {
+  const audio::AudioStreamInfo input_stream_info = this->sources_[index]->get_audio_stream_info();
   if (input_stream_info != this->input_stream_info_) {
     this->init_resampler_(input_stream_info);
   }
