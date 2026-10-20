@@ -9,7 +9,6 @@
 #include <vector>
 
 #include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
 #include <freertos/task.h>
 
 #include <esp_cam_sensor_types.h>
@@ -61,9 +60,12 @@ class MipiCsiImage : public camera::CameraImage {
   uint8_t requesters_;
 };
 
-/// Tracks how far a consumer has read into an image.
+class MipiCsiCamera;
+
+/// Tracks how far a consumer has read into an image; tells the camera when it gives the image back.
 class MipiCsiImageReader : public camera::CameraImageReader {
  public:
+  explicit MipiCsiImageReader(MipiCsiCamera *parent) : parent_(parent) {}
   void set_image(std::shared_ptr<camera::CameraImage> image) override;
   size_t available() const override;
   uint8_t *peek_data_buffer() override;
@@ -71,18 +73,30 @@ class MipiCsiImageReader : public camera::CameraImageReader {
   void return_image() override;
 
  protected:
+  MipiCsiCamera *parent_;
   std::shared_ptr<camera::CameraImage> image_;
   size_t offset_{0};
 };
+
+/// Memory for the camera's buffers while it streams (frames, JPEG output, the capture task's stack):
+/// DMA-capable PSRAM, 128-byte aligned; nullptr when there is no room. Given back with the free function.
+using BufferAlloc = uint8_t *(*) (size_t size);
+using BufferFree = void (*)(uint8_t *ptr);
 
 /// Camera for MIPI-CSI sensors on the ESP32-P4.
 ///
 /// Frames are captured through the V4L2 interface of Espressif's `esp_video` component and encoded
 /// to JPEG by the chip's JPEG peripheral. Sensors with a RAW Bayer output are routed through the
-/// ISP, where `esp_ipa` runs auto exposure and auto white balance. `esp_video` wires that up on its
-/// own, so there is nothing to configure here beyond enabling it at build time.
+/// ISP, where `esp_ipa` runs auto exposure and auto white balance.
+///
+/// Everything runs only while an image or a stream is asked for: esp_video, the JPEG engine, the
+/// capture task and every buffer are set up then and given back after (the buffers from the allocator).
 class MipiCsiCamera final : public camera::Camera {
  public:
+  void set_buffer_allocator(BufferAlloc alloc, BufferFree free) {
+    this->alloc_ = alloc;
+    this->free_ = free;
+  }
   void set_sensor_name(const char *sensor_name) { this->sensor_name_ = sensor_name; }
   void set_resolution(uint16_t width, uint16_t height) {
     this->width_ = width;
@@ -93,7 +107,6 @@ class MipiCsiCamera final : public camera::Camera {
   void set_horizontal_flip(bool flip) { this->horizontal_flip_ = flip; }
   void set_vertical_flip(bool flip) { this->vertical_flip_ = flip; }
   void set_framerate(uint8_t framerate) { this->framerate_ = framerate; }
-  void set_idle_update_interval(uint32_t interval) { this->idle_update_interval_ = interval; }
   void set_frame_buffer_count(uint8_t count) { this->frame_buffer_count_ = count; }
   void set_i2c_bus(i2c::InternalI2CBus *bus) { this->i2c_bus_ = bus; }
   void set_sccb_frequency(uint32_t frequency) { this->sccb_frequency_ = frequency; }
@@ -111,10 +124,12 @@ class MipiCsiCamera final : public camera::Camera {
   float get_setup_priority() const override { return setup_priority::LATE; }
 
   void add_listener(camera::CameraListener *listener) override { this->listeners_.push_back(listener); }
-  camera::CameraImageReader *create_image_reader() override { return new MipiCsiImageReader(); }  // NOLINT
+  camera::CameraImageReader *create_image_reader() override { return new MipiCsiImageReader(this); }  // NOLINT
   void request_image(camera::CameraRequester requester) override;
   void start_stream(camera::CameraRequester requester) override;
   void stop_stream(camera::CameraRequester requester) override;
+  /// A reader gave its image back (any task): the main loop checks whether the next frame can be asked for.
+  void on_image_returned() { this->enable_loop_soon_any_context(); }
 
  protected:
   /// One V4L2 capture buffer mapped into our address space.
@@ -123,13 +138,17 @@ class MipiCsiCamera final : public camera::Camera {
     size_t length;
   };
 
+  enum class State : uint8_t { IDLE, RUNNING, STOPPING };
+
   bool start_external_clock_();
   bool init_video_();
   bool select_sensor_format_();
   bool configure_device_();
-  bool start_streaming_();
-  void teardown_();
-  void report_throughput_(uint32_t now);
+  /// Main loop: esp_video, the device, the buffers, the encoder and the capture task for a stream.
+  bool start_capture_();
+  /// Main loop, once the capture task has parked: everything start_capture_() set up given back.
+  void finish_stop_();
+  bool queue_buffer_(uint32_t index);
   /// Logs every MIPI-CSI format the sensor offers, used when the configured resolution is rejected.
   void log_sensor_formats_();
   /// Ranks two sensor formats of the same resolution against each other.
@@ -153,8 +172,7 @@ class MipiCsiCamera final : public camera::Camera {
   optional<bool> horizontal_flip_;
   optional<bool> vertical_flip_;
   uint8_t framerate_{10};
-  uint32_t idle_update_interval_{15000};
-  uint8_t frame_buffer_count_{2};
+  uint8_t frame_buffer_count_{4};
   i2c::InternalI2CBus *i2c_bus_{nullptr};
   uint32_t sccb_frequency_{100000};
   bool init_ldo_{true};
@@ -167,17 +185,27 @@ class MipiCsiCamera final : public camera::Camera {
   /// Frame size the driver reports and the encoder is set up for. A frame that arrives at a
   /// different size did not come out of the pipeline we configured.
   size_t expected_frame_size_{0};
-  // Rolling counters behind the throughput report, which tells whether the delivered frame rate is
-  // anywhere near the configured one.
-  uint32_t published_frames_{0};
-  size_t published_bytes_{0};
-  uint32_t last_stats_{0};
+  BufferAlloc alloc_{nullptr};
+  BufferFree free_{nullptr};
+  State state_{State::IDLE};
+  bool video_ready_{false};
   FixedVector<FrameBuffer> buffers_;
   JpegEncoder encoder_;
-  QueueHandle_t result_queue_{nullptr};
+  uint8_t *jpeg_output_{nullptr};
+  // The capture task: its stack from the allocator, its TCB internal (FreeRTOS), both only while streaming
   TaskHandle_t capture_task_handle_{nullptr};
+  StaticTask_t *capture_tcb_{nullptr};
+  uint8_t *capture_stack_{nullptr};
   /// Set by the main loop to ask the capture task for one frame, cleared by the task when done.
   std::atomic<bool> frame_wanted_{false};
+  /// The capture task's result for the main loop: valid once result_ready_ is set (0 = encoding failed).
+  std::atomic<size_t> result_length_{0};
+  std::atomic<bool> result_ready_{false};
+  /// Main loop -> task: stop streaming and park; task -> main loop: parked, everything can be given back.
+  std::atomic<bool> stop_wanted_{false};
+  std::atomic<bool> parked_{false};
+  /// Set by the capture task when the driver failed; the stream is then given up.
+  std::atomic<bool> failed_{false};
 
   std::shared_ptr<MipiCsiImage> current_image_;
   std::vector<camera::CameraListener *> listeners_;
@@ -185,9 +213,6 @@ class MipiCsiCamera final : public camera::Camera {
   std::atomic<uint8_t> stream_requesters_{0};
   /// Requesters recorded when the frame currently being captured was asked for.
   uint8_t pending_requesters_{0};
-  uint32_t update_interval_{100};
-  uint32_t last_update_{0};
-  uint32_t last_idle_request_{0};
 };
 
 class MipiCsiImageTrigger final : public Trigger<CameraImageData>, public camera::CameraListener {

@@ -10,32 +10,25 @@ namespace esphome::mipi_csi {
 
 /// Wrapper around the ESP32-P4 hardware JPEG encoder.
 ///
-/// The encoder owns a single output buffer sized for the configured frame geometry, so only one
-/// encoded frame can be in flight at a time. The caller must therefore not start a new encode while
-/// a previously returned buffer is still being read.
+/// The output buffer belongs to the caller (taken for the stream, given back after it), so only one
+/// encoded frame can be in flight at a time. The engine exists between open() and close().
 class JpegEncoder {
  public:
-  /// Allocates the encoder engine and its output buffer.
-  /// @param width Frame width in pixels.
-  /// @param height Frame height in pixels.
-  /// @param input_format Pixel layout of the frames that will be passed to encode().
-  /// @param sub_sample Chroma subsampling to use for the encoded image.
-  /// @param quality JPEG quality, 1 (smallest) to 100 (best).
-  /// @param frame_size Size in bytes of one raw frame in @p input_format
-  /// @return true when the encoder is ready for use.
-  bool init(uint16_t width, uint16_t height, jpeg_enc_input_format_t input_format, jpeg_down_sampling_type_t sub_sample,
-            uint8_t quality, size_t frame_size);
+  /// The output size open() needs for frames of @p frame_size bytes (3/4 of a raw frame, at least 8 KiB).
+  static size_t output_size_for(size_t frame_size);
 
-  /// Encodes one frame into the internal output buffer.
-  /// @param frame Raw pixel data in the configured input format.
-  /// @param frame_length Length of @p frame in bytes.
+  /// Creates the encoder engine; @p output (DMA-capable, cache-line aligned) receives every image.
+  bool open(uint16_t width, uint16_t height, jpeg_enc_input_format_t input_format, jpeg_down_sampling_type_t sub_sample,
+            uint8_t quality, uint8_t *output, size_t output_size);
+  /// Deletes the engine; the output buffer stays the caller's.
+  void close();
+
+  /// Encodes one frame into the output buffer.
   /// @return Number of JPEG bytes written to the output buffer, or 0 on failure.
   size_t encode(const uint8_t *frame, size_t frame_length);
 
   /// Returns the buffer holding the most recently encoded image.
   uint8_t *get_output_buffer() const { return this->output_; }
-
-  ~JpegEncoder();
 
  protected:
   jpeg_encoder_handle_t engine_{nullptr};
