@@ -61,25 +61,20 @@ void SimpleVideoPlayer::capture_setup_() {
 #endif
 }
 
-jpeg_encoder_handle_t SimpleVideoPlayer::shared_jpeg_encoder() {
+bool SimpleVideoPlayer::capture_ready_() {
+  if (this->lvgl_component_ == nullptr)
+    return false;
+  if (this->cap_sync_sem_ == nullptr)
+    this->cap_sync_sem_ = xSemaphoreCreateBinaryStatic(&this->cap_sync_sem_buf_);
   if (this->cap_encoder_ == nullptr) {
     jpeg_encode_engine_cfg_t cfg{};
     cfg.timeout_ms = CAP_ENCODE_TIMEOUT_MS;
     if (jpeg_new_encoder_engine(&cfg, &this->cap_encoder_) != ESP_OK) {
       this->cap_encoder_ = nullptr;
       ESP_LOGE(TAG, "No JPEG encoder");
+      return false;
     }
   }
-  return this->cap_encoder_;
-}
-
-bool SimpleVideoPlayer::capture_ready_() {
-  if (this->lvgl_component_ == nullptr)
-    return false;
-  if (this->cap_sync_sem_ == nullptr)
-    this->cap_sync_sem_ = xSemaphoreCreateBinaryStatic(&this->cap_sync_sem_buf_);
-  if (this->shared_jpeg_encoder() == nullptr)
-    return false;
   if (this->cap_ppa_ == nullptr) {
     ppa_client_config_t cfg{};
     cfg.oper_type = PPA_OPERATION_SRM;

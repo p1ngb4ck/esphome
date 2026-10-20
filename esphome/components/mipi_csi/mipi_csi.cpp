@@ -329,34 +329,6 @@ void MipiCsiCamera::apply_control_(uint32_t id, int32_t value, const char *name)
 
 static size_t align_piece(size_t size) { return (size + 127) & ~static_cast<size_t>(127); }
 
-bool MipiCsiCamera::open_jpeg_() {
-  if (this->encoder_.is_open())
-    return true;
-  jpeg_encoder_handle_t engine = this->jpeg_engine_ != nullptr ? this->jpeg_engine_() : nullptr;
-  if (engine == nullptr) {
-    ESP_LOGE(TAG, "No JPEG encoder engine (set_jpeg_encoder)");
-    return false;
-  }
-  const size_t jpeg_size = align_piece(JpegEncoder::output_size_for(this->expected_frame_size_));
-  this->jpeg_output_ = this->alloc_(jpeg_size);
-  if (this->jpeg_output_ == nullptr) {
-    ESP_LOGE(TAG, "No room for the JPEG output (%zu bytes)", jpeg_size);
-    return false;
-  }
-  const FormatMapping mapping = get_format_mapping(this->pixel_format_);
-  this->encoder_.open(engine, this->width_, this->height_, mapping.jpeg_input, mapping.sub_sample, this->jpeg_quality_,
-                      this->jpeg_output_, jpeg_size);
-  return true;
-}
-
-void MipiCsiCamera::close_jpeg_() {
-  this->encoder_.close();
-  if (this->jpeg_output_ != nullptr) {
-    this->free_(this->jpeg_output_);
-    this->jpeg_output_ = nullptr;
-  }
-}
-
 bool MipiCsiCamera::queue_buffer_(uint32_t index) {
   v4l2_buffer buffer{};
   buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -410,6 +382,20 @@ bool MipiCsiCamera::start_capture_() {
     }
   }
 
+  const FormatMapping mapping = get_format_mapping(this->pixel_format_);
+  const size_t jpeg_size = align_piece(JpegEncoder::output_size_for(this->expected_frame_size_));
+  this->jpeg_output_ = this->alloc_(jpeg_size);
+  if (this->jpeg_output_ == nullptr) {
+    ESP_LOGE(TAG, "No room for the JPEG output (%zu bytes)", jpeg_size);
+    this->finish_stop_();
+    return false;
+  }
+  if (!this->encoder_.open(this->width_, this->height_, mapping.jpeg_input, mapping.sub_sample, this->jpeg_quality_,
+                           this->jpeg_output_, jpeg_size)) {
+    this->finish_stop_();
+    return false;
+  }
+
   int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   if (ioctl(this->fd_, VIDIOC_STREAMON, &type) != 0) {
     ESP_LOGE(TAG, "Starting the video stream failed: %s", strerror(errno));
@@ -433,7 +419,8 @@ bool MipiCsiCamera::start_capture_() {
     return false;
   }
   this->state_ = State::RUNNING;
-  ESP_LOGD(TAG, "Streaming: %u frames of %zu bytes", this->frame_buffer_count_, frame_piece);
+  ESP_LOGD(TAG, "Streaming: %u frames of %zu bytes, JPEG output %zu bytes", this->frame_buffer_count_, frame_piece,
+           jpeg_size);
   return true;
 }
 
@@ -455,7 +442,7 @@ void MipiCsiCamera::finish_stop_() {
     close(this->fd_);
     this->fd_ = -1;
   }
-  this->close_jpeg_();
+  this->encoder_.close();
   if (this->capture_tcb_ != nullptr) {
     heap_caps_free(this->capture_tcb_);
     this->capture_tcb_ = nullptr;
@@ -463,6 +450,10 @@ void MipiCsiCamera::finish_stop_() {
   if (this->capture_stack_ != nullptr) {
     this->free_(this->capture_stack_);
     this->capture_stack_ = nullptr;
+  }
+  if (this->jpeg_output_ != nullptr) {
+    this->free_(this->jpeg_output_);
+    this->jpeg_output_ = nullptr;
   }
   for (auto &buffer : this->buffers_) {
     this->free_(buffer.data);
@@ -649,7 +640,6 @@ void MipiCsiCamera::loop() {
     return;
   }
   if (this->preview_buffer_.load() != nullptr && this->single_requesters_ == 0 && this->stream_requesters_ == 0) {
-    this->close_jpeg_();   // no API image wanted: the JPEG output back to the pool
     this->disable_loop();  // only the preview: the task wakes the loop with each frame
     return;
   }
@@ -658,13 +648,6 @@ void MipiCsiCamera::loop() {
     this->state_ = State::STOPPING;
     this->stop_wanted_.store(true);
     this->disable_loop();
-    return;
-  }
-  if (!this->open_jpeg_()) {
-    ESP_LOGE(TAG, "No JPEG for the image requests; they are dropped");
-    this->single_requesters_ = 0;
-    this->stream_requesters_ = 0;
-    this->enable_loop();  // the stop (or the preview) follows on the next pass
     return;
   }
   this->pending_requesters_ = this->single_requesters_ | this->stream_requesters_;

@@ -97,8 +97,6 @@ class MipiCsiCamera final : public camera::Camera {
     this->alloc_ = alloc;
     this->free_ = free;
   }
-  /// The HW JPEG encoder engine to encode with (shared with others; nullptr while none exists).
-  void set_jpeg_encoder(jpeg_encoder_handle_t (*engine)()) { this->jpeg_engine_ = engine; }
   void set_sensor_name(const char *sensor_name) { this->sensor_name_ = sensor_name; }
   void set_resolution(uint16_t width, uint16_t height) {
     this->width_ = width;
@@ -161,9 +159,6 @@ class MipiCsiCamera final : public camera::Camera {
   /// Main loop, once the capture task has parked: everything start_capture_() set up given back.
   void finish_stop_();
   bool queue_buffer_(uint32_t index);
-  /// Main loop: the JPEG output (a pool piece) and the engine while API images are asked for; given back after.
-  bool open_jpeg_();
-  void close_jpeg_();
   /// Logs every MIPI-CSI format the sensor offers, used when the configured resolution is rejected.
   void log_sensor_formats_();
   /// Ranks two sensor formats of the same resolution against each other.
@@ -205,7 +200,6 @@ class MipiCsiCamera final : public camera::Camera {
   size_t expected_frame_size_{0};
   BufferAlloc alloc_{nullptr};
   BufferFree free_{nullptr};
-  jpeg_encoder_handle_t (*jpeg_engine_)(){nullptr};
   State state_{State::IDLE};
   bool video_ready_{false};
   FixedVector<FrameBuffer> buffers_;
