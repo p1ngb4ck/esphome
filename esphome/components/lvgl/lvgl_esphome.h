@@ -409,8 +409,8 @@ class LvglComponent final : public PollingComponent {
 #endif
 #if defined(USE_ESP32_VARIANT_ESP32P4)
   /// A camera's picture straight into the display's frame buffers (scanout with the PPA only), not drawn by LVGL:
-  /// each frame converted, fit (1/16 steps) and rotated by one PPA pass into the marker object's rectangle, then
-  /// presented. Only while LVGL runs, the marker shows and nothing of the top layer lies over it. Main loop.
+  /// each frame copied 1:1 in the panel's own orientation (the camera mounted to match; never scaled or turned:
+  /// only a YUV frame is converted) into the marker object's rectangle, centred and cut to it, then presented. Only while LVGL runs, the marker shows and nothing of the top layer lies over it. Main loop.
   /// False: no scanout or no PPA.
   bool camera_layer_start(lv_obj_t *marker);
   /// The layer ends: a pending frame is dropped (its done() called), the marker drawn by LVGL again.
@@ -528,7 +528,7 @@ class LvglComponent final : public PollingComponent {
   void cam_layer_draw_();
   void cam_layer_reset_();
   void cam_layer_restore_();
-  ppa_srm_rotation_angle_t scanout_angle_() const;
+  void panel_to_area_(int32_t x, int32_t y, int32_t w, int32_t h, lv_area_t *area) const;
   struct CamFrame {
     const void *data;
     uint16_t pic_w, pic_h, w, h;

@@ -838,20 +838,41 @@ bool LvglComponent::ppa_blit_to_(const uint8_t *src, uint16_t src_w, uint16_t sr
   return ppa_do_scale_rotate_mirror(this->ppa_client_, &cfg) == ESP_OK;
 }
 
-// The PPA's angle for an LVGL area onto the panel (it turns counter-clockwise), as draw_scanout_()
-ppa_srm_rotation_angle_t LvglComponent::scanout_angle_() const {
-  if (this->rotation_type_ != ROTATION_SOFTWARE)
-    return PPA_SRM_ROTATION_ANGLE_0;
-  switch (this->rotation_) {
+// The area of the LVGL screen a panel rectangle shows (the inverse of scanout_rect_())
+void LvglComponent::panel_to_area_(int32_t x, int32_t y, int32_t w, int32_t h, lv_area_t *area) const {
+  const auto rotation =
+      this->rotation_type_ == ROTATION_SOFTWARE ? this->rotation_ : display::DISPLAY_ROTATION_0_DEGREES;
+  int32_t ax, ay, aw, ah;
+  switch (rotation) {
     case display::DISPLAY_ROTATION_90_DEGREES:
-      return PPA_SRM_ROTATION_ANGLE_270;
+      ax = y;
+      ay = this->width_ - x - w;
+      aw = h;
+      ah = w;
+      break;
     case display::DISPLAY_ROTATION_180_DEGREES:
-      return PPA_SRM_ROTATION_ANGLE_180;
+      ax = this->width_ - x - w;
+      ay = this->height_ - y - h;
+      aw = w;
+      ah = h;
+      break;
     case display::DISPLAY_ROTATION_270_DEGREES:
-      return PPA_SRM_ROTATION_ANGLE_90;
+      ax = this->height_ - y - h;
+      ay = x;
+      aw = h;
+      ah = w;
+      break;
     default:
-      return PPA_SRM_ROTATION_ANGLE_0;
+      ax = x;
+      ay = y;
+      aw = w;
+      ah = h;
+      break;
   }
+  area->x1 = ax;
+  area->y1 = ay;
+  area->x2 = ax + aw - 1;
+  area->y2 = ay + ah - 1;
 }
 
 /* ---------------- camera layer ---------------- */
@@ -960,22 +981,18 @@ void LvglComponent::cam_layer_draw_() {
     this->cam_layer_reset_();  // moved or resized (full screen): LVGL draws it black, then the pictures
     this->cam_box_ = box;
   }
-  const int32_t bw = lv_area_get_width(&box);
-  const int32_t bh = lv_area_get_height(&box);
-  // The PPA scales in 1/16 steps: the fit rounded down to one, never larger than the box
-  const float fit = std::min(static_cast<float>(bw) / f.w, static_cast<float>(bh) / f.h);
-  const float scale = std::min(std::floor(fit * 16.0f) / 16.0f, 255.0f);
-  if (scale < 1.0f / 16.0f) {
-    this->camera_layer_drop();
-    return;
-  }
-  const int32_t ow = static_cast<int32_t>(scale * f.w);
-  const int32_t oh = static_cast<int32_t>(scale * f.h);
+  // The frame as it comes, in the panel's own orientation (the camera is mounted to match): 1:1, never scaled or
+  // turned (the device does not resize at runtime). Centred in the box's panel rectangle, cut to it when larger.
+  int32_t bx, by, bw, bh;
+  this->scanout_rect_(&box, bx, by, bw, bh);
+  const int32_t ow = std::min<int32_t>(f.w, bw) & ~1;  // even: a YUV422 frame is cut between pixel pairs
+  const int32_t oh = std::min<int32_t>(f.h, bh);
+  const int32_t sx = ((f.w - ow) / 2) & ~1;
+  const int32_t sy = (f.h - oh) / 2;
+  const int32_t x = bx + (bw - ow) / 2;
+  const int32_t y = by + (bh - oh) / 2;
   lv_area_t pic;
-  pic.x1 = box.x1 + (bw - ow) / 2;
-  pic.y1 = box.y1 + (bh - oh) / 2;
-  pic.x2 = pic.x1 + ow - 1;
-  pic.y2 = pic.y1 + oh - 1;
+  this->panel_to_area_(x, y, ow, oh, &pic);
   if (!lv_area_is_equal(&pic, &this->cam_pic_) && this->cam_latest_ != 0) {
     // Another picture size: the old one's edges go black (LVGL), both buffers
     lv_obj_invalidate(this->cam_marker_);
@@ -990,14 +1007,14 @@ void LvglComponent::cam_layer_draw_() {
     this->sync_scanout_(area);
   lv_ll_clear(areas);
 
-  int32_t x, y, w, h;
-  this->scanout_rect_(&pic, x, y, w, h);
   ppa_srm_oper_config_t cfg{};
   cfg.in.buffer = f.data;
   cfg.in.pic_w = f.pic_w;
   cfg.in.pic_h = f.pic_h;
-  cfg.in.block_w = f.w;
-  cfg.in.block_h = f.h;
+  cfg.in.block_w = ow;
+  cfg.in.block_h = oh;
+  cfg.in.block_offset_x = sx;
+  cfg.in.block_offset_y = sy;
   cfg.in.srm_cm = f.cm;
   cfg.in.yuv_range = PPA_COLOR_RANGE_LIMIT;
   cfg.in.yuv_std = PPA_COLOR_CONV_STD_RGB_YUV_BT601;
@@ -1012,9 +1029,10 @@ void LvglComponent::cam_layer_draw_() {
 #elif LV_COLOR_DEPTH == 32
   cfg.out.srm_cm = PPA_SRM_COLOR_MODE_RGB888;
 #endif
-  cfg.rotation_angle = this->scanout_angle_();
-  cfg.scale_x = scale;
-  cfg.scale_y = scale;
+  // A copy (and a YUV conversion): no scaling, no rotation
+  cfg.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
+  cfg.scale_x = 1.0f;
+  cfg.scale_y = 1.0f;
   cfg.mode = PPA_TRANS_MODE_BLOCKING;
   const bool ok = ppa_do_scale_rotate_mirror(this->ppa_client_, &cfg) == ESP_OK;
   this->camera_layer_drop();  // read: the camera's buffer goes back
