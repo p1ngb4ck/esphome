@@ -928,6 +928,7 @@ void LvglComponent::cam_layer_reset_() {
   this->cam_latest_ = 0;
   this->cam_box_ = lv_area_t{};
   this->cam_pic_ = lv_area_t{0, 0, -1, -1};
+  this->cam_rate_since_ = 0;
 }
 
 // Main loop, outside LVGL's refresh
@@ -1027,6 +1028,17 @@ void LvglComponent::cam_layer_draw_() {
   this->scanout_back_ ^= 1;
   this->scanout_wait_ = true;
   this->scanout_presented_ = millis();
+  // The pictures' rate: one line per 10 s while they come (counted per picture, nothing runs between them)
+  this->cam_frames_++;
+  const uint32_t elapsed = this->scanout_presented_ - this->cam_rate_since_;
+  if (this->cam_rate_since_ == 0) {
+    this->cam_rate_since_ = this->scanout_presented_;
+    this->cam_frames_ = 0;
+  } else if (elapsed >= 10000) {
+    ESP_LOGI(TAG, "Camera layer: %.1f pictures/s", this->cam_frames_ * 1000.0f / elapsed);
+    this->cam_rate_since_ = this->scanout_presented_;
+    this->cam_frames_ = 0;
+  }
 }
 
 // LVGL presents its buffer (last flush): an older picture in it gets the newest one from the shown buffer

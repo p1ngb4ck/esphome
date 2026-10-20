@@ -543,6 +543,8 @@ class LvglComponent final : public PollingComponent {
   uint32_t cam_latest_{0};
   lv_area_t cam_box_{};  // the marker's area at the last frame (LVGL coordinates)
   lv_area_t cam_pic_{0, 0, -1, -1};  // the newest picture's area, empty: none
+  uint32_t cam_frames_{0};      // pictures presented since cam_rate_since_ (the log's rate line)
+  uint32_t cam_rate_since_{0};
 #endif
 };
 
