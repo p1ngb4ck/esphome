@@ -94,6 +94,20 @@ static const char *core_version(uint8_t version) {
 
 // -- Device ------------------------------------------------------------------------------
 
+// The SCO interface (isochronous voice endpoints) is never claimed: SCO is not carried over this transport.
+// Its endpoints stay out of the host channel budget; once SCO is carried, ignoring it becomes an option.
+uint32_t USBBluetooth::skipped_endpoints_(const usb_device_desc_t * /*desc*/, const usb_config_desc_t *config,
+                                          const usb_intf_desc_t *alt) const {
+  uint32_t all = 0;
+  bool isoc = false;
+  usb_host::for_each_alt_endpoint(config, alt, [&](const usb_ep_desc_t *ep) {
+    all |= usb_host::endpoint_bit(ep);
+    if (USB_EP_DESC_GET_XFERTYPE(ep) == USB_BM_ATTRIBUTES_XFER_ISOC)
+      isoc = true;
+  });
+  return isoc ? all : 0;
+}
+
 bool USBBluetooth::find_interface_() {
   const usb_config_desc_t *cfg = this->get_config_desc_();
   if (cfg == nullptr)

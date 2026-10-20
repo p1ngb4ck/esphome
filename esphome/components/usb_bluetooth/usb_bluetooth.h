@@ -59,6 +59,8 @@ class USBBluetooth : public usb_host::USBClient {
   void on_connected() override;
   void on_disconnected() override;
   bool reports_connection_itself() const override { return true; }
+  uint32_t skipped_endpoints_(const usb_device_desc_t *desc, const usb_config_desc_t *config,
+                              const usb_intf_desc_t *alt) const override;
 
   bool find_interface_();
   void read_event_(uint32_t generation);
