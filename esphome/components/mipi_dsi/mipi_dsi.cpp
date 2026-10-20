@@ -3,6 +3,8 @@
 #include <utility>
 #include "mipi_dsi.h"
 #include "esphome/core/helpers.h"
+#include "hal/mipi_dsi_hal.h"
+#include "hal/mipi_dsi_host_ll.h"
 
 #include <algorithm>
 #include <cstring>
@@ -94,6 +96,9 @@ void MipiDsi::setup() {
                                            .pixel_format = pixel_format,
 #endif
                                            .num_fbs = this->num_fbs_,  // frame buffers (YAML: frame_buffers)
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+                                           .video_burst_type = static_cast<mipi_dsi_video_burst_type_t>(this->video_mode_),
+#endif
                                            .video_timing =
                                                {
                                                    .h_size = this->width_,
@@ -108,6 +113,8 @@ void MipiDsi::setup() {
                                            .flags = {
 #if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(6, 0, 0)
                                                .use_dma2d = true,
+#else
+                                               .disable_frame_ack = !this->frame_ack_,
 #endif
                                            }};
   // clang-format on
@@ -116,6 +123,15 @@ void MipiDsi::setup() {
     this->smark_failed(LOG_STR("esp_lcd_new_panel_dpi failed"), err);
     return;
   }
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(6, 0, 0)
+  // ESP-IDF 5.5 fixes burst mode and frame ack in esp_lcd_new_panel_dpi(); set them before esp_lcd_panel_init()
+  // starts the video mode
+  static constexpr mipi_dsi_ll_video_burst_type_t LL_VIDEO_MODES[] = {
+      MIPI_DSI_LL_VIDEO_BURST_WITH_SYNC_PULSES, MIPI_DSI_LL_VIDEO_NON_BURST_WITH_SYNC_PULSES,
+      MIPI_DSI_LL_VIDEO_NON_BURST_WITH_SYNC_EVENTS};
+  mipi_dsi_host_ll_dpi_set_video_burst_type(MIPI_DSI_LL_GET_HOST(0), LL_VIDEO_MODES[this->video_mode_]);
+  mipi_dsi_host_ll_dpi_enable_frame_ack(MIPI_DSI_LL_GET_HOST(0), this->frame_ack_);
+#endif
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
   err = esp_lcd_dpi_panel_enable_dma2d(this->handle_);
   if (err != ESP_OK) {
@@ -130,7 +146,7 @@ void MipiDsi::setup() {
     this->reset_pin_->digital_write(false);
     delay(5);
     this->reset_pin_->digital_write(true);
-  } else {
+  } else if (!this->generic_commands_) {
     esp_lcd_panel_io_tx_param(this->io_handle_, SW_RESET_CMD, nullptr, 0);
   }
   // need to know when the display is ready for SLPOUT command - will be 120ms after reset
@@ -159,7 +175,7 @@ void MipiDsi::setup() {
         this->mark_failed(LOG_STR("Malformed init sequence"));
         return;
       }
-      if (cmd == SLEEP_OUT) {
+      if (cmd == SLEEP_OUT && !this->generic_commands_) {
         // are we ready, boots?
         int duration = when - millis();
         if (duration > 0) {
@@ -172,12 +188,16 @@ void MipiDsi::setup() {
 #endif
       ESP_LOGVV(TAG, "Command %02X, length %d, byte(s) %s", cmd, num_args,
                 format_hex_pretty_to(hex_buf, ptr, num_args, '.'));
+      index += num_args;
+      if (this->generic_commands_) {
+        this->write_generic_(cmd, ptr, num_args);
+        continue;
+      }
       err = esp_lcd_panel_io_tx_param(this->io_handle_, cmd, ptr, num_args);
       if (err != ESP_OK) {
         this->smark_failed(LOG_STR("lcd_panel_io_tx_param failed"), err);
         return;
       }
-      index += num_args;
       if (cmd == SLEEP_OUT)
         delay(10);
     }
@@ -500,7 +520,25 @@ int MipiDsi::get_height() {
   }
 }
 
+// esp_lcd's DBI io sends DCS packets only; bridge chips (TC358762) take their register writes as generic writes.
+// The HAL's packet functions use only the host registers, the same ones the DBI io writes through.
+void MipiDsi::write_generic_(uint8_t cmd, const uint8_t *args, uint8_t num_args) {
+  mipi_dsi_hal_context_t hal{};
+  hal.host = MIPI_DSI_LL_GET_HOST(0);
+  if (num_args == 0) {
+    mipi_dsi_hal_host_gen_write_short_packet(&hal, 0, MIPI_DSI_DT_GENERIC_SHORT_WRITE_1, cmd);
+  } else if (num_args == 1) {
+    mipi_dsi_hal_host_gen_write_short_packet(&hal, 0, MIPI_DSI_DT_GENERIC_SHORT_WRITE_2, cmd | (args[0] << 8));
+  } else {
+    uint8_t payload[128];  // num_args <= 0x7F
+    payload[0] = cmd;
+    memcpy(payload + 1, args, num_args);
+    mipi_dsi_hal_host_gen_write_long_packet(&hal, 0, MIPI_DSI_DT_GENERIC_LONG_WRITE, payload, num_args + 1);
+  }
+}
+
 static const uint8_t PIXEL_MODES[] = {0, 16, 18, 24};
+static const char *const VIDEO_MODES[] = {"burst", "non-burst, sync pulses", "non-burst, sync events"};
 
 void MipiDsi::dump_config() {
   ESP_LOGCONFIG(TAG,
@@ -520,11 +558,15 @@ void MipiDsi::dump_config() {
                 "\n  Buffer Color Depth: %d bit"
                 "\n  Display Pixel Mode: %d bit"
                 "\n  Invert Colors: %s"
-                "\n  Pixel Clock: %.1fMHz",
+                "\n  Pixel Clock: %.1fMHz"
+                "\n  Video Mode: %s"
+                "\n  Frame Ack: %s"
+                "\n  Commands: %s",
                 this->model_, this->width_, this->height_, this->rotation_, this->lanes_, this->lane_bit_rate_,
                 this->hsync_pulse_width_, this->hsync_back_porch_, this->hsync_front_porch_, this->vsync_pulse_width_,
                 this->vsync_back_porch_, this->vsync_front_porch_, (3 - this->color_depth_) * 8, this->pixel_mode_,
-                YESNO(this->invert_colors_), this->pclk_frequency_);
+                YESNO(this->invert_colors_), this->pclk_frequency_, VIDEO_MODES[this->video_mode_],
+                YESNO(this->frame_ack_), this->generic_commands_ ? "generic" : "DCS");
   LOG_PIN("  Reset Pin ", this->reset_pin_);
 }
 }  // namespace esphome::mipi_dsi
