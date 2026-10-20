@@ -1806,7 +1806,7 @@ inline void put_be32(uint8_t *p, uint32_t v) {
 
 // The panel, then the relay's picture; until the panel ends it or the relay's sender goes. The USB
 // slots' devices are exported over USB/IP meanwhile (select/usbip.cpp).
-void SimpleVideoPlayer::desktop_vnc_(const char *host, uint16_t port, const char *password) {
+void SimpleVideoPlayer::desktop_vnc_(const char *kind, const char *host, uint16_t port, const char *password) {
   bool direct = true, wifi_held = false;
   uint32_t out_w = 0, out_h = 0;
   this->desktop_output_(direct, out_w, out_h);
@@ -1823,10 +1823,14 @@ void SimpleVideoPlayer::desktop_vnc_(const char *host, uint16_t port, const char
     xQueueReset(this->stream_touch_q_);
 #endif
   this->desktop_relay_inputs_.store(true, std::memory_order_release);
-  if (!this->desktop_relay_start_("vnc", host, port, password, 0)) {
+  if (!this->desktop_relay_start_(kind, host, port, password, 0)) {
     this->desktop_took_ = false;
   } else {
-    ESP_LOGI(TAG, "VNC desktop of %s:%u through svp_relay", host, port);
+    if (std::strcmp(kind, "browser") == 0) {
+      ESP_LOGI(TAG, "Browser of svp_relay's host");
+    } else {
+      ESP_LOGI(TAG, "VNC desktop of %s:%u through svp_relay", host, port);
+    }
 #ifdef SVP_SPICE_USB
     UsbipLink links[SPICE_USB_SLOTS];
     const int listener = this->spice_usb_count_ > 0 ? usbip_listen() : -1;
@@ -2025,8 +2029,30 @@ void SimpleVideoPlayer::spice_connect(const std::string &host, uint16_t port, co
   std::snprintf(this->spice_->host, sizeof(this->spice_->host), "%s", host.c_str());
   std::snprintf(this->spice_->password, sizeof(this->spice_->password), "%s", password.c_str());
   this->spice_->port = port;
+  this->spice_browser_.store(false, std::memory_order_release);
   xSemaphoreGive(this->spice_lock_);
   // A connection still being made ends first; the task then connects anew.
+  this->spice_request_.store(1, std::memory_order_release);
+  this->spice_wake();
+  xTaskNotifyGive(this->spice_task_);
+}
+
+void SimpleVideoPlayer::spice_connect_browser() {
+  if (this->spice_task_ == nullptr) {
+    ESP_LOGE(TAG, "The SPICE client is not running");
+    return;
+  }
+  if (this->spice_on_.load(std::memory_order_acquire)) {
+    ESP_LOGW(TAG, "A SPICE session runs: disconnect it first");
+    return;
+  }
+  this->spice_active_saved_ = -1;
+  xSemaphoreTake(this->spice_lock_, portMAX_DELAY);
+  this->spice_->host[0] = 0;
+  this->spice_->password[0] = 0;
+  this->spice_->port = 0;
+  this->spice_browser_.store(true, std::memory_order_release);
+  xSemaphoreGive(this->spice_lock_);
   this->spice_request_.store(1, std::memory_order_release);
   this->spice_wake();
   xTaskNotifyGive(this->spice_task_);
@@ -2653,6 +2679,7 @@ void SimpleVideoPlayer::spice_loop_() {
     std::memcpy(host, this->spice_->host, sizeof(host));
     std::memcpy(password, this->spice_->password, sizeof(password));
     const uint16_t port = this->spice_->port;
+    const bool browser = this->spice_browser_.load(std::memory_order_acquire);
     xSemaphoreGive(this->spice_lock_);
     {
       // The wake count of the request itself.
@@ -2671,12 +2698,13 @@ void SimpleVideoPlayer::spice_loop_() {
     App.wake_loop_threadsafe();
     this->desktop_took_ = false;
     this->desktop_sender_gone_.store(false, std::memory_order_release);
-    // A VNC server greets first, a SPICE server waits for the client.
-    const DesktopKind kind = this->desktop_probe_(host, port);
+    // A VNC server greets first, a SPICE server waits for the client. The Browser's server is
+    // started by the relay: no probe.
+    const DesktopKind kind = browser ? DesktopKind::VNC : this->desktop_probe_(host, port);
     if (this->spice_request_.load(std::memory_order_acquire) != 0) {
       // Asked anew meanwhile.
     } else if (kind == DesktopKind::VNC) {
-      this->desktop_vnc_(host, port, password);
+      this->desktop_vnc_(browser ? "browser" : "vnc", host, port, password);
     } else if (kind == DesktopKind::SPICE) {
       SpiceSession session(this);
       session.run(host, port, password);

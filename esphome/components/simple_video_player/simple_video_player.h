@@ -520,6 +520,11 @@ class SimpleVideoPlayer : public Component
   /// SPICE client (spice_client.cpp): the server's desktop on the stream's output, its pictures
   /// (JPEG, MJPEG streams, plain bitmaps) drawn like udisp rectangles. The panel is held meanwhile.
   void spice_connect(const std::string &host, uint16_t port, const std::string &password);
+  /// The Browser: svp_relay's host runs a browser in a VNC server of its own, shown as a VNC desktop
+  /// (one per panel; no host, port or password: the relay starts and knows it).
+  void spice_connect_browser();
+  /// The connect asked for last is the Browser's (its session, or why it failed).
+  bool is_spice_browser() const { return this->spice_browser_.load(std::memory_order_acquire); }
   void spice_disconnect();
   bool is_spice_connected() const { return this->spice_on_.load(std::memory_order_acquire); }
   /// A connect under way; the last one ended without a session (refused, unreachable, wrong password).
@@ -1286,8 +1291,9 @@ class SimpleVideoPlayer : public Component
   bool desktop_relay_start_(const char *kind, const char *host, uint16_t port, const char *password,
                             uint32_t connection_id);
   void desktop_relay_stop_();
-  /// A VNC session: all of it through the relay, the panel's keys, mouse and touches too.
-  void desktop_vnc_(const char *host, uint16_t port, const char *password);
+  /// A VNC session: all of it through the relay, the panel's keys, mouse and touches too. kind: "vnc",
+  /// or "browser" (the relay's own VNC server, host and port unused).
+  void desktop_vnc_(const char *kind, const char *host, uint16_t port, const char *password);
   struct SpiceCursorShape;
   /// Network task: the relay's VNC pointer shape shown, or (changed) where it is.
   void desktop_cursor_set_(const SpiceCursorShape *shape);
@@ -2472,6 +2478,7 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> spice_on_{false};
   std::atomic<bool> spice_connecting_{false};
   std::atomic<bool> spice_failed_{false};
+  std::atomic<bool> spice_browser_{false};  // the connect asked for last is the Browser's
   std::atomic<bool> spice_inputs_on_{false};    // the session's inputs channel takes keys, mouse, touches
   std::atomic<bool> spice_sound_on_{false};     // the session's playback channel is open
   std::atomic<bool> spice_sound_claim_{false};  // loop(): what plays on the session's sound device stops
