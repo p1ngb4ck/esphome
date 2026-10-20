@@ -43,6 +43,16 @@ void UVCClient::loop() {
       const uint8_t *data = cam->buffers[cam->ready_index];
       const UvcFrameInfo &info = cam->frames[cam->selected];
       cam->restarts = 0;  // it streams
+      // What became of the stream's frames: one line per 10 s while frames come (checked per delivered frame)
+      const uint32_t now = millis();
+      if (cam->stats_since == 0) {
+        cam->stats_since = now;
+      } else if (now - cam->stats_since >= 10000) {
+        ESP_LOGI(TAG, "Frames in %u s: %u whole, %u with a lost / skipped packet, %u broken, %u while the last was read",
+                 static_cast<unsigned>((now - cam->stats_since) / 1000), cam->n_ok.exchange(0), cam->n_holes.exchange(0),
+                 cam->n_bad.exchange(0), cam->n_busy.exchange(0));
+        cam->stats_since = now;
+      }
       for (auto &cb : this->frame_callbacks_)
         cb(static_cast<uint8_t>(cam->dev->addr), data, cam->ready_len, info);
       if (!cam->held)
@@ -391,6 +401,9 @@ void UVCClient::on_device_connected(usb_host::UsbDevice &dev) {
 
 // Main loop: the selected frame size negotiated, then the stream opened
 void UVCClient::open_(Camera &cam) {
+  cam.stats_since = 0;
+  for (auto *n : {&cam.n_ok, &cam.n_holes, &cam.n_bad, &cam.n_busy})
+    n->store(0, std::memory_order_relaxed);
   if (this->alloc_ == nullptr || this->free_ == nullptr) {
     ESP_LOGE(TAG, "No buffer allocator set (set_buffer_allocator)");
     return;
@@ -607,6 +620,7 @@ void UVCClient::on_stream_packet(usb_host::IsocStream &stream, const uint8_t *da
   // A lost or skipped packet leaves a hole in the frame: that frame is not delivered (a decoder would choke on it)
   if (error || skipped) {
     cam.skip_frame = true;
+    cam.skip_why |= 1;
     return;
   }
   if (len < 2)
@@ -619,14 +633,18 @@ void UVCClient::on_stream_packet(usb_host::IsocStream &stream, const uint8_t *da
     cam.frame_id = hdr->bm_header_info.frame_id;
     cam.fill_len = 0;
     cam.skip_frame = false;
+    cam.skip_why = 0;
   }
-  if (hdr->bm_header_info.error)
+  if (hdr->bm_header_info.error) {
     cam.skip_frame = true;
+    cam.skip_why |= 2;
+  }
 
   const size_t payload_len = len - hdr->b_header_length;
   if (!cam.skip_frame && payload_len > 0) {
     if (cam.fill_len + payload_len > cam.buffer_size) {
       cam.skip_frame = true;
+      cam.skip_why |= 2;
     } else {
       memcpy(cam.buffers[cam.fill] + cam.fill_len, data + hdr->b_header_length, payload_len);
       cam.fill_len += payload_len;
@@ -646,8 +664,15 @@ void UVCClient::on_stream_packet(usb_host::IsocStream &stream, const uint8_t *da
           break;
         }
       }
-      if (cam.fill_len < 4 || f[0] != 0xFF || f[1] != 0xD8 || !eoi)
+      if (cam.fill_len < 4 || f[0] != 0xFF || f[1] != 0xD8 || !eoi) {
         cam.skip_frame = true;
+        cam.skip_why |= 2;
+      }
+    }
+    if (cam.skip_frame) {
+      ((cam.skip_why & 1) != 0 ? cam.n_holes : cam.n_bad).fetch_add(1, std::memory_order_relaxed);
+    } else if (cam.fill_len > 0 && cam.ready.load(std::memory_order_acquire)) {
+      cam.n_busy.fetch_add(1, std::memory_order_relaxed);
     }
     // Handed over only while the main loop is done with the previous frame; otherwise this
     // one is not delivered and its buffer takes the next frame.
@@ -656,10 +681,12 @@ void UVCClient::on_stream_packet(usb_host::IsocStream &stream, const uint8_t *da
       cam.ready_len = cam.fill_len;
       cam.fill ^= 1;
       cam.ready.store(true, std::memory_order_release);
+      cam.n_ok.fetch_add(1, std::memory_order_relaxed);
       this->enable_loop_soon_any_context();
     }
     cam.fill_len = 0;
     cam.frame_id = 2;
+    cam.skip_why = 0;
   }
 }
 

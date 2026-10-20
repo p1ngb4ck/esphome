@@ -144,6 +144,13 @@ class UVCClient : public usb_host::USBClient {
     size_t fill_len{0};      // USB task
     uint8_t frame_id{2};     // USB task; 2: no frame started
     bool skip_frame{false};  // USB task
+    uint8_t skip_why{0};     // USB task: why this frame is not delivered (bit 0 a hole, 1 its header's error bit / too big)
+    // Frames of the stream since stats_since (the 10 s line): USB task counts, main loop reads and clears
+    std::atomic<uint16_t> n_ok{0};      // handed over
+    std::atomic<uint16_t> n_holes{0};   // a lost or skipped packet
+    std::atomic<uint16_t> n_bad{0};     // the header's error bit, larger than the buffer, or MJPEG without SOI / EOI
+    std::atomic<uint16_t> n_busy{0};    // whole, but the last one was still read
+    uint32_t stats_since{0};            // main loop
     uint8_t ready_index{0};
     size_t ready_len{0};
     std::atomic<bool> ready{false};  // set by the USB task, cleared by the main loop
