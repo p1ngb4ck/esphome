@@ -7,6 +7,7 @@
 #include "esphome/core/log.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cstring>
 #include <string>
 
@@ -47,7 +48,7 @@ void USBAudioMicrophone::setup() {
 
 void USBAudioMicrophone::dump_config() {
   ESP_LOGCONFIG(TAG_MIC, "USB Microphone:");
-  ESP_LOGCONFIG(TAG_MIC, "  Sample rate: %u Hz", this->sample_rate_);
+  ESP_LOGCONFIG(TAG_MIC, "  Sample rate: %" PRIu32 " Hz", this->sample_rate_);
   ESP_LOGCONFIG(TAG_MIC, "  Bits per sample: %u", this->bits_per_sample_);
   ESP_LOGCONFIG(TAG_MIC, "  Source channels: %u", this->channels_);
   if (!this->enabled_channels_.empty()) {
