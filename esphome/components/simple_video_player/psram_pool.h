@@ -3,27 +3,24 @@
 #include <cstddef>
 #include <cstdint>
 
-#include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include <atomic>
 
 namespace esphome::simple_video_player {
 
-/// One PSRAM block for everything the player buffers, taken at boot. Pieces are handed out first
-/// fit, 128-byte aligned (whole cache lines, as the JPEG unit and DMA need), and given back
-/// whole; neighbouring free pieces merge. Thread-safe. Its piece table lives at the block's start
-/// (no internal heap); with the table full a free piece is handed out whole instead of split.
+/// The player's PSRAM pieces, each taken from PSRAM (the system's allocator, MALLOC_CAP_SPIRAM only - never internal
+/// RAM) when its function needs it and given back after; nothing is reserved. 128-byte aligned (whole cache lines,
+/// as the JPEG unit and DMA need). Thread-safe (the system's allocator). size() is the media budget plan_pool_()
+/// shares out, used() what the player holds now, largest_free() PSRAM's largest free block.
 class PsramPool {
  public:
   static constexpr size_t ALIGN = 128;
-  static constexpr size_t MAX_PIECES = 128;
 
   bool init(size_t size);
-  bool ready() const { return this->base_ != nullptr; }
+  bool ready() const { return this->ready_; }
 
-  /// nullptr when no free piece is large enough.
+  /// nullptr when PSRAM has no free block that large.
   uint8_t *alloc(size_t size);
-  /// The same from the pool's end (last fit): the player's small objects, so they never split the
-  /// stretch the media buffers take and give back.
+  /// The same as alloc() (kept for the callers of the block's time).
   uint8_t *alloc_top(size_t size);
   void free(uint8_t *ptr);
 
@@ -35,17 +32,9 @@ class PsramPool {
   static PsramPool *instance();
 
  protected:
-  struct Piece {
-    size_t offset;
-    size_t size;
-    bool used;
-  };
-  void erase_(size_t index);  // lock held
-  uint8_t *base_{nullptr};
-  size_t size_{0};             // usable bytes, after the piece table
-  Piece *pieces_{nullptr};     // in address order, at base_
-  size_t count_{0};
-  SemaphoreHandle_t lock_{nullptr};
+  size_t size_{0};
+  std::atomic<size_t> used_{0};
+  bool ready_{false};
 };
 
 }  // namespace esphome::simple_video_player
