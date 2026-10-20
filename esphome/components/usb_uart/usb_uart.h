@@ -18,6 +18,7 @@ namespace esphome::usb_uart {
 
 class USBUartTypeCdcAcm;
 class USBUartTypeCH934X;
+class USBUartClient;
 class USBUartComponent;
 class USBUartChannel;
 class USBUartChannelBase;
@@ -274,6 +275,7 @@ template<uint8_t COUNT> class RxChunkPool {
 // multiplexed channels like CH934X) derive from this and are themselves final,
 // per the "configurable classes are final" convention.
 class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartComponent> {
+  friend class USBUartClient;
   friend class USBUartComponent;
   friend class USBUartTypeCdcAcm;
   friend class USBUartTypeCP210X;
@@ -340,6 +342,12 @@ class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartCo
  protected:
   // Not directly instantiable; construct a concrete channel type instead.
   USBUartChannelBase(uint8_t index, uint16_t buffer_size) : input_buffer_(RingBuffer(buffer_size)), index_(index) {}
+
+ public:
+  // A channel made for an adapter without a YAML entry is deleted with it
+  virtual ~USBUartChannelBase() = default;
+
+ protected:
   void check_logger_conflict() override {}
   LineStopBits line_stop_bits_() const;
   LineParity line_parity_() const;
@@ -384,12 +392,30 @@ class USBUartChannel final : public USBUartChannelBase {
   USBUartChannel(uint8_t index, uint16_t buffer_size) : USBUartChannelBase(index, buffer_size) {}
 };
 
-class USBUartComponent : public usb_host::USBClient {
+/// The serial adapter types; an adapter without a YAML entry gets its type from its vid:pid, else CDC ACM.
+enum class UartType : uint8_t { CDC_ACM, CH34X, CH934X, CP210X, FT23XX, PL2303 };
+
+/// An optional YAML entry: an adapter it names (vid / pid) gets its type and its channels (with ids that
+/// consumers bind by uart_id).
+struct USBUartEntry {
+  uint16_t vid;
+  uint16_t pid;
+  UartType type;
+  uint8_t init_lanes;
+  bool claim_comm_interface;
+  std::vector<USBUartChannelBase *> channels;
+};
+
+// One plugged serial adapter: the driver of its type on one UsbDevice of the USBUartClient. Made when the
+// adapter connects, deleted once it is gone and none of its transfers is out any more. The client's calls
+// for this device are behind the same names the type drivers have always used (transfer_in, disconnect ...).
+class USBUartComponent {
+  friend class USBUartClient;
+
  public:
-  USBUartComponent(uint16_t vid, uint16_t pid) : usb_host::USBClient(vid, pid) {}
-  void setup() override;
-  void loop() override;
-  void dump_config() override;
+  USBUartComponent(USBUartClient *client, usb_host::UsbDevice *dev);
+  virtual ~USBUartComponent();
+  virtual void dump_config();
   std::vector<USBUartChannelBase *> get_channels() { return this->channels_; }
 
   void add_channel(USBUartChannelBase *channel) { this->channels_.push_back(channel); }
@@ -405,6 +431,16 @@ class USBUartComponent : public usb_host::USBClient {
   // Apply the DTR/RTS state of a single, already-open channel (used by
   // USBUartChannelBase::set_modem_control()).
   void apply_modem_control(USBUartChannelBase *channel);
+
+  // The client's calls for this adapter's device
+#ifdef USE_USB_BULK_TRANSFERS
+  bool transfer_in(uint8_t ep_address, const usb_host::transfer_cb_t &callback, uint16_t length);
+  bool transfer_out(uint8_t ep_address, const usb_host::transfer_cb_t &callback, const uint8_t *data, uint16_t length);
+#endif
+  bool control_transfer(uint8_t type, uint8_t request, uint16_t value, uint16_t index,
+                        const usb_host::transfer_cb_t &callback, const std::vector<uint8_t> &data = {});
+  void enable_loop();
+  void enable_loop_soon_any_context();
 
   // Called from loop() when input_buffer_ has insufficient space for the incoming chunk.
   // Default is a no-op; override in device-specific subclasses that need resync on overflow.
@@ -430,6 +466,19 @@ class USBUartComponent : public usb_host::USBClient {
   // Advance the config state machine; called from loop(). Returns true if it did work.
   bool run_config_machine_();
 
+  // The client's main loop: queued data, the config machine. False when there was nothing to do.
+  bool loop();
+  virtual void on_connected() = 0;
+  virtual void on_disconnected() {}
+  /// No YAML entry: @p count channels with the defaults (115200 8N1, 256 byte buffers), deleted with the adapter.
+  void add_default_channels_(uint8_t count);
+  virtual USBUartChannelBase *make_channel_(uint8_t index, uint16_t buffer_size);
+  /// The adapter is given up (closed; deleted once nothing of it is out).
+  void disconnect();
+  void status_set_error(const LogString *message);
+  void status_set_warning(const LogString *message);
+  void status_clear_error();
+
   // Per-subclass per-channel settings sequence. For the given zero-based step, issue the
   // next control transfer via config_transfer_() and return true, or return false when the
   // channel has no more steps. reload=true ⇒ apply only baud/parity/stop/data (skip
@@ -443,9 +492,14 @@ class USBUartComponent : public usb_host::USBClient {
   // and rts_ on the wire.
   virtual void modem_control_transfer(USBUartChannelBase *channel) = 0;
 
-  // The device is only usable once the config machine has applied every channel's line
-  // settings, so the connected report waits for run_config_machine_() to finish the init
-  bool reports_connection_itself() const override { return true; }
+  USBUartClient *client_;
+  usb_host::UsbDevice *dev_;
+  usb_host_client_handle_t handle_;
+  usb_device_handle_t device_handle_;
+  uint16_t vid_;
+  uint16_t pid_;
+  bool connected_{true};
+  bool own_channels_{false};  // made by add_default_channels_(), deleted with the adapter
 
   std::vector<USBUartChannelBase *> channels_{};
 
@@ -464,8 +518,7 @@ class USBUartComponent : public usb_host::USBClient {
 
 class USBUartTypeCdcAcm : public USBUartComponent {
  public:
-  // Without vid/pid: any device with a CDC ACM communication interface (class 02/02).
-  USBUartTypeCdcAcm(uint16_t vid, uint16_t pid) : USBUartComponent(vid, pid) { this->add_class_match(0x02, 0x02); }
+  USBUartTypeCdcAcm(USBUartClient *client, usb_host::UsbDevice *dev) : USBUartComponent(client, dev) {}
   void set_claim_comm_interface(bool claim) { this->claim_comm_interface_ = claim; }
 
  protected:
@@ -481,7 +534,7 @@ class USBUartTypeCdcAcm : public USBUartComponent {
 
 class USBUartTypeCP210X : public USBUartTypeCdcAcm {
  public:
-  USBUartTypeCP210X(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
+  USBUartTypeCP210X(USBUartClient *client, usb_host::UsbDevice *dev) : USBUartTypeCdcAcm(client, dev) {}
 
  protected:
   std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override;
@@ -490,7 +543,7 @@ class USBUartTypeCP210X : public USBUartTypeCdcAcm {
 };
 class USBUartTypeCH34X : public USBUartTypeCdcAcm {
  public:
-  USBUartTypeCH34X(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {
+  USBUartTypeCH34X(USBUartClient *client, usb_host::UsbDevice *dev) : USBUartTypeCdcAcm(client, dev) {
     // ch34x doesn't use the interrupt endpoint, and we don't have endpoints to spare. The
     // comm interface is left in place unclaimed: on the CDC-style chips it is still the
     // interface a host binds, and so the one the port is identified by.
@@ -511,7 +564,7 @@ class USBUartTypeCH34X : public USBUartTypeCdcAcm {
 
 class USBUartTypeCH934X : public USBUartComponent {
  public:
-  USBUartTypeCH934X(uint16_t vid, uint16_t pid) : USBUartComponent(vid, pid) {}
+  USBUartTypeCH934X(USBUartClient *client, usb_host::UsbDevice *dev) : USBUartComponent(client, dev) {}
 
   void start_input(USBUartChannelBase *channel) override;
   // Max number of channels initialised in parallel (one in-flight command write each).
@@ -531,6 +584,7 @@ class USBUartTypeCH934X : public USBUartComponent {
   void modem_control_transfer(USBUartChannelBase *channel) override;
 
   bool parse_descriptors_(usb_device_handle_t dev_hdl);
+  USBUartChannelBase *make_channel_(uint8_t index, uint16_t buffer_size) override;
   // Build the idx-th init register write for a channel into a stack buffer. Stateless and
   // deterministic, so the paced config machine can re-derive any write per round without
   // storing them. Returns false when idx is past this chip's per-channel write count.
@@ -585,7 +639,7 @@ class CH934XChannel final : public USBUartChannelBase {
 
 class USBUartTypeFT23XX : public USBUartTypeCdcAcm {
  public:
-  USBUartTypeFT23XX(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
+  USBUartTypeFT23XX(USBUartClient *client, usb_host::UsbDevice *dev) : USBUartTypeCdcAcm(client, dev) {}
 
   void start_input(USBUartChannelBase *channel) override;
   void on_rx_overflow(USBUartChannelBase *channel) override;
@@ -612,7 +666,7 @@ class USBUartTypePL2303 : public USBUartTypeCdcAcm {
   friend class USBUartChannelBase;
 
  public:
-  USBUartTypePL2303(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
+  USBUartTypePL2303(USBUartClient *client, usb_host::UsbDevice *dev) : USBUartTypeCdcAcm(client, dev) {}
 
  protected:
   std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override;
@@ -620,6 +674,39 @@ class USBUartTypePL2303 : public USBUartTypeCdcAcm {
   void modem_control_transfer(USBUartChannelBase *channel) override;
 
   Pl2303ChipType chip_type_{PL2303_TYPE_UNKNOWN};
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USBUartClient: one usb_host client for every serial adapter (accepts_more_devices_()). An adapter gets
+// the channels of the YAML entry naming it, else its type from its vid:pid and default channels.
+// ─────────────────────────────────────────────────────────────────────────────
+class USBUartClient : public usb_host::USBClient {
+  friend class USBUartComponent;
+
+ public:
+  USBUartClient(uint16_t vid, uint16_t pid);
+  void loop() override;
+  void dump_config() override;
+
+  /// A YAML entry; its channels follow with add_entry_channel().
+  void add_entry(uint16_t vid, uint16_t pid, UartType type, uint8_t init_lanes, bool claim_comm_interface) {
+    this->entries_.push_back({vid, pid, type, init_lanes, claim_comm_interface, {}});
+    if (vid != 0)
+      this->add_vendor_match(vid, pid);  // routed here even when its class does not say serial
+  }
+  void add_entry_channel(USBUartChannelBase *channel) { this->entries_.back().channels.push_back(channel); }
+
+ protected:
+  bool accepts_more_devices_() const override { return true; }
+  void on_device_connected(usb_host::UsbDevice &dev) override;
+  void on_device_disconnected(usb_host::UsbDevice &dev) override;
+  void free_device_context(usb_host::UsbDevice &dev) override;
+
+  /// The entry naming this adapter whose channels are free (nullptr: none).
+  USBUartEntry *find_entry_(uint16_t vid, uint16_t pid);
+
+  std::vector<USBUartEntry> entries_{};
+  std::vector<USBUartComponent *> adapters_{};
 };
 
 }  // namespace esphome::usb_uart

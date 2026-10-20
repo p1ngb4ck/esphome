@@ -10,6 +10,8 @@ from esphome.components.uart import (
     restore_line_settings,
 )
 from esphome.components.usb_host import (
+    CONF_PID,
+    CONF_VID,
     get_max_packet_size,
     get_max_transfer_requests,
     register_usb_client,
@@ -23,6 +25,7 @@ from esphome.const import (
     CONF_BUFFER_SIZE,
     CONF_CHANNELS,
     CONF_DEBUG,
+    CONF_DEVICES,
     CONF_DUMMY_RECEIVER,
     CONF_ID,
     CONF_TYPE,
@@ -36,7 +39,18 @@ CODEOWNERS = ["@clydebarrow"]
 DOMAIN = "usb_uart"
 
 usb_uart_ns = cg.esphome_ns.namespace("usb_uart")
-USBUartComponent = usb_uart_ns.class_("USBUartComponent", Component)
+# One client for every adapter; the type classes are the per-adapter drivers it makes on plug
+USBUartClient = usb_uart_ns.class_("USBUartClient", Component)
+USBUartComponent = usb_uart_ns.class_("USBUartComponent")
+UartType = usb_uart_ns.enum("UartType", is_class=True)
+UART_TYPES = {
+    "CdcAcm": UartType.CDC_ACM,
+    "CH34X": UartType.CH34X,
+    "CH934X": UartType.CH934X,
+    "CP210X": UartType.CP210X,
+    "FT23XX": UartType.FT23XX,
+    "PL2303": UartType.PL2303,
+}
 USBUartChannel = usb_uart_ns.class_("USBUartChannel", UARTComponent)
 CH934XChannel = usb_uart_ns.class_("CH934XChannel", USBUartChannel)
 
@@ -44,7 +58,7 @@ CH934XChannel = usb_uart_ns.class_("CH934XChannel", USBUartChannel)
 def is_usb_uart_channel(uart_id: ID, full_config: ConfigType) -> bool:
     return any(
         channel[CONF_ID] == uart_id
-        for device in full_config.get(DOMAIN) or []
+        for device in (full_config.get(DOMAIN) or {}).get(CONF_DEVICES) or []
         for channel in device[CONF_CHANNELS]
     )
 
@@ -261,23 +275,53 @@ def channel_schema(type_: "Type") -> cv.Schema:
     return schema
 
 
-CONFIG_SCHEMA = cv.All(
-    cv.ensure_list(
-        cv.typed_schema(
-            {
-                it.name: usb_device_schema(it.cls, it.vid, it.pid).extend(
-                    channel_schema(it)
-                )
-                for it in uart_types
-            },
-            upper=True,
+def _entry_schema(type_: "Type") -> cv.Schema:
+    # An entry names its adapter by vid / pid (the type's by default); no object of its own
+    schema = cv.Schema({cv.GenerateID(): cv.declare_id(type_.cls)})
+    if type_.vid:
+        schema = schema.extend(
+            {cv.Optional(CONF_VID, default=type_.vid): cv.hex_uint16_t}
         )
+    else:
+        schema = schema.extend({cv.Optional(CONF_VID): cv.hex_uint16_t})
+    if type_.pid:
+        schema = schema.extend(
+            {cv.Optional(CONF_PID, default=type_.pid): cv.hex_uint16_t}
+        )
+    else:
+        schema = schema.extend({cv.Optional(CONF_PID): cv.hex_uint16_t})
+    return schema.extend(channel_schema(type_))
+
+
+def _entries_block(value):
+    # The former form, a list of entries, is the block's devices
+    if isinstance(value, list):
+        return {CONF_DEVICES: value}
+    return value if value is not None else {}
+
+
+# One client for every serial adapter. An adapter without an entry gets its type from its vid:pid
+# (else CDC ACM) and channels with 115200 8N1 when it is plugged in; entries are optional.
+CONFIG_SCHEMA = cv.All(
+    _entries_block,
+    usb_device_schema(USBUartClient).extend(
+        {
+            cv.Optional(CONF_DEVICES): cv.All(
+                cv.ensure_list(
+                    cv.typed_schema(
+                        {it.name: _entry_schema(it) for it in uart_types},
+                        upper=True,
+                    )
+                ),
+                validate_usb_clients,
+            ),
+        }
     ),
-    validate_usb_clients,
 )
 
 
-async def to_code(config: list[ConfigType]) -> None:
+async def to_code(config: ConfigType) -> None:
+    devices = config.get(CONF_DEVICES) or []
     # The output chunk pool/queue are compile-time-sized templates shared by all channel
     # instances. Add one extra slot because LockFreeQueue<T,N> is a ring buffer that wastes
     # one entry.
@@ -286,7 +330,7 @@ async def to_code(config: list[ConfigType]) -> None:
     payload = mps - CH934X_TX_HEADER_SIZE
 
     output_chunk_count = 3
-    for device in config:
+    for device in devices:
         device_type = type_by_name.get(device[CONF_TYPE])
         if isinstance(device_type, MpxType) and payload > 0:
             # A multiplexed device routes every channel's TX through the shared queue on
@@ -316,20 +360,27 @@ async def to_code(config: list[ConfigType]) -> None:
     cg.add_define("USE_USB_BULK_TRANSFERS")
     cg.add_define("USE_USB_CONTROL_TRANSFERS")
 
-    for device in config:
-        if (driver := _TYPES_BY_NAME[device[CONF_TYPE]].driver) is not None:
-            cg.add_define(_driver_define(driver))
-        var = await register_usb_client(device)
-        device_type = type_by_name.get(device[CONF_TYPE])
+    # Every driver: an adapter of any type may be plugged in without an entry
+    for driver in {it.driver for it in uart_types if it.driver is not None}:
+        cg.add_define(_driver_define(driver))
+    var = await register_usb_client(config)
+    for device in devices:
+        device_type = type_by_name[device[CONF_TYPE]]
+        lanes = 1
         if isinstance(device_type, MpxType):
             lanes = min(len(device[CONF_CHANNELS]), max_init_lanes)
-            cg.add(var.set_init_lanes(lanes))
-        # The C++ default is true; only emit the override
-        if not device.get(CONF_CLAIM_COMM_INTERFACE, True):
-            cg.add(var.set_claim_comm_interface(False))
+        cg.add(
+            var.add_entry(
+                device.get(CONF_VID, 0),
+                device.get(CONF_PID, 0),
+                UART_TYPES[device_type.cls_name],
+                lanes,
+                device.get(CONF_CLAIM_COMM_INTERFACE, True),
+            )
+        )
         for index, channel in enumerate(device[CONF_CHANNELS]):
+            # The adapter it belongs to is its parent while it is plugged in
             chvar = cg.new_Pvariable(channel[CONF_ID], index, channel[CONF_BUFFER_SIZE])
-            await cg.register_parented(chvar, var)
             cg.add(chvar.set_stop_bits(channel[CONF_STOP_BITS]))
             cg.add(chvar.set_data_bits(channel[CONF_DATA_BITS]))
             cg.add(chvar.set_parity(channel[CONF_PARITY]))
@@ -341,7 +392,7 @@ async def to_code(config: list[ConfigType]) -> None:
             cg.add(chvar.set_debug(channel[CONF_DEBUG]))
             if channel[CONF_DEBUG_PREFIX]:
                 cg.add(chvar.set_debug_prefix(channel[CONF_DEBUG_PREFIX]))
-            cg.add(var.add_channel(chvar))
+            cg.add(var.add_entry_channel(chvar))
             if channel[CONF_DEBUG]:
                 cg.add_define("USE_UART_DEBUGGER")
                 if channel[CONF_DEBUG_ADD_UART_SETTINGS]:

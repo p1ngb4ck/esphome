@@ -723,12 +723,13 @@ void CH934XChannel::write_array(const uint8_t *data, size_t len) {
     data += data_len;
     len -= data_len;
   }
-  this->parent_->start_output(shared);
+  if (this->parent_ != nullptr)
+    this->parent_->start_output(shared);
 }
 
 uart::UARTFlushResult CH934XChannel::flush() {
   auto *shared = this->tx_shared_channel_;
-  if (shared == nullptr)
+  if (shared == nullptr || this->parent_ == nullptr)
     return uart::UARTFlushResult::UART_FLUSH_RESULT_SUCCESS;
   uint32_t start = millis();
   while ((!shared->output_queue_.empty() || shared->output_started_.load()) &&
@@ -741,8 +742,18 @@ uart::UARTFlushResult CH934XChannel::flush() {
   return uart::UARTFlushResult::UART_FLUSH_RESULT_SUCCESS;
 }
 
+USBUartChannelBase *USBUartTypeCH934X::make_channel_(uint8_t index, uint16_t buffer_size) {
+  return new CH934XChannel(index, buffer_size);  // NOLINT: deleted with the adapter
+}
+
 void USBUartTypeCH934X::on_connected() {
   ESP_LOGI(TAG, "CH934X connected (VID=%04X, PID=%04X)", this->vid_, this->pid_);
+  if (this->channels_.empty()) {
+    // No YAML entry: every port of the chip, initialised as many at once as the transfer pool allows
+    const uint8_t ports = this->pid_ == 0x55D9 ? 8 : 4;
+    this->add_default_channels_(ports);
+    this->init_lanes_ = static_cast<uint8_t>(std::min<size_t>(ports, usb_host::MAX_REQUESTS));
+  }
 
   if (!this->parse_descriptors_(this->device_handle_)) {
     ESP_LOGE(TAG, "CH934X parse_descriptors_ failed");
@@ -825,7 +836,6 @@ void USBUartTypeCH934X::on_disconnected() {
   }
 
   usb_host_interface_release(this->handle_, this->device_handle_, this->uart_host_dev_.data_interface);
-  USBClient::on_disconnected();
 }
 
 }  // namespace esphome::usb_uart
