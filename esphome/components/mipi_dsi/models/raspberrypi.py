@@ -6,7 +6,8 @@ from . import DsiDriverChip
 # power, resets and backlight through an ATTINY88 at I2C 0x45 (REG_POWERON 0x85, REG_PWM 0x86), touch at 0x38.
 # Timing, DSI mode and bridge init from Linux drivers/gpu/drm/panel/panel-raspberrypi-touchscreen.c and
 # drivers/gpu/drm/bridge/tc358762.c: 1 lane, RGB888, video mode with sync pulses (non-burst), each bridge register
-# written as a generic long write of the 16-bit address and the 32-bit value, both little-endian.
+# written as a generic long write of the 16-bit address and the 32-bit value, both little-endian. As Linux vc4_dsi.c
+# drives it: continuous HS clock (no MIPI_DSI_CLOCK_NON_CONTINUOUS), lane rate = pixel clock * 24 / lanes.
 # The ATTINY must have powered the bridge (REG_POWERON = 1, then REG_PORTB bit 0 set) before this display sets up.
 # fmt: off
 DsiDriverChip(
@@ -20,13 +21,14 @@ DsiDriverChip(
     vsync_pulse_width=2,
     vsync_back_porch=21,
     pclk_frequency="26MHz",
-    lane_bit_rate="650Mbps",
+    lane_bit_rate="624Mbps",
     lanes=1,
     color_depth="24",
     pixel_mode="24bit",
     color_order="RGB",
     video_mode="non_burst_sync_pulses",
     frame_ack=False,
+    continuous_clock=True,
     command_mode="generic",
     no_transform=True,
     initsequence=[

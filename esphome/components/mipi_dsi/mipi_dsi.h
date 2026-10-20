@@ -74,6 +74,8 @@ class MipiDsi final : public display::Display {
   // DSI host vid_mode_type: 0 non-burst sync pulses, 1 non-burst sync events, 2 burst
   void set_video_mode(uint8_t mode) { this->video_mode_ = mode; }
   void set_frame_ack(bool frame_ack) { this->frame_ack_ = frame_ack; }
+  // Clock lane kept in HS (bridges that take their pixel clock from it) instead of the host's automatic LP
+  void set_continuous_clock(bool continuous) { this->continuous_clock_ = continuous; }
   // Init sequence sent as generic writes (bridge chips), without the DCS soft reset
   void set_generic_commands(bool generic) { this->generic_commands_ = generic; }
 
@@ -167,6 +169,7 @@ class MipiDsi final : public display::Display {
   uint8_t num_fbs_{1};         // DPI frame buffers; >=2 lets the driver flip at VSYNC (anti-tearing)
   uint8_t video_mode_{2};
   bool frame_ack_{true};
+  bool continuous_clock_{false};
   bool generic_commands_{false};
 
   bool invert_colors_{};

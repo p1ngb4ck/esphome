@@ -77,6 +77,7 @@ CONF_LANES = "lanes"
 CONF_FRAME_BUFFERS = "frame_buffers"
 CONF_VIDEO_MODE = "video_mode"
 CONF_FRAME_ACK = "frame_ack"
+CONF_CONTINUOUS_CLOCK = "continuous_clock"
 
 # The DSI host's vid_mode_type register values
 VIDEO_MODES = {
@@ -142,6 +143,7 @@ def model_schema(config: ConfigType) -> cv.All:
             model.option(CONF_LANES, 2): cv.int_range(1, 2),
             model.option(CONF_VIDEO_MODE, "burst"): cv.one_of(*VIDEO_MODES, lower=True),
             model.option(CONF_FRAME_ACK, True): cv.boolean,
+            model.option(CONF_CONTINUOUS_CLOCK, False): cv.boolean,
             model.option(CONF_COMMAND_MODE, COMMAND_MODE_DCS): cv.one_of(
                 COMMAND_MODE_DCS, COMMAND_MODE_GENERIC, lower=True
             ),
@@ -235,6 +237,7 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_lanes(int(config[CONF_LANES])))
     cg.add(var.set_video_mode(VIDEO_MODES[config[CONF_VIDEO_MODE]]))
     cg.add(var.set_frame_ack(config[CONF_FRAME_ACK]))
+    cg.add(var.set_continuous_clock(config[CONF_CONTINUOUS_CLOCK]))
     cg.add(
         var.set_generic_commands(config[CONF_COMMAND_MODE] == COMMAND_MODE_GENERIC)
     )

@@ -59,6 +59,7 @@ void MipiDsi::setup() {
           this->lanes_,  // Number of data lanes to use, can't set a value that exceeds the chip's capability
       // phy_clk_src left at 0 to enable runtime auto-select.
       .lane_bit_rate_mbps = this->lane_bit_rate_,  // Bit rate of the data lanes, in Mbps
+      .flags = {.clock_lane_force_hs = this->continuous_clock_},
   };
   auto err = esp_lcd_new_dsi_bus(&bus_config, &this->bus_handle_);
   if (err != ESP_OK) {
@@ -552,12 +553,14 @@ void MipiDsi::dump_config() {
                 "\n  Pixel Clock: %.1fMHz"
                 "\n  Video Mode: %s"
                 "\n  Frame Ack: %s"
+                "\n  Continuous Clock: %s"
                 "\n  Commands: %s",
                 this->model_, this->width_, this->height_, this->rotation_, this->lanes_, this->lane_bit_rate_,
                 this->hsync_pulse_width_, this->hsync_back_porch_, this->hsync_front_porch_, this->vsync_pulse_width_,
                 this->vsync_back_porch_, this->vsync_front_porch_, (3 - this->color_depth_) * 8, this->pixel_mode_,
                 YESNO(this->invert_colors_), this->pclk_frequency_, VIDEO_MODES[this->video_mode_],
-                YESNO(this->frame_ack_), this->generic_commands_ ? "generic" : "DCS");
+                YESNO(this->frame_ack_), YESNO(this->continuous_clock_),
+                this->generic_commands_ ? "generic" : "DCS");
   LOG_PIN("  Reset Pin ", this->reset_pin_);
 }
 }  // namespace esphome::mipi_dsi
