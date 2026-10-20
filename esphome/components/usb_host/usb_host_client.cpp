@@ -843,6 +843,13 @@ bool USBClient::set_interface(uint8_t interface_num, uint8_t alt_setting, const 
   return this->control_transfer(REQ_TYPE, B_REQUEST_SET_INTERFACE, alt_setting, interface_num, callback);
 }
 
+bool USBClient::set_interface(UsbDevice &dev, uint8_t interface_num, uint8_t alt_setting,
+                              const transfer_cb_t &callback) {
+  static constexpr uint8_t REQ_TYPE = USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_INTERFACE;
+  static constexpr uint8_t B_REQUEST_SET_INTERFACE = 11;
+  return this->control_transfer(dev, REQ_TYPE, B_REQUEST_SET_INTERFACE, alt_setting, interface_num, callback);
+}
+
 #endif  // USE_USB_CONTROL_TRANSFERS
 
 bool USBClient::claim_interface(uint8_t interface_num, uint8_t alt_setting) {
@@ -994,7 +1001,7 @@ bool USBClient::reap_devices_() {
   bool any = false;
   for (size_t i = 0; i < this->dead_devices_.size();) {
     UsbDevice *dev = this->dead_devices_[i].get();
-    if (dev->in_use.load(std::memory_order_acquire) != 0) {
+    if (dev->in_use.load(std::memory_order_acquire) != 0 || this->device_busy_(*dev)) {
       i++;
       continue;
     }
@@ -1024,6 +1031,7 @@ void USBClient::drop_device_(UsbDevice *dev) {
     const esp_err_t err = usb_host_device_close(this->handle_, dev->handle);
     if (err != ESP_OK)
       ESP_LOGE(TAG, "Device %d close failed: %s", dev->addr, esp_err_to_name(err));
+    dev->handle = nullptr;  // a stream still draining sees the device closed (stream_device_handle_)
   }
   const int addr = dev->addr;
   // Its memory waits until no transfer of it is out (a flushed transfer still completes on the USB task):
@@ -1054,6 +1062,11 @@ void USBClient::isoc_free(usb_transfer_t *xfer) { this->host_->do_isoc_free(xfer
 
 bool USBClient::stream_open(IsocStream &stream, USBClient *cb) {
   return this->host_->stream_open(stream, cb, this->handle_, this->device_handle_);
+}
+
+bool USBClient::stream_open(UsbDevice &dev, IsocStream &stream, USBClient *cb) {
+  stream.device = &dev;
+  return this->host_->stream_open(stream, cb, this->handle_, dev.handle);
 }
 
 void USBClient::stream_close(IsocStream &stream) { this->host_->stream_close(stream); }

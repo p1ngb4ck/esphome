@@ -13,10 +13,12 @@
 
 namespace esphome::usb_uvc {
 
-// A complete frame, on the main loop. data is valid only during the call.
-using frame_cb_t = std::function<void(const uint8_t *data, size_t len, UvcFormat format)>;
+// A complete frame of the camera at bus address `camera`, on the main loop. data is valid only during the call.
+using frame_cb_t = std::function<void(uint8_t camera, const uint8_t *data, size_t len, UvcFormat format)>;
 
-// UVC (USB Video Class) camera as a usb_host client: it shares the host with every other client.
+// UVC (USB Video Class) cameras as one usb_host client serving any number of them at once: it shares the
+// host with every other client. Nothing of a camera exists before it is plugged in: its state, stream and
+// frame buffers are made when it connects and freed once it is gone and its stream has drained.
 //
 // Setup runs on the main loop as a chain of control transfers, each continued from its
 // completion (no waiting): PROBE SET_CUR -> PROBE GET_CUR -> COMMIT SET_CUR -> isochronous
@@ -46,45 +48,58 @@ class UVCClient : public usb_host::USBClient {
     uint16_t mps;
   };
 
-  bool reports_connection_itself() const override { return true; }
-  void on_connected() override;
-  void on_disconnected() override;
+  // One plugged camera (its UsbDevice's context): made in on_device_connected(), freed in
+  // free_device_context() once its stream is closed (device_busy_()).
+  struct Camera {
+    usb_host::UsbDevice *dev{nullptr};
+    uint32_t id{0};  // continuations of an earlier camera find it gone
+
+    // Device, from the descriptors.
+    uint16_t probe_len{26};  // probe/commit structure size of the device's UVC version
+    uint8_t vs_intf{0};
+    std::vector<AltSetting> alts{};
+    UvcFrameDesc selected_frame{};
+    bool high_speed{false};
+
+    UvcVsCtrl probe{};
+    usb_host::IsocStream stream{};
+
+    // Two frame buffers in PSRAM: the USB task fills one while the main loop reads the other.
+    uint8_t *buffers[2]{nullptr, nullptr};
+    size_t buffer_size{0};
+    uint8_t fill{0};         // USB task
+    size_t fill_len{0};      // USB task
+    uint8_t frame_id{2};     // USB task; 2: no frame started
+    bool skip_frame{false};  // USB task
+    uint8_t ready_index{0};
+    size_t ready_len{0};
+    std::atomic<bool> ready{false};  // set by the USB task, cleared by the main loop
+
+    ~Camera();
+  };
+
+  bool accepts_more_devices_() const override { return true; }
+  void on_device_connected(usb_host::UsbDevice &dev) override;
+  void on_device_disconnected(usb_host::UsbDevice &dev) override;
+  void free_device_context(usb_host::UsbDevice &dev) override;
+  bool device_busy_(const usb_host::UsbDevice &dev) const override;
   void on_stream_open(usb_host::IsocStream &stream, bool ok) override;
   // USB task.
-  void on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t len, bool error) override;
+  void on_stream_packet(usb_host::IsocStream &stream, const uint8_t *data, size_t len, bool error) override;
 
-  bool parse_descriptors_();
-  // A probe/commit request; next runs on the main loop with the outcome, unless the device
+  bool parse_descriptors_(Camera &cam);
+  // A probe/commit request; next runs on the main loop with the outcome, unless the camera
   // went away meanwhile.
-  void probe_request_(uint8_t request, uint8_t selector, std::function<void(bool)> &&next);
-  void commit_();
-  void start_stream_();
-  bool ensure_buffers_(size_t size);
-  void finish_setup_(bool ok);
+  void probe_request_(Camera &cam, uint8_t request, uint8_t selector, std::function<void(bool)> &&next);
+  void commit_(Camera &cam);
+  void start_stream_(Camera &cam);
+  bool alloc_buffers_(Camera &cam, size_t size);
+  // A failed setup gives the camera up (closed, its memory freed once nothing of it is out).
+  void finish_setup_(Camera &cam, bool ok);
+  Camera *find_camera_(uint32_t id) const;
 
-  // Device, from the descriptors.
-  uint16_t probe_len_{26};  // probe/commit structure size of the device's UVC version
-  uint8_t vs_intf_{0};
-  std::vector<AltSetting> alts_{};
-  UvcFrameDesc selected_frame_{};
-  bool high_speed_{false};
-
-  UvcVsCtrl probe_{};
-  // Bumped on every connect and disconnect: a completion from an earlier device is dropped.
-  std::atomic<uint32_t> generation_{0};
-
-  usb_host::IsocStream stream_{};
-
-  // Two frame buffers in PSRAM: the USB task fills one while the main loop reads the other.
-  uint8_t *buffers_[2]{nullptr, nullptr};
-  size_t buffer_size_{0};
-  uint8_t fill_{0};         // USB task
-  size_t fill_len_{0};      // USB task
-  uint8_t frame_id_{2};     // USB task; 2: no frame started
-  bool skip_frame_{false};  // USB task
-  uint8_t ready_index_{0};
-  size_t ready_len_{0};
-  std::atomic<bool> ready_{false};  // set by the USB task, cleared by the main loop
+  std::vector<Camera *> cameras_{};
+  uint32_t next_id_{0};
 
   UvcFormat req_format_{UvcFormat::MJPEG};
   uint16_t req_width_{0};  // 0: any

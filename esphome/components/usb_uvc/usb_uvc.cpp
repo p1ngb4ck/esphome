@@ -17,25 +17,40 @@ static const char *const TAG = "usb_uvc";
 // Packets per isochronous URB.
 static constexpr uint8_t PACKETS_PER_URB = 4;
 
+UVCClient::Camera::~Camera() {
+  for (auto &buffer : this->buffers)
+    heap_caps_free(buffer);
+}
+
 void UVCClient::loop() {
-  if (this->ready_.load(std::memory_order_acquire)) {
-    const uint8_t *data = this->buffers_[this->ready_index_];
-    for (auto &cb : this->frame_callbacks_)
-      cb(data, this->ready_len_, this->selected_frame_.format);
-    this->ready_.store(false, std::memory_order_release);
+  for (auto *cam : this->cameras_) {
+    if (cam->ready.load(std::memory_order_acquire)) {
+      const uint8_t *data = cam->buffers[cam->ready_index];
+      for (auto &cb : this->frame_callbacks_)
+        cb(static_cast<uint8_t>(cam->dev->addr), data, cam->ready_len, cam->selected_frame.format);
+      cam->ready.store(false, std::memory_order_release);
+    }
   }
   usb_host::USBClient::loop();
 }
 
+UVCClient::Camera *UVCClient::find_camera_(uint32_t id) const {
+  for (auto *cam : this->cameras_) {
+    if (cam->id == id)
+      return cam;
+  }
+  return nullptr;
+}
+
 // -- Descriptors ---------------------------------------------------------------------------
 
-bool UVCClient::parse_descriptors_() {
-  const usb_config_desc_t *cfg = this->get_config_desc_();
+bool UVCClient::parse_descriptors_(Camera &cam) {
+  const usb_config_desc_t *cfg = cam.dev->config;
   if (cfg == nullptr)
     return false;
 
   usb_device_info_t info;
-  this->high_speed_ = usb_host_device_info(this->device_handle_, &info) == ESP_OK && info.speed == USB_SPEED_HIGH;
+  cam.high_speed = usb_host_device_info(cam.dev->handle, &info) == ESP_OK && info.speed == USB_SPEED_HIGH;
 
   uint16_t bcd_uvc = 0x0100;
   uint8_t cur_intf = 0, cur_alt = 0, cur_subclass = 0;
@@ -86,17 +101,17 @@ bool UVCClient::parse_descriptors_() {
             (this->req_height_ == 0 || fd.height == this->req_height_)) {
           best = fd;
           found = true;
-          this->vs_intf_ = cur_intf;
+          cam.vs_intf = cur_intf;
         }
       }
       continue;
     }
-    if (desc->bDescriptorType == USB_W_VALUE_DT_ENDPOINT && found && cur_intf == this->vs_intf_ && cur_alt > 0) {
+    if (desc->bDescriptorType == USB_W_VALUE_DT_ENDPOINT && found && cur_intf == cam.vs_intf && cur_alt > 0) {
       const auto *ep = reinterpret_cast<const usb_ep_desc_t *>(desc);
       if (USB_EP_DESC_GET_XFERTYPE(ep) != USB_BM_ATTRIBUTES_XFER_ISOC || !USB_EP_DESC_GET_EP_DIR(ep))
         continue;
       // MULT is high-speed only; at full speed an isochronous packet is at most 1023 bytes.
-      const uint16_t mps = this->high_speed_
+      const uint16_t mps = cam.high_speed
                                ? static_cast<uint16_t>(USB_EP_DESC_GET_MPS(ep) * (USB_EP_DESC_GET_MULT(ep) + 1))
                                : std::min<uint16_t>(USB_EP_DESC_GET_MPS(ep), 1023);
       alts.push_back({cur_alt, ep->bEndpointAddress, mps});
@@ -108,235 +123,247 @@ bool UVCClient::parse_descriptors_() {
              this->req_width_, this->req_height_);
     return false;
   }
-  this->selected_frame_ = best;
-  this->alts_ = std::move(alts);
+  cam.selected_frame = best;
+  cam.alts = std::move(alts);
   // Probe/commit structure: 26 bytes in UVC 1.0, 34 in 1.1, 48 from 1.5.
-  this->probe_len_ = bcd_uvc >= 0x0150 ? 48 : bcd_uvc >= 0x0110 ? 34 : 26;
+  cam.probe_len = bcd_uvc >= 0x0150 ? 48 : bcd_uvc >= 0x0110 ? 34 : 26;
   ESP_LOGD(TAG, "UVC %X.%02X, streaming interface %u, %ux%u, %u alt-settings", bcd_uvc >> 8, bcd_uvc & 0xFF,
-           this->vs_intf_, best.width, best.height, static_cast<unsigned>(this->alts_.size()));
+           cam.vs_intf, best.width, best.height, static_cast<unsigned>(cam.alts.size()));
   return true;
 }
 
 // -- Probe / commit ------------------------------------------------------------------------
 
-void UVCClient::probe_request_(uint8_t request, uint8_t selector, std::function<void(bool)> &&next) {
+void UVCClient::probe_request_(Camera &cam, uint8_t request, uint8_t selector, std::function<void(bool)> &&next) {
   const bool in = request == UVC_GET_CUR;
-  size_t buffer_len = this->probe_len_;
+  size_t buffer_len = cam.probe_len;
   if (in) {
     // An IN data stage needs whole endpoint 0 packets; wLength stays the class-defined size.
-    const usb_device_desc_t *dev = this->get_device_desc_();
+    const usb_device_desc_t *dev = cam.dev->desc;
     const size_t mps0 = dev != nullptr && dev->bMaxPacketSize0 != 0 ? dev->bMaxPacketSize0 : 64;
     buffer_len = ((buffer_len + mps0 - 1) / mps0) * mps0;
   }
   std::vector<uint8_t> data(buffer_len, 0);
   if (!in)
-    memcpy(data.data(), &this->probe_, this->probe_len_);
+    memcpy(data.data(), &cam.probe, cam.probe_len);
 
-  const uint32_t generation = this->generation_.load(std::memory_order_acquire);
+  // The camera stays allocated while this transfer is out (its pool); the continuation runs only
+  // while the camera is still connected.
+  Camera *camp = &cam;
+  const uint32_t id = cam.id;
   auto then = std::make_shared<std::function<void(bool)>>(std::move(next));
   const bool submitted = this->control_transfer(
-      in ? UVC_REQ_TYPE_GET : UVC_REQ_TYPE_SET, request, static_cast<uint16_t>(selector << 8), this->vs_intf_,
-      [this, generation, in, then](const usb_host::TransferStatus &status) {
+      *cam.dev, in ? UVC_REQ_TYPE_GET : UVC_REQ_TYPE_SET, request, static_cast<uint16_t>(selector << 8), cam.vs_intf,
+      [this, camp, id, in, then](const usb_host::TransferStatus &status) {
         // USB task.
-        if (generation != this->generation_.load(std::memory_order_acquire))
-          return;
         bool ok = status.success;
         if (ok && in) {
           ok = status.data_len >= 26;
           if (ok)
-            memcpy(&this->probe_, status.data, std::min<size_t>(status.data_len, this->probe_len_));
+            memcpy(&camp->probe, status.data, std::min<size_t>(status.data_len, camp->probe_len));
         }
-        this->defer([this, generation, ok, then]() {
-          if (generation == this->generation_.load(std::memory_order_acquire))
+        this->defer([this, id, ok, then]() {
+          if (this->find_camera_(id) != nullptr)
             (*then)(ok);
         });
       },
-      data, this->probe_len_);
+      data, cam.probe_len);
   if (!submitted)
     (*then)(false);
 }
 
-void UVCClient::on_connected() {
-  this->generation_.fetch_add(1, std::memory_order_acq_rel);
-  const usb_device_desc_t *dev = this->get_device_desc_();
-  if (dev != nullptr)
-    ESP_LOGI(TAG, "Camera %04X:%04X connected", dev->idVendor, dev->idProduct);
-  if (!this->parse_descriptors_()) {
-    this->finish_setup_(false);
+void UVCClient::on_device_connected(usb_host::UsbDevice &dev) {
+  auto *cam = new Camera();  // NOLINT: deleted in free_device_context
+  cam->dev = &dev;
+  cam->id = ++this->next_id_;
+  dev.context = cam;
+  this->cameras_.push_back(cam);
+  ESP_LOGI(TAG, "Camera %04X:%04X connected", dev.desc->idVendor, dev.desc->idProduct);
+  if (!this->parse_descriptors_(*cam)) {
+    this->finish_setup_(*cam, false);
     return;
   }
 
-  memset(&this->probe_, 0, sizeof(this->probe_));
-  this->probe_.bm_hint = 0x0001;  // keep dwFrameInterval
-  this->probe_.b_format_index = this->selected_frame_.format_index;
-  this->probe_.b_frame_index = this->selected_frame_.frame_index;
-  this->probe_.dw_frame_interval =
-      this->req_fps_ > 0 ? 10000000u / this->req_fps_ : this->selected_frame_.default_interval;
+  memset(&cam->probe, 0, sizeof(cam->probe));
+  cam->probe.bm_hint = 0x0001;  // keep dwFrameInterval
+  cam->probe.b_format_index = cam->selected_frame.format_index;
+  cam->probe.b_frame_index = cam->selected_frame.frame_index;
+  cam->probe.dw_frame_interval =
+      this->req_fps_ > 0 ? 10000000u / this->req_fps_ : cam->selected_frame.default_interval;
 
-  this->probe_request_(UVC_SET_CUR, UVC_VS_PROBE_CONTROL, [this](bool ok) {
+  this->probe_request_(*cam, UVC_SET_CUR, UVC_VS_PROBE_CONTROL, [this, cam](bool ok) {
     if (!ok) {
       ESP_LOGE(TAG, "PROBE SET_CUR failed");
-      this->finish_setup_(false);
+      this->finish_setup_(*cam, false);
       return;
     }
-    this->probe_request_(UVC_GET_CUR, UVC_VS_PROBE_CONTROL, [this](bool ok) {
+    this->probe_request_(*cam, UVC_GET_CUR, UVC_VS_PROBE_CONTROL, [this, cam](bool ok) {
       if (!ok) {
         ESP_LOGE(TAG, "PROBE GET_CUR failed");
-        this->finish_setup_(false);
+        this->finish_setup_(*cam, false);
         return;
       }
-      this->commit_();
+      this->commit_(*cam);
     });
   });
 }
 
-void UVCClient::commit_() {
+void UVCClient::commit_(Camera &cam) {
   ESP_LOGD(TAG, "Negotiated: interval %" PRIu32 ", frame %" PRIu32 " bytes, payload %" PRIu32 " bytes",
-           this->probe_.dw_frame_interval, this->probe_.dw_max_video_frame_size,
-           this->probe_.dw_max_payload_transfer_size);
-  this->probe_request_(UVC_SET_CUR, UVC_VS_COMMIT_CONTROL, [this](bool ok) {
+           cam.probe.dw_frame_interval, cam.probe.dw_max_video_frame_size, cam.probe.dw_max_payload_transfer_size);
+  Camera *camp = &cam;
+  this->probe_request_(cam, UVC_SET_CUR, UVC_VS_COMMIT_CONTROL, [this, camp](bool ok) {
     if (!ok) {
       ESP_LOGE(TAG, "COMMIT SET_CUR failed");
-      this->finish_setup_(false);
+      this->finish_setup_(*camp, false);
       return;
     }
-    this->start_stream_();
+    this->start_stream_(*camp);
   });
 }
 
-void UVCClient::start_stream_() {
+void UVCClient::start_stream_(Camera &cam) {
   // The smallest alt-setting that carries the negotiated payload: the rest of the bus stays
   // free for the host's other devices.
-  const uint32_t payload = this->probe_.dw_max_payload_transfer_size;
+  const uint32_t payload = cam.probe.dw_max_payload_transfer_size;
   const AltSetting *chosen = nullptr;
-  for (const auto &alt : this->alts_) {
+  for (const auto &alt : cam.alts) {
     if (payload != 0 && alt.mps >= payload) {
       if (chosen == nullptr || alt.mps < chosen->mps)
         chosen = &alt;
     }
   }
   if (chosen == nullptr) {
-    for (const auto &alt : this->alts_) {
+    for (const auto &alt : cam.alts) {
       if (chosen == nullptr || alt.mps > chosen->mps)
         chosen = &alt;
     }
   }
 
-  size_t frame_size = this->probe_.dw_max_video_frame_size;
+  size_t frame_size = cam.probe.dw_max_video_frame_size;
   if (frame_size == 0)
-    frame_size = this->selected_frame_.max_frame_size;
-  if (!this->ensure_buffers_(frame_size)) {
-    this->finish_setup_(false);
+    frame_size = cam.selected_frame.max_frame_size;
+  if (!this->alloc_buffers_(cam, frame_size)) {
+    this->finish_setup_(cam, false);
     return;
   }
-  this->fill_ = 0;
-  this->fill_len_ = 0;
-  this->frame_id_ = 2;
-  this->skip_frame_ = false;
-  this->ready_.store(false, std::memory_order_release);
+  cam.fill = 0;
+  cam.fill_len = 0;
+  cam.frame_id = 2;
+  cam.skip_frame = false;
+  cam.ready.store(false, std::memory_order_release);
 
-  this->stream_.ep_addr = chosen->ep;
-  this->stream_.mps = chosen->mps;
-  this->stream_.packets_per_urb = PACKETS_PER_URB;
-  this->stream_.num_urbs = this->num_urbs_;
-  this->stream_.interface_num = this->vs_intf_;
-  this->stream_.alt_setting = chosen->alt;
+  cam.stream.ep_addr = chosen->ep;
+  cam.stream.mps = chosen->mps;
+  cam.stream.packets_per_urb = PACKETS_PER_URB;
+  cam.stream.num_urbs = this->num_urbs_;
+  cam.stream.interface_num = cam.vs_intf;
+  cam.stream.alt_setting = chosen->alt;
   ESP_LOGD(TAG, "Streaming on alt %u, endpoint 0x%02X, %u bytes per packet", chosen->alt, chosen->ep, chosen->mps);
-  // An accepted open reports through on_stream_open(); a refused one only through the return
-  // value. Reporting the connection is idempotent, so a failure reaching both is harmless.
-  if (!this->stream_open(this->stream_, this))
-    this->finish_setup_(false);
+  // An accepted open reports through on_stream_open(); a refused one only through the return value.
+  if (!this->stream_open(*cam.dev, cam.stream, this))
+    this->finish_setup_(cam, false);
 }
 
-bool UVCClient::ensure_buffers_(size_t size) {
+// Made with the camera's stream, freed with the camera.
+bool UVCClient::alloc_buffers_(Camera &cam, size_t size) {
   if (size == 0) {
     ESP_LOGE(TAG, "The camera reports no frame size");
     return false;
   }
-  if (size <= this->buffer_size_)
-    return true;
-  if (!this->stream_.is_closed()) {
-    ESP_LOGE(TAG, "Previous stream still draining");
-    return false;
-  }
-  for (auto &buffer : this->buffers_) {
-    heap_caps_free(buffer);
+  for (auto &buffer : cam.buffers)
     buffer = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  }
-  if (this->buffers_[0] == nullptr || this->buffers_[1] == nullptr) {
+  if (cam.buffers[0] == nullptr || cam.buffers[1] == nullptr) {
     ESP_LOGE(TAG, "No PSRAM for two %u byte frame buffers", static_cast<unsigned>(size));
-    for (auto &buffer : this->buffers_) {
+    for (auto &buffer : cam.buffers) {
       heap_caps_free(buffer);
       buffer = nullptr;
     }
-    this->buffer_size_ = 0;
     return false;
   }
-  this->buffer_size_ = size;
+  cam.buffer_size = size;
   return true;
 }
 
 void UVCClient::on_stream_open(usb_host::IsocStream &stream, bool ok) {
-  if (&stream != &this->stream_)
+  if (stream.device == nullptr || stream.device->context == nullptr)
     return;
+  auto *cam = static_cast<Camera *>(stream.device->context);
+  if (this->find_camera_(cam->id) == nullptr)
+    return;  // gone meanwhile: nothing to set up
   if (!ok)
     ESP_LOGE(TAG, "Opening the isochronous stream failed");
-  this->finish_setup_(ok);
+  this->finish_setup_(*cam, ok);
 }
 
-void UVCClient::finish_setup_(bool ok) {
-  if (ok)
-    ESP_LOGI(TAG, "Streaming %ux%u", this->selected_frame_.width, this->selected_frame_.height);
-  this->report_connected_();
+void UVCClient::finish_setup_(Camera &cam, bool ok) {
+  if (ok) {
+    ESP_LOGI(TAG, "Streaming %ux%u", cam.selected_frame.width, cam.selected_frame.height);
+    return;
+  }
+  this->close_device(*cam.dev);  // on_device_disconnected(), then free_device_context() once drained
 }
 
-void UVCClient::on_disconnected() {
-  this->generation_.fetch_add(1, std::memory_order_acq_rel);
-  this->stream_close(this->stream_);
-  this->ready_.store(false, std::memory_order_release);
+void UVCClient::on_device_disconnected(usb_host::UsbDevice &dev) {
+  auto *cam = static_cast<Camera *>(dev.context);
+  if (cam == nullptr)
+    return;
+  this->stream_close(cam->stream);
+  cam->ready.store(false, std::memory_order_release);
+  this->cameras_.erase(std::remove(this->cameras_.begin(), this->cameras_.end(), cam), this->cameras_.end());
   ESP_LOGI(TAG, "Camera disconnected");
-  usb_host::USBClient::on_disconnected();
+}
+
+bool UVCClient::device_busy_(const usb_host::UsbDevice &dev) const {
+  const auto *cam = static_cast<const Camera *>(dev.context);
+  return cam != nullptr && !cam->stream.is_closed();
+}
+
+void UVCClient::free_device_context(usb_host::UsbDevice &dev) {
+  delete static_cast<Camera *>(dev.context);  // NOLINT
+  dev.context = nullptr;
 }
 
 // -- Frame assembly (USB task) -------------------------------------------------------------
 
-void UVCClient::on_isoc_packet(uint8_t /*ep_addr*/, const uint8_t *data, size_t len, bool error) {
-  if (error || len < 2)
+void UVCClient::on_stream_packet(usb_host::IsocStream &stream, const uint8_t *data, size_t len, bool error) {
+  if (error || len < 2 || stream.device == nullptr)
     return;
+  auto &cam = *static_cast<Camera *>(stream.device->context);
   const auto *hdr = reinterpret_cast<const UvcPayloadHeader *>(data);
   if (hdr->b_header_length < 2 || hdr->b_header_length > len)
     return;
 
-  if (hdr->bm_header_info.frame_id != this->frame_id_) {
-    this->frame_id_ = hdr->bm_header_info.frame_id;
-    this->fill_len_ = 0;
-    this->skip_frame_ = false;
+  if (hdr->bm_header_info.frame_id != cam.frame_id) {
+    cam.frame_id = hdr->bm_header_info.frame_id;
+    cam.fill_len = 0;
+    cam.skip_frame = false;
   }
   if (hdr->bm_header_info.error)
-    this->skip_frame_ = true;
+    cam.skip_frame = true;
 
   const size_t payload_len = len - hdr->b_header_length;
-  if (!this->skip_frame_ && payload_len > 0) {
-    if (this->fill_len_ + payload_len > this->buffer_size_) {
-      this->skip_frame_ = true;
+  if (!cam.skip_frame && payload_len > 0) {
+    if (cam.fill_len + payload_len > cam.buffer_size) {
+      cam.skip_frame = true;
     } else {
-      memcpy(this->buffers_[this->fill_] + this->fill_len_, data + hdr->b_header_length, payload_len);
-      this->fill_len_ += payload_len;
+      memcpy(cam.buffers[cam.fill] + cam.fill_len, data + hdr->b_header_length, payload_len);
+      cam.fill_len += payload_len;
     }
   }
 
   if (hdr->bm_header_info.end_of_frame) {
     // Handed over only while the main loop is done with the previous frame; otherwise this
     // one is not delivered and its buffer takes the next frame.
-    if (!this->skip_frame_ && this->fill_len_ > 0 && !this->ready_.load(std::memory_order_acquire)) {
-      this->ready_index_ = this->fill_;
-      this->ready_len_ = this->fill_len_;
-      this->fill_ ^= 1;
-      this->ready_.store(true, std::memory_order_release);
+    if (!cam.skip_frame && cam.fill_len > 0 && !cam.ready.load(std::memory_order_acquire)) {
+      cam.ready_index = cam.fill;
+      cam.ready_len = cam.fill_len;
+      cam.fill ^= 1;
+      cam.ready.store(true, std::memory_order_release);
       this->enable_loop_soon_any_context();
     }
-    this->fill_len_ = 0;
-    this->frame_id_ = 2;
+    cam.fill_len = 0;
+    cam.frame_id = 2;
   }
 }
 

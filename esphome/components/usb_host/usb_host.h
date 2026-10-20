@@ -316,6 +316,9 @@ struct IsocCbCtx {
 };
 
 struct IsocStream {
+  // A several-devices driver's stream: the device it runs on (set by stream_open(UsbDevice &, ...));
+  // null: the client's single device.
+  UsbDevice *device{nullptr};
   std::unique_ptr<usb_transfer_t *[]> xfers {};
   std::unique_ptr<IsocCbCtx[]> ctxs{};
   std::atomic<uint8_t> pending_urbs{0};
@@ -489,6 +492,7 @@ class USBClient : public Component {
 
 #ifdef USE_USB_CONTROL_TRANSFERS
   bool set_interface(uint8_t interface_num, uint8_t alt_setting, const transfer_cb_t &callback);
+  bool set_interface(UsbDevice &dev, uint8_t interface_num, uint8_t alt_setting, const transfer_cb_t &callback);
 #endif
 
   // -- Isochronous support -----------------------------------------------------
@@ -510,11 +514,17 @@ class USBClient : public Component {
   // before it is accepted and report through the return value only -- they say nothing
   // about the stream that is already there.
   bool stream_open(IsocStream &stream, USBClient *cb);
+  /// Several-devices drivers: the same on one of their devices.
+  bool stream_open(UsbDevice &dev, IsocStream &stream, USBClient *cb);
   void stream_close(IsocStream &stream);
 
   // Override in subclass to consume one received isochronous packet (IN endpoints).
   // Called from USB-task context -- must be fast and non-blocking.
   virtual void on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t len, bool error) {}
+  // The same with its stream (several-devices drivers: stream.device says whose); by default on_isoc_packet().
+  virtual void on_stream_packet(IsocStream &stream, const uint8_t *data, size_t len, bool error) {
+    this->on_isoc_packet(stream.ep_addr, data, len, error);
+  }
   // Override in subclass to produce one isochronous packet (OUT endpoints). max_len is what
   // the sample clock allows this packet to carry; return how many bytes were written. The
   // rest of the packet is zero filled, so a short return is silence rather than stale audio.
@@ -549,6 +559,9 @@ class USBClient : public Component {
   virtual void on_device_disconnected(UsbDevice &dev) {}
   /// Several-devices drivers: the device's memory goes now (main loop) - free what `context` points to.
   virtual void free_device_context(UsbDevice &dev) {}
+  /// Several-devices drivers: the device's context is still used beyond its transfer pool (an isochronous stream
+  /// still draining); its memory waits, the stream's close wakes the loop.
+  virtual bool device_busy_(const UsbDevice &dev) const { return false; }
   bool reap_devices_();
   void bind_device_(uint8_t addr, uint32_t interfaces);
   bool open_devices_();
@@ -730,6 +743,8 @@ class USBHost final : public Component {
   // and submit. Split out so it can run either straight from stream_open() or from the
   // SET_INTERFACE completion.
   bool stream_start_urbs(IsocStream &stream, USBClient *cb, usb_device_handle_t device_handle);
+  // The device a stream runs on, now: its UsbDevice's handle or the client's (null once closed).
+  static usb_device_handle_t stream_device_handle_(const IsocStream &stream, const USBClient *client);
   // Give back whatever the stream holds of its interface. Does nothing for a stream that
   // shares its interface with another one, and skips the alt-setting reset when there is
   // nothing to reset.
