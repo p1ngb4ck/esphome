@@ -911,6 +911,13 @@ class SimpleVideoPlayer : public Component
                          std::function<void(bool)> &&done);
   /// The camera's picture ends (main loop): its scratch piece back to the pool once no frame is decoded.
   void camera_preview_end();
+  /// Where in the target the last camera frame went (target pixels): what to redraw.
+  void camera_frame_rect(int32_t &x, int32_t &y, int32_t &w, int32_t &h) const {
+    x = this->cam_job_data_.out_x;
+    y = this->cam_job_data_.out_y;
+    w = this->cam_job_data_.out_w;
+    h = this->cam_job_data_.out_h;
+  }
   void start_slideshow();
   void stop_slideshow();
   void pause_slideshow();
@@ -2167,6 +2174,7 @@ class SimpleVideoPlayer : public Component
     size_t target_capacity{0};
     int32_t target_w{0}, target_h{0};
     bool ok{false};
+    int32_t out_x{0}, out_y{0}, out_w{0}, out_h{0};  // the picture's rectangle in the target
   };
   CameraJob cam_job_data_{};
   std::atomic<bool> cam_job_{false};
@@ -2279,6 +2287,10 @@ class SimpleVideoPlayer : public Component
   static void picture_task_entry_(void *arg);
   void decode_job_(PictureJob &job);
   void camera_decode_();   // picture task
+  // Picture task: a picture (RGB565 or YUV422 block of pic_w x pic_h) fit into the job's target by the PPA, black
+  // around it (drawn once per size). False: no PPA client or the PPA refused it.
+  bool camera_ppa_fit_(const void *in, uint32_t in_cm, uint32_t pic_w, uint32_t pic_h, uint32_t block_w,
+                       uint32_t block_h);
   void camera_service_();  // main loop
   void render_current_();
   void finish_picture_();

@@ -10,6 +10,7 @@
 #include <esp_memory_utils.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cinttypes>
 #include <cstdio>
 #include <cctype>
@@ -1227,6 +1228,69 @@ void SimpleVideoPlayer::camera_service_() {
 }
 
 // Picture task: the frame fit into the canvas piece, black around it
+#ifdef SVP_CAPTURE
+bool SimpleVideoPlayer::camera_ppa_fit_(const void *in, uint32_t in_cm, uint32_t pic_w, uint32_t pic_h,
+                                        uint32_t block_w, uint32_t block_h) {
+  CameraJob &job = this->cam_job_data_;
+  if (this->cap_ppa_ == nullptr) {
+    ppa_client_config_t pcfg{};
+    pcfg.oper_type = PPA_OPERATION_SRM;
+    pcfg.max_pending_trans_num = 1;
+    if (ppa_register_client(&pcfg, &this->cap_ppa_) != ESP_OK) {
+      this->cap_ppa_ = nullptr;
+      return false;
+    }
+  }
+  const float sx = static_cast<float>(job.target_w) / static_cast<float>(block_w);
+  const float sy = static_cast<float>(job.target_h) / static_cast<float>(block_h);
+  // The PPA scales in 1/16 steps: the fit rounded down to one, so the result never exceeds the target
+  const float scale = std::floor(std::min(sx, sy) * 16.0f) / 16.0f;
+  if (scale <= 0.0f)
+    return false;
+  const int32_t ow = static_cast<int32_t>(static_cast<float>(block_w) * scale) & ~1;
+  const int32_t oh = static_cast<int32_t>(static_cast<float>(block_h) * scale);
+  const int32_t dx = ((job.target_w - ow) / 2) & ~1;
+  const int32_t dy = (job.target_h - oh) / 2;
+  // The black around the picture: once per frame size
+  const uint32_t key = (block_w << 16) | block_h;
+  if (this->cam_cleared_key_ != key) {
+    memset(job.target, 0, static_cast<size_t>(job.target_w) * job.target_h * 2);
+    written_by_cpu(job.target, job.target_capacity);
+    this->cam_cleared_key_ = key;
+    job.out_x = 0;  // the black is new too: all of it redrawn once
+    job.out_y = 0;
+    job.out_w = job.target_w;
+    job.out_h = job.target_h;
+  } else {
+    job.out_x = dx;
+    job.out_y = dy;
+    job.out_w = ow;
+    job.out_h = oh;
+  }
+  ppa_srm_oper_config_t cfg{};
+  cfg.in.buffer = in;
+  cfg.in.pic_w = pic_w;
+  cfg.in.pic_h = pic_h;
+  cfg.in.block_w = block_w;
+  cfg.in.block_h = block_h;
+  cfg.in.srm_cm = static_cast<ppa_srm_color_mode_t>(in_cm);
+  cfg.in.yuv_range = PPA_COLOR_RANGE_LIMIT;
+  cfg.in.yuv_std = PPA_COLOR_CONV_STD_RGB_YUV_BT601;
+  cfg.out.buffer = job.target;
+  cfg.out.buffer_size = dma_usable(job.target_capacity);
+  cfg.out.pic_w = static_cast<uint32_t>(job.target_w);
+  cfg.out.pic_h = static_cast<uint32_t>(job.target_h);
+  cfg.out.block_offset_x = static_cast<uint32_t>(dx);
+  cfg.out.block_offset_y = static_cast<uint32_t>(dy);
+  cfg.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+  cfg.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
+  cfg.scale_x = scale;
+  cfg.scale_y = scale;
+  cfg.mode = PPA_TRANS_MODE_BLOCKING;
+  return ppa_do_scale_rotate_mirror(this->cap_ppa_, &cfg) == ESP_OK;
+}
+#endif
+
 void SimpleVideoPlayer::camera_decode_() {
   CameraJob &job = this->cam_job_data_;
   if (job.format == CameraFrameFormat::MJPEG) {
@@ -1251,6 +1315,10 @@ void SimpleVideoPlayer::camera_decode_() {
       job.ok = jpeg_decoder_process(this->hw_jpeg_decoder_, &cfg, job.data, stream, job.target,
                                     static_cast<uint32_t>(dma_usable(job.target_capacity)), &out) == ESP_OK &&
                out != 0;
+      job.out_x = 0;
+      job.out_y = 0;
+      job.out_w = static_cast<int32_t>(info.width);
+      job.out_h = static_cast<int32_t>(info.height);
       return;
     }
     if (this->cam_scratch_ == nullptr || bytes > dma_usable(this->cam_scratch_capacity_))
@@ -1259,65 +1327,34 @@ void SimpleVideoPlayer::camera_decode_() {
                              static_cast<uint32_t>(dma_usable(this->cam_scratch_capacity_)), &out) != ESP_OK ||
         out == 0)
       return;
+#ifdef SVP_CAPTURE
+    // Scaled by the PPA (DMA): the decoder's rows are pw wide, the picture info.width of them
+    if (this->camera_ppa_fit_(this->cam_scratch_, PPA_SRM_COLOR_MODE_RGB565, pw, info.height, info.width,
+                              info.height)) {
+      job.ok = true;
+      return;
+    }
+#endif
     scale_rgb565(this->cam_scratch_, static_cast<int32_t>(info.width), static_cast<int32_t>(info.height), pw * 2,
                  job.target, job.target_w, job.target_h, static_cast<uint32_t>(job.target_w) * 2,
                  ImageFitMode::SCALE_TO_FIT);
     written_by_cpu(job.target, job.target_capacity);
+    this->cam_cleared_key_ = 0;  // the CPU drew the black itself
+    job.out_x = 0;
+    job.out_y = 0;
+    job.out_w = job.target_w;
+    job.out_h = job.target_h;
     job.ok = true;
     return;
   }
 #ifdef SVP_CAPTURE
-  // YUV422: the PPA converts and scales it straight into the canvas (screen capture's client)
-  if (this->cap_ppa_ == nullptr) {
-    ppa_client_config_t pcfg{};
-    pcfg.oper_type = PPA_OPERATION_SRM;
-    pcfg.max_pending_trans_num = 1;
-    if (ppa_register_client(&pcfg, &this->cap_ppa_) != ESP_OK) {
-      this->cap_ppa_ = nullptr;
-      return;
-    }
-  }
+  // YUV422: the PPA converts and scales it straight into the canvas (its driver writes the input's cache lines back,
+  // ppa_srm.c)
   if (job.width == 0 || job.height == 0)
     return;
-  const float sx = static_cast<float>(job.target_w) / static_cast<float>(job.width);
-  const float sy = static_cast<float>(job.target_h) / static_cast<float>(job.height);
-  const float scale = std::min(sx, sy);
-  const int32_t ow = static_cast<int32_t>(static_cast<float>(job.width) * scale) & ~1;
-  const int32_t oh = static_cast<int32_t>(static_cast<float>(job.height) * scale);
-  const int32_t dx = ((job.target_w - ow) / 2) & ~1;
-  const int32_t dy = (job.target_h - oh) / 2;
-  // The black around the picture: once per frame size
-  const uint32_t key = (static_cast<uint32_t>(job.width) << 16) | job.height;
-  if (this->cam_cleared_key_ != key) {
-    memset(job.target, 0, static_cast<size_t>(job.target_w) * job.target_h * 2);
-    written_by_cpu(job.target, job.target_capacity);
-    this->cam_cleared_key_ = key;
-  }
-  // The USB task wrote the frame by CPU: out to PSRAM before the PPA reads it
-  esp_cache_msync(const_cast<uint8_t *>(job.data), job.length,
-                  ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
-  ppa_srm_oper_config_t cfg{};
-  cfg.in.buffer = job.data;
-  cfg.in.pic_w = job.width;
-  cfg.in.pic_h = job.height;
-  cfg.in.block_w = job.width;
-  cfg.in.block_h = job.height;
-  cfg.in.srm_cm =
-      job.format == CameraFrameFormat::YUYV ? PPA_SRM_COLOR_MODE_YUV422_YUYV : PPA_SRM_COLOR_MODE_YUV422_UYVY;
-  cfg.in.yuv_range = PPA_COLOR_RANGE_LIMIT;
-  cfg.in.yuv_std = PPA_COLOR_CONV_STD_RGB_YUV_BT601;
-  cfg.out.buffer = job.target;
-  cfg.out.buffer_size = dma_usable(job.target_capacity);
-  cfg.out.pic_w = static_cast<uint32_t>(job.target_w);
-  cfg.out.pic_h = static_cast<uint32_t>(job.target_h);
-  cfg.out.block_offset_x = static_cast<uint32_t>(dx);
-  cfg.out.block_offset_y = static_cast<uint32_t>(dy);
-  cfg.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
-  cfg.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
-  cfg.scale_x = scale;
-  cfg.scale_y = scale;
-  cfg.mode = PPA_TRANS_MODE_BLOCKING;
-  job.ok = ppa_do_scale_rotate_mirror(this->cap_ppa_, &cfg) == ESP_OK;
+  job.ok = this->camera_ppa_fit_(
+      job.data, job.format == CameraFrameFormat::YUYV ? PPA_SRM_COLOR_MODE_YUV422_YUYV : PPA_SRM_COLOR_MODE_YUV422_UYVY,
+      job.width, job.height, job.width, job.height);
 #endif
 }
 

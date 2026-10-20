@@ -105,6 +105,7 @@ class UVCClient : public usb_host::USBClient {
     uint8_t alt;
     uint8_t ep;
     uint16_t mps;
+    uint16_t interval;  // (micro)frames between its transactions: 2^(bInterval - 1)
   };
 
   enum class StreamState : uint8_t { IDLE, NEGOTIATING, STREAMING, CLOSING };

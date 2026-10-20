@@ -13,8 +13,10 @@ namespace esphome::usb_uvc {
 
 static const char *const TAG = "usb_uvc";
 
-// Packets per isochronous URB.
-static constexpr uint8_t PACKETS_PER_URB = 4;
+// Packets per isochronous URB: one per (micro)frame at bInterval 1. 32 keep 32 (micro)frames per URB on the bus, so a
+// resubmit that comes late does not lose packets (with 4, num_urbs x 4 = 12 microframes at high speed were too few:
+// lost packets left holes in the frames). The HCD takes up to 61 (64 qTDs, 3 of them margin; hcd_dwc.c).
+static constexpr uint8_t PACKETS_PER_URB = 32;
 
 static inline uint16_t rd16(const uint8_t *d) { return static_cast<uint16_t>(d[0] | (d[1] << 8)); }
 static inline uint32_t rd32(const uint8_t *d) {
@@ -269,7 +271,8 @@ bool UVCClient::parse_descriptors_(Camera &cam) {
       const uint16_t mps = cam.high_speed
                                ? static_cast<uint16_t>(USB_EP_DESC_GET_MPS(ep) * (USB_EP_DESC_GET_MULT(ep) + 1))
                                : std::min<uint16_t>(USB_EP_DESC_GET_MPS(ep), 1023);
-      alts.push_back({cur_alt, ep->bEndpointAddress, mps});
+      const uint8_t b_interval = std::max<uint8_t>(1, std::min<uint8_t>(ep->bInterval, 16));
+      alts.push_back({cur_alt, ep->bEndpointAddress, mps, static_cast<uint16_t>(1U << (b_interval - 1))});
     }
   }
 
@@ -470,7 +473,9 @@ void UVCClient::start_stream_(Camera &cam) {
 
   cam.stream.ep_addr = chosen->ep;
   cam.stream.mps = chosen->mps;
-  cam.stream.packets_per_urb = PACKETS_PER_URB;
+  // The HCD's list takes packets x interval <= 61 (micro)frames
+  cam.stream.packets_per_urb =
+      static_cast<uint8_t>(std::max(1, std::min<int>(PACKETS_PER_URB, 61 / std::max<int>(1, chosen->interval))));
   cam.stream.num_urbs = this->num_urbs_;
   cam.stream.interface_num = cam.vs_intf;
   cam.stream.alt_setting = chosen->alt;
