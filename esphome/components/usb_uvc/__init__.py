@@ -35,6 +35,7 @@ UvcFormat = usb_uvc_ns.enum("UvcFormat", is_class=True)
 UVC_FORMATS = {
     "MJPEG": UvcFormat.MJPEG,
     "UNCOMPRESSED": UvcFormat.UNCOMPRESSED,
+    "FRAME_BASED": UvcFormat.FRAME_BASED,
 }
 
 CONFIG_SCHEMA = cv.All(

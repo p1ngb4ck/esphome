@@ -30,6 +30,8 @@ static constexpr uint8_t UVC_VS_FORMAT_UNCOMPRESSED = 0x04;
 static constexpr uint8_t UVC_VS_FRAME_UNCOMPRESSED  = 0x05;
 static constexpr uint8_t UVC_VS_FORMAT_MJPEG        = 0x06;
 static constexpr uint8_t UVC_VS_FRAME_MJPEG         = 0x07;
+static constexpr uint8_t UVC_VS_FORMAT_FRAME_BASED  = 0x10;
+static constexpr uint8_t UVC_VS_FRAME_FRAME_BASED   = 0x11;
 
 // ── VideoStreaming control selectors (wValue high byte) ───────────────────────
 static constexpr uint8_t UVC_VS_PROBE_CONTROL  = 0x01;
@@ -96,17 +98,7 @@ struct __attribute__((packed)) UvcPayloadHeader {
 enum class UvcFormat : uint8_t {
   MJPEG        = UVC_VS_FORMAT_MJPEG,
   UNCOMPRESSED = UVC_VS_FORMAT_UNCOMPRESSED,
-};
-
-// ── Descriptor of a format+frame combo found during enumeration ───────────────
-struct UvcFrameDesc {
-  UvcFormat format;
-  uint8_t   format_index;
-  uint8_t   frame_index;
-  uint16_t  width;
-  uint16_t  height;
-  uint32_t  default_interval;   // 100-ns units (= 10 000 000 / fps)
-  uint32_t  max_frame_size;
+  FRAME_BASED  = UVC_VS_FORMAT_FRAME_BASED,  // H.264 and the like: passed on, not shown (no decoder on the P4)
 };
 
 }  // namespace usb_uvc
