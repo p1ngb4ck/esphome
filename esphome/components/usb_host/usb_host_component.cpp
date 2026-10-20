@@ -472,23 +472,27 @@ void USBHost::route_(RoutedDevice &dev) {
   auto listed = [](const std::vector<USBClient *> &list, USBClient *client) {
     return std::find(list.begin(), list.end(), client) != list.end();
   };
-  // A device that a driver names is reserved for the drivers that name it, busy or not.
+  // The interfaces a driver names (by vid / pid ...) are reserved for the drivers that name them, busy or not; the
+  // device's other interfaces go to the drivers that match them by vendor or class (a camera's UVC and storage
+  // beside its microphone that one driver names).
   bool named = false;
+  uint32_t named_interfaces = 0;
   uint32_t interfaces;
   for (auto *client : this->clients_) {
-    if (!listed(dev.declined, client) && client->match_(dev, interfaces) == MatchTier::NAMED)
+    if (!listed(dev.declined, client) && client->match_(dev, interfaces) == MatchTier::NAMED) {
       named = true;
+      named_interfaces |= interfaces;
+    }
   }
   bool routed = false;
   for (MatchTier tier : {MatchTier::NAMED, MatchTier::VENDOR, MatchTier::CLASS}) {
-    if (named && tier != MatchTier::NAMED)
-      break;
+    const uint32_t reserved = tier == MatchTier::NAMED ? 0 : named_interfaces;
     for (auto *client : this->clients_) {
       if (!client->is_free_() || listed(dev.bound, client) || listed(dev.declined, client))
         continue;
       if (client->match_(dev, interfaces) != tier)
         continue;
-      const uint32_t free_interfaces = interfaces & ~dev.assigned;
+      const uint32_t free_interfaces = interfaces & ~dev.assigned & ~reserved;
       if (free_interfaces == 0)
         continue;
       ESP_LOGI(TAG, "%04X:%04X interfaces 0x%02" PRIX32 " -> %s", dev.desc->idVendor, dev.desc->idProduct,

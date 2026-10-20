@@ -198,8 +198,9 @@ struct UsbMatch {
   int16_t protocol;
 };
 
-// How a driver matched a device. Higher wins, and a device that a driver names by its
-// filters (vid/pid/manufacturer/product from the YAML) is reserved for such drivers.
+// How a driver matched a device. Higher wins, and the interfaces a driver names by its
+// filters (vid/pid/manufacturer/product from the YAML) are reserved for such drivers; the
+// device's other interfaces still go to the drivers that match them.
 enum class MatchTier : uint8_t {
   NONE,
   CLASS,   // one of its class patterns matches an interface
