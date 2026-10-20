@@ -740,12 +740,12 @@ void USBStorageDevice::finish_connect_() {
     base = this->client_->entries_[this->entry_].mount_path;
     this->format_on_mismatch_ = this->client_->entries_[this->entry_].format_on_mismatch;
   }
-  snprintf(this->mount_buf_, sizeof(this->mount_buf_), "%s", base);
-  for (int n = 2; this->client_->path_in_use_(base) && n <= 9; n++) {
-    snprintf(this->mount_buf_, sizeof(this->mount_buf_), "%s%d", base, n);
-    if (!this->client_->path_in_use_(this->mount_buf_))
-      break;
-  }
+  // Chosen in a local buffer: this stick's own mount_buf_ stays empty until then, so it never counts as taken
+  char path[sizeof(this->mount_buf_)];
+  snprintf(path, sizeof(path), "%s", base);
+  for (int n = 2; this->client_->path_in_use_(path) && n <= 9; n++)
+    snprintf(path, sizeof(path), "%s%d", base, n);
+  memcpy(this->mount_buf_, path, sizeof(this->mount_buf_));
   this->set_mount_path_(this->mount_buf_);
 
 #ifdef USE_STORAGE_FILE_SYSTEM_SELECT
