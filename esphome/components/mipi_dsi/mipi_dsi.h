@@ -71,7 +71,7 @@ class MipiDsi final : public display::Display {
   void set_lane_bit_rate(float lane_bit_rate) { this->lane_bit_rate_ = lane_bit_rate; }
   void set_lanes(uint8_t lanes) { this->lanes_ = lanes; }
   void set_frame_buffers(uint8_t n) { this->num_fbs_ = n; }
-  // ESP-IDF 6 mipi_dsi_video_burst_type_t order: 0 burst, 1 non-burst sync pulses, 2 non-burst sync events
+  // DSI host vid_mode_type: 0 non-burst sync pulses, 1 non-burst sync events, 2 burst
   void set_video_mode(uint8_t mode) { this->video_mode_ = mode; }
   void set_frame_ack(bool frame_ack) { this->frame_ack_ = frame_ack; }
   // Init sequence sent as generic writes (bridge chips), without the DCS soft reset
@@ -165,7 +165,7 @@ class MipiDsi final : public display::Display {
   float lane_bit_rate_{1500};  // in Mbps
   uint8_t lanes_{2};           // 1, 2, 3 or 4 lanes
   uint8_t num_fbs_{1};         // DPI frame buffers; >=2 lets the driver flip at VSYNC (anti-tearing)
-  uint8_t video_mode_{0};
+  uint8_t video_mode_{2};
   bool frame_ack_{true};
   bool generic_commands_{false};
 

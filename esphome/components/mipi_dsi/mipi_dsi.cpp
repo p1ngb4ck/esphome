@@ -96,9 +96,6 @@ void MipiDsi::setup() {
                                            .pixel_format = pixel_format,
 #endif
                                            .num_fbs = this->num_fbs_,  // frame buffers (YAML: frame_buffers)
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
-                                           .video_burst_type = static_cast<mipi_dsi_video_burst_type_t>(this->video_mode_),
-#endif
                                            .video_timing =
                                                {
                                                    .h_size = this->width_,
@@ -113,8 +110,6 @@ void MipiDsi::setup() {
                                            .flags = {
 #if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(6, 0, 0)
                                                .use_dma2d = true,
-#else
-                                               .disable_frame_ack = !this->frame_ack_,
 #endif
                                            }};
   // clang-format on
@@ -123,15 +118,11 @@ void MipiDsi::setup() {
     this->smark_failed(LOG_STR("esp_lcd_new_panel_dpi failed"), err);
     return;
   }
-#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(6, 0, 0)
-  // ESP-IDF 5.5 fixes burst mode and frame ack in esp_lcd_new_panel_dpi(); set them before esp_lcd_panel_init()
-  // starts the video mode
-  static constexpr mipi_dsi_ll_video_burst_type_t LL_VIDEO_MODES[] = {
-      MIPI_DSI_LL_VIDEO_BURST_WITH_SYNC_PULSES, MIPI_DSI_LL_VIDEO_NON_BURST_WITH_SYNC_PULSES,
-      MIPI_DSI_LL_VIDEO_NON_BURST_WITH_SYNC_EVENTS};
-  mipi_dsi_host_ll_dpi_set_video_burst_type(MIPI_DSI_LL_GET_HOST(0), LL_VIDEO_MODES[this->video_mode_]);
-  mipi_dsi_host_ll_dpi_enable_frame_ack(MIPI_DSI_LL_GET_HOST(0), this->frame_ack_);
-#endif
+  // esp_lcd_new_panel_dpi() sets the video mode type and the frame ack (fixed to burst / on in IDF 5.5.5 and 6.1.0,
+  // from its config in later 6.1, whose LL API differs); set both in the host's register before esp_lcd_panel_init()
+  // starts the video mode. vid_mode_type: 0 non-burst sync pulses, 1 non-burst sync events, 2 burst.
+  MIPI_DSI_LL_GET_HOST(0)->vid_mode_cfg.vid_mode_type = this->video_mode_;
+  MIPI_DSI_LL_GET_HOST(0)->vid_mode_cfg.frame_bta_ack_en = this->frame_ack_;
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
   err = esp_lcd_dpi_panel_enable_dma2d(this->handle_);
   if (err != ESP_OK) {
@@ -538,7 +529,7 @@ void MipiDsi::write_generic_(uint8_t cmd, const uint8_t *args, uint8_t num_args)
 }
 
 static const uint8_t PIXEL_MODES[] = {0, 16, 18, 24};
-static const char *const VIDEO_MODES[] = {"burst", "non-burst, sync pulses", "non-burst, sync events"};
+static const char *const VIDEO_MODES[] = {"non-burst, sync pulses", "non-burst, sync events", "burst"};
 
 void MipiDsi::dump_config() {
   ESP_LOGCONFIG(TAG,

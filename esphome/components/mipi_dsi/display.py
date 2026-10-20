@@ -78,11 +78,11 @@ CONF_FRAME_BUFFERS = "frame_buffers"
 CONF_VIDEO_MODE = "video_mode"
 CONF_FRAME_ACK = "frame_ack"
 
-# Order of ESP-IDF 6's mipi_dsi_video_burst_type_t
+# The DSI host's vid_mode_type register values
 VIDEO_MODES = {
-    "burst": 0,
-    "non_burst_sync_pulses": 1,
-    "non_burst_sync_events": 2,
+    "non_burst_sync_pulses": 0,
+    "non_burst_sync_events": 1,
+    "burst": 2,
 }
 
 DsiDriverChip("CUSTOM")
