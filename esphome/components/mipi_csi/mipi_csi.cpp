@@ -1,5 +1,7 @@
 #include "mipi_csi.h"
 
+#include <esp_log.h>
+
 #ifdef USE_ESP32_VARIANT_ESP32P4
 
 #include <algorithm>
@@ -108,6 +110,11 @@ bool MipiCsiCamera::start_external_clock_() {
 }
 
 bool MipiCsiCamera::init_video_() {
+  // The ISP's algorithms (esp_ipa, a prebuilt library) log every frame at debug level: warnings and errors only
+  static const char *const IPA_TAGS[] = {"esp_ipa_acc", "esp_ipa_adn", "esp_ipa_aen", "esp_ipa_af", "esp_ipa_agc",
+                                         "esp_ipa_atc", "esp_ipa_awb", "esp_ipa_ext", "esp_ipa_ian"};
+  for (const char *tag : IPA_TAGS)
+    esp_log_level_set(tag, ESP_LOG_WARN);
   i2c_master_bus_handle_t i2c_handle = nullptr;
   esp_err_t err = i2c_master_get_bus_handle(this->i2c_bus_->get_port(), &i2c_handle);
   if (err != ESP_OK) {

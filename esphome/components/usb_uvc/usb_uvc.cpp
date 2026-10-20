@@ -586,9 +586,16 @@ void UVCClient::destroy_(Camera *cam) {
 // -- Frame assembly (USB task) -------------------------------------------------------------
 
 void UVCClient::on_stream_packet(usb_host::IsocStream &stream, const uint8_t *data, size_t len, bool error) {
-  if (error || len < 2 || stream.device == nullptr)
+  if (stream.device == nullptr)
     return;
   auto &cam = *static_cast<Camera *>(stream.device->context);
+  // A lost packet leaves a hole in the frame: that frame is not delivered (a decoder would choke on it)
+  if (error) {
+    cam.skip_frame = true;
+    return;
+  }
+  if (len < 2)
+    return;
   const auto *hdr = reinterpret_cast<const UvcPayloadHeader *>(data);
   if (hdr->b_header_length < 2 || hdr->b_header_length > len)
     return;
