@@ -113,21 +113,23 @@ uint32_t UVCClient::hold_frame(uint8_t camera) {
   Camera *cam = this->find_(camera);
   if (cam == nullptr || !cam->ready.load(std::memory_order_acquire))
     return 0;
-  cam->held = true;
+  cam->held++;
   return cam->id;
 }
 
 void UVCClient::release_frame(uint32_t token) {
   Camera *cam = this->find_camera_(token);
   if (cam != nullptr) {
-    cam->held = false;
-    cam->ready.store(false, std::memory_order_release);
-    this->enable_loop();  // a stream closing meanwhile gives its buffers back now
+    if (cam->held > 0 && --cam->held == 0) {
+      cam->ready.store(false, std::memory_order_release);
+      this->enable_loop();  // a stream closing meanwhile gives its buffers back now
+    }
     return;
   }
   for (auto *gone : this->gone_) {
     if (gone->id == token) {
-      gone->held = false;
+      if (gone->held > 0)
+        gone->held--;
       this->enable_loop();  // the reap frees it now (device_busy_)
       return;
     }
@@ -153,6 +155,7 @@ void UVCClient::start(uint8_t camera) {
   Camera *cam = this->find_(camera);
   if (cam == nullptr)
     return;
+  cam->starts++;
   cam->wanted = true;
   if (cam->state == StreamState::IDLE) {
     this->open_(*cam);
@@ -163,8 +166,10 @@ void UVCClient::start(uint8_t camera) {
 
 void UVCClient::stop(uint8_t camera) {
   Camera *cam = this->find_(camera);
-  if (cam == nullptr)
+  if (cam == nullptr || cam->starts == 0)
     return;
+  if (--cam->starts > 0)
+    return;  // another one still wants it
   cam->wanted = false;
   cam->reopen = false;
   if (cam->state == StreamState::NEGOTIATING || cam->state == StreamState::STREAMING)
@@ -620,6 +625,72 @@ void UVCClient::on_stream_packet(usb_host::IsocStream &stream, const uint8_t *da
     cam.frame_id = 2;
   }
 }
+
+#ifdef USE_CAMERA
+// -- Home Assistant camera entity ----------------------------------------------------------
+
+void UvcCamera::setup() {
+  this->client_->add_frame_callback([this](uint8_t camera, const uint8_t *data, size_t length,
+                                           const UvcFrameInfo &info) { this->on_frame_(camera, data, length, info); });
+  // An unplugged camera ends what this entity started on it
+  this->client_->add_camera_callback([this](uint8_t camera, bool connected) {
+    if (!connected && camera == this->camera_)
+      this->camera_ = 0;
+    if (connected && this->camera_ == 0)
+      this->update_stream_();
+  });
+}
+
+void UvcCamera::request_image(camera::CameraRequester requester) {
+  this->single_ |= static_cast<uint8_t>(1U << requester);
+  this->update_stream_();
+}
+
+void UvcCamera::start_stream(camera::CameraRequester requester) {
+  this->streaming_ |= static_cast<uint8_t>(1U << requester);
+  this->update_stream_();
+}
+
+void UvcCamera::stop_stream(camera::CameraRequester requester) {
+  this->streaming_ &= static_cast<uint8_t>(~(1U << requester));
+  this->update_stream_();
+}
+
+// Started on the first plugged camera while anything is asked for, stopped (its start counted off) after
+void UvcCamera::update_stream_() {
+  const bool wanted = this->single_ != 0 || this->streaming_ != 0;
+  if (wanted && this->camera_ == 0) {
+    const uint8_t camera = this->client_->camera_at(0);
+    if (camera != 0) {
+      this->camera_ = camera;
+      this->client_->start(camera);
+    }
+  } else if (!wanted && this->camera_ != 0) {
+    this->client_->stop(this->camera_);
+    this->camera_ = 0;
+  }
+}
+
+void UvcCamera::on_frame_(uint8_t camera, const uint8_t *data, size_t length, const UvcFrameInfo &info) {
+  const uint8_t requesters = this->single_ | this->streaming_;
+  if (camera != this->camera_ || requesters == 0)
+    return;
+  if (info.format != UvcFormat::MJPEG) {
+    if (!this->warned_)
+      ESP_LOGW(TAG, "Home Assistant gets MJPEG frames only; the camera streams another format");
+    this->warned_ = true;
+    return;
+  }
+  const uint32_t token = this->client_->hold_frame(camera);
+  if (token == 0)
+    return;
+  auto image = std::make_shared<UvcImage>(this->client_, token, const_cast<uint8_t *>(data), length, requesters);
+  this->single_ = 0;
+  for (auto *listener : this->listeners_)
+    listener->on_camera_image(image);
+  this->update_stream_();
+}
+#endif
 
 }  // namespace esphome::usb_uvc
 

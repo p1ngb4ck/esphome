@@ -8,10 +8,11 @@ from esphome.components.esp32 import (
 from esphome.components.usb_host import USB_BLACKLIST_SCHEMA, setup_usb_match, usb_host_ns
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
+from esphome.core.entity_helpers import setup_entity
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32"]
-AUTO_LOAD = ["usb_host"]
+AUTO_LOAD = ["usb_host", "camera"]
 MULTI_CONF = True
 
 CONF_FORMAT = "format"
@@ -21,6 +22,7 @@ CONF_FPS = "fps"
 CONF_NUM_URBS = "num_urbs"
 CONF_VID = "vid"
 CONF_PID = "pid"
+CONF_CAMERA = "camera"
 
 usb_uvc_ns = cg.esphome_ns.namespace("usb_uvc")
 
@@ -30,6 +32,7 @@ UVCClient = usb_uvc_ns.class_(
     cg.Component,
 )
 
+UvcCamera = usb_uvc_ns.class_("UvcCamera", cg.Component)
 UvcFormat = usb_uvc_ns.enum("UvcFormat", is_class=True)
 
 UVC_FORMATS = {
@@ -50,6 +53,10 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_HEIGHT, default=0): cv.uint16_t,
             cv.Optional(CONF_FPS, default=0): cv.uint8_t,
             cv.Optional(CONF_NUM_URBS, default=3): cv.int_range(min=1, max=8),
+            # The first plugged camera as a Home Assistant camera entity (its MJPEG frames)
+            cv.Optional(CONF_CAMERA): cv.ENTITY_BASE_SCHEMA.extend(
+                {cv.GenerateID(): cv.declare_id(UvcCamera)}
+            ).extend(cv.COMPONENT_SCHEMA),
         }
     ),
     only_on_variant(supported=[VARIANT_ESP32S2, VARIANT_ESP32S3, VARIANT_ESP32P4]),
@@ -74,3 +81,10 @@ async def to_code(config):
 
     cg.add_define("USE_USB_ISOC_TRANSFERS")
     cg.add_define("USE_USB_CONTROL_TRANSFERS")
+
+    if (camera := config.get(CONF_CAMERA)) is not None:
+        cg.add_define("USE_CAMERA")
+        cam = cg.new_Pvariable(camera[CONF_ID])
+        await setup_entity(cam, camera, "camera")
+        await cg.register_component(cam, camera)
+        cg.add(cam.set_client(var))

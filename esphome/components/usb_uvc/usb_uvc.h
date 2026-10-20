@@ -7,6 +7,9 @@
 #include "esphome/core/defines.h"
 #include "esphome/core/helpers.h"
 #include "uvc_types.h"
+#ifdef USE_CAMERA
+#include "esphome/components/camera/camera.h"
+#endif
 
 #include <atomic>
 #include <functional>
@@ -87,12 +90,12 @@ class UVCClient : public usb_host::USBClient {
   uint32_t selected_interval(uint8_t camera) const;
   /// Selects a frame size (and interval, 0: its default); a running stream switches to it. False: no such entry.
   bool select(uint8_t camera, size_t index, uint32_t interval = 0);
-  /// The stream runs while started; stop gives its buffers back.
+  /// The stream runs while anyone started it (counted: each start() one stop()); the last stop gives its buffers back.
   void start(uint8_t camera);
   void stop(uint8_t camera);
   bool is_streaming(uint8_t camera) const;
   /// In a frame callback: the frame stays (its buffer is not refilled, the next one waits) until release_frame() with
-  /// the token returned (0: no frame being delivered). For a consumer that reads it on another task.
+  /// the token returned (0: no frame being delivered); counted, so several consumers can hold it.
   uint32_t hold_frame(uint8_t camera);
   /// Main loop: a held frame is done with; the camera may be gone meanwhile.
   void release_frame(uint32_t token);
@@ -123,7 +126,8 @@ class UVCClient : public usb_host::USBClient {
     int16_t selected{-1};
     uint32_t interval{0};
     StreamState state{StreamState::IDLE};
-    bool wanted{false};   // start() asked for the stream
+    bool wanted{false};   // start() asked for the stream (starts > 0)
+    uint8_t starts{0};
     bool reopen{false};   // closing for a switch: open again in the new selection once closed
 
     UvcVsCtrl probe{};
@@ -139,7 +143,7 @@ class UVCClient : public usb_host::USBClient {
     uint8_t ready_index{0};
     size_t ready_len{0};
     std::atomic<bool> ready{false};  // set by the USB task, cleared by the main loop
-    bool held{false};                // a consumer reads the ready frame (hold_frame / release_frame)
+    uint8_t held{0};                 // consumers reading the ready frame (hold_frame / release_frame)
   };
 
   bool accepts_more_devices_() const override { return true; }
@@ -185,6 +189,70 @@ class UVCClient : public usb_host::USBClient {
   std::vector<frame_cb_t> frame_callbacks_{};
   std::vector<camera_cb_t> camera_callbacks_{};
 };
+
+#ifdef USE_CAMERA
+/// A held MJPEG frame of a UVC camera as a camera image; the frame is released when the last reference goes.
+class UvcImage : public camera::CameraImage {
+ public:
+  UvcImage(UVCClient *client, uint32_t token, uint8_t *data, size_t length, uint8_t requesters)
+      : client_(client), token_(token), data_(data), length_(length), requesters_(requesters) {}
+  ~UvcImage() override { this->client_->release_frame(this->token_); }
+  uint8_t *get_data_buffer() override { return this->data_; }
+  size_t get_data_length() override { return this->length_; }
+  bool was_requested_by(camera::CameraRequester requester) const override {
+    return (this->requesters_ & (1U << requester)) != 0;
+  }
+
+ protected:
+  UVCClient *client_;
+  uint32_t token_;
+  uint8_t *data_;
+  size_t length_;
+  uint8_t requesters_;
+};
+
+class UvcImageReader : public camera::CameraImageReader {
+ public:
+  void set_image(std::shared_ptr<camera::CameraImage> image) override {
+    this->image_ = std::move(image);
+    this->offset_ = 0;
+  }
+  size_t available() const override { return this->image_ ? this->image_->get_data_length() - this->offset_ : 0; }
+  uint8_t *peek_data_buffer() override {
+    return this->image_ ? this->image_->get_data_buffer() + this->offset_ : nullptr;
+  }
+  void consume_data(size_t consumed) override { this->offset_ += consumed; }
+  void return_image() override { this->image_.reset(); }
+
+ protected:
+  std::shared_ptr<camera::CameraImage> image_;
+  size_t offset_{0};
+};
+
+/// The UVC camera as a Home Assistant camera entity: the first plugged camera, its MJPEG frames as they are. The
+/// stream runs (counted start) while an image or a stream is asked for.
+class UvcCamera : public camera::Camera {
+ public:
+  void set_client(UVCClient *client) { this->client_ = client; }
+  void setup() override;
+  void add_listener(camera::CameraListener *listener) override { this->listeners_.push_back(listener); }
+  camera::CameraImageReader *create_image_reader() override { return new UvcImageReader(); }  // NOLINT
+  void request_image(camera::CameraRequester requester) override;
+  void start_stream(camera::CameraRequester requester) override;
+  void stop_stream(camera::CameraRequester requester) override;
+
+ protected:
+  void on_frame_(uint8_t camera, const uint8_t *data, size_t length, const UvcFrameInfo &info);
+  void update_stream_();
+
+  UVCClient *client_{nullptr};
+  std::vector<camera::CameraListener *> listeners_{};
+  uint8_t single_{0};     // requesters waiting for one image
+  uint8_t streaming_{0};  // requesters streaming
+  uint8_t camera_{0};     // the camera this entity started (0: none)
+  bool warned_{false};
+};
+#endif
 
 }  // namespace esphome::usb_uvc
 
