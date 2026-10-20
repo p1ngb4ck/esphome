@@ -240,15 +240,10 @@ class SpiceUsbSlot : public select::Select, public usb_host::USBClient {
   uint8_t claimed_[32]{};
   uint8_t claimed_count_{0};
   QueueHandle_t done_q_{nullptr};
-  // A redirection session's transfers: allocated by link_open() (internal: the session's hot path), freed by
-  // release_buffers() once none of them holds a buffer - nothing of it while no session runs
-  struct Session {
-    Xfer gen[GEN_XFERS];
-    Xfer intr[INT_XFERS];
-    IntIn int_in[MAX_INT_IN];
-    IsoStream iso[ISO_STREAMS];
-  };
-  Session *xs_{nullptr};
+  Xfer gen_[GEN_XFERS];
+  Xfer int_[INT_XFERS];
+  IntIn int_in_[MAX_INT_IN];
+  IsoStream iso_[ISO_STREAMS];
   uint8_t *stage_{nullptr};  // STAGE_BYTES, internal RAM
   Rx rx_{Rx::HEADER};
   AltChange alt_;
