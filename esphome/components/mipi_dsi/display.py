@@ -78,6 +78,7 @@ CONF_FRAME_BUFFERS = "frame_buffers"
 CONF_VIDEO_MODE = "video_mode"
 CONF_FRAME_ACK = "frame_ack"
 CONF_CONTINUOUS_CLOCK = "continuous_clock"
+CONF_READ_REGISTERS = "read_registers"
 
 # The DSI host's vid_mode_type register values
 VIDEO_MODES = {
@@ -146,6 +147,9 @@ def model_schema(config: ConfigType) -> cv.All:
             model.option(CONF_CONTINUOUS_CLOCK, False): cv.boolean,
             model.option(CONF_COMMAND_MODE, COMMAND_MODE_DCS): cv.one_of(
                 COMMAND_MODE_DCS, COMMAND_MODE_GENERIC, lower=True
+            ),
+            model.option(CONF_READ_REGISTERS, []): cv.All(
+                cv.ensure_list(cv.uint16_t), cv.Length(max=32)
             ),
             cv.Optional(CONF_FRAME_BUFFERS, default=1): cv.int_range(1, 3),
             model.option(CONF_LANE_BIT_RATE, None): cv.All(
@@ -241,6 +245,9 @@ async def to_code(config: ConfigType) -> None:
     cg.add(
         var.set_generic_commands(config[CONF_COMMAND_MODE] == COMMAND_MODE_GENERIC)
     )
+    if registers := config[CONF_READ_REGISTERS]:
+        table = cg.shared_progmem_array("mipi_dsi_read_registers", cg.uint16, registers)
+        cg.add(var.set_read_registers(table, len(registers)))
     cg.add(var.set_frame_buffers(config[CONF_FRAME_BUFFERS]))
     cg.add(var.set_lane_bit_rate(config[CONF_LANE_BIT_RATE] / 1.0e6))
     await cg.add_pin(var.set_reset_pin, config.get(CONF_RESET_PIN))

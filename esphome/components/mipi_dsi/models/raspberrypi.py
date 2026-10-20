@@ -31,6 +31,9 @@ DsiDriverChip(
     continuous_clock=True,
     command_mode="generic",
     no_transform=True,
+    # Read back after the init: IDREG, DSI_LANEENABLE, LCDCTRL, SYSCTRL (written), SYSSTAT, DSI_LANESTATUS0/1,
+    # DSI_INTSTATUS, DSIERRCNT
+    read_registers=[0x04A0, 0x0210, 0x0420, 0x0464, 0x0460, 0x0214, 0x0218, 0x0220, 0x0300],
     initsequence=[
         (0x10, 0x02, 0x03, 0x00, 0x00, 0x00),  # DSI_LANEENABLE: clock lane + data lane 0
         (0x64, 0x01, 0x05, 0x00, 0x00, 0x00),  # PPI_D0S_CLRSIPOCOUNT
