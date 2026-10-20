@@ -262,7 +262,7 @@ class USBStorageDevice : public esphome::storage::FilesystemStorage, public esph
   uint32_t cbw_tag_{1};
 
   int fatfs_drive_{-1};
-  char fatfs_drive_str_[4]{};  // "N:"
+  char fatfs_drive_str_[12]{};  // "N:" (sized for any int: no truncation warning)
   bool disk_ready_{false};
   bool mounted_{false};     // FAT mounted and VFS-registered
   bool fs_mounted_{false};  // in the StorageRegistry
