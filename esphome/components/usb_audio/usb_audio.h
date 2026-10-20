@@ -178,6 +178,7 @@ class USBAudioClient : public usb_host::USBClient {
   void release_speaker();
   // A device that can play the speaker's format is connected.
   bool speaker_available() const { return this->device_connected_ && this->spk_format_ok_; }
+  bool microphone_available() const { return this->device_connected_ && this->mic_format_ok_; }
   // True when the stream is open or opening; on_stream_event() then reports the outcome.
   bool resume_microphone();
   void suspend_microphone();
