@@ -8,6 +8,7 @@
 #include "core/lv_obj_class_private.h"
 #include "core/lv_obj_private.h"
 #include "display/lv_display_private.h"
+#include "misc/lv_area_private.h"
 
 #include <algorithm>
 #include <climits>
