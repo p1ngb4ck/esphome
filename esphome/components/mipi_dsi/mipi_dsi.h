@@ -76,6 +76,10 @@ class MipiDsi final : public display::Display {
   void set_frame_ack(bool frame_ack) { this->frame_ack_ = frame_ack; }
   // Clock lane kept in HS (bridges that take their pixel clock from it) instead of the host's automatic LP
   void set_continuous_clock(bool continuous) { this->continuous_clock_ = continuous; }
+  // End of Transmission packet after each HS transmission (IDF's default: on)
+  void set_eotp(bool eotp) { this->eotp_ = eotp; }
+  // Low power allowed in the horizontal back / front porch (IDF's default: allowed)
+  void set_lp_horizontal_blanking(bool lp) { this->lp_horizontal_blanking_ = lp; }
   // Init sequence sent as generic writes (bridge chips), without the DCS soft reset
   void set_generic_commands(bool generic) { this->generic_commands_ = generic; }
   // Generic mode: 16-bit registers read back (generic read) and logged once after the init sequence
@@ -177,6 +181,8 @@ class MipiDsi final : public display::Display {
   uint8_t video_mode_{2};
   bool frame_ack_{true};
   bool continuous_clock_{false};
+  bool eotp_{true};
+  bool lp_horizontal_blanking_{true};
   bool generic_commands_{false};
   uint8_t read_registers_count_{0};
   const uint16_t *read_registers_{nullptr};

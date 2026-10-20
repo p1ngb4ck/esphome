@@ -125,6 +125,11 @@ void MipiDsi::setup() {
   // starts the video mode. vid_mode_type: 0 non-burst sync pulses, 1 non-burst sync events, 2 burst.
   MIPI_DSI_LL_GET_HOST(0)->vid_mode_cfg.vid_mode_type = this->video_mode_;
   MIPI_DSI_LL_GET_HOST(0)->vid_mode_cfg.frame_bta_ack_en = this->frame_ack_;
+  // EoTp in HS is switched on by esp_lcd_new_dsi_bus(), LP in HBP / HFP by esp_lcd_new_panel_dpi() (both IDF 5.5.5
+  // and 6.1.0)
+  mipi_dsi_host_ll_enable_tx_eotp(MIPI_DSI_LL_GET_HOST(0), this->eotp_, false);
+  mipi_dsi_host_ll_dpi_enable_lp_horizontal_timing(MIPI_DSI_LL_GET_HOST(0), this->lp_horizontal_blanking_,
+                                                   this->lp_horizontal_blanking_);
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
   err = esp_lcd_dpi_panel_enable_dma2d(this->handle_);
   if (err != ESP_OK) {
@@ -601,13 +606,15 @@ void MipiDsi::dump_config() {
                 "\n  Video Mode: %s"
                 "\n  Frame Ack: %s"
                 "\n  Continuous Clock: %s"
+                "\n  EoTp: %s"
+                "\n  LP in horizontal blanking: %s"
                 "\n  Commands: %s",
                 this->model_, this->width_, this->height_, this->rotation_, this->lanes_, this->lane_bit_rate_,
                 this->hsync_pulse_width_, this->hsync_back_porch_, this->hsync_front_porch_, this->vsync_pulse_width_,
                 this->vsync_back_porch_, this->vsync_front_porch_, (3 - this->color_depth_) * 8, this->pixel_mode_,
                 YESNO(this->invert_colors_), this->pclk_frequency_, VIDEO_MODES[this->video_mode_],
-                YESNO(this->frame_ack_), YESNO(this->continuous_clock_),
-                this->generic_commands_ ? "generic" : "DCS");
+                YESNO(this->frame_ack_), YESNO(this->continuous_clock_), YESNO(this->eotp_),
+                YESNO(this->lp_horizontal_blanking_), this->generic_commands_ ? "generic" : "DCS");
   LOG_PIN("  Reset Pin ", this->reset_pin_);
 }
 }  // namespace esphome::mipi_dsi
