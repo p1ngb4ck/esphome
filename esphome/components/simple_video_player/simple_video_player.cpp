@@ -382,8 +382,11 @@ void SimpleVideoPlayer::loop() {
 #else
     const bool streaming = false;
 #endif
+    // The camera full screen takes the panel as a direct stream does
+    const bool cam_direct = this->cam_direct_.load(std::memory_order_acquire);
+    const bool panel_taken = streaming || cam_direct;
 #ifdef SVP_USE_LVGL
-    if (streaming && this->lvgl_component_ != nullptr && !this->dsi_lvgl_paused_) {
+    if (panel_taken && this->lvgl_component_ != nullptr && !this->dsi_lvgl_paused_) {
       this->lvgl_component_->set_paused(true, false);
       this->dsi_lvgl_paused_ = true;
     }
@@ -396,7 +399,7 @@ void SimpleVideoPlayer::loop() {
     idle = idle || this->audio_session_.load(std::memory_order_acquire);
 #endif
     const bool ended = idle && !this->playback_busy_.load(std::memory_order_acquire);
-    if (this->dsi_lvgl_paused_ && !streaming && ended && !this->advance_req_.load(std::memory_order_acquire) &&
+    if (this->dsi_lvgl_paused_ && !panel_taken && ended && !this->advance_req_.load(std::memory_order_acquire) &&
         !this->start_pending_.load(std::memory_order_acquire)) {
       this->lvgl_component_->set_paused(false, false);
       this->dsi_lvgl_paused_ = false;
@@ -407,7 +410,7 @@ void SimpleVideoPlayer::loop() {
       this->paused_ui_ = false;  // stopped or replaced meanwhile
       this->resume_req_.store(false, std::memory_order_relaxed);
     }
-    bool paused_ui = this->dsi_lvgl_paused_ && !streaming && state == PlayerState::PAUSED &&
+    bool paused_ui = this->dsi_lvgl_paused_ && !panel_taken && state == PlayerState::PAUSED &&
                      !this->is_network_session() && this->playback_parked_.load(std::memory_order_acquire);
 #ifdef SVP_CONTROLS
     paused_ui = paused_ui && !this->ctl_ready_.load(std::memory_order_acquire);  // else the controls draw over it
@@ -434,6 +437,8 @@ void SimpleVideoPlayer::loop() {
 #else
     const bool lvgl_off = true;
 #endif
+    // The camera's frames are drawn once LVGL lets go of the panel
+    this->cam_direct_ready_.store(cam_direct && lvgl_off, std::memory_order_release);
 #if defined(SVP_STREAM) && defined(USE_AUDIO)
     // Stream sound stopped arriving (the speaker runs on).
     if (this->stream_audio_on_.load(std::memory_order_acquire) &&

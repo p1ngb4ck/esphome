@@ -124,6 +124,12 @@ reports the media player's state instead while `state_` is STOPPED and `audio_re
   advances. The dashboard (direct sender) and a remote desktop run only with everything else stopped;
   pictures and audio are the only things that run side by side.
   No PPA in the video paths (the screen capture has a PPA client of its own, section 11).
+- **Camera full screen** (`camera_direct_start/stop`, `show_camera_frame_direct()`): the panel taken as a direct
+  stream is (loop() pauses LVGL, `cam_direct_ready_` once it let go); the picture task draws each frame into the
+  scanout buffer not shown (`direct_target_()`), 1:1 in the panel's orientation (the camera mounted to match),
+  centred and cut to the panel, black around (each buffer cleared once per picture size); MJPEG with rows of the
+  panel's width decoded straight into it, else into the camera scratch and copied 1:1 by screen capture's PPA client
+  (YUV converted), then flipped (`direct_show_()`). A tap calls `add_on_camera_direct_tap_callback`. Never scaled.
 - **Canvas**: RGB888 pair `output_buffers_[2]` at canvas size; decode into the back buffer, loop swaps
   the canvas draw buffer (S:419-441, S:1612-1625).
 - **udisp stills**: draw task decodes into the direct target or the canvas pair (R:1014-1153).

@@ -1215,6 +1215,165 @@ bool SimpleVideoPlayer::show_camera_frame(const uint8_t *data, size_t length, Ca
   return true;
 }
 
+#ifdef SVP_DSI_OUTPUT
+bool SimpleVideoPlayer::camera_direct_start() {
+  if (this->dsi_ == nullptr || !this->direct_flips_() || this->pic_task_ == nullptr)
+    return false;
+  this->cam_direct_touch_ = false;
+  this->cam_direct_.store(true, std::memory_order_release);
+  return true;
+}
+
+void SimpleVideoPlayer::camera_direct_stop() {
+  this->cam_direct_.store(false, std::memory_order_release);
+  this->cam_direct_ready_.store(false, std::memory_order_release);
+}
+
+bool SimpleVideoPlayer::show_camera_frame_direct(const uint8_t *data, size_t length, CameraFrameFormat format,
+                                                 uint16_t width, uint16_t height, std::function<void(bool)> &&done) {
+  if (!this->cam_direct_ready_.load(std::memory_order_acquire) || this->pic_task_ == nullptr || this->cam_busy_ ||
+      data == nullptr || length == 0)
+    return false;
+#ifndef SVP_CAPTURE
+  if (format != CameraFrameFormat::MJPEG)
+    return false;  // copied by the PPA: screen capture's client
+#endif
+  uint16_t w = width, h = height;
+  if (format == CameraFrameFormat::MJPEG) {
+    jpeg_decode_picture_info_t info{};
+    if (this->hw_jpeg_decoder_ == nullptr ||
+        jpeg_decoder_get_info(data, static_cast<uint32_t>(length), &info) != ESP_OK || info.width == 0 ||
+        info.height == 0)
+      return false;
+    uint32_t pw = 0;
+    const size_t bytes = jpeg_decoded_size(info, &pw);
+    w = static_cast<uint16_t>(info.width);
+    h = static_cast<uint16_t>(info.height);
+    // Rows the panel's own width and no padded rows: decoded straight into the scanout buffer; else via the scratch
+    const bool straight = pw == this->dsi_out_w_ && h <= this->dsi_out_h_ && bytes == static_cast<size_t>(pw) * h * 2;
+    if (!straight && bytes > dma_usable(this->cam_scratch_capacity_[0])) {
+      if (this->cam_scratch_[0] != nullptr)
+        this->pool_.free(this->cam_scratch_[0]);
+      this->cam_scratch_capacity_[0] = align_up(bytes, PsramPool::ALIGN);
+      this->cam_scratch_[0] = this->pool_.alloc(this->cam_scratch_capacity_[0]);
+      if (this->cam_scratch_[0] == nullptr) {
+        ESP_LOGW(TAG, "No room in the pool for the camera's %u byte picture", static_cast<unsigned>(bytes));
+        this->cam_scratch_capacity_[0] = 0;
+        return false;
+      }
+    }
+  }
+  CameraJob &job = this->cam_job_data_;
+  job = CameraJob{};
+  job.data = data;
+  job.length = length;
+  job.format = format;
+  job.width = w;
+  job.height = h;
+  job.direct = true;
+  this->cam_done_ = std::move(done);
+  this->cam_busy_ = true;
+  this->cam_decoded_.store(false, std::memory_order_relaxed);
+  this->cam_job_.store(true, std::memory_order_release);
+  xTaskNotifyGive(this->pic_task_);
+  return true;
+}
+
+// Picture task (Core 1, as the video's decode): the picture 1:1, centred, black around, in the buffer not shown
+bool SimpleVideoPlayer::camera_direct_draw_() {
+  CameraJob &job = this->cam_job_data_;
+  if (!this->cam_direct_ready_.load(std::memory_order_acquire))
+    return false;
+  size_t len = 0;
+  uint8_t *fb = this->direct_target_(true, &len);  // after the last flip
+  void *fbs[2]{};
+  display::ColorBitness bitness{};
+  if (fb == nullptr || fb == this->decode_target_ || this->dsi_->get_scanout_buffers(fbs, 2, &bitness) != 2)
+    return false;
+  const uint8_t index = fb == fbs[0] ? 0 : 1;
+  const uint32_t W = this->dsi_out_w_, H = this->dsi_out_h_;
+  const size_t bpp = this->dsi_fb_bpp_;
+  const size_t stride = static_cast<size_t>(W) * bpp;
+  const size_t fb_size = stride * H;
+  // Black once per buffer and picture size (the picture covers the same place in every frame)
+  const uint32_t key = (static_cast<uint32_t>(job.width) << 16) | job.height;
+  if (this->cam_direct_key_ != key) {
+    this->cam_direct_key_ = key;
+    this->cam_direct_black_ = 0;
+  }
+  if ((this->cam_direct_black_ & (1u << index)) == 0) {
+    memset(fb, 0, fb_size);
+    esp_cache_msync(fb, fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA |
+                                     ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    this->cam_direct_black_ |= static_cast<uint8_t>(1u << index);
+  }
+  // 1:1 in the panel's orientation, centred, cut when larger; even (YUV pixel pairs, decoder rows on cache lines)
+  const uint32_t ow = std::min<uint32_t>(job.width, W) & ~1u;
+  const uint32_t oh = std::min<uint32_t>(job.height, H);
+  const uint32_t sx = ((job.width - ow) / 2) & ~1u;
+  const uint32_t sy = (job.height - oh) / 2;
+  const uint32_t dx = ((W - ow) / 2) & ~1u;
+  const uint32_t dy = ((H - oh) / 2) & ~1u;
+  bool ok = false;
+  if (job.format == CameraFrameFormat::MJPEG) {
+    jpeg_decode_picture_info_t info{};
+    if (jpeg_decoder_get_info(job.data, static_cast<uint32_t>(job.length), &info) != ESP_OK)
+      return false;
+    uint32_t pw = 0;
+    const size_t bytes = jpeg_decoded_size(info, &pw);
+    jpeg_decode_cfg_t cfg{};
+    cfg.output_format = bpp == 3 ? JPEG_DECODE_OUT_FORMAT_RGB888 : JPEG_DECODE_OUT_FORMAT_RGB565;
+    cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;  // little-endian, as the panel's buffers
+    cfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
+    const uint32_t stream = static_cast<uint32_t>(align_up(job.length, 16));
+    uint32_t out = 0;
+    if (pw == W && bpp == 2 && bytes == static_cast<size_t>(pw) * info.height * 2 && info.height <= H) {
+      // The rows are the panel's: straight in at the picture's first row (on whole cache lines: dy even)
+      uint8_t *dest = fb + static_cast<size_t>(dy) * stride;
+      const size_t room = dma_usable(fb_size - static_cast<size_t>(dy) * stride);
+      ok = jpeg_decoder_process(this->hw_jpeg_decoder_, &cfg, job.data, stream, dest, static_cast<uint32_t>(room),
+                                &out) == ESP_OK &&
+           out != 0;
+    } else {
+      uint8_t *const scratch = this->cam_scratch_[0];
+      if (scratch == nullptr || bytes > dma_usable(this->cam_scratch_capacity_[0]))
+        return false;
+      if (jpeg_decoder_process(this->hw_jpeg_decoder_, &cfg, job.data, stream, scratch,
+                               static_cast<uint32_t>(dma_usable(this->cam_scratch_capacity_[0])), &out) != ESP_OK ||
+          out == 0)
+        return false;
+#ifdef SVP_CAPTURE
+      ok = this->camera_ppa_copy_(scratch, bpp == 3 ? PPA_SRM_COLOR_MODE_RGB888 : PPA_SRM_COLOR_MODE_RGB565, pw,
+                                  static_cast<uint32_t>(bytes / (static_cast<size_t>(pw) * bpp)), sx, sy, ow, oh, fb,
+                                  bpp == 3 ? PPA_SRM_COLOR_MODE_RGB888 : PPA_SRM_COLOR_MODE_RGB565, W, H, fb_size, dx,
+                                  dy);
+#endif
+      if (!ok) {
+        // No PPA: the rows by the CPU
+        for (uint32_t r = 0; r < oh; r++)
+          memcpy(fb + (static_cast<size_t>(dy + r) * W + dx) * bpp,
+                 scratch + (static_cast<size_t>(sy + r) * pw + sx) * bpp, static_cast<size_t>(ow) * bpp);
+        esp_cache_msync(fb + static_cast<size_t>(dy) * stride, static_cast<size_t>(oh) * stride,
+                        ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+        ok = true;
+      }
+    }
+  } else {
+#ifdef SVP_CAPTURE
+    const uint32_t in_cm = job.format == CameraFrameFormat::YUYV   ? PPA_SRM_COLOR_MODE_YUV422_YUYV
+                           : job.format == CameraFrameFormat::UYVY ? PPA_SRM_COLOR_MODE_YUV422_UYVY
+                                                                   : PPA_SRM_COLOR_MODE_RGB565;
+    ok = this->camera_ppa_copy_(job.data, in_cm, job.width, job.height, sx, sy, ow, oh, fb,
+                                bpp == 3 ? PPA_SRM_COLOR_MODE_RGB888 : PPA_SRM_COLOR_MODE_RGB565, W, H, fb_size, dx,
+                                dy);
+#endif
+  }
+  if (ok)
+    this->direct_show_(fb, 0, 0, static_cast<int>(W), static_cast<int>(H), 0);  // flipped to
+  return ok;
+}
+#endif
+
 void SimpleVideoPlayer::camera_preview_end() {
   if (this->cam_busy_) {
     this->cam_end_pending_ = true;
@@ -1246,6 +1405,43 @@ void SimpleVideoPlayer::camera_service_() {
 
 // Picture task: the frame fit into the canvas piece, black around it
 #ifdef SVP_CAPTURE
+bool SimpleVideoPlayer::camera_ppa_copy_(const void *in, uint32_t in_cm, uint32_t pic_w, uint32_t pic_h, uint32_t sx,
+                                         uint32_t sy, uint32_t bw, uint32_t bh, uint8_t *out, uint32_t out_cm,
+                                         uint32_t out_w, uint32_t out_h, size_t out_size, uint32_t dx, uint32_t dy) {
+  if (this->cap_ppa_ == nullptr) {
+    ppa_client_config_t pcfg{};
+    pcfg.oper_type = PPA_OPERATION_SRM;
+    pcfg.max_pending_trans_num = 1;
+    if (ppa_register_client(&pcfg, &this->cap_ppa_) != ESP_OK) {
+      this->cap_ppa_ = nullptr;
+      return false;
+    }
+  }
+  ppa_srm_oper_config_t cfg{};
+  cfg.in.buffer = in;
+  cfg.in.pic_w = pic_w;
+  cfg.in.pic_h = pic_h;
+  cfg.in.block_w = bw;
+  cfg.in.block_h = bh;
+  cfg.in.block_offset_x = sx;
+  cfg.in.block_offset_y = sy;
+  cfg.in.srm_cm = static_cast<ppa_srm_color_mode_t>(in_cm);
+  cfg.in.yuv_range = PPA_COLOR_RANGE_LIMIT;
+  cfg.in.yuv_std = PPA_COLOR_CONV_STD_RGB_YUV_BT601;
+  cfg.out.buffer = out;
+  cfg.out.buffer_size = out_size & ~(PsramPool::ALIGN - 1);
+  cfg.out.pic_w = out_w;
+  cfg.out.pic_h = out_h;
+  cfg.out.block_offset_x = dx;
+  cfg.out.block_offset_y = dy;
+  cfg.out.srm_cm = static_cast<ppa_srm_color_mode_t>(out_cm);
+  cfg.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
+  cfg.scale_x = 1.0f;
+  cfg.scale_y = 1.0f;
+  cfg.mode = PPA_TRANS_MODE_BLOCKING;
+  return ppa_do_scale_rotate_mirror(this->cap_ppa_, &cfg) == ESP_OK;
+}
+
 bool SimpleVideoPlayer::camera_ppa_fit_(const void *in, uint32_t in_cm, uint32_t pic_w, uint32_t pic_h,
                                         uint32_t block_w, uint32_t block_h) {
   CameraJob &job = this->cam_job_data_;
@@ -1310,6 +1506,12 @@ bool SimpleVideoPlayer::camera_ppa_fit_(const void *in, uint32_t in_cm, uint32_t
 
 void SimpleVideoPlayer::camera_decode_() {
   CameraJob &job = this->cam_job_data_;
+#ifdef SVP_DSI_OUTPUT
+  if (job.direct) {
+    job.ok = this->camera_direct_draw_();
+    return;
+  }
+#endif
   if (job.format == CameraFrameFormat::MJPEG) {
     jpeg_decode_picture_info_t info{};
     if (jpeg_decoder_get_info(job.data, static_cast<uint32_t>(job.length), &info) != ESP_OK || info.width == 0 ||

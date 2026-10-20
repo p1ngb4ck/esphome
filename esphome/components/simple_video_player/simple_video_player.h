@@ -907,7 +907,7 @@ class SimpleVideoPlayer : public Component
   /// the frame was not taken. target nullptr (MJPEG only): decoded into one of two scratch pieces only (the one the
   /// reader does not hold), camera_decoded() gives its pixels: the next frame can be decoded while the reader still
   /// shows the last one (as the video's decoded double buffer).
-  enum class CameraFrameFormat : uint8_t { MJPEG, YUYV, UYVY };
+  enum class CameraFrameFormat : uint8_t { MJPEG, YUYV, UYVY, RGB565 };
   bool show_camera_frame(const uint8_t *data, size_t length, CameraFrameFormat format, uint16_t width,
                          uint16_t height, uint8_t *target, size_t target_capacity, int32_t target_w, int32_t target_h,
                          std::function<void(bool)> &&done);
@@ -931,6 +931,22 @@ class SimpleVideoPlayer : public Component
   }
   /// Main loop: the reader is done with a piece camera_decoded() gave.
   void camera_decoded_done(uint8_t slot) { this->cam_held_ &= static_cast<uint8_t>(~(1u << slot)); }
+  /// Camera full screen through the display's direct output (as a video on the panel): LVGL paused by loop() while it
+  /// runs; each frame 1:1 in the panel's own orientation, centred, black around (cut when larger), never scaled.
+  /// Main loop. False: no direct output with two scanout buffers.
+  bool camera_direct_start();
+  void camera_direct_stop();
+  /// LVGL is paused for it: frames are drawn (show_camera_frame_direct()).
+  bool camera_direct_running() const { return this->cam_direct_ready_.load(std::memory_order_acquire); }
+  /// A frame for the full screen: MJPEG decoded, RGB565 / YUYV / UYVY copied (converted) by the picture task into the
+  /// scanout buffer not shown, then flipped to. done(ok) on the main loop once the frame is not read any more. False:
+  /// not running, the task busy, or the format not shown - not taken.
+  bool show_camera_frame_direct(const uint8_t *data, size_t length, CameraFrameFormat format, uint16_t width,
+                                uint16_t height, std::function<void(bool)> &&done);
+  /// A tap on the panel while the camera is full screen (main loop): its owner ends it.
+  void add_on_camera_direct_tap_callback(std::function<void()> &&callback) {
+    this->cam_direct_tap_callbacks_.add(std::move(callback));
+  }
   /// Where in the target the last camera frame went (target pixels): what to redraw.
   void camera_frame_rect(int32_t &x, int32_t &y, int32_t &w, int32_t &h) const {
     x = this->cam_job_data_.out_x;
@@ -2197,6 +2213,7 @@ class SimpleVideoPlayer : public Component
     int32_t out_x{0}, out_y{0}, out_w{0}, out_h{0};  // the picture's rectangle in the target
     uint16_t pic_w{0}, pic_h{0};                     // no target: the decoded rows in the scratch
     uint8_t slot{0};                                 // the scratch piece decoded into
+    bool direct{false};                              // full screen: into the scanout buffer not shown
   };
   CameraJob cam_job_data_{};
   std::atomic<bool> cam_job_{false};
@@ -2209,6 +2226,14 @@ class SimpleVideoPlayer : public Component
   uint8_t *cam_scratch_[2]{};
   size_t cam_scratch_capacity_[2]{};
   uint8_t cam_held_{0};  // bit n: the reader shows scratch n (main loop)
+  // Camera full screen (direct output): wanted (main loop), LVGL paused for it (loop(), read by the main loop); which
+  // scanout buffers are black around the picture of cam_direct_key_ (picture task)
+  std::atomic<bool> cam_direct_{false};
+  std::atomic<bool> cam_direct_ready_{false};
+  uint8_t cam_direct_black_{0};
+  uint32_t cam_direct_key_{0};
+  bool cam_direct_touch_{false};
+  CallbackManager<void()> cam_direct_tap_callbacks_;
   // The canvas' black around a YUV frame the PPA fits in: drawn once per size
   uint32_t cam_cleared_key_{0};
   int pic_render_{-1};                    // image to decode again (overlay, canvas size), -1 none
@@ -2311,6 +2336,11 @@ class SimpleVideoPlayer : public Component
   static void picture_task_entry_(void *arg);
   void decode_job_(PictureJob &job);
   void camera_decode_();   // picture task
+  bool camera_direct_draw_();  // picture task: the job's frame into the scanout buffer not shown, flipped to
+  // Picture task: a 1:1 PPA copy (YUV converted) of a block of a picture into a picture of out_w x out_h
+  bool camera_ppa_copy_(const void *in, uint32_t in_cm, uint32_t pic_w, uint32_t pic_h, uint32_t sx, uint32_t sy,
+                        uint32_t bw, uint32_t bh, uint8_t *out, uint32_t out_cm, uint32_t out_w, uint32_t out_h,
+                        size_t out_size, uint32_t dx, uint32_t dy);
   // Picture task: a picture (RGB565 or YUV422 block of pic_w x pic_h) fit into the job's target by the PPA, black
   // around it (drawn once per size). False: no PPA client or the PPA refused it.
   bool camera_ppa_fit_(const void *in, uint32_t in_cm, uint32_t pic_w, uint32_t pic_h, uint32_t block_w,

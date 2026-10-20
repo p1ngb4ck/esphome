@@ -978,6 +978,18 @@ float SimpleVideoPlayer::controls_fraction_(int32_t x) const {
 }
 
 void SimpleVideoPlayer::controls_touch(bool pressed, int32_t x, int32_t y) {
+#ifdef SVP_DSI_OUTPUT
+  // The camera full screen: a tap (press and release) tells its owner, who ends it
+  if (this->cam_direct_ready_.load(std::memory_order_acquire)) {
+    if (pressed) {
+      this->cam_direct_touch_ = true;
+    } else if (this->cam_direct_touch_) {
+      this->cam_direct_touch_ = false;
+      this->cam_direct_tap_callbacks_.call();
+    }
+    return;
+  }
+#endif
   if (!this->controls_active_()) {
     this->ctl_pressed_ = false;
     this->ctl_dragging_.store(false, std::memory_order_release);
