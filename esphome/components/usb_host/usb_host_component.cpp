@@ -884,10 +884,16 @@ void USBHost::stream_release(IsocStream &stream, USBClient *cb, usb_host_client_
   // Only the owner may touch the alt-setting: a feedback stream shares its interface with
   // the data stream, and resetting it here would tear that one down.
   if (stream.alt_setting != 0) {
-    cb->set_interface(stream.interface_num, 0, [](const TransferStatus &status) {
+    auto done = [](const TransferStatus &status) {
       if (!status.success)
         ESP_LOGW(TAG, "alt-setting reset failed");
-    });
+    };
+    // A several-devices driver's stream: on its own device (the client has no single device then)
+    if (stream.device != nullptr) {
+      cb->set_interface(*stream.device, stream.interface_num, 0, done);
+    } else {
+      cb->set_interface(stream.interface_num, 0, done);
+    }
   }
   this->do_release_interface(client_handle, device_handle, stream.interface_num);
 }
