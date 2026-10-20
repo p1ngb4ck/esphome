@@ -292,7 +292,15 @@ def _add_idf_config(config: ConfigType) -> None:
         override_path=_sync_esp_video_override(),
     )
     add_idf_component(name="espressif/esp_cam_sensor", ref="2.6.0")
-    add_idf_component(name="espressif/esp_ipa", ref="2.4.0")
+    # esp_ipa 2.4.0's IDF 6 library is built for ESP32-P4 rev >= 3 (Zba / Zbb instructions): on a rev < 3 chip
+    # the ISP pipeline's create_ipa_array() trapped (illegal instruction, sh2add). The commit that adds
+    # libesp_ipa_p4_less_v3*.a (picked with CONFIG_ESP32P4_SELECTS_REV_LESS_V3), still version 2.4.0
+    add_idf_component(
+        name="espressif/esp_ipa",
+        repo="https://github.com/espressif/esp-video-components.git",
+        ref="5ec4d12101d7308dd9f826ff211312387f63e22d",
+        path="esp_ipa",
+    )
 
     sensor = config[CONF_SENSOR]
     if (formats := SENSOR_FORMATS.get(sensor)) is not None:
