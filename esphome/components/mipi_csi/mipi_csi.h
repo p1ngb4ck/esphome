@@ -112,6 +112,9 @@ class MipiCsiCamera final : public camera::Camera {
   /// An image control (V4L2_CID_BRIGHTNESS, CONTRAST, SATURATION, SHARPNESS, HFLIP, VFLIP ...): kept for every
   /// start and applied at once while the camera streams. False: no room for another control.
   bool set_control(uint32_t id, int32_t value);
+  /// The sensor's flips as controls (applied at once while streaming)
+  void set_mirror(bool on);
+  void set_upside_down(bool on);
   uint8_t get_framerate() const { return this->framerate_; }
   uint8_t get_jpeg_quality() const { return this->jpeg_quality_; }
   void set_frame_buffer_count(uint8_t count) { this->frame_buffer_count_ = count; }

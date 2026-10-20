@@ -347,6 +347,10 @@ bool MipiCsiCamera::set_control(uint32_t id, int32_t value) {
   return true;
 }
 
+void MipiCsiCamera::set_mirror(bool on) { this->set_control(V4L2_CID_HFLIP, on ? 1 : 0); }
+
+void MipiCsiCamera::set_upside_down(bool on) { this->set_control(V4L2_CID_VFLIP, on ? 1 : 0); }
+
 static size_t align_piece(size_t size) { return (size + 127) & ~static_cast<size_t>(127); }
 
 bool MipiCsiCamera::open_jpeg_() {
