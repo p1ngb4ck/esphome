@@ -45,9 +45,9 @@ void FT5x06Touchscreen::continue_setup_() {
       break;
 
     default:
-      ESP_LOGE(TAG, "Unknown vendor ID 0x%X", data[0]);
-      this->mark_failed();
-      return;
+      // Other FT5x06-family controllers (e.g. the Raspberry Pi 7" Touch Display's) use the same register map
+      ESP_LOGW(TAG, "Unknown vendor ID 0x%X, using the FT5x06 register map", data[0]);
+      break;
   }
 }
 
