@@ -283,7 +283,7 @@ SpiceUsbSlot::Xfer *SpiceUsbSlot::usbip_take_(Kind kind, size_t bytes, uint16_t 
   if (kind == Kind::CONTROL || kind == Kind::BULK)
     return this->gen_take_();
   if (kind == Kind::INTERRUPT_IN || kind == Kind::INTERRUPT_OUT) {
-    for (auto &x : this->int_) {
+    for (auto &x : this->xs_->intr) {
       if (!x.busy) {
         x = Xfer{x.t, this};
         x.t->callback = xfer_done_;
@@ -585,9 +585,9 @@ bool SpiceUsbSlot::usbip_unlink_(uint32_t seqnum, uint32_t target) {
     }
     return nullptr;
   };
-  Xfer *x = find(this->gen_, GEN_XFERS);
+  Xfer *x = find(this->xs_->gen, GEN_XFERS);
   if (x == nullptr)
-    x = find(this->int_, INT_XFERS);
+    x = find(this->xs_->intr, INT_XFERS);
   if (x == nullptr)
     x = find(this->usbip_iso_, USBIP_ISO_XFERS);
   if (x == nullptr)
