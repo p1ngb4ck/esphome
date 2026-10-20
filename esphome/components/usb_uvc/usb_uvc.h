@@ -112,6 +112,8 @@ class UVCClient : public usb_host::USBClient {
 
   // One plugged camera (its UsbDevice's context): made in on_device_connected(), freed in
   // free_device_context() once its stream is closed (device_busy_()).
+  // A stream that died is opened again this often in a row (without a frame between) before it is given up
+  static constexpr uint8_t MAX_RESTARTS = 3;
   struct Camera {
     usb_host::UsbDevice *dev{nullptr};
     uint32_t id{0};  // continuations of an earlier camera find it gone
@@ -130,6 +132,7 @@ class UVCClient : public usb_host::USBClient {
     bool wanted{false};   // start() asked for the stream (starts > 0)
     uint8_t starts{0};
     bool reopen{false};   // closing for a switch: open again in the new selection once closed
+    uint8_t restarts{0};  // the stream died and was opened again; back to 0 with each delivered frame
 
     UvcVsCtrl probe{};
     usb_host::IsocStream stream{};

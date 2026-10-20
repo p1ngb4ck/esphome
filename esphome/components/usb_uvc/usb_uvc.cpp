@@ -42,15 +42,24 @@ void UVCClient::loop() {
     if (cam->ready.load(std::memory_order_acquire)) {
       const uint8_t *data = cam->buffers[cam->ready_index];
       const UvcFrameInfo &info = cam->frames[cam->selected];
+      cam->restarts = 0;  // it streams
       for (auto &cb : this->frame_callbacks_)
         cb(static_cast<uint8_t>(cam->dev->addr), data, cam->ready_len, info);
       if (!cam->held)
         cam->ready.store(false, std::memory_order_release);
     }
-    // A stream that stopped by itself (its URBs refused): closed like a stopped one
+    // A stream that stopped by itself (its URBs refused: the host halted the endpoint on a transfer error, seen right
+    // after a start): closed and opened again while it is still wanted, as a switch does; given up after
+    // MAX_RESTARTS in a row without a frame
     if (cam->state == StreamState::STREAMING && cam->stream.died.exchange(false, std::memory_order_acq_rel)) {
-      ESP_LOGW(TAG, "The stream stopped");
-      cam->wanted = false;
+      if (cam->wanted && cam->restarts < MAX_RESTARTS) {
+        cam->restarts++;
+        ESP_LOGW(TAG, "The stream stopped; opening it again (%u of %u)", cam->restarts, MAX_RESTARTS);
+        cam->reopen = true;
+      } else {
+        ESP_LOGW(TAG, "The stream stopped");
+        cam->wanted = false;
+      }
       this->close_(*cam);
     }
     // A closed stream: its buffers back; a switch opens it again in the new selection
