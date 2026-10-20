@@ -272,6 +272,8 @@ bool MipiCsiCamera::configure_device_() {
     this->apply_control_(V4L2_CID_HFLIP, *this->horizontal_flip_, "horizontal flip");
   if (this->vertical_flip_.has_value())
     this->apply_control_(V4L2_CID_VFLIP, *this->vertical_flip_, "vertical flip");
+  for (uint8_t i = 0; i < this->control_count_; i++)
+    this->apply_control_(this->controls_[i].id, this->controls_[i].value, "an image control");
 
   if (!this->read_back_format_(mapping.fourcc, mapping.bytes_per_pixel, mapping.name))
     return false;
@@ -325,6 +327,24 @@ void MipiCsiCamera::apply_control_(uint32_t id, int32_t value, const char *name)
   if (ioctl(this->fd_, VIDIOC_S_EXT_CTRLS, &controls) != 0) {
     ESP_LOGW(TAG, "The sensor does not support %s", name);
   }
+}
+
+bool MipiCsiCamera::set_control(uint32_t id, int32_t value) {
+  Control *slot = nullptr;
+  for (uint8_t i = 0; i < this->control_count_; i++) {
+    if (this->controls_[i].id == id)
+      slot = &this->controls_[i];
+  }
+  if (slot == nullptr) {
+    if (this->control_count_ >= MAX_CONTROLS)
+      return false;
+    slot = &this->controls_[this->control_count_++];
+    slot->id = id;
+  }
+  slot->value = value;
+  if (this->fd_ >= 0)
+    this->apply_control_(id, value, "an image control");
+  return true;
 }
 
 static size_t align_piece(size_t size) { return (size + 127) & ~static_cast<size_t>(127); }

@@ -109,6 +109,11 @@ class MipiCsiCamera final : public camera::Camera {
   void set_horizontal_flip(bool flip) { this->horizontal_flip_ = flip; }
   void set_vertical_flip(bool flip) { this->vertical_flip_ = flip; }
   void set_framerate(uint8_t framerate) { this->framerate_ = framerate; }
+  /// An image control (V4L2_CID_BRIGHTNESS, CONTRAST, SATURATION, SHARPNESS, HFLIP, VFLIP ...): kept for every
+  /// start and applied at once while the camera streams. False: no room for another control.
+  bool set_control(uint32_t id, int32_t value);
+  uint8_t get_framerate() const { return this->framerate_; }
+  uint8_t get_jpeg_quality() const { return this->jpeg_quality_; }
   void set_frame_buffer_count(uint8_t count) { this->frame_buffer_count_ = count; }
   void set_i2c_bus(i2c::InternalI2CBus *bus) { this->i2c_bus_ = bus; }
   void set_sccb_frequency(uint32_t frequency) { this->sccb_frequency_ = frequency; }
@@ -200,6 +205,14 @@ class MipiCsiCamera final : public camera::Camera {
   uint32_t xclk_frequency_{0};
 
   int fd_{-1};
+  // The image controls set at runtime (set_control), applied at each start after the flips
+  struct Control {
+    uint32_t id;
+    int32_t value;
+  };
+  static constexpr uint8_t MAX_CONTROLS = 8;
+  Control controls_[MAX_CONTROLS]{};
+  uint8_t control_count_{0};
   /// Frame size the driver reports and the encoder is set up for. A frame that arrives at a
   /// different size did not come out of the pipeline we configured.
   size_t expected_frame_size_{0};
