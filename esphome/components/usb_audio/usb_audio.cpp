@@ -771,9 +771,29 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
   UacAltInfo mapped_alt{};
   uint8_t mapped_intf = 0;
 
+  // What the device offers, once per device (the first of the two searches): what a configuration can ask for
+  const bool log_formats = want_out == this->spk_cfg_.configured;
   auto try_commit = [&]() {
     if (!format_seen || !cur_alt_info.valid)
       return;
+    if (log_formats) {
+      char rates[64] = "";
+      if (cur_alt_info.freq_from_clock) {
+        snprintf(rates, sizeof(rates), "clock");
+      } else if (cur_alt_info.sample_freq_type == 0) {
+        snprintf(rates, sizeof(rates), "%" PRIu32 "-%" PRIu32, cur_alt_info.sample_freq_lower,
+                 cur_alt_info.sample_freq_upper);
+      } else {
+        size_t used = 0;
+        for (uint8_t i = 0; i < cur_alt_info.sample_freq_type && i < UAC_MAX_SAMPLE_FREQS && used < sizeof(rates);
+             i++)
+          used += snprintf(rates + used, sizeof(rates) - used, "%s%" PRIu32, i == 0 ? "" : " ",
+                           cur_alt_info.sample_freq[i]);
+      }
+      ESP_LOGD(TAG, "Offers %s: intf=%u alt=%u channels=%u bits=%u rate=%s Hz",
+               (cur_alt_info.ep_addr & 0x80) == 0 ? "speaker" : "microphone", cur_intf, cur_alt_info.alt_setting,
+               cur_alt_info.channels, cur_alt_info.bit_resolution, rates);
+    }
     if (cur_alt_info.bit_resolution != bits)
       return;
     // A multichannel alt-setting is usable when it carries the requested pair, but only for a
@@ -973,7 +993,7 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
   }
 
   if (!alt_out.valid) {
-    ESP_LOGE(TAG, "No %s AS alt-setting found for channels=%u bits=%u rate=%" PRIu32,
+    ESP_LOGD(TAG, "No %s AS alt-setting found for channels=%u bits=%u rate=%" PRIu32,
              want_out ? "speaker" : "microphone", channels, bits, sample_rate);
     return false;
   }
@@ -1785,9 +1805,9 @@ void USBAudioClient::on_connected() {
                                                      this->spk_cfg_.sample_rate,
                                                      this->spk_as_intf_, this->spk_alt_);
     if (!this->spk_format_ok_) {
-      // The device cannot do the configured format. Retrying will not change that, so say so
-      // once and leave the status set until a different device shows up.
-      this->set_stream_error_("Device does not offer the configured speaker format");
+      // The device cannot do the configured format (its formats: "Offers" above). Retrying will not change that:
+      // said once, the speaker stays off for this device; its microphone (if configured) is served on
+      ESP_LOGW(TAG, "Device does not offer the configured speaker format: no speaker on it");
     }
   }
 
@@ -1797,7 +1817,7 @@ void USBAudioClient::on_connected() {
                                                      this->mic_cfg_.sample_rate,
                                                      this->mic_as_intf_, this->mic_alt_);
     if (!this->mic_format_ok_) {
-      this->set_stream_error_("Device does not offer the configured microphone format");
+      ESP_LOGW(TAG, "Device does not offer the configured microphone format: no microphone on it");
     }
   }
 
