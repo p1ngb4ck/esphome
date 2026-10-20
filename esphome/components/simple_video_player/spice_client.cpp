@@ -1488,6 +1488,7 @@ bool SimpleVideoPlayer::desktop_take_panel_(bool direct, bool &wifi_held, bool w
     return false;
   }
   this->spice_on_.store(true, std::memory_order_release);
+  this->app_end_req_.store(true, std::memory_order_release);  // pictures / the camera end (main loop)
   this->start_pending_.store(false, std::memory_order_release);
 #ifdef SVP_AUDIO_FILES
   if (with_sound)

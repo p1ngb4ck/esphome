@@ -312,6 +312,8 @@ void SimpleVideoPlayer::loop() {
 #endif
   if (this->sound_takeover_req_.exchange(false, std::memory_order_acq_rel))
     this->sound_take_over_();
+  if (this->app_end_req_.exchange(false, std::memory_order_acq_rel))
+    this->app_end_();  // a video, stream or desktop session started on another task
 #ifdef SVP_SPICE
   if (this->spice_sound_claim_.exchange(false, std::memory_order_acq_rel))
     this->spice_sound_take_();
@@ -543,6 +545,7 @@ void SimpleVideoPlayer::play(const std::string &video_path, bool folder_playlist
     return;
 #endif
   this->sound_take_over_();  // a video plays alone
+  this->app_end_();          // and without pictures or the camera
   this->start_path_ = video_path;
   this->start_folder_ = folder_playlist;
   this->start_pending_.store(true, std::memory_order_release);
@@ -911,6 +914,43 @@ void SimpleVideoPlayer::stop() {
 #endif
   this->start_pending_.store(false, std::memory_order_release);
   this->end_session_();
+}
+
+void SimpleVideoPlayer::app_end_() {
+  const AppKind was = this->app_;
+  if (was == AppKind::NONE)
+    return;
+  this->app_ = AppKind::NONE;
+  if (was == AppKind::PICTURES)
+    this->close_picture();
+  this->app_end_callbacks_.call(was);
+}
+
+void SimpleVideoPlayer::app_take(AppKind app, size_t need_bytes) {
+#ifdef SVP_SPICE
+  if (this->is_spice_connected())
+    this->spice_disconnect();  // a desktop session ends
+#endif
+  const PlayerState state = this->state_.load(std::memory_order_acquire);
+  const bool video = (state == PlayerState::PLAYING || state == PlayerState::PAUSED) && !this->is_audio_session();
+  if (video)
+    this->stop();  // a video ends (an audio file plays on)
+  if (this->app_ != app)
+    this->app_end_();
+  this->app_ = app;
+#ifdef SVP_AUDIO_FILES
+  // The camera beside the audio only if it fits: PSRAM's largest free block against what it takes
+  if (app == AppKind::CAMERA && need_bytes != 0 && this->is_audio_session() &&
+      heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) < need_bytes) {
+    ESP_LOGI(TAG, "Audio stopped: PSRAM has no room for the camera beside it");
+    this->stop();
+  }
+#endif
+}
+
+void SimpleVideoPlayer::app_release(AppKind app) {
+  if (this->app_ == app)
+    this->app_ = AppKind::NONE;
 }
 
 void SimpleVideoPlayer::sound_take_over_() {

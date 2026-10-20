@@ -315,6 +315,8 @@ void SimpleVideoPlayer::stream_net_loop_() {
       this->stream_desktop_sender_ = desktop_sender;
 #endif
       this->stream_sender_busy_.store(true, std::memory_order_release);
+      this->app_end_req_.store(true, std::memory_order_release);  // pictures / the camera end (main loop)
+      App.wake_loop_threadsafe();
       ESP_LOGI(TAG, "Sender connected from %s", peer_text);
 
       this->stream_hdr_len_ = 0;

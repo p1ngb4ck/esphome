@@ -880,6 +880,18 @@ class SimpleVideoPlayer : public Component
     this->thumb_ready_callback_ = std::move(callback);
   }
 
+  /// The apps beside the video / stream / desktop sessions (Olli: only pictures + audio, VNC + audio, camera + audio
+  /// if it fits; everything else exclusive). One runs at a time.
+  enum class AppKind : uint8_t { NONE, PICTURES, CAMERA };
+  /// Main loop: @p app takes the panel - a video, a desktop session and the other app end; for the camera the
+  /// audio ends too when PSRAM has no free block of @p need_bytes beside it.
+  void app_take(AppKind app, size_t need_bytes = 0);
+  /// Main loop: @p app ended by itself (nothing else ends).
+  void app_release(AppKind app);
+  AppKind active_app() const { return this->app_; }
+  /// The app ended by another taking the panel (main loop): its owner gives everything back.
+  void add_on_app_end_callback(std::function<void(AppKind)> &&callback) { this->app_end_callbacks_.add(std::move(callback)); }
+
   /// Requests an image of the current folder; it shows once read and decoded. False when out of range.
   bool show_image(size_t index);
   /// An image by full path or file name; a path outside the current folder opens its folder.
@@ -1085,6 +1097,12 @@ class SimpleVideoPlayer : public Component
   /// announcement) stop.
   void sound_take_over_();
   std::atomic<bool> sound_takeover_req_{false};  // sound_take_over_() asked for by another task
+  // The app switch: the running app; another task's session start asks the main loop to end it
+  AppKind app_{AppKind::NONE};
+  std::atomic<bool> app_end_req_{false};
+  CallbackManager<void(AppKind)> app_end_callbacks_;
+  /// Main loop: the running app ends (pictures close, the camera's owner is told).
+  void app_end_();
 
   /// Main playback loop (runs in task)
   void playback_loop_();

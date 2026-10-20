@@ -463,6 +463,8 @@ bool SimpleVideoPlayer::show_image(size_t index) {
     ESP_LOGW(TAG, "No picture %u (of %u)", static_cast<unsigned>(index), static_cast<unsigned>(this->images_.size()));
     return false;
   }
+  if (this->app_ != AppKind::PICTURES)
+    this->app_take(AppKind::PICTURES);  // a video, a desktop session, the camera end
   this->pic_wanted_ = static_cast<int>(index);
   return true;
 }
@@ -534,6 +536,7 @@ bool SimpleVideoPlayer::next_image() {
 void SimpleVideoPlayer::close_picture() {
   if (!this->pic_ready_)
     return;
+  this->app_release(AppKind::PICTURES);
   this->slideshow_mode_ = SlideshowMode::STOPPED;
   this->overlay_visible_ = false;
   this->pic_wanted_ = -1;
