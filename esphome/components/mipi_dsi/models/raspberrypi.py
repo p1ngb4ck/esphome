@@ -7,7 +7,7 @@ from . import DsiDriverChip
 # Bridge init from Linux drivers/gpu/drm/panel/panel-raspberrypi-touchscreen.c and drivers/gpu/drm/bridge/tc358762.c:
 # each bridge register written as a generic long write of the 16-bit address and the 32-bit value, both
 # little-endian. Link and timing as a Raspberry Pi 4's firmware drives this display (its DSI1 host, pixel valve and
-# clock registers, read 2026-10-21): 1 lane at 750 Mbps, RGB888, video mode with sync pulses (non-burst), continuous
+# clock registers, read 2026-10-21): 1 lane at 750 Mbps (its DSI1 PHY PLL; the bit rate inferred from it), RGB888, video mode with sync pulses (non-burst), continuous
 # HS clock, no LP in the horizontal blanking, no EoT packet, pixel clock 27.777 MHz (750 / 27), H sync / back / front
 # porch 2 / 44 / 61, V 2 / 21 / 7.
 # The ATTINY must have powered the bridge (REG_POWERON = 1, then REG_PORTB bit 0 set) before this display sets up.
