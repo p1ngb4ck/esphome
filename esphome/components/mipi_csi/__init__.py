@@ -282,6 +282,44 @@ def _sync_esp_video_override() -> str:
     return str(dest)
 
 
+ESP_IPA_COMMIT = "5ec4d12101d7308dd9f826ff211312387f63e22d"
+ESP_IPA_URL = f"https://codeload.github.com/espressif/esp-video-components/zip/{ESP_IPA_COMMIT}"
+
+
+def _sync_esp_ipa_override() -> str:
+    """esp_ipa of esp-video-components ESP_IPA_COMMIT (with its ESP32-P4 rev < 3 library) in components-src."""
+    import io
+    import shutil
+    import zipfile
+
+    from esphome.external_files import compute_local_file_path, download_content
+
+    dest = Path(CORE.build_path) / "components-src" / "espressif__esp_ipa"
+    marker = dest / _ESP_VIDEO_OVERRIDE_MARKER
+    if marker.is_file() and marker.read_text() == ESP_IPA_COMMIT:
+        return str(dest)
+
+    archive = download_content(ESP_IPA_URL, compute_local_file_path("mipi_csi", ESP_IPA_URL))
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    prefix = f"esp-video-components-{ESP_IPA_COMMIT}/esp_ipa/"
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        for info in zf.infolist():
+            if not info.filename.startswith(prefix) or info.is_dir():
+                continue
+            if info.filename[len(prefix) :].startswith("test_apps/"):
+                continue  # their own manifests, not the component
+            target = dest / info.filename[len(prefix) :]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(zf.read(info))
+    if not (dest / "lib" / "esp32p4" / "v6.0+" / "libesp_ipa_p4_less_v3.a").is_file():
+        raise cv.Invalid(f"mipi_csi: esp_ipa {ESP_IPA_COMMIT} has no libesp_ipa_p4_less_v3.a")
+
+    marker.write_text(ESP_IPA_COMMIT)
+    return str(dest)
+
+
 def _add_idf_config(config: ConfigType) -> None:
     # A copy without its USB UVC device (idf_video_patch.py): USB cameras are usb_uvc's
     from . import idf_video_patch as patch
@@ -294,12 +332,12 @@ def _add_idf_config(config: ConfigType) -> None:
     add_idf_component(name="espressif/esp_cam_sensor", ref="2.6.0")
     # esp_ipa 2.4.0's IDF 6 library is built for ESP32-P4 rev >= 3 (Zba / Zbb instructions): on a rev < 3 chip
     # the ISP pipeline's create_ipa_array() trapped (illegal instruction, sh2add). The commit that adds
-    # libesp_ipa_p4_less_v3*.a (picked with CONFIG_ESP32P4_SELECTS_REV_LESS_V3), still version 2.4.0
+    # libesp_ipa_p4_less_v3*.a (picked with CONFIG_ESP32P4_SELECTS_REV_LESS_V3), still version 2.4.0. As an
+    # override: a git source beside esp_video's registry requirement was resolved from the registry anyway
     add_idf_component(
         name="espressif/esp_ipa",
-        repo="https://github.com/espressif/esp-video-components.git",
-        ref="5ec4d12101d7308dd9f826ff211312387f63e22d",
-        path="esp_ipa",
+        ref="2.4.0",
+        override_path=_sync_esp_ipa_override(),
     )
 
     sensor = config[CONF_SENSOR]
