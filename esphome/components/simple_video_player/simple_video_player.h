@@ -904,27 +904,33 @@ class SimpleVideoPlayer : public Component
   /// A camera's frame for the camera page (a UVC camera): decoded (MJPEG, the HW JPEG decoder) or converted (YUYV /
   /// UYVY, the PPA) and fit into target (RGB565, target_w x target_h, a pool piece) by the picture task. done(ok)
   /// on the main loop once the frame is no longer read. False: the task is busy, or the format is not shown here -
-  /// the frame was not taken. target nullptr (MJPEG only): decoded into the scratch piece only, camera_decoded()
-  /// gives its pixels (valid until the next frame or camera_preview_end()).
+  /// the frame was not taken. target nullptr (MJPEG only): decoded into one of two scratch pieces only (the one the
+  /// reader does not hold), camera_decoded() gives its pixels: the next frame can be decoded while the reader still
+  /// shows the last one (as the video's decoded double buffer).
   enum class CameraFrameFormat : uint8_t { MJPEG, YUYV, UYVY };
   bool show_camera_frame(const uint8_t *data, size_t length, CameraFrameFormat format, uint16_t width,
                          uint16_t height, uint8_t *target, size_t target_capacity, int32_t target_w, int32_t target_h,
                          std::function<void(bool)> &&done);
   /// The camera's picture ends (main loop): its scratch piece back to the pool once no frame is decoded.
   void camera_preview_end();
-  /// The last frame decoded without a target (RGB565): pic_w x pic_h rows (the decoder's padding), w x h of it the
-  /// picture. False: none.
-  bool camera_decoded(const uint8_t *&pixels, uint16_t &pic_w, uint16_t &pic_h, uint16_t &w, uint16_t &h) const {
+  /// Main loop: the last frame decoded without a target (RGB565): pic_w x pic_h rows (the decoder's padding), w x h of
+  /// it the picture, its piece held by the reader (slot) until camera_decoded_done(slot). False: none.
+  bool camera_decoded(const uint8_t *&pixels, uint16_t &pic_w, uint16_t &pic_h, uint16_t &w, uint16_t &h,
+                      uint8_t &slot) {
     const CameraJob &job = this->cam_job_data_;
-    if (job.target != nullptr || !job.ok || this->cam_scratch_ == nullptr)
+    if (job.target != nullptr || !job.ok || this->cam_scratch_[job.slot] == nullptr)
       return false;
-    pixels = this->cam_scratch_;
+    pixels = this->cam_scratch_[job.slot];
     pic_w = job.pic_w;
     pic_h = job.pic_h;
     w = static_cast<uint16_t>(job.out_w);
     h = static_cast<uint16_t>(job.out_h);
+    slot = job.slot;
+    this->cam_held_ |= static_cast<uint8_t>(1u << job.slot);
     return true;
   }
+  /// Main loop: the reader is done with a piece camera_decoded() gave.
+  void camera_decoded_done(uint8_t slot) { this->cam_held_ &= static_cast<uint8_t>(~(1u << slot)); }
   /// Where in the target the last camera frame went (target pixels): what to redraw.
   void camera_frame_rect(int32_t &x, int32_t &y, int32_t &w, int32_t &h) const {
     x = this->cam_job_data_.out_x;
@@ -2190,6 +2196,7 @@ class SimpleVideoPlayer : public Component
     bool ok{false};
     int32_t out_x{0}, out_y{0}, out_w{0}, out_h{0};  // the picture's rectangle in the target
     uint16_t pic_w{0}, pic_h{0};                     // no target: the decoded rows in the scratch
+    uint8_t slot{0};                                 // the scratch piece decoded into
   };
   CameraJob cam_job_data_{};
   std::atomic<bool> cam_job_{false};
@@ -2198,8 +2205,10 @@ class SimpleVideoPlayer : public Component
   bool cam_end_pending_{false};  // camera_preview_end() while a frame was decoded: the scratch goes after it
   std::function<void(bool)> cam_done_{};
   // A JPEG larger than the canvas is decoded whole here, then scaled (pool, while the camera's picture shows)
-  uint8_t *cam_scratch_{nullptr};
-  size_t cam_scratch_capacity_{0};
+  // No target (the camera layer): two, the next frame decoded into the one the reader does not hold (cam_held_)
+  uint8_t *cam_scratch_[2]{};
+  size_t cam_scratch_capacity_[2]{};
+  uint8_t cam_held_{0};  // bit n: the reader shows scratch n (main loop)
   // The canvas' black around a YUV frame the PPA fits in: drawn once per size
   uint32_t cam_cleared_key_{0};
   int pic_render_{-1};                    // image to decode again (overlay, canvas size), -1 none

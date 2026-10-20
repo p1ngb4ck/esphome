@@ -1159,6 +1159,7 @@ bool SimpleVideoPlayer::show_camera_frame(const uint8_t *data, size_t length, Ca
   if (format != CameraFrameFormat::MJPEG)
     return false;  // the PPA client is screen capture's
 #endif
+  uint8_t slot = 0;
   if (format == CameraFrameFormat::MJPEG) {
     // A frame larger than the canvas needs the scratch piece of its decoded size (kept while the picture shows)
     jpeg_decode_picture_info_t info{};
@@ -1171,14 +1172,25 @@ bool SimpleVideoPlayer::show_camera_frame(const uint8_t *data, size_t length, Ca
     const bool direct = target != nullptr && info.width <= static_cast<uint32_t>(target_w) &&
                         info.height <= static_cast<uint32_t>(target_h) && pw == static_cast<uint32_t>(target_w) &&
                         bytes <= dma_usable(target_capacity);
-    if (!direct && bytes > dma_usable(this->cam_scratch_capacity_)) {
-      if (this->cam_scratch_ != nullptr)
-        this->pool_.free(this->cam_scratch_);
-      this->cam_scratch_capacity_ = align_up(bytes, PsramPool::ALIGN);
-      this->cam_scratch_ = this->pool_.alloc(this->cam_scratch_capacity_);
-      if (this->cam_scratch_ == nullptr) {
+    // No target: the piece the reader does not hold (both held: the frame is not taken); a target: the first
+    slot = 0;
+    if (target == nullptr) {
+      if ((this->cam_held_ & 1u) == 0) {
+        slot = 0;
+      } else if ((this->cam_held_ & 2u) == 0) {
+        slot = 1;
+      } else {
+        return false;
+      }
+    }
+    if (!direct && bytes > dma_usable(this->cam_scratch_capacity_[slot])) {
+      if (this->cam_scratch_[slot] != nullptr)
+        this->pool_.free(this->cam_scratch_[slot]);
+      this->cam_scratch_capacity_[slot] = align_up(bytes, PsramPool::ALIGN);
+      this->cam_scratch_[slot] = this->pool_.alloc(this->cam_scratch_capacity_[slot]);
+      if (this->cam_scratch_[slot] == nullptr) {
         ESP_LOGW(TAG, "No room in the pool for the camera's %u byte picture", static_cast<unsigned>(bytes));
-        this->cam_scratch_capacity_ = 0;
+        this->cam_scratch_capacity_[slot] = 0;
         return false;
       }
     }
@@ -1194,6 +1206,7 @@ bool SimpleVideoPlayer::show_camera_frame(const uint8_t *data, size_t length, Ca
   job.target_w = target_w;
   job.target_h = target_h;
   job.ok = false;
+  job.slot = slot;
   this->cam_done_ = std::move(done);
   this->cam_busy_ = true;
   this->cam_decoded_.store(false, std::memory_order_relaxed);
@@ -1207,10 +1220,13 @@ void SimpleVideoPlayer::camera_preview_end() {
     this->cam_end_pending_ = true;
     return;
   }
-  if (this->cam_scratch_ != nullptr)
-    this->pool_.free(this->cam_scratch_);
-  this->cam_scratch_ = nullptr;
-  this->cam_scratch_capacity_ = 0;
+  for (int i = 0; i < 2; i++) {
+    if (this->cam_scratch_[i] != nullptr)
+      this->pool_.free(this->cam_scratch_[i]);
+    this->cam_scratch_[i] = nullptr;
+    this->cam_scratch_capacity_[i] = 0;
+  }
+  this->cam_held_ = 0;  // the reader let go first (its frames dropped before the end)
   this->cam_cleared_key_ = 0;
 }
 
@@ -1322,10 +1338,11 @@ void SimpleVideoPlayer::camera_decode_() {
       job.out_h = static_cast<int32_t>(info.height);
       return;
     }
-    if (this->cam_scratch_ == nullptr || bytes > dma_usable(this->cam_scratch_capacity_))
+    uint8_t *const scratch = this->cam_scratch_[job.slot];
+    if (scratch == nullptr || bytes > dma_usable(this->cam_scratch_capacity_[job.slot]))
       return;
-    if (jpeg_decoder_process(this->hw_jpeg_decoder_, &cfg, job.data, stream, this->cam_scratch_,
-                             static_cast<uint32_t>(dma_usable(this->cam_scratch_capacity_)), &out) != ESP_OK ||
+    if (jpeg_decoder_process(this->hw_jpeg_decoder_, &cfg, job.data, stream, scratch,
+                             static_cast<uint32_t>(dma_usable(this->cam_scratch_capacity_[job.slot])), &out) != ESP_OK ||
         out == 0)
       return;
     if (job.target == nullptr) {  // the reader takes it from the scratch (camera_decoded)
@@ -1340,13 +1357,13 @@ void SimpleVideoPlayer::camera_decode_() {
     }
 #ifdef SVP_CAPTURE
     // Scaled by the PPA (DMA): the decoder's rows are pw wide, the picture info.width of them
-    if (this->camera_ppa_fit_(this->cam_scratch_, PPA_SRM_COLOR_MODE_RGB565, pw, info.height, info.width,
+    if (this->camera_ppa_fit_(scratch, PPA_SRM_COLOR_MODE_RGB565, pw, info.height, info.width,
                               info.height)) {
       job.ok = true;
       return;
     }
 #endif
-    scale_rgb565(this->cam_scratch_, static_cast<int32_t>(info.width), static_cast<int32_t>(info.height), pw * 2,
+    scale_rgb565(scratch, static_cast<int32_t>(info.width), static_cast<int32_t>(info.height), pw * 2,
                  job.target, job.target_w, job.target_h, static_cast<uint32_t>(job.target_w) * 2,
                  ImageFitMode::SCALE_TO_FIT);
     written_by_cpu(job.target, job.target_capacity);
