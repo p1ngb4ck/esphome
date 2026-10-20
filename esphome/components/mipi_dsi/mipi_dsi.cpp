@@ -144,9 +144,14 @@ void MipiDsi::setup() {
   // need to know when the display is ready for SLPOUT command - will be 120ms after reset
   auto when = millis() + 120;
   // A bridge takes its setup in command mode, before esp_lcd_panel_init() starts the video (as IDF's own panel
-  // drivers and Linux send it); DCS panels get theirs after it, as before.
-  if (this->generic_commands_ && !this->send_init_sequence_(when))
-    return;
+  // drivers send theirs); DCS panels get theirs after it, as before.
+  if (this->generic_commands_) {
+    // esp_lcd_new_panel_io_dbi() requests an ack (BTA) after every command and the bus has its timeouts off; Linux
+    // writes a bridge "command only" (vc4_dsi.c DSI_TXPKT1C_CMD_CTRL_TX), so no ack is requested here either
+    MIPI_DSI_LL_GET_HOST(0)->cmd_mode_cfg.ack_rqst_en = 0;
+    if (!this->send_init_sequence_(when))
+      return;
+  }
   err = esp_lcd_panel_init(this->handle_);
   if (err != ESP_OK) {
     this->smark_failed(LOG_STR("esp_lcd_init failed"), err);
