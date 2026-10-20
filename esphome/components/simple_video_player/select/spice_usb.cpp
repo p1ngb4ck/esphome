@@ -3,6 +3,8 @@
 
 #include "spice_usb.h"
 
+#include <new>
+
 #ifdef SVP_SPICE_USB
 
 #include "esphome/core/application.h"
@@ -143,8 +145,6 @@ void SpiceUsbSlot::setup() {
   const bool ok = this->labels_ != nullptr && this->stage_ != nullptr && this->dev_lock_ != nullptr &&
                   this->done_q_ != nullptr && this->usbip_lock_ != nullptr && this->usbip_offsets_ != nullptr &&
                   this->usbip_entry_ != nullptr && this->usbip_iso_ != nullptr && this->pool_bufs_ != nullptr;
-  for (auto &x : this->int_)
-    x.kind = Kind::INTERRUPT_IN;
   if (!ok) {
     ESP_LOGE(TAG, "No memory for the USB redirection");
     this->mark_failed();
@@ -399,7 +399,7 @@ void SpiceUsbSlot::xfer_free_(usb_transfer_t *t) {
 }
 
 bool SpiceUsbSlot::release_buffers() {
-  if (this->link_up_.load(std::memory_order_acquire) || this->pool_bufs_ == nullptr)
+  if (this->link_up_.load(std::memory_order_acquire) || this->pool_bufs_ == nullptr || this->xs_ == nullptr)
     return false;
   bool released = false;
   auto give = [this, &released](Xfer &x) {
@@ -409,16 +409,41 @@ bool SpiceUsbSlot::release_buffers() {
       released = true;
     }
   };
-  for (auto &x : this->gen_)
+  for (auto &x : this->xs_->gen)
     give(x);
-  for (auto &x : this->int_)
+  for (auto &x : this->xs_->intr)
     give(x);
   for (uint8_t i = 0; i < USBIP_ISO_XFERS; i++)
     give(this->usbip_iso_[i]);
+  // Nothing of the session holds a buffer any more: its state goes too
+  bool held = false;
+  for (auto &x : this->xs_->gen)
+    held = held || x.t != nullptr;
+  for (auto &x : this->xs_->intr)
+    held = held || x.t != nullptr;
+  for (auto &st : this->xs_->iso) {
+    for (auto &x : st.x)
+      held = held || x.t != nullptr;
+  }
+  if (!held) {
+    this->xs_->~Session();
+    heap_caps_free(this->xs_);
+    this->xs_ = nullptr;
+  }
   return released;
 }
 
 bool SpiceUsbSlot::link_open(SpiceVmcLink *link, Proto proto) {
+  if (this->xs_ == nullptr) {
+    void *mem = heap_caps_calloc(1, sizeof(Session), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (mem == nullptr) {
+      ESP_LOGE(TAG, "No internal RAM for the USB redirection's transfers (%u bytes)", static_cast<unsigned>(sizeof(Session)));
+      return false;
+    }
+    this->xs_ = new (mem) Session();
+    for (auto &x : this->xs_->intr)
+      x.kind = Kind::INTERRUPT_IN;
+  }
   // What came back after the last channel ended is for no one.
   Xfer *x;
   while (xQueueReceive(this->done_q_, &x, 0) == pdTRUE) {
@@ -436,9 +461,9 @@ bool SpiceUsbSlot::link_open(SpiceVmcLink *link, Proto proto) {
       xfer.t->context = &xfer;
     }
   };
-  for (auto &g : this->gen_)
+  for (auto &g : this->xs_->gen)
     take(g, GEN_BYTES);
-  for (auto &i : this->int_)
+  for (auto &i : this->xs_->intr)
     take(i, INT_BYTES);
   if (!ok) {
     ESP_LOGE(TAG, "No room in the PSRAM pool for the USB redirection");
@@ -717,7 +742,7 @@ bool SpiceUsbSlot::rx_done(size_t n) {
 }
 
 SpiceUsbSlot::Xfer *SpiceUsbSlot::gen_take_() {
-  for (auto &x : this->gen_) {
+  for (auto &x : this->xs_->gen) {
     if (!x.busy) {
       x = Xfer{x.t, this};
       x.t->callback = xfer_done_;
@@ -1066,7 +1091,7 @@ bool SpiceUsbSlot::handle_body_() {
       return this->send_(REDIR_BULK_STREAMS_STATUS, id, s, sizeof(s));
     }
     case REDIR_CANCEL_DATA_PACKET:
-      for (auto &x : this->gen_) {
+      for (auto &x : this->xs_->gen) {
         if (x.busy && x.in_flight && x.id == id && x.kind != Kind::CONTROL)
           this->cancel_ep_(x.ep);
       }
@@ -1117,11 +1142,11 @@ void SpiceUsbSlot::cancel_ep_(uint8_t ep) {
 }
 
 bool SpiceUsbSlot::interface_busy_(uint8_t interface) const {
-  for (const auto &s : this->iso_) {
+  for (const auto &s : this->xs_->iso) {
     if (s.urbs != 0 && this->eps_[ep_index(s.ep)].interface == interface)
       return true;
   }
-  for (const auto &in : this->int_in_) {
+  for (const auto &in : this->xs_->int_in) {
     if ((in.on || in.stopping) && this->eps_[ep_index(in.ep)].interface == interface)
       return true;
   }
@@ -1137,11 +1162,11 @@ bool SpiceUsbSlot::set_alt_(uint64_t id, uint8_t interface, uint8_t alt) {
   }
   this->alt_ = {true, false, id, interface, alt};
   // Its streams end first.
-  for (auto &s : this->iso_) {
+  for (auto &s : this->xs_->iso) {
     if (s.on && this->eps_[ep_index(s.ep)].interface == interface)
       this->stop_iso_(0, s.ep, false);
   }
-  for (auto &in : this->int_in_) {
+  for (auto &in : this->xs_->int_in) {
     if (in.on && this->eps_[ep_index(in.ep)].interface == interface)
       this->stop_int_(0, in.ep, false);
   }
@@ -1216,9 +1241,9 @@ bool SpiceUsbSlot::start_int_(uint64_t id, uint8_t ep) {
   if ((ep & 0x80) != 0 && this->eps_[idx].type == TYPE_INTERRUPT && this->eps_[idx].mps != 0 &&
       this->eps_[idx].mps <= INT_BYTES && this->usable_()) {
     bool running = false;
-    for (auto &i : this->int_in_)
+    for (auto &i : this->xs_->int_in)
       running = running || ((i.on || i.stopping) && i.ep == ep);
-    for (auto &i : this->int_in_) {
+    for (auto &i : this->xs_->int_in) {
       if (!running && in == nullptr && !i.on && !i.stopping)
         in = &i;
     }
@@ -1226,7 +1251,7 @@ bool SpiceUsbSlot::start_int_(uint64_t id, uint8_t ep) {
   Xfer *taken[INT_PER_EP]{};
   uint8_t count = 0;
   if (in != nullptr) {
-    for (auto &x : this->int_) {
+    for (auto &x : this->xs_->intr) {
       if (count < INT_PER_EP && !x.busy)
         taken[count++] = &x;
     }
@@ -1280,7 +1305,7 @@ bool SpiceUsbSlot::start_int_(uint64_t id, uint8_t ep) {
 }
 
 bool SpiceUsbSlot::stop_int_(uint64_t id, uint8_t ep, bool reply) {
-  for (auto &in : this->int_in_) {
+  for (auto &in : this->xs_->int_in) {
     if (in.on && !in.stopping && in.ep == ep) {
       in.stopping = true;
       this->cancel_ep_(ep);  // freed as they come back (complete_())
@@ -1300,9 +1325,9 @@ bool SpiceUsbSlot::start_iso_(uint64_t id, uint8_t ep, uint8_t pkts, uint8_t urb
   if (this->eps_[idx].type == TYPE_ISO && mps != 0 && pkts >= 1 && pkts <= ISO_PKTS && urbs >= 1 && urbs <= ISO_URBS &&
       this->usable_()) {
     bool running = false;
-    for (auto &i : this->iso_)
+    for (auto &i : this->xs_->iso)
       running = running || (i.urbs != 0 && i.ep == ep);
-    for (auto &i : this->iso_) {
+    for (auto &i : this->xs_->iso) {
       if (!running && s == nullptr && i.urbs == 0)
         s = &i;
     }
@@ -1375,7 +1400,7 @@ bool SpiceUsbSlot::start_iso_(uint64_t id, uint8_t ep, uint8_t pkts, uint8_t urb
 }
 
 bool SpiceUsbSlot::stop_iso_(uint64_t id, uint8_t ep, bool reply) {
-  for (auto &s : this->iso_) {
+  for (auto &s : this->xs_->iso) {
     if (s.urbs == 0 || s.ep != ep || s.stopping)
       continue;
     s.stopping = true;
@@ -1405,7 +1430,7 @@ bool SpiceUsbSlot::stop_iso_(uint64_t id, uint8_t ep, bool reply) {
 // its packets are buffered, and drops back to half after an overflow (usbredirhost_iso_packet()).
 bool SpiceUsbSlot::iso_out_(uint8_t ep, const uint8_t *data, size_t len) {
   IsoStream *s = nullptr;
-  for (auto &i : this->iso_) {
+  for (auto &i : this->xs_->iso) {
     if (i.on && i.ep == ep && (ep & 0x80) == 0)
       s = &i;
   }
@@ -1455,22 +1480,24 @@ bool SpiceUsbSlot::iso_out_(uint8_t ep, const uint8_t *data, size_t len) {
 }
 
 void SpiceUsbSlot::drain_() {
+  if (this->xs_ == nullptr)
+    return;  // no session's transfers
   // Streams and receivers stop; every transfer comes back (cancelled, or with the device gone).
-  for (auto &s : this->iso_) {
+  for (auto &s : this->xs_->iso) {
     if (s.urbs != 0)
       this->stop_iso_(0, s.ep, false);
   }
-  for (auto &in : this->int_in_) {
+  for (auto &in : this->xs_->int_in) {
     if (in.on)
       this->stop_int_(0, in.ep, false);
   }
-  for (auto &x : this->gen_) {
+  for (auto &x : this->xs_->gen) {
     if (x.in_flight && x.kind != Kind::CONTROL && x.kind != Kind::SET_ALT)
       this->cancel_ep_(x.ep);
   }
   // USB/IP's URBs on interrupt and isochronous endpoints too.
-  for (auto *pool : {static_cast<Xfer *>(this->int_), static_cast<Xfer *>(this->usbip_iso_)}) {
-    const size_t count = pool == this->int_ ? INT_XFERS : USBIP_ISO_XFERS;
+  for (auto *pool : {static_cast<Xfer *>(this->xs_->intr), static_cast<Xfer *>(this->usbip_iso_)}) {
+    const size_t count = pool == this->xs_->intr ? INT_XFERS : USBIP_ISO_XFERS;
     for (size_t i = 0; i < count; i++) {
       if (this->proto_ == Proto::USBIP && pool[i].in_flight)
         this->cancel_ep_(pool[i].ep);
@@ -1495,13 +1522,13 @@ void SpiceUsbSlot::drain_() {
       this->complete_(x);
     }
     bool any = false;
-    for (auto &g : this->gen_)
+    for (auto &g : this->xs_->gen)
       any = any || g.in_flight;
-    for (auto &i : this->int_)
+    for (auto &i : this->xs_->intr)
       any = any || i.in_flight;
     for (uint8_t i = 0; i < USBIP_ISO_XFERS; i++)
       any = any || this->usbip_iso_[i].in_flight;
-    for (auto &s : this->iso_) {
+    for (auto &s : this->xs_->iso) {
       for (uint8_t i = 0; i < s.urbs; i++)
         any = any || s.x[i].in_flight;
     }
