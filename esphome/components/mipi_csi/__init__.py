@@ -32,6 +32,8 @@ from .const import (
     CONF_JPEG_QUALITY,
     CONF_ON_IMAGE,
     CONF_ON_STREAM_START,
+    CONF_ON_PREVIEW_FRAME,
+    CONF_ON_PREVIEW_RELEASED,
     CONF_ON_STREAM_STOP,
     CONF_PIXEL_FORMAT,
     CONF_POWER_PIN,
@@ -60,6 +62,12 @@ MipiCsiStreamStartTrigger = mipi_csi_ns.class_(
 )
 MipiCsiStreamStopTrigger = mipi_csi_ns.class_(
     "MipiCsiStreamStopTrigger", automation.Trigger.template()
+)
+MipiCsiPreviewFrameTrigger = mipi_csi_ns.class_(
+    "MipiCsiPreviewFrameTrigger", automation.Trigger.template()
+)
+MipiCsiPreviewReleasedTrigger = mipi_csi_ns.class_(
+    "MipiCsiPreviewReleasedTrigger", automation.Trigger.template(cg.uint8.operator("ptr"))
 )
 
 PixelFormat = mipi_csi_ns.enum("PixelFormat", is_class=True)
@@ -155,6 +163,13 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_ON_IMAGE): automation.validate_automation(
                 {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(MipiCsiImageTrigger)}
             ),
+            # set_preview_buffer(): each frame copied into it; the buffer handed back when the preview ends
+            cv.Optional(CONF_ON_PREVIEW_FRAME): automation.validate_automation(
+                {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(MipiCsiPreviewFrameTrigger)}
+            ),
+            cv.Optional(CONF_ON_PREVIEW_RELEASED): automation.validate_automation(
+                {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(MipiCsiPreviewReleasedTrigger)}
+            ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     cv.only_with_framework(Framework.ESP_IDF),
@@ -204,6 +219,8 @@ async def to_code(config: ConfigType) -> None:
         (CONF_ON_STREAM_START, []),
         (CONF_ON_STREAM_STOP, []),
         (CONF_ON_IMAGE, [(CameraImageData, "image")]),
+        (CONF_ON_PREVIEW_FRAME, []),
+        (CONF_ON_PREVIEW_RELEASED, [(cg.uint8.operator("ptr"), "buffer")]),
     ):
         for conf in config.get(conf_key, []):
             trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)

@@ -128,6 +128,16 @@ class MipiCsiCamera final : public camera::Camera {
   void request_image(camera::CameraRequester requester) override;
   void start_stream(camera::CameraRequester requester) override;
   void stop_stream(camera::CameraRequester requester) override;
+  /// Main loop: every frame copied raw (the capture format) into @p buffer while it is set; the stream runs while
+  /// set. nullptr ends it: the buffer goes back through the released callback once no copy into it is under way.
+  void set_preview_buffer(uint8_t *buffer, size_t size);
+  size_t frame_size() const { return static_cast<size_t>(this->width_) * this->height_ * this->bytes_per_pixel_(); }
+  uint16_t get_width() const { return this->width_; }
+  uint16_t get_height() const { return this->height_; }
+  void add_on_preview_frame_callback(std::function<void()> &&callback) { this->preview_callback_.add(std::move(callback)); }
+  void add_on_preview_released_callback(std::function<void(uint8_t *)> &&callback) {
+    this->preview_released_callback_.add(std::move(callback));
+  }
   /// A reader gave its image back (any task): the main loop checks whether the next frame can be asked for.
   void on_image_returned() { this->enable_loop_soon_any_context(); }
 
@@ -159,7 +169,10 @@ class MipiCsiCamera final : public camera::Camera {
   void apply_control_(uint32_t id, int32_t value, const char *name);
   /// Reads back the format the driver settled on, which the JPEG encoder has to match exactly.
   bool read_back_format_(uint32_t expected_fourcc, uint8_t bytes_per_pixel, const char *name);
-  bool has_requested_image_() const { return this->single_requesters_ != 0 || this->stream_requesters_ != 0; }
+  bool has_requested_image_() const {
+    return this->single_requesters_ != 0 || this->stream_requesters_ != 0 || this->preview_buffer_.load() != nullptr;
+  }
+  uint8_t bytes_per_pixel_() const;
 
   static void capture_task(void *param);
 
@@ -206,6 +219,15 @@ class MipiCsiCamera final : public camera::Camera {
   std::atomic<bool> parked_{false};
   /// Set by the capture task when the driver failed; the stream is then given up.
   std::atomic<bool> failed_{false};
+  // Preview: the caller's buffer (set on the main loop), copied into by the task while preview_busy_
+  std::atomic<uint8_t *> preview_buffer_{nullptr};
+  size_t preview_size_{0};
+  uint8_t *preview_released_{nullptr};  // ended, handed back once the task is not copying
+  std::atomic<bool> preview_busy_{false};
+  std::atomic<bool> preview_wanted_{false};
+  std::atomic<bool> preview_ready_{false};
+  CallbackManager<void()> preview_callback_;
+  CallbackManager<void(uint8_t *)> preview_released_callback_;
 
   std::shared_ptr<MipiCsiImage> current_image_;
   std::vector<camera::CameraListener *> listeners_;
@@ -227,6 +249,20 @@ class MipiCsiStreamStartTrigger final : public Trigger<>, public camera::CameraL
  public:
   explicit MipiCsiStreamStartTrigger(MipiCsiCamera *parent) { parent->add_listener(this); }
   void on_stream_start() override { this->trigger(); }
+};
+
+class MipiCsiPreviewFrameTrigger final : public Trigger<> {
+ public:
+  explicit MipiCsiPreviewFrameTrigger(MipiCsiCamera *parent) {
+    parent->add_on_preview_frame_callback([this]() { this->trigger(); });
+  }
+};
+
+class MipiCsiPreviewReleasedTrigger final : public Trigger<uint8_t *> {
+ public:
+  explicit MipiCsiPreviewReleasedTrigger(MipiCsiCamera *parent) {
+    parent->add_on_preview_released_callback([this](uint8_t *buffer) { this->trigger(buffer); });
+  }
 };
 
 class MipiCsiStreamStopTrigger final : public Trigger<>, public camera::CameraListener {

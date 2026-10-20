@@ -8,6 +8,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <esp_cache.h>
 #include <esp_heap_caps.h>
 #include <unistd.h>
 
@@ -463,6 +464,13 @@ void MipiCsiCamera::finish_stop_() {
     this->video_ready_ = false;
   }
   this->current_image_.reset();
+  if (this->preview_released_ != nullptr) {
+    uint8_t *released = this->preview_released_;
+    this->preview_released_ = nullptr;
+    this->preview_released_callback_.call(released);
+  }
+  this->preview_wanted_.store(false);
+  this->preview_ready_.store(false);
   this->frame_wanted_.store(false);
   this->result_ready_.store(false);
   this->stop_wanted_.store(false);
@@ -525,6 +533,23 @@ void MipiCsiCamera::capture_task(void *param) {
       App.wake_loop_threadsafe();
     }
 
+    // Busy first, then the buffer read: a buffer ended meanwhile is either seen as gone or waited for (loop)
+    self->preview_busy_.store(true);
+    uint8_t *target = self->preview_buffer_.load();
+    if (target != nullptr && self->preview_wanted_.load() && (buffer.flags & V4L2_BUF_FLAG_ERROR) == 0) {
+      const FrameBuffer &frame = self->buffers_[buffer.index];
+      // The frame came by DMA: the cache lines over it are dropped before the CPU reads it
+      esp_cache_msync(frame.data, frame.length, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+      memcpy(target, frame.data, std::min(self->preview_size_, self->expected_frame_size_));
+      self->preview_wanted_.store(false);
+      self->preview_ready_.store(true);
+    }
+    self->preview_busy_.store(false);
+    if (self->preview_ready_.load() || self->preview_released_ != nullptr) {
+      self->enable_loop_soon_any_context();
+      App.wake_loop_threadsafe();
+    }
+
     if (!self->queue_buffer_(buffer.index)) {
       ESP_LOGW(TAG, "Returning a frame buffer failed: %s", strerror(errno));
     }
@@ -569,6 +594,19 @@ void MipiCsiCamera::loop() {
     return;
   }
 
+  if (this->preview_released_ != nullptr && !this->preview_busy_.load()) {
+    uint8_t *released = this->preview_released_;
+    this->preview_released_ = nullptr;
+    this->preview_released_callback_.call(released);
+  }
+  if (this->preview_ready_.load()) {
+    this->preview_ready_.store(false);
+    if (this->preview_buffer_.load() != nullptr)
+      this->preview_callback_.call();
+  }
+  if (this->preview_buffer_.load() != nullptr && !this->preview_wanted_.load())
+    this->preview_wanted_.store(true);
+
   // Release the previous image once every consumer has finished reading it, which frees the
   // encoder's output buffer for the next frame.
   if (this->current_image_ && this->current_image_.use_count() == 1) {
@@ -601,6 +639,10 @@ void MipiCsiCamera::loop() {
     this->disable_loop();
     return;
   }
+  if (this->preview_buffer_.load() != nullptr && this->single_requesters_ == 0 && this->stream_requesters_ == 0) {
+    this->disable_loop();  // only the preview: the task wakes the loop with each frame
+    return;
+  }
   if (!this->has_requested_image_()) {
     // Nothing asked for: the task stops taking frames and parks, then everything is given back
     this->state_ = State::STOPPING;
@@ -615,6 +657,28 @@ void MipiCsiCamera::loop() {
 }
 
 /* ---------------- MipiCsiCamera: requests ---------------- */
+
+uint8_t MipiCsiCamera::bytes_per_pixel_() const { return get_format_mapping(this->pixel_format_).bytes_per_pixel; }
+
+void MipiCsiCamera::set_preview_buffer(uint8_t *buffer, size_t size) {
+  uint8_t *old = this->preview_buffer_.exchange(buffer);
+  this->preview_size_ = size;
+  this->preview_wanted_.store(false);
+  this->preview_ready_.store(false);
+  if (old != nullptr && old != buffer) {
+    if (this->state_ == State::IDLE) {
+      this->preview_released_callback_.call(old);  // no task: nothing copies into it
+    } else {
+      // An earlier one still waiting is not the task's target any more: back at once; this one once the task is not
+      // copying (loop)
+      if (this->preview_released_ != nullptr)
+        this->preview_released_callback_.call(this->preview_released_);
+      this->preview_released_ = old;
+    }
+  }
+  this->enable_loop_soon_any_context();
+}
+
 
 void MipiCsiCamera::request_image(camera::CameraRequester requester) {
   this->single_requesters_ |= (1U << requester);
