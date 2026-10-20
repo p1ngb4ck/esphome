@@ -148,6 +148,16 @@ class MipiCsiCamera final : public camera::Camera {
   void add_on_preview_released_callback(std::function<void(uint8_t *)> &&callback) {
     this->preview_released_callback_.add(std::move(callback));
   }
+  /// Main loop: frames handed over as they are (no copy) while on; the stream runs while on. Each frame comes through
+  /// the direct frame callbacks (main loop: data, width, height, in get_pixel_format()); its buffer stays the
+  /// reader's until release_direct_frame(), the next one waits for that. data nullptr: the frame given is gone (the
+  /// stream ends), whoever reads it drops it at once.
+  void set_direct(bool on);
+  void release_direct_frame();
+  void add_on_direct_frame_callback(std::function<void(const uint8_t *, uint16_t, uint16_t)> &&callback) {
+    this->direct_callback_.add(std::move(callback));
+  }
+  PixelFormat get_pixel_format() const { return this->pixel_format_; }
   /// A reader gave its image back (any task): the main loop checks whether the next frame can be asked for.
   void on_image_returned() { this->enable_loop_soon_any_context(); }
 
@@ -183,7 +193,8 @@ class MipiCsiCamera final : public camera::Camera {
   /// Reads back the format the driver settled on, which the JPEG encoder has to match exactly.
   bool read_back_format_(uint32_t expected_fourcc, uint8_t bytes_per_pixel, const char *name);
   bool has_requested_image_() const {
-    return this->single_requesters_ != 0 || this->stream_requesters_ != 0 || this->preview_buffer_.load() != nullptr;
+    return this->single_requesters_ != 0 || this->stream_requesters_ != 0 || this->preview_buffer_.load() != nullptr ||
+           this->direct_.load();
   }
   uint8_t bytes_per_pixel_() const;
 
@@ -250,6 +261,14 @@ class MipiCsiCamera final : public camera::Camera {
   std::atomic<bool> preview_ready_{false};
   CallbackManager<void()> preview_callback_;
   CallbackManager<void(uint8_t *)> preview_released_callback_;
+  // Direct frames: the task holds one buffer (its index) until the main loop hands it back (returned, re-queued by
+  // the task); given: the reader has it
+  std::atomic<bool> direct_{false};
+  std::atomic<int8_t> direct_held_{-1};
+  std::atomic<int8_t> direct_returned_{-1};
+  std::atomic<bool> direct_ready_{false};
+  bool direct_given_{false};
+  CallbackManager<void(const uint8_t *, uint16_t, uint16_t)> direct_callback_;
 
   std::shared_ptr<MipiCsiImage> current_image_;
   std::vector<camera::CameraListener *> listeners_;
