@@ -61,6 +61,8 @@ from .models import (
     COMMAND_MODE_DCS,
     COMMAND_MODE_GENERIC,
     CONF_COMMAND_MODE,
+    CONF_I2C_ADDRESS,
+    CONF_I2C_INIT_SEQUENCE,
     DsiDriverChip,
 )
 
@@ -84,8 +86,6 @@ CONF_READ_REGISTERS = "read_registers"
 CONF_EOTP = "eotp"
 CONF_LP_HORIZONTAL_BLANKING = "lp_horizontal_blanking"
 CONF_LP_VERTICAL_ACTIVE = "lp_vertical_active"
-CONF_I2C_ADDRESS = "i2c_address"
-CONF_I2C_INIT_SEQUENCE = "i2c_init_sequence"
 
 # The DSI host's vid_mode_type register values
 VIDEO_MODES = {
@@ -221,7 +221,9 @@ def _config_schema(config: ConfigType) -> ConfigType:
         byte_order=config[CONF_BYTE_ORDER],
         has_writer=requires_buffer(config)
         or config.get(CONF_AUTO_CLEAR_ENABLED) is True,
-        rotation=config.get(CONF_ROTATION, 0),
+        rotation=0
+        if model.rotation_as_transform(config)
+        else config.get(CONF_ROTATION, 0),
         draw_rounding=config.get(CONF_DRAW_ROUNDING, 0),
     )
     return config
@@ -278,9 +280,7 @@ async def to_code(config: ConfigType) -> None:
         cg.add(var.set_read_registers(table, len(registers)))
     cg.add(var.set_frame_buffers(config[CONF_FRAME_BUFFERS]))
     cg.add(var.set_lane_bit_rate(config[CONF_LANE_BIT_RATE] / 1.0e6))
-    if i2c_sequence := config.get(
-        CONF_I2C_INIT_SEQUENCE, model.get_default(CONF_I2C_INIT_SEQUENCE)
-    ):
+    if i2c_sequence := model.get_i2c_init_sequence(config):
         # Each write as its length and bytes, a delay as 0 and its ms
         data = sum(
             ((0, x[1]) if x[0] == DELAY_FLAG else (len(x), *x) for x in i2c_sequence),

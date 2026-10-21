@@ -1,6 +1,44 @@
 from esphome.components.mipi import delay
+from esphome.const import CONF_DISABLED, CONF_ROTATION, CONF_TRANSFORM
 
-from . import DsiDriverChip
+from . import CONF_I2C_INIT_SEQUENCE, DsiDriverChip
+
+PORTA_LCD_LR = 0x04
+PORTA_LCD_UD = 0x08
+
+
+# fmt: off
+def attiny_sequence(porta):
+    return [
+        (0x85, 0x00), delay(30),  # POWERON off
+        (0x86, 0x00), delay(8),   # PWM: backlight off
+        (0x83, 0x00), delay(8),   # PORTC: bridge, LCD and touch in reset
+        (0x81, porta), delay(8),  # PORTA: scan direction
+        (0x82, 0x80), delay(8),   # PORTB: LCD_MAIN
+        (0x83, 0x01), delay(88),  # PORTC: LED_EN
+        (0x83, 0x0D), delay(8),   # PORTC: RST_BRIDGE_N, RST_LCD_N released
+        (0x8D, 0x04), delay(8),   # bridge register 0x047C = 0
+        (0x8C, 0x7C), delay(8),
+        (0x90, 0x00), delay(8),
+        (0x91, 0x00), delay(108),
+        (0x83, 0x0F), delay(8),   # PORTC: RST_TP_N released
+    ]
+# fmt: on
+
+
+class RpiTouchDisplayV1(DsiDriverChip):
+    def rotation_as_transform(self, config) -> bool:
+        # 180 degrees through the ATTINY's scan direction (PORTA)
+        return (
+            config.get(CONF_TRANSFORM) != CONF_DISABLED
+            and config.get(CONF_ROTATION, 0) == 180
+        )
+
+    def get_i2c_init_sequence(self, config) -> list | None:
+        if CONF_I2C_INIT_SEQUENCE in config or not self.rotation_as_transform(config):
+            return super().get_i2c_init_sequence(config)
+        return attiny_sequence(PORTA_LCD_UD)
+
 
 # Raspberry Pi 7" Touch Display, first version (800x480): DPI panel behind a Toshiba TC358762XBG DSI-DPI bridge,
 # power, resets and backlight through an ATTINY88 at I2C 0x45 (REG_POWERON 0x85, REG_PWM 0x86), touch at 0x38.
@@ -19,7 +57,7 @@ from . import DsiDriverChip
 # The ATTINY powers the panel and releases the bridge reset (Linux rpi-panel-attiny-regulator.c sequence) from the
 # display's setup, once the DSI lanes are in LP-11 (Linux: tc358762 pre_enable_prev_first, vc4_dsi drives STOP first).
 # fmt: off
-DsiDriverChip(
+RpiTouchDisplayV1(
     "RPI-7INCH-V1",
     width=800,
     height=480,
@@ -46,21 +84,7 @@ DsiDriverChip(
     command_mode="generic",
     no_transform=True,
     i2c_address=0x45,
-    # ATTINY88 registers
-    i2c_init_sequence=[
-        (0x85, 0x00), delay(30),  # POWERON off
-        (0x86, 0x00), delay(8),   # PWM: backlight off
-        (0x83, 0x00), delay(8),   # PORTC: bridge, LCD and touch in reset
-        (0x81, 0x04), delay(8),   # PORTA: LCD_LR (0x08 LCD_UD: rotated 180 degrees)
-        (0x82, 0x80), delay(8),   # PORTB: LCD_MAIN
-        (0x83, 0x01), delay(88),  # PORTC: LED_EN
-        (0x83, 0x0D), delay(8),   # PORTC: RST_BRIDGE_N, RST_LCD_N released
-        (0x8D, 0x04), delay(8),   # bridge register 0x047C = 0
-        (0x8C, 0x7C), delay(8),
-        (0x90, 0x00), delay(8),
-        (0x91, 0x00), delay(108),
-        (0x83, 0x0F), delay(8),   # PORTC: RST_TP_N released
-    ],
+    i2c_init_sequence=attiny_sequence(PORTA_LCD_LR),
     # No read_registers, no ack, no frame ack: the TC358762 does not answer a bus turnaround - lane 0 stays reversed
     # (DSI host PHY_STATUS phy_direction 1, gen_rd_cmd_busy, IDF runs without timeouts) and nothing is sent after
     # it, not even video (seen 2026-10-21). Linux never reads it.
