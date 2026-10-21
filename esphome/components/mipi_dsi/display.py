@@ -55,7 +55,12 @@ from esphome.final_validate import full_config
 from esphome.types import ConfigType
 
 from . import mipi_dsi_ns, models
-from .models import DsiDriverChip
+from .models import (
+    COMMAND_MODE_DCS,
+    COMMAND_MODE_GENERIC,
+    CONF_COMMAND_MODE,
+    DsiDriverChip,
+)
 
 # Currently only ESP32-P4 is supported, so esp_ldo and psram are required
 DEPENDENCIES = ["esp32", "esp_ldo", "psram"]
@@ -69,6 +74,11 @@ ColorBitness = display.display_ns.enum("ColorBitness")
 
 CONF_LANE_BIT_RATE = "lane_bit_rate"
 CONF_LANES = "lanes"
+CONF_FRAME_ACK = "frame_ack"
+CONF_CONTINUOUS_CLOCK = "continuous_clock"
+CONF_EOTP = "eotp"
+CONF_LP_HORIZONTAL_BLANKING = "lp_horizontal_blanking"
+CONF_LP_VERTICAL_ACTIVE = "lp_vertical_active"
 
 DsiDriverChip("CUSTOM")
 
@@ -125,6 +135,14 @@ def model_schema(config: ConfigType) -> cv.All:
                 cv.frequency, cv.Range(min=4e6, max=100e6)
             ),
             model.option(CONF_LANES, 2): cv.int_range(1, 2),
+            model.option(CONF_FRAME_ACK, True): cv.boolean,
+            model.option(CONF_CONTINUOUS_CLOCK, False): cv.boolean,
+            model.option(CONF_EOTP, True): cv.boolean,
+            model.option(CONF_LP_HORIZONTAL_BLANKING, True): cv.boolean,
+            model.option(CONF_LP_VERTICAL_ACTIVE, True): cv.boolean,
+            model.option(CONF_COMMAND_MODE, COMMAND_MODE_DCS): cv.one_of(
+                COMMAND_MODE_DCS, COMMAND_MODE_GENERIC, lower=True
+            ),
             model.option(CONF_LANE_BIT_RATE, None): cv.All(
                 cv.bps, cv.Range(min=100e6, max=3200e6)
             ),
@@ -212,6 +230,14 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_vsync_front_porch(config[CONF_VSYNC_FRONT_PORCH]))
     cg.add(var.set_pclk_frequency(config[CONF_PCLK_FREQUENCY] / 1.0e6))
     cg.add(var.set_lanes(int(config[CONF_LANES])))
+    cg.add(var.set_frame_ack(config[CONF_FRAME_ACK]))
+    cg.add(var.set_continuous_clock(config[CONF_CONTINUOUS_CLOCK]))
+    cg.add(var.set_eotp(config[CONF_EOTP]))
+    cg.add(var.set_lp_horizontal_blanking(config[CONF_LP_HORIZONTAL_BLANKING]))
+    cg.add(var.set_lp_vertical_active(config[CONF_LP_VERTICAL_ACTIVE]))
+    cg.add(
+        var.set_generic_commands(config[CONF_COMMAND_MODE] == COMMAND_MODE_GENERIC)
+    )
     cg.add(var.set_lane_bit_rate(config[CONF_LANE_BIT_RATE] / 1.0e6))
     await cg.add_pin(var.set_reset_pin, config.get(CONF_RESET_PIN))
     if enable_pin := config.get(CONF_ENABLE_PIN):

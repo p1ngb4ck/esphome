@@ -45,9 +45,9 @@ void FT5x06Touchscreen::continue_setup_() {
       break;
 
     default:
-      ESP_LOGE(TAG, "Unknown vendor ID 0x%X", data[0]);
-      this->mark_failed();
-      return;
+      // Other FT5x06-family controllers use the same register map
+      ESP_LOGW(TAG, "Unknown vendor ID 0x%X, using the FT5x06 register map", data[0]);
+      break;
   }
 }
 
@@ -55,11 +55,12 @@ void FT5x06Touchscreen::update_touches() {
   uint8_t touch_cnt;
   uint8_t data[MAX_TOUCHES][6];
 
-  if (!this->read_byte(FT5X06_TD_STATUS, &touch_cnt) || touch_cnt > MAX_TOUCHES) {
+  if (!this->read_byte(FT5X06_TD_STATUS, &touch_cnt)) {
     ESP_LOGW(TAG, "Failed to read status");
     return;
   }
-  if (touch_cnt == 0)
+  // Some controllers read 0xFF until the first touch
+  if (touch_cnt == 0 || touch_cnt > MAX_TOUCHES)
     return;
 
   if (!this->read_bytes(FT5X06_TOUCH_DATA, (uint8_t *) data, touch_cnt * 6)) {
