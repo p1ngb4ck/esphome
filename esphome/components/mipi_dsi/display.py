@@ -81,6 +81,7 @@ CONF_CONTINUOUS_CLOCK = "continuous_clock"
 CONF_READ_REGISTERS = "read_registers"
 CONF_EOTP = "eotp"
 CONF_LP_HORIZONTAL_BLANKING = "lp_horizontal_blanking"
+CONF_LP_VERTICAL_ACTIVE = "lp_vertical_active"
 
 # The DSI host's vid_mode_type register values
 VIDEO_MODES = {
@@ -149,6 +150,7 @@ def model_schema(config: ConfigType) -> cv.All:
             model.option(CONF_CONTINUOUS_CLOCK, False): cv.boolean,
             model.option(CONF_EOTP, True): cv.boolean,
             model.option(CONF_LP_HORIZONTAL_BLANKING, True): cv.boolean,
+            model.option(CONF_LP_VERTICAL_ACTIVE, True): cv.boolean,
             model.option(CONF_COMMAND_MODE, COMMAND_MODE_DCS): cv.one_of(
                 COMMAND_MODE_DCS, COMMAND_MODE_GENERIC, lower=True
             ),
@@ -248,6 +250,7 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_continuous_clock(config[CONF_CONTINUOUS_CLOCK]))
     cg.add(var.set_eotp(config[CONF_EOTP]))
     cg.add(var.set_lp_horizontal_blanking(config[CONF_LP_HORIZONTAL_BLANKING]))
+    cg.add(var.set_lp_vertical_active(config[CONF_LP_VERTICAL_ACTIVE]))
     cg.add(
         var.set_generic_commands(config[CONF_COMMAND_MODE] == COMMAND_MODE_GENERIC)
     )

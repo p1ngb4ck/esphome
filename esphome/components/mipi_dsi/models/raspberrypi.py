@@ -9,7 +9,8 @@ from . import DsiDriverChip
 # negative HSYNC and VSYNC), tc358762.c bridge init (each register a generic long write of the 16-bit address and the
 # 32-bit value, both little-endian; LCDCTRL with the polarity bits of the mode; the LCD timing registers from the
 # mode), vc4_dsi.c link (1 lane at pixel clock * 24 = 720 Mbps - that the bridge takes its pixel clock from the byte
-# clock is inferred -, RGB888, video mode with sync pulses (non-burst), continuous HS clock).
+# clock is inferred -, RGB888, video mode with sync pulses (non-burst), continuous HS clock, no EoT packet, LP only
+# once per frame).
 # The ATTINY must have powered the bridge (REG_POWERON = 1, then REG_PORTB bit 0 set) before this display sets up.
 # fmt: off
 DsiDriverChip(
@@ -31,9 +32,11 @@ DsiDriverChip(
     video_mode="non_burst_sync_pulses",
     frame_ack=False,
     continuous_clock=True,
-    # vc4 sends the EoT packet (no MIPI_DSI_MODE_NO_EOT_PACKET); no LP in the horizontal blanking as the Pi firmware
-    # (vc4's setting for it not read)
+    # vc4_dsi.c: DSI_CTRL_HSDT_EOT_DISABLE always (no EoT packet), DISP0 LP_STOP_PERFRAME (LP once per frame, none
+    # in the horizontal blanking or the active lines)
+    eotp=False,
     lp_horizontal_blanking=False,
+    lp_vertical_active=False,
     command_mode="generic",
     no_transform=True,
     # No read_registers, no ack, no frame ack: the TC358762 does not answer a bus turnaround - lane 0 stays reversed

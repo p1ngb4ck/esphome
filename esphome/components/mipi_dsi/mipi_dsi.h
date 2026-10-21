@@ -80,6 +80,8 @@ class MipiDsi final : public display::Display {
   void set_eotp(bool eotp) { this->eotp_ = eotp; }
   // Low power allowed in the horizontal back / front porch (IDF's default: allowed)
   void set_lp_horizontal_blanking(bool lp) { this->lp_horizontal_blanking_ = lp; }
+  // Low power allowed inside the vertical active lines (IDF's default: allowed); off = LP only once per frame
+  void set_lp_vertical_active(bool lp) { this->lp_vertical_active_ = lp; }
   // Init sequence sent as generic writes (bridge chips), without the DCS soft reset
   void set_generic_commands(bool generic) { this->generic_commands_ = generic; }
   // Generic mode: 16-bit registers read back (generic read) and logged once after the init sequence
@@ -183,6 +185,7 @@ class MipiDsi final : public display::Display {
   bool continuous_clock_{false};
   bool eotp_{true};
   bool lp_horizontal_blanking_{true};
+  bool lp_vertical_active_{true};
   bool generic_commands_{false};
   uint8_t read_registers_count_{0};
   const uint16_t *read_registers_{nullptr};
