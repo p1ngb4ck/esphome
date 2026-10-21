@@ -131,10 +131,6 @@ void MipiDsi::setup() {
     return;
   }
 #endif
-#ifdef USE_I2C
-  if (this->i2c_init_sequence_ != nullptr && !this->send_i2c_init_sequence_())
-    return;
-#endif
   if (this->reset_pin_ != nullptr) {
     this->reset_pin_->setup();
     this->reset_pin_->digital_write(true);
@@ -483,6 +479,19 @@ bool MipiDsi::send_init_sequence_(uint32_t when) {
     if (x == DELAY_FLAG) {
       ESP_LOGD(TAG, "Delay %dms", cmd);
       delay(cmd);
+#ifdef USE_I2C
+    } else if (x == I2C_FLAG) {
+      if (len - index < 2) {
+        this->mark_failed(LOG_STR("Malformed init sequence"));
+        return false;
+      }
+      this->i2c_device_.set_i2c_address(cmd);
+      if (!this->i2c_device_.write_registers(reinterpret_cast<const i2c::I2CRegValue *>(seq + index), 1)) {
+        this->mark_failed(LOG_STR("I2C write failed"));
+        return false;
+      }
+      index += 2;
+#endif
     } else {
       uint8_t num_args = x & 0x7F;
       if (len - index < num_args) {
@@ -560,37 +569,6 @@ void MipiDsi::log_read_registers_() {
     ESP_LOGI(TAG, "Register 0x%04X = 0x%08" PRIX32, reg, value);
   }
 }
-
-#ifdef USE_I2C
-bool MipiDsi::send_i2c_init_sequence_() {
-  size_t index = 0;
-  const uint8_t *seq = this->i2c_init_sequence_;
-  const size_t len = this->i2c_init_sequence_len_;
-  while (index != len) {
-    if (len - index < 2) {
-      this->mark_failed(LOG_STR("Malformed I2C init sequence"));
-      return false;
-    }
-    uint8_t reg = seq[index++];
-    uint8_t x = seq[index++];
-    if (x == DELAY_FLAG) {
-      delay(reg);
-      continue;
-    }
-    uint8_t num_args = x & 0x7F;
-    if (len - index < num_args) {
-      this->mark_failed(LOG_STR("Malformed I2C init sequence"));
-      return false;
-    }
-    if (this->i2c_device_.write_register(reg, seq + index, num_args) != i2c::ERROR_OK) {
-      this->mark_failed(LOG_STR("I2C init sequence write failed"));
-      return false;
-    }
-    index += num_args;
-  }
-  return true;
-}
-#endif
 
 static const uint8_t PIXEL_MODES[] = {0, 16, 18, 24};
 static const char *const VIDEO_MODES[] = {"non-burst, sync pulses", "non-burst, sync events", "burst"};

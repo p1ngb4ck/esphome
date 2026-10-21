@@ -36,6 +36,7 @@ const uint8_t INVERT_ON = 0x21;
 const uint8_t DISPLAY_ON = 0x29;
 const uint8_t CMD2_BKSEL = 0xFF;
 const uint8_t DELAY_FLAG = 0xFF;
+const uint8_t I2C_FLAG = 0xFE;
 const uint8_t MADCTL_BGR = 0x08;
 const uint8_t MADCTL_MX = 0x40;
 const uint8_t MADCTL_MY = 0x80;
@@ -83,12 +84,7 @@ class MipiDsi final : public display::Display {
     this->read_registers_count_ = count;
   }
 #ifdef USE_I2C
-  void set_i2c_init_sequence(i2c::I2CBus *bus, uint8_t address, const uint8_t *sequence, size_t len) {
-    this->i2c_device_.set_i2c_bus(bus);
-    this->i2c_device_.set_i2c_address(address);
-    this->i2c_init_sequence_ = sequence;
-    this->i2c_init_sequence_len_ = len;
-  }
+  void set_i2c_bus(i2c::I2CBus *bus) { this->i2c_device_.set_i2c_bus(bus); }
 #endif
 
   void get_dsi_frame_buffers(void **out, uint8_t *count) const {
@@ -153,9 +149,6 @@ class MipiDsi final : public display::Display {
   bool send_init_sequence_(uint32_t when);
   void write_generic_(uint8_t cmd, const uint8_t *args, uint8_t num_args);
   void log_read_registers_();
-#ifdef USE_I2C
-  bool send_i2c_init_sequence_();
-#endif
   /// Pack a colour as the 565 value the panel's byte order expects in memory.
   uint16_t to_panel_565_(Color color) const {
     const uint16_t rgb565 = display::ColorUtil::color_to_565(color);
@@ -190,8 +183,6 @@ class MipiDsi final : public display::Display {
   const uint16_t *read_registers_{nullptr};
 #ifdef USE_I2C
   i2c::I2CDevice i2c_device_;
-  const uint8_t *i2c_init_sequence_{nullptr};
-  size_t i2c_init_sequence_len_{0};
 #endif
 
   bool invert_colors_{};

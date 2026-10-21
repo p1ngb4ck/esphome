@@ -25,12 +25,12 @@ from esphome.components.mipi import (
     CONF_VSYNC_BACK_PORCH,
     CONF_VSYNC_FRONT_PORCH,
     CONF_VSYNC_PULSE_WIDTH,
+    I2C_FLAG,
     MODE_BGR,
     PIXEL_MODE_16BIT,
     PIXEL_MODE_24BIT,
     DriverChip,
     dimension_schema,
-    flatten_sequence,
     get_color_depth,
     map_sequence,
     model_schema_extractor,
@@ -61,8 +61,6 @@ from .models import (
     COMMAND_MODE_DCS,
     COMMAND_MODE_GENERIC,
     CONF_COMMAND_MODE,
-    CONF_I2C_ADDRESS,
-    CONF_I2C_INIT_SEQUENCE,
     DsiDriverChip,
 )
 
@@ -174,22 +172,12 @@ def model_schema(config: ConfigType) -> cv.All:
             model.option(CONF_VSYNC_PULSE_WIDTH): cv.int_,
             model.option(CONF_VSYNC_BACK_PORCH): cv.int_,
             model.option(CONF_VSYNC_FRONT_PORCH): cv.int_,
-            cv.Optional(CONF_I2C_INIT_SEQUENCE): cv.ensure_list(map_sequence),
         }
     )
-    if config.get(CONF_I2C_INIT_SEQUENCE) or model.get_default(CONF_I2C_INIT_SEQUENCE):
-        address = model.get_default(CONF_I2C_ADDRESS, None)
-        address_key = (
-            cv.Required(CONF_I2C_ADDRESS)
-            if address is None
-            else cv.Optional(CONF_I2C_ADDRESS, default=address)
-        )
-        schema = schema.extend(
-            {
-                cv.GenerateID(CONF_I2C_ID): cv.use_id(i2c.I2CBus),
-                address_key: cv.i2c_address,
-            }
-        )
+    if any(
+        isinstance(x, tuple) and x[0] == I2C_FLAG for x in model.initsequence or ()
+    ):
+        schema = schema.extend({cv.GenerateID(CONF_I2C_ID): cv.use_id(i2c.I2CBus)})
     return cv.All(
         schema,
         cv.only_on_esp32,
@@ -276,13 +264,8 @@ async def to_code(config: ConfigType) -> None:
         cg.add(var.set_read_registers(table, len(registers)))
     cg.add(var.set_frame_buffers(config[CONF_FRAME_BUFFERS]))
     cg.add(var.set_lane_bit_rate(config[CONF_LANE_BIT_RATE] / 1.0e6))
-    if i2c_sequence := model.get_i2c_init_sequence(config):
-        data = flatten_sequence(i2c_sequence)
-        bus = await cg.get_variable(config[CONF_I2C_ID])
-        table = cg.shared_progmem_array("mipi_dsi_i2c_init_sequence", cg.uint8, data)
-        cg.add(
-            var.set_i2c_init_sequence(bus, config[CONF_I2C_ADDRESS], table, len(data))
-        )
+    if CONF_I2C_ID in config:
+        cg.add(var.set_i2c_bus(await cg.get_variable(config[CONF_I2C_ID])))
     await cg.add_pin(var.set_reset_pin, config.get(CONF_RESET_PIN))
     if enable_pin := config.get(CONF_ENABLE_PIN):
         enable = [await cg.gpio_pin_expression(pin) for pin in enable_pin]

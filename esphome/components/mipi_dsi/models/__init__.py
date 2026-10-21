@@ -2,8 +2,6 @@ from esphome.components.mipi import DriverChip, flatten_sequence
 from esphome.const import CONF_INIT_SEQUENCE, CONF_SWAP_XY
 
 CONF_COMMAND_MODE = "command_mode"
-CONF_I2C_ADDRESS = "i2c_address"
-CONF_I2C_INIT_SEQUENCE = "i2c_init_sequence"
 COMMAND_MODE_DCS = "dcs"
 COMMAND_MODE_GENERIC = "generic"
 
@@ -18,11 +16,6 @@ class DsiDriverChip(DriverChip):
         sequence.extend(config.get(CONF_INIT_SEQUENCE, []))
         sequence = [x if isinstance(x, tuple) else (x,) for x in sequence]
         return flatten_sequence(sequence)
-
-    def get_i2c_init_sequence(self, config) -> list | None:
-        return config.get(
-            CONF_I2C_INIT_SEQUENCE, self.get_default(CONF_I2C_INIT_SEQUENCE)
-        )
 
     @property
     def transforms(self) -> set[str]:
