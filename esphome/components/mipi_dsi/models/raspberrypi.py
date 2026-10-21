@@ -11,13 +11,17 @@ from . import DsiDriverChip
 # mode), vc4_dsi.c link (1 lane at pixel clock * 24 = 720 Mbps - that the bridge takes its pixel clock from the byte
 # clock is inferred -, RGB888, video mode with sync pulses (non-burst), continuous HS clock, no EoT packet, LP only
 # once per frame).
-# The ATTINY must have powered the bridge (REG_POWERON = 1, then REG_PORTB bit 0 set) before this display sets up.
+# DSI-side front porch 171 (line 1018 pixel clocks), the bridge's LCD timing registers 131 (978): on a Pi 4,
+# vc4_dsi_bridge_mode_fixup stretches the DSI line by 40 and tc358762_bridge_mode_set keeps the requested mode, so
+# the bridge's own line always ends before the next line start arrives.
+# The ATTINY must have powered the panel and released the bridge reset (Linux rpi-panel-attiny-regulator.c sequence)
+# before this display sets up.
 # fmt: off
 DsiDriverChip(
     "RPI-7INCH-V1",
     width=800,
     height=480,
-    hsync_front_porch=131,
+    hsync_front_porch=171,
     hsync_pulse_width=2,
     hsync_back_porch=45,
     vsync_front_porch=7,
