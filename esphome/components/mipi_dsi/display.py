@@ -4,7 +4,7 @@ import pkgutil
 
 from esphome import pins
 import esphome.codegen as cg
-from esphome.components import display
+from esphome.components import display, i2c
 from esphome.components.const import (
     BYTE_ORDER_BIG,
     BYTE_ORDER_LITTLE,
@@ -25,6 +25,7 @@ from esphome.components.mipi import (
     CONF_VSYNC_BACK_PORCH,
     CONF_VSYNC_FRONT_PORCH,
     CONF_VSYNC_PULSE_WIDTH,
+    DELAY_FLAG,
     MODE_BGR,
     PIXEL_MODE_16BIT,
     PIXEL_MODE_24BIT,
@@ -42,6 +43,7 @@ from esphome.const import (
     CONF_COLOR_ORDER,
     CONF_DIMENSIONS,
     CONF_ENABLE_PIN,
+    CONF_I2C_ID,
     CONF_ID,
     CONF_INIT_SEQUENCE,
     CONF_INVERT_COLORS,
@@ -82,6 +84,8 @@ CONF_READ_REGISTERS = "read_registers"
 CONF_EOTP = "eotp"
 CONF_LP_HORIZONTAL_BLANKING = "lp_horizontal_blanking"
 CONF_LP_VERTICAL_ACTIVE = "lp_vertical_active"
+CONF_I2C_ADDRESS = "i2c_address"
+CONF_I2C_INIT_SEQUENCE = "i2c_init_sequence"
 
 # The DSI host's vid_mode_type register values
 VIDEO_MODES = {
@@ -171,8 +175,23 @@ def model_schema(config: ConfigType) -> cv.All:
             model.option(CONF_VSYNC_PULSE_WIDTH): cv.int_,
             model.option(CONF_VSYNC_BACK_PORCH): cv.int_,
             model.option(CONF_VSYNC_FRONT_PORCH): cv.int_,
+            # Replaces the model's I2C init sequence
+            cv.Optional(CONF_I2C_INIT_SEQUENCE): cv.ensure_list(map_sequence),
         }
     )
+    if config.get(CONF_I2C_INIT_SEQUENCE) or model.get_default(CONF_I2C_INIT_SEQUENCE):
+        address = model.get_default(CONF_I2C_ADDRESS, None)
+        address_key = (
+            cv.Required(CONF_I2C_ADDRESS)
+            if address is None
+            else cv.Optional(CONF_I2C_ADDRESS, default=address)
+        )
+        schema = schema.extend(
+            {
+                cv.GenerateID(CONF_I2C_ID): cv.use_id(i2c.I2CBus),
+                address_key: cv.i2c_address,
+            }
+        )
     return cv.All(
         schema,
         cv.only_on_esp32,
@@ -259,6 +278,19 @@ async def to_code(config: ConfigType) -> None:
         cg.add(var.set_read_registers(table, len(registers)))
     cg.add(var.set_frame_buffers(config[CONF_FRAME_BUFFERS]))
     cg.add(var.set_lane_bit_rate(config[CONF_LANE_BIT_RATE] / 1.0e6))
+    if i2c_sequence := config.get(
+        CONF_I2C_INIT_SEQUENCE, model.get_default(CONF_I2C_INIT_SEQUENCE)
+    ):
+        # Each write as its length and bytes, a delay as 0 and its ms
+        data = sum(
+            ((0, x[1]) if x[0] == DELAY_FLAG else (len(x), *x) for x in i2c_sequence),
+            (),
+        )
+        bus = await cg.get_variable(config[CONF_I2C_ID])
+        table = cg.shared_progmem_array("mipi_dsi_i2c_init_sequence", cg.uint8, data)
+        cg.add(
+            var.set_i2c_init_sequence(bus, config[CONF_I2C_ADDRESS], table, len(data))
+        )
     await cg.add_pin(var.set_reset_pin, config.get(CONF_RESET_PIN))
     if enable_pin := config.get(CONF_ENABLE_PIN):
         enable = [await cg.gpio_pin_expression(pin) for pin in enable_pin]

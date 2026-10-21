@@ -13,6 +13,9 @@
 
 #include "esphome/components/display/display.h"
 #include "esphome/components/display/display_color_utils.h"
+#ifdef USE_I2C
+#include "esphome/components/i2c/i2c_bus.h"
+#endif
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_io.h"
 
@@ -89,6 +92,15 @@ class MipiDsi final : public display::Display {
     this->read_registers_ = registers;
     this->read_registers_count_ = count;
   }
+#ifdef USE_I2C
+  // Writes to an I2C power controller once the DSI lanes are in LP-11, before the display is reset and initialised
+  void set_i2c_init_sequence(i2c::I2CBus *bus, uint8_t address, const uint8_t *sequence, size_t len) {
+    this->i2c_bus_ = bus;
+    this->i2c_address_ = address;
+    this->i2c_init_sequence_ = sequence;
+    this->i2c_init_sequence_len_ = len;
+  }
+#endif
 
   // --- direct DPI framebuffer access for a real-time video client (simple_video_player) ---
   // Only valid when frame_buffers >= 2. get_dsi_frame_buffers() hands back the driver-owned
@@ -157,6 +169,9 @@ class MipiDsi final : public display::Display {
   bool send_init_sequence_(uint32_t when);
   void write_generic_(uint8_t cmd, const uint8_t *args, uint8_t num_args);
   void log_read_registers_();
+#ifdef USE_I2C
+  bool send_i2c_init_sequence_();
+#endif
   /// Pack a colour as the 565 value the panel's byte order expects in memory.
   uint16_t to_panel_565_(Color color) const {
     const uint16_t rgb565 = display::ColorUtil::color_to_565(color);
@@ -189,6 +204,13 @@ class MipiDsi final : public display::Display {
   bool generic_commands_{false};
   uint8_t read_registers_count_{0};
   const uint16_t *read_registers_{nullptr};
+#ifdef USE_I2C
+  uint8_t i2c_address_{};
+  i2c::I2CBus *i2c_bus_{nullptr};
+  // Shared PROGMEM table: entries of length, bytes; length 0 = delay of the next byte in ms
+  const uint8_t *i2c_init_sequence_{nullptr};
+  size_t i2c_init_sequence_len_{0};
+#endif
 
   bool invert_colors_{};
   display::ColorBitness color_depth_;

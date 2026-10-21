@@ -16,8 +16,8 @@ from . import DsiDriverChip
 # firmware runs H 2 / 44, V 2 / 21), the same on DSI and in the bridge; 30 MHz = 240 MHz / 8 on the P4.
 # Link as vc4_dsi.c (raspberrypi/linux rpi-6.6.y): 1 lane, RGB888, video mode with sync pulses (non-burst),
 # continuous HS clock, no EoT packet, LP only once per frame.
-# The ATTINY must have powered the panel and released the bridge reset (Linux rpi-panel-attiny-regulator.c sequence)
-# before this display sets up.
+# The ATTINY powers the panel and releases the bridge reset (Linux rpi-panel-attiny-regulator.c sequence) from the
+# display's setup, once the DSI lanes are in LP-11 (Linux: tc358762 pre_enable_prev_first, vc4_dsi drives STOP first).
 # fmt: off
 DsiDriverChip(
     "RPI-7INCH-V1",
@@ -45,6 +45,22 @@ DsiDriverChip(
     lp_vertical_active=False,
     command_mode="generic",
     no_transform=True,
+    i2c_address=0x45,
+    # ATTINY88 registers
+    i2c_init_sequence=[
+        (0x85, 0x00), delay(30),  # POWERON off
+        (0x86, 0x00), delay(8),   # PWM: backlight off
+        (0x83, 0x00), delay(8),   # PORTC: bridge, LCD and touch in reset
+        (0x81, 0x04), delay(8),   # PORTA: LCD_LR (0x08 LCD_UD: rotated 180 degrees)
+        (0x82, 0x80), delay(8),   # PORTB: LCD_MAIN
+        (0x83, 0x01), delay(88),  # PORTC: LED_EN
+        (0x83, 0x0D), delay(8),   # PORTC: RST_BRIDGE_N, RST_LCD_N released
+        (0x8D, 0x04), delay(8),   # bridge register 0x047C = 0
+        (0x8C, 0x7C), delay(8),
+        (0x90, 0x00), delay(8),
+        (0x91, 0x00), delay(108),
+        (0x83, 0x0F), delay(8),   # PORTC: RST_TP_N released
+    ],
     # No read_registers, no ack, no frame ack: the TC358762 does not answer a bus turnaround - lane 0 stays reversed
     # (DSI host PHY_STATUS phy_direction 1, gen_rd_cmd_busy, IDF runs without timeouts) and nothing is sent after
     # it, not even video (seen 2026-10-21). Linux never reads it.
