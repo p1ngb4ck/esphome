@@ -140,8 +140,7 @@ void MipiDsi::setup() {
   }
 #endif
 #ifdef USE_I2C
-  // esp_lcd_new_dsi_bus() has the lanes in LP-11: a bridge powered up or released from reset before that may not start
-  if (this->i2c_bus_ != nullptr && !this->send_i2c_init_sequence_())
+  if (this->i2c_init_sequence_ != nullptr && !this->send_i2c_init_sequence_())
     return;
 #endif
   if (this->reset_pin_ != nullptr) {
@@ -590,26 +589,30 @@ void MipiDsi::log_read_registers_() {
 
 #ifdef USE_I2C
 bool MipiDsi::send_i2c_init_sequence_() {
+  size_t index = 0;
   const uint8_t *seq = this->i2c_init_sequence_;
   const size_t len = this->i2c_init_sequence_len_;
-  size_t index = 0;
   while (index != len) {
-    const uint8_t count = seq[index++];
-    if (index == len || len - index < (count == 0 ? 1 : count)) {
+    if (len - index < 2) {
       this->mark_failed(LOG_STR("Malformed I2C init sequence"));
       return false;
     }
-    if (count == 0) {
-      delay(seq[index++]);
+    uint8_t reg = seq[index++];
+    uint8_t x = seq[index++];
+    if (x == DELAY_FLAG) {
+      delay(reg);
       continue;
     }
-    const auto err = this->i2c_bus_->write(this->i2c_address_, seq + index, count);
-    if (err != i2c::ERROR_OK) {
-      ESP_LOGE(TAG, "I2C write 0x%02X to 0x%02X failed: %d", seq[index], this->i2c_address_, err);
-      this->mark_failed(LOG_STR("I2C init sequence failed"));
+    uint8_t num_args = x & 0x7F;
+    if (len - index < num_args) {
+      this->mark_failed(LOG_STR("Malformed I2C init sequence"));
       return false;
     }
-    index += count;
+    if (this->i2c_device_.write_register(reg, seq + index, num_args) != i2c::ERROR_OK) {
+      this->mark_failed(LOG_STR("I2C init sequence write failed"));
+      return false;
+    }
+    index += num_args;
   }
   return true;
 }

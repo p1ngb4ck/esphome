@@ -25,12 +25,12 @@ from esphome.components.mipi import (
     CONF_VSYNC_BACK_PORCH,
     CONF_VSYNC_FRONT_PORCH,
     CONF_VSYNC_PULSE_WIDTH,
-    DELAY_FLAG,
     MODE_BGR,
     PIXEL_MODE_16BIT,
     PIXEL_MODE_24BIT,
     DriverChip,
     dimension_schema,
+    flatten_sequence,
     get_color_depth,
     map_sequence,
     model_schema_extractor,
@@ -175,7 +175,6 @@ def model_schema(config: ConfigType) -> cv.All:
             model.option(CONF_VSYNC_PULSE_WIDTH): cv.int_,
             model.option(CONF_VSYNC_BACK_PORCH): cv.int_,
             model.option(CONF_VSYNC_FRONT_PORCH): cv.int_,
-            # Replaces the model's I2C init sequence
             cv.Optional(CONF_I2C_INIT_SEQUENCE): cv.ensure_list(map_sequence),
         }
     )
@@ -221,9 +220,7 @@ def _config_schema(config: ConfigType) -> ConfigType:
         byte_order=config[CONF_BYTE_ORDER],
         has_writer=requires_buffer(config)
         or config.get(CONF_AUTO_CLEAR_ENABLED) is True,
-        rotation=0
-        if model.rotation_as_transform(config)
-        else config.get(CONF_ROTATION, 0),
+        rotation=config.get(CONF_ROTATION, 0),
         draw_rounding=config.get(CONF_DRAW_ROUNDING, 0),
     )
     return config
@@ -281,11 +278,7 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_frame_buffers(config[CONF_FRAME_BUFFERS]))
     cg.add(var.set_lane_bit_rate(config[CONF_LANE_BIT_RATE] / 1.0e6))
     if i2c_sequence := model.get_i2c_init_sequence(config):
-        # Each write as its length and bytes, a delay as 0 and its ms
-        data = sum(
-            ((0, x[1]) if x[0] == DELAY_FLAG else (len(x), *x) for x in i2c_sequence),
-            (),
-        )
+        data = flatten_sequence(i2c_sequence)
         bus = await cg.get_variable(config[CONF_I2C_ID])
         table = cg.shared_progmem_array("mipi_dsi_i2c_init_sequence", cg.uint8, data)
         cg.add(

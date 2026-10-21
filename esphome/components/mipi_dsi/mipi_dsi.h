@@ -14,7 +14,7 @@
 #include "esphome/components/display/display.h"
 #include "esphome/components/display/display_color_utils.h"
 #ifdef USE_I2C
-#include "esphome/components/i2c/i2c_bus.h"
+#include "esphome/components/i2c/i2c.h"
 #endif
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_io.h"
@@ -93,10 +93,9 @@ class MipiDsi final : public display::Display {
     this->read_registers_count_ = count;
   }
 #ifdef USE_I2C
-  // Writes to an I2C power controller once the DSI lanes are in LP-11, before the display is reset and initialised
   void set_i2c_init_sequence(i2c::I2CBus *bus, uint8_t address, const uint8_t *sequence, size_t len) {
-    this->i2c_bus_ = bus;
-    this->i2c_address_ = address;
+    this->i2c_device_.set_i2c_bus(bus);
+    this->i2c_device_.set_i2c_address(address);
     this->i2c_init_sequence_ = sequence;
     this->i2c_init_sequence_len_ = len;
   }
@@ -205,9 +204,7 @@ class MipiDsi final : public display::Display {
   uint8_t read_registers_count_{0};
   const uint16_t *read_registers_{nullptr};
 #ifdef USE_I2C
-  uint8_t i2c_address_{};
-  i2c::I2CBus *i2c_bus_{nullptr};
-  // Shared PROGMEM table: entries of length, bytes; length 0 = delay of the next byte in ms
+  i2c::I2CDevice i2c_device_;
   const uint8_t *i2c_init_sequence_{nullptr};
   size_t i2c_init_sequence_len_{0};
 #endif
