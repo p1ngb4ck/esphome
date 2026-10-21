@@ -8,12 +8,12 @@ from . import DsiDriverChip
 # 2026-10-21): panel-simple raspberrypi_7inch mode (30 MHz, H 800 / front 131 / sync 2 / back 45, V 480 / 7 / 2 / 22,
 # negative HSYNC and VSYNC), tc358762.c bridge init (each register a generic long write of the 16-bit address and the
 # 32-bit value, both little-endian; LCDCTRL with the polarity bits of the mode; the LCD timing registers from the
-# mode), vc4_dsi.c link (1 lane, RGB888, video mode with sync pulses (non-burst), continuous HS clock, no EoT packet,
-# LP only once per frame).
-# Timing: the mode the Pi 4's firmware runs (pixel valve 1 read on a working Pi, 2026-10-21): H sync 2 / back 44 /
-# front 61, V 2 / 21 / 7, pixel clock 27.777 MHz = 750 Mbps / 27. Here 26.667 MHz (240 MHz / 9, the DPI clock is an
-# integer divider of PLL_F240M) and 720 Mbps keep the Pi's 27 link bits per pixel; the bridge's LCD timing registers
-# get the same mode.
+# mode), vc4_dsi.c link (1 lane at pixel clock * 24 = 720 Mbps - that the bridge takes its pixel clock from the byte
+# clock is inferred -, RGB888, video mode with sync pulses (non-burst), continuous HS clock, no EoT packet, LP only
+# once per frame).
+# DSI-side front porch 171 (line 1018 pixel clocks), the bridge's LCD timing registers 131 (978): on a Pi 4,
+# vc4_dsi_bridge_mode_fixup stretches the DSI line by 40 and tc358762_bridge_mode_set keeps the requested mode, so
+# the bridge's own line always ends before the next line start arrives.
 # The ATTINY must have powered the panel and released the bridge reset (Linux rpi-panel-attiny-regulator.c sequence)
 # before this display sets up.
 # fmt: off
@@ -21,13 +21,13 @@ DsiDriverChip(
     "RPI-7INCH-V1",
     width=800,
     height=480,
-    hsync_front_porch=61,
+    hsync_front_porch=171,
     hsync_pulse_width=2,
-    hsync_back_porch=44,
+    hsync_back_porch=45,
     vsync_front_porch=7,
     vsync_pulse_width=2,
-    vsync_back_porch=21,
-    pclk_frequency="26.6667MHz",
+    vsync_back_porch=22,
+    pclk_frequency="30MHz",
     lane_bit_rate="720Mbps",
     lanes=1,
     color_depth="24",
@@ -58,9 +58,9 @@ DsiDriverChip(
         (0x64, 0x04, 0x0F, 0x04, 0x00, 0x00),  # SYSCTRL 0x040F
         # LCD timing for the bridge's own timing generator (VTGEN) - raspberrypi/linux rpi-6.6.y tc358762.c writes
         # these four, mainline does not: sync | back porch << 16, active | front porch << 16
-        (0x24, 0x04, 0x02, 0x00, 0x2C, 0x00),  # LCD_HS_HBP 0x002C0002: HSYNC 2, HBP 44
-        (0x28, 0x04, 0x20, 0x03, 0x3D, 0x00),  # LCD_HDISP_HFP 0x003D0320: 800, HFP 61
-        (0x2C, 0x04, 0x02, 0x00, 0x15, 0x00),  # LCD_VS_VBP 0x00150002: VSYNC 2, VBP 21
+        (0x24, 0x04, 0x02, 0x00, 0x2D, 0x00),  # LCD_HS_HBP 0x002D0002: HSYNC 2, HBP 45
+        (0x28, 0x04, 0x20, 0x03, 0x83, 0x00),  # LCD_HDISP_HFP 0x00830320: 800, HFP 131
+        (0x2C, 0x04, 0x02, 0x00, 0x16, 0x00),  # LCD_VS_VBP 0x00160002: VSYNC 2, VBP 22
         (0x30, 0x04, 0xE0, 0x01, 0x07, 0x00),  # LCD_VDISP_VFP 0x000701E0: 480, VFP 7
         delay(100),
         (0x04, 0x01, 0x01, 0x00, 0x00, 0x00),  # PPI_STARTPPI
