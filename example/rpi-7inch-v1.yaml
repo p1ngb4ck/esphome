@@ -15,6 +15,7 @@ esp32:
 external_components:
   - source: github://p1ngb4ck/esphome@rpi7-v1-upstream
     components:
+      - mipi      # changed upstream component: i2c_write in init sequences
       - mipi_dsi  # changed upstream component: link options, generic commands, I2C init sequence, model RPI-7INCH-V1
       - ft5x06    # changed upstream component: other FT5x06-family vendor IDs, 0xFF touch count
     refresh: always
