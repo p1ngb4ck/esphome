@@ -22,12 +22,10 @@ bool MipiDsi::notify_refresh_ready_(esp_lcd_panel_handle_t panel, esp_lcd_dpi_pa
   return (need_yield == pdTRUE);
 }
 
-// The scan DMA has just restarted on the current frame buffer.
 bool MipiDsi::notify_frame_started_(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata,
                                     void *user_ctx) {
   auto *self = static_cast<MipiDsi *>(user_ctx);
   const uint32_t frames = self->scan_frames_.fetch_add(1, std::memory_order_acq_rel) + 1;
-  // A task waits for the flip (wait_scanout_flipped()): woken at the frame it took effect.
   if (self->flip_waiting_.load(std::memory_order_acquire) &&
       static_cast<int32_t>(frames - self->flip_frame_.load(std::memory_order_acquire)) >= 0) {
     self->flip_waiting_.store(false, std::memory_order_release);
@@ -97,7 +95,7 @@ void MipiDsi::setup() {
                                            .dpi_clock_freq_mhz = this->pclk_frequency_,
                                            .pixel_format = pixel_format,
 #endif
-                                           .num_fbs = this->num_fbs_,  // frame buffers (YAML: frame_buffers)
+                                           .num_fbs = this->num_fbs_,
                                            .video_timing =
                                                {
                                                    .h_size = this->width_,
@@ -120,17 +118,11 @@ void MipiDsi::setup() {
     this->smark_failed(LOG_STR("esp_lcd_new_panel_dpi failed"), err);
     return;
   }
-  // esp_lcd_new_panel_dpi() sets the video mode type and the frame ack (fixed to burst / on in IDF 5.5.5 and 6.1.0,
-  // from its config in later 6.1, whose LL API differs); set both in the host's register before esp_lcd_panel_init()
-  // starts the video mode. vid_mode_type: 0 non-burst sync pulses, 1 non-burst sync events, 2 burst.
   MIPI_DSI_LL_GET_HOST(0)->vid_mode_cfg.vid_mode_type = this->video_mode_;
   MIPI_DSI_LL_GET_HOST(0)->vid_mode_cfg.frame_bta_ack_en = this->frame_ack_;
-  // EoTp in HS is switched on by esp_lcd_new_dsi_bus(), LP in HBP / HFP by esp_lcd_new_panel_dpi() (both IDF 5.5.5
-  // and 6.1.0)
   mipi_dsi_host_ll_enable_tx_eotp(MIPI_DSI_LL_GET_HOST(0), this->eotp_, false);
   mipi_dsi_host_ll_dpi_enable_lp_horizontal_timing(MIPI_DSI_LL_GET_HOST(0), this->lp_horizontal_blanking_,
                                                    this->lp_horizontal_blanking_);
-  // LP in VSA / VBP / VFP as IDF sets it, in the active lines only when allowed
   mipi_dsi_host_ll_dpi_enable_lp_vertical_timing(MIPI_DSI_LL_GET_HOST(0), true, true, true, this->lp_vertical_active_);
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
   err = esp_lcd_dpi_panel_enable_dma2d(this->handle_);
@@ -155,11 +147,7 @@ void MipiDsi::setup() {
   }
   // need to know when the display is ready for SLPOUT command - will be 120ms after reset
   auto when = millis() + 120;
-  // A bridge takes its setup in command mode, before esp_lcd_panel_init() starts the video (as IDF's own panel
-  // drivers send theirs); DCS panels get theirs after it, as before.
   if (this->generic_commands_) {
-    // esp_lcd_new_panel_io_dbi() requests an ack (BTA) after every command and the bus has its timeouts off; Linux
-    // writes a bridge "command only" (vc4_dsi.c DSI_TXPKT1C_CMD_CTRL_TX), so no ack is requested here either
     MIPI_DSI_LL_GET_HOST(0)->cmd_mode_cfg.ack_rqst_en = 0;
     if (!this->send_init_sequence_(when))
       return;
@@ -184,8 +172,6 @@ void MipiDsi::setup() {
     return;
   }
 
-  // Hand back the driver-owned framebuffers so a direct video client can decode/rotate
-  // straight into them and flip at VSYNC. Only meaningful with >= 2 buffers.
   if (this->num_fbs_ >= 2) {
     esp_err_t fberr;
     if (this->num_fbs_ >= 3) {
@@ -207,10 +193,6 @@ void MipiDsi::setup() {
 }
 
 void MipiDsi::present_dsi_frame_buffer(void *fb) {
-  // fb must be one of dsi_fbs_ -> esp_lcd_panel_draw_bitmap recognises it as an owned framebuffer
-  // and just repoints the DPI scanout at it for the next scan frame (no copy). The owned-FB path
-  // invokes on_color_trans_done synchronously (IDF esp_lcd_panel_dpi.c), so drain io_lock_
-  // non-blocking -- never wait.
   esp_lcd_panel_draw_bitmap(this->handle_, 0, 0, this->width_, this->height_, fb);
   xSemaphoreTake(this->io_lock_, 0);
   this->draw_fb_ = fb;
@@ -227,13 +209,9 @@ uint8_t MipiDsi::get_scanout_buffers(void **out, uint8_t max, display::ColorBitn
 }
 
 void MipiDsi::present_scanout_buffer(void *buffer) {
-  // An owned buffer is only made the scanout source; the one-pixel window keeps the driver's
-  // cache write-back to a single row, the caller has written its rows back already.
   esp_lcd_panel_draw_bitmap(this->handle_, 0, 0, 1, 1, buffer);
   xSemaphoreTake(this->io_lock_, 0);
   this->draw_fb_ = buffer;
-  // A restart counted from here may have picked the buffer before the switch; the one after it
-  // cannot have.
   this->flip_frame_.store(this->scan_frames_.load(std::memory_order_acquire) + 2, std::memory_order_release);
 }
 
@@ -250,9 +228,9 @@ bool MipiDsi::scanout_flipped() {
 bool MipiDsi::wait_scanout_flipped(uint32_t timeout_ms) {
   if (this->scanout_flipped() || this->flip_sem_ == nullptr)
     return this->scanout_flipped();
-  xSemaphoreTake(this->flip_sem_, 0);  // a give left from an earlier wait
+  xSemaphoreTake(this->flip_sem_, 0);
   this->flip_waiting_.store(true, std::memory_order_release);
-  if (!this->scanout_flipped())  // the frame may have come before the flag was set
+  if (!this->scanout_flipped())
     xSemaphoreTake(this->flip_sem_, pdMS_TO_TICKS(timeout_ms));
   this->flip_waiting_.store(false, std::memory_order_release);
   return this->scanout_flipped();
@@ -541,8 +519,6 @@ bool MipiDsi::send_init_sequence_(uint32_t when) {
   return true;
 }
 
-// esp_lcd's DBI io sends DCS packets only; bridge chips (TC358762) take their register writes as generic writes.
-// The HAL's packet functions use only the host registers, the same ones the DBI io writes through.
 void MipiDsi::write_generic_(uint8_t cmd, const uint8_t *args, uint8_t num_args) {
   mipi_dsi_hal_context_t hal{};
   hal.host = MIPI_DSI_LL_GET_HOST(0);
@@ -551,15 +527,13 @@ void MipiDsi::write_generic_(uint8_t cmd, const uint8_t *args, uint8_t num_args)
   } else if (num_args == 1) {
     mipi_dsi_hal_host_gen_write_short_packet(&hal, 0, MIPI_DSI_DT_GENERIC_SHORT_WRITE_2, cmd | (args[0] << 8));
   } else {
-    uint8_t payload[128];  // num_args <= 0x7F
+    uint8_t payload[128];
     payload[0] = cmd;
     memcpy(payload + 1, args, num_args);
     mipi_dsi_hal_host_gen_write_long_packet(&hal, 0, MIPI_DSI_DT_GENERIC_LONG_WRITE, payload, num_args + 1);
   }
 }
 
-// Each register by a generic read request with its 16-bit address; the answer (up to 4 bytes) is logged. IDF's
-// mipi_dsi_hal_host_gen_read_short_packet() waits without a limit for an answer, so this waits at most 20 ms.
 void MipiDsi::log_read_registers_() {
   auto *host = MIPI_DSI_LL_GET_HOST(0);
   mipi_dsi_hal_context_t hal{};

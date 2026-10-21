@@ -56,9 +56,6 @@ class MipiDsi final : public display::Display {
   void set_pclk_frequency(float pclk_frequency) { this->pclk_frequency_ = pclk_frequency; }
   int get_width_internal() override { return this->width_; }
   int get_height_internal() override { return this->height_; }
-  // Bytes per pixel of the panel framebuffers, derived from the configured color depth (same
-  // expression write_to_display_() uses): RGB888 -> 3, RGB565 -> 2. Lets a direct-framebuffer
-  // client size and format its output from the display config instead of hardcoding RGB888.
   uint8_t get_bytes_per_pixel() const { return 3 - static_cast<uint8_t>(this->color_depth_); }
   void set_hsync_back_porch(uint16_t hsync_back_porch) { this->hsync_back_porch_ = hsync_back_porch; }
   void set_hsync_front_porch(uint16_t hsync_front_porch) { this->hsync_front_porch_ = hsync_front_porch; }
@@ -74,20 +71,13 @@ class MipiDsi final : public display::Display {
   void set_lane_bit_rate(float lane_bit_rate) { this->lane_bit_rate_ = lane_bit_rate; }
   void set_lanes(uint8_t lanes) { this->lanes_ = lanes; }
   void set_frame_buffers(uint8_t n) { this->num_fbs_ = n; }
-  // DSI host vid_mode_type: 0 non-burst sync pulses, 1 non-burst sync events, 2 burst
   void set_video_mode(uint8_t mode) { this->video_mode_ = mode; }
   void set_frame_ack(bool frame_ack) { this->frame_ack_ = frame_ack; }
-  // Clock lane kept in HS (bridges that take their pixel clock from it) instead of the host's automatic LP
   void set_continuous_clock(bool continuous) { this->continuous_clock_ = continuous; }
-  // End of Transmission packet after each HS transmission (IDF's default: on)
   void set_eotp(bool eotp) { this->eotp_ = eotp; }
-  // Low power allowed in the horizontal back / front porch (IDF's default: allowed)
   void set_lp_horizontal_blanking(bool lp) { this->lp_horizontal_blanking_ = lp; }
-  // Low power allowed inside the vertical active lines (IDF's default: allowed); off = LP only once per frame
   void set_lp_vertical_active(bool lp) { this->lp_vertical_active_ = lp; }
-  // Init sequence sent as generic writes (bridge chips), without the DCS soft reset
   void set_generic_commands(bool generic) { this->generic_commands_ = generic; }
-  // Generic mode: 16-bit registers read back (generic read) and logged once after the init sequence
   void set_read_registers(const uint16_t *registers, uint8_t count) {
     this->read_registers_ = registers;
     this->read_registers_count_ = count;
@@ -101,11 +91,6 @@ class MipiDsi final : public display::Display {
   }
 #endif
 
-  // --- direct DPI framebuffer access for a real-time video client (simple_video_player) ---
-  // Only valid when frame_buffers >= 2. get_dsi_frame_buffers() hands back the driver-owned
-  // framebuffers in native panel orientation; present_dsi_frame_buffer() points the DPI scanout
-  // at one of them and returns after the next VSYNC flip (zero copy). While a client uses these,
-  // LVGL must be paused so its own flushes don't fight the scanout.
   void get_dsi_frame_buffers(void **out, uint8_t *count) const {
     *count = this->dsi_fbs_[0] != nullptr ? this->num_fbs_ : 0;
     for (uint8_t i = 0; i < *count && i < 3; i++)
@@ -193,7 +178,7 @@ class MipiDsi final : public display::Display {
   float pclk_frequency_ = 16;  // in MHz
   float lane_bit_rate_{1500};  // in Mbps
   uint8_t lanes_{2};           // 1, 2, 3 or 4 lanes
-  uint8_t num_fbs_{1};         // DPI frame buffers; >=2 lets the driver flip at VSYNC (anti-tearing)
+  uint8_t num_fbs_{1};
   uint8_t video_mode_{2};
   bool frame_ack_{true};
   bool continuous_clock_{false};
@@ -216,16 +201,14 @@ class MipiDsi final : public display::Display {
   uint8_t pixel_mode_{};
 
   esp_lcd_panel_handle_t handle_{};
-  void *dsi_fbs_[3]{};  // driver-owned DPI framebuffers, populated in setup() when num_fbs_ >= 2
-  // The one draw_bitmap() copies into: the one presented last (esp_lcd_panel_dpi.c's cur_fb_index,
-  // 0 after init).
+  void *dsi_fbs_[3]{};
   void *draw_fb_{nullptr};
   esp_lcd_dsi_bus_handle_t bus_handle_{};
   esp_lcd_panel_io_handle_t io_handle_{};
   SemaphoreHandle_t io_lock_{};
   std::atomic<uint32_t> scan_frames_{0};
   std::atomic<uint32_t> flip_frame_{0};
-  SemaphoreHandle_t flip_sem_{};           // given by the frame interrupt to a wait_scanout_flipped()
+  SemaphoreHandle_t flip_sem_{};
   std::atomic<bool> flip_waiting_{false};
   uint8_t *buffer_{nullptr};
   uint16_t x_low_{1};

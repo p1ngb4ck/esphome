@@ -87,7 +87,6 @@ CONF_EOTP = "eotp"
 CONF_LP_HORIZONTAL_BLANKING = "lp_horizontal_blanking"
 CONF_LP_VERTICAL_ACTIVE = "lp_vertical_active"
 
-# The DSI host's vid_mode_type register values
 VIDEO_MODES = {
     "non_burst_sync_pulses": 0,
     "non_burst_sync_events": 1,

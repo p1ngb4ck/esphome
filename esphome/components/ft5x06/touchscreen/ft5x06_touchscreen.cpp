@@ -45,7 +45,6 @@ void FT5x06Touchscreen::continue_setup_() {
       break;
 
     default:
-      // Other FT5x06-family controllers (e.g. the Raspberry Pi 7" Touch Display's) use the same register map
       ESP_LOGW(TAG, "Unknown vendor ID 0x%X, using the FT5x06 register map", data[0]);
       break;
   }
@@ -59,7 +58,6 @@ void FT5x06Touchscreen::update_touches() {
     ESP_LOGW(TAG, "Failed to read status");
     return;
   }
-  // No valid count: some controllers (the Raspberry Pi 7" Touch Display's) read 0xFF until the first touch
   if (touch_cnt == 0 || touch_cnt > MAX_TOUCHES)
     return;
 
