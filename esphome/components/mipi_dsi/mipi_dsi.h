@@ -74,7 +74,6 @@ class MipiDsi final : public display::Display {
   void set_eotp(bool eotp) { this->eotp_ = eotp; }
   void set_lp_horizontal_blanking(bool lp) { this->lp_horizontal_blanking_ = lp; }
   void set_lp_vertical_active(bool lp) { this->lp_vertical_active_ = lp; }
-  // Init sequence as generic writes, without DCS soft reset
   void set_generic_commands(bool generic) { this->generic_commands_ = generic; }
 #ifdef USE_I2C
   void set_i2c_bus(i2c::I2CBus *bus) { this->i2c_device_.set_i2c_bus(bus); }

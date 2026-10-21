@@ -102,7 +102,6 @@ void MipiDsi::setup() {
     this->smark_failed(LOG_STR("esp_lcd_new_panel_dpi failed"), err);
     return;
   }
-  // IDF enables frame ack, EoTp and LP in all blanking; override before the video starts
   MIPI_DSI_LL_GET_HOST(0)->vid_mode_cfg.frame_bta_ack_en = this->frame_ack_;
   mipi_dsi_host_ll_enable_tx_eotp(MIPI_DSI_LL_GET_HOST(0), this->eotp_, false);
   mipi_dsi_host_ll_dpi_enable_lp_horizontal_timing(MIPI_DSI_LL_GET_HOST(0), this->lp_horizontal_blanking_,
@@ -128,7 +127,6 @@ void MipiDsi::setup() {
   // need to know when the display is ready for SLPOUT command - will be 120ms after reset
   auto when = millis() + 120;
   if (this->generic_commands_) {
-    // Bridges such as the TC358762 never answer the ack's bus turnaround
     MIPI_DSI_LL_GET_HOST(0)->cmd_mode_cfg.ack_rqst_en = 0;
   }
   err = esp_lcd_panel_init(this->handle_);
@@ -442,7 +440,6 @@ int MipiDsi::get_height() {
   }
 }
 
-// The DBI io sends DCS packets only
 void MipiDsi::write_generic_(uint8_t cmd, const uint8_t *args, uint8_t num_args) {
   mipi_dsi_hal_context_t hal{};
   hal.host = MIPI_DSI_LL_GET_HOST(0);
@@ -451,7 +448,7 @@ void MipiDsi::write_generic_(uint8_t cmd, const uint8_t *args, uint8_t num_args)
   } else if (num_args == 1) {
     mipi_dsi_hal_host_gen_write_short_packet(&hal, 0, MIPI_DSI_DT_GENERIC_SHORT_WRITE_2, cmd | (args[0] << 8));
   } else {
-    uint8_t payload[128];  // num_args <= 0x7F
+    uint8_t payload[128];
     payload[0] = cmd;
     memcpy(payload + 1, args, num_args);
     mipi_dsi_hal_host_gen_write_long_packet(&hal, 0, MIPI_DSI_DT_GENERIC_LONG_WRITE, payload, num_args + 1);
