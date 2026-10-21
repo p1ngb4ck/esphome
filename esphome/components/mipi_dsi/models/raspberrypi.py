@@ -24,7 +24,7 @@ DsiDriverChip(
     vsync_pulse_width=2,
     vsync_back_porch=22,
     pclk_frequency="30MHz",
-    lane_bit_rate="720Mbps",
+    lane_bit_rate="1440Mbps",
     lanes=1,
     color_depth="24",
     pixel_mode="24bit",
