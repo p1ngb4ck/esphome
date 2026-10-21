@@ -8,23 +8,26 @@ from . import DsiDriverChip
 # 2026-10-21): panel-simple raspberrypi_7inch mode (30 MHz, H 800 / front 131 / sync 2 / back 45, V 480 / 7 / 2 / 22,
 # negative HSYNC and VSYNC), tc358762.c bridge init (each register a generic long write of the 16-bit address and the
 # 32-bit value, both little-endian; LCDCTRL with the polarity bits of the mode; the LCD timing registers from the
-# mode), vc4_dsi.c link (1 lane at pixel clock * 24 = 720 Mbps - that the bridge takes its pixel clock from the byte
-# clock is inferred -, RGB888, video mode with sync pulses (non-burst), continuous HS clock, no EoT packet, LP only
-# once per frame).
-# The ATTINY must have powered the bridge (REG_POWERON = 1, then REG_PORTB bit 0 set) before this display sets up.
+# requested mode), vc4_dsi.c link: RGB888, 1 lane, video mode with sync pulses (non-burst), continuous HS clock, no
+# EoT packet, LP only once per frame. vc4_dsi_bridge_mode_fixup runs the link at a whole divider of PLLD (3 GHz on a
+# Pi 4): 30 MHz * 24 = 720 MHz -> divider 4 -> 750 Mbps, pixel clock 750 / 24 = 31.25 MHz, htotal stretched to keep
+# 60 Hz (978 * 31250 / 30000 = 1018: front porch 131 + 40 = 171) - on the DSI side only: tc358762_bridge_mode_set
+# copies the requested mode, so the bridge's LCD timing registers keep front porch 131.
+# The ATTINY must have powered the panel and released the bridge reset (Linux rpi-panel-attiny-regulator.c sequence)
+# before this display sets up.
 # fmt: off
 DsiDriverChip(
     "RPI-7INCH-V1",
     width=800,
     height=480,
-    hsync_front_porch=131,
+    hsync_front_porch=171,
     hsync_pulse_width=2,
     hsync_back_porch=45,
     vsync_front_porch=7,
     vsync_pulse_width=2,
     vsync_back_porch=22,
-    pclk_frequency="30MHz",
-    lane_bit_rate="720Mbps",
+    pclk_frequency="31.25MHz",
+    lane_bit_rate="750Mbps",
     lanes=1,
     color_depth="24",
     pixel_mode="24bit",
