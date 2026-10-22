@@ -129,8 +129,39 @@ uint8_t FT63X6Touchscreen::read_touch_misc_(uint8_t touch) {
 
 uint8_t FT63X6Touchscreen::read_byte_(uint8_t addr) {
   uint8_t byte = 0;
-  this->read_byte(addr, &byte);
-  return byte;
+
+  if (!this->edt_read_variant_) {
+    this->read_byte(addr, &byte);
+    return byte;
+  }
+
+  // EDT-M06 work-mode register read.
+  const uint8_t cmd[2] = {
+      0xFC,
+      static_cast<uint8_t>((addr & 0x3F) | 0x40),
+  };
+  uint8_t response[2] = {0, 0};
+
+  const auto err =
+      this->bus_->write_readv(this->address_, cmd, sizeof(cmd),
+                              response, sizeof(response));
+
+  if (err != i2c::ERROR_OK) {
+    ESP_LOGW(TAG, "EDT read failed for register 0x%02X: %d", addr, err);
+    return 0;
+  }
+
+  // EDT-M06 response: data byte followed by XOR checksum.
+  const uint8_t crc = cmd[0] ^ cmd[1] ^ response[0];
+
+  if (crc != response[1]) {
+    ESP_LOGW(TAG, "EDT read CRC mismatch for register 0x%02X: "
+                  "expected 0x%02X, received 0x%02X",
+             addr, crc, response[1]);
+    return 0;
+  }
+
+  return response[0];
 }
 
 }  // namespace esphome::ft63x6
