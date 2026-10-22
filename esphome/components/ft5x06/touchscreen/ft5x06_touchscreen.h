@@ -42,6 +42,7 @@ class FT5x06Touchscreen final : public touchscreen::Touchscreen, public i2c::I2C
 
   void set_interrupt_pin(InternalGPIOPin *interrupt_pin) { this->interrupt_pin_ = interrupt_pin; }
   void set_register_copy(bool register_copy) { this->register_copy_ = register_copy; }
+  void set_byte_reads(bool byte_reads) { this->byte_reads_ = byte_reads; }
 
  protected:
   void continue_setup_();
@@ -49,6 +50,8 @@ class FT5x06Touchscreen final : public touchscreen::Touchscreen, public i2c::I2C
   bool set_mode_(FTMode mode);
   VendorId vendor_id_{FT5X06_ID_UNKNOWN};
   bool register_copy_{false};
+  bool byte_reads_{false};
+  bool byte_reads_ready_{false};
 
   InternalGPIOPin *interrupt_pin_{nullptr};
 };

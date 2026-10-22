@@ -29,6 +29,12 @@ void FT5x06Touchscreen::setup() {
 
   if (this->register_copy_)
     return;
+  if (this->byte_reads_) {
+    if (!this->set_mode_(FT5X06_OP_MODE))
+      return;
+    this->set_timeout(100, [this] { this->byte_reads_ready_ = true; });
+    return;
+  }
   // wait 200ms after reset.
   this->set_timeout(200, [this] { this->continue_setup_(); });
 }
@@ -58,7 +64,24 @@ void FT5x06Touchscreen::update_touches() {
   uint8_t touch_cnt;
   uint8_t data[MAX_TOUCHES][6];
 
-  if (this->register_copy_) {
+  if (this->byte_reads_) {
+    if (!this->byte_reads_ready_)
+      return;
+    if (!this->read_byte(FT5X06_TD_STATUS, &touch_cnt)) {
+      ESP_LOGW(TAG, "Failed to read status");
+      return;
+    }
+    if (touch_cnt == 0 || touch_cnt > MAX_TOUCHES)
+      return;
+    for (uint8_t i = 0; i != touch_cnt; i++) {
+      for (uint8_t b = 0; b != 4; b++) {
+        if (!this->read_byte(FT5X06_TOUCH_DATA + i * 6 + b, &data[i][b])) {
+          ESP_LOGW(TAG, "Failed to read touch data");
+          return;
+        }
+      }
+    }
+  } else if (this->register_copy_) {
     uint8_t regs[3 + sizeof(data)];
     if (this->read_register(FT5X06_MODE_REG, regs, sizeof(regs)) != i2c::ERROR_OK) {
       ESP_LOGW(TAG, "Failed to read registers");
