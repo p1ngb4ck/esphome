@@ -3,6 +3,8 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
+#include <cstring>
+
 namespace esphome::ft5x06 {
 
 ESPHOME_LOG_TAG(TAG, "ft5x06.touchscreen");
@@ -25,6 +27,8 @@ void FT5x06Touchscreen::setup() {
     }
   }
 
+  if (this->register_copy_)
+    return;
   // wait 200ms after reset.
   this->set_timeout(200, [this] { this->continue_setup_(); });
 }
@@ -45,7 +49,6 @@ void FT5x06Touchscreen::continue_setup_() {
       break;
 
     default:
-      // Other FT5x06-family controllers use the same register map
       ESP_LOGW(TAG, "Unknown vendor ID 0x%X, using the FT5x06 register map", data[0]);
       break;
   }
@@ -55,17 +58,27 @@ void FT5x06Touchscreen::update_touches() {
   uint8_t touch_cnt;
   uint8_t data[MAX_TOUCHES][6];
 
-  if (!this->read_byte(FT5X06_TD_STATUS, &touch_cnt)) {
-    ESP_LOGW(TAG, "Failed to read status");
-    return;
-  }
-  // Some controllers read 0xFF until the first touch
-  if (touch_cnt == 0 || touch_cnt > MAX_TOUCHES)
-    return;
-
-  if (!this->read_bytes(FT5X06_TOUCH_DATA, (uint8_t *) data, touch_cnt * 6)) {
-    ESP_LOGW(TAG, "Failed to read touch data");
-    return;
+  if (this->register_copy_) {
+    uint8_t regs[3 + sizeof(data)];
+    if (this->read_register(FT5X06_MODE_REG, regs, sizeof(regs)) != i2c::ERROR_OK) {
+      ESP_LOGW(TAG, "Failed to read registers");
+      return;
+    }
+    touch_cnt = regs[FT5X06_TD_STATUS] & 0x0F;
+    if (touch_cnt == 0 || touch_cnt > MAX_TOUCHES)
+      return;
+    memcpy(data, regs + FT5X06_TOUCH_DATA, touch_cnt * 6);
+  } else {
+    if (!this->read_byte(FT5X06_TD_STATUS, &touch_cnt)) {
+      ESP_LOGW(TAG, "Failed to read status");
+      return;
+    }
+    if (touch_cnt == 0 || touch_cnt > MAX_TOUCHES)
+      return;
+    if (!this->read_bytes(FT5X06_TOUCH_DATA, (uint8_t *) data, touch_cnt * 6)) {
+      ESP_LOGW(TAG, "Failed to read touch data");
+      return;
+    }
   }
   for (uint8_t i = 0; i != touch_cnt; i++) {
     uint8_t status = data[i][0] >> 6;
