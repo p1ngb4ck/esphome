@@ -10,7 +10,6 @@ class DsiDriverChip(DriverChip):
     """A driver chip for MIPI DSI displays."""
 
     def get_sequence(self, config, add_madctl=True, add_reset=False) -> tuple[int, ...]:
-        """In generic command mode the init sequence is sent as is, without added DCS commands."""
         if config.get(CONF_COMMAND_MODE) != COMMAND_MODE_GENERIC:
             return super().get_sequence(config, add_madctl, add_reset)
         sequence = list(self.initsequence or ())

@@ -15,7 +15,8 @@ esp32:
 external_components:
   - source: github://p1ngb4ck/esphome@rpi7-v1-upstream
     components:
-      - mipi_dsi  # changed upstream component: link options, generic commands, I2C init sequence, model RPI-7INCH-V1
+      - mipi      # changed upstream component: i2c_write in init sequences
+      - mipi_dsi  # changed upstream component: link options, generic commands, I2C init writes, model RPI-7INCH-V1
       - ft5x06    # changed upstream component: other FT5x06-family vendor IDs, 0xFF touch count
     refresh: always
 
@@ -56,11 +57,17 @@ i2c_device:
 display:
   - platform: mipi_dsi
     model: RPI-7INCH-V1
+    transform:
+      mirror_x: true
+      mirror_y: true
     show_test_card: true
 
 touchscreen:
   - platform: ft5x06
     address: 0x38
+    transform:
+      mirror_x: true
+      mirror_y: true
 
 output:
   - platform: template

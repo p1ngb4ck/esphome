@@ -1,11 +1,7 @@
-from esphome.components.mipi import delay
+from esphome.components.mipi import delay, i2c_write
 
 from . import DsiDriverChip
 
-# DFRobot DFR0550 5" DSI display V1.0 (800x480, 60 Hz): an STM32F103 on the connector's I2C sets up the DSI-RGB
-# bridge itself, so nothing is sent over DSI (one delay keeps the sequence non-empty). The Pi drives it as its 7" v1
-# (vc4-kms-dsi-7inch: 1 lane, RGB888, no EoT, LP once per frame); H 2/44 and V 2/21/7 as the Pi firmware's mode,
-# front porch for 60 Hz at 30 MHz.
 # fmt: off
 DsiDriverChip(
     "DFROBOT-DFR0550",
@@ -31,6 +27,17 @@ DsiDriverChip(
     command_mode="generic",
     no_transform=True,
     initsequence=[
-        delay(10),
+        i2c_write(0x45, 0x85, 0x00), delay(30),
+        i2c_write(0x45, 0x86, 0x00), delay(8),
+        i2c_write(0x45, 0x83, 0x00), delay(8),
+        i2c_write(0x45, 0x81, 0x04), delay(8),
+        i2c_write(0x45, 0x82, 0x80), delay(8),
+        i2c_write(0x45, 0x83, 0x01), delay(88),
+        i2c_write(0x45, 0x83, 0x0D), delay(8),
+        i2c_write(0x45, 0x8D, 0x04), delay(8),
+        i2c_write(0x45, 0x8C, 0x7C), delay(8),
+        i2c_write(0x45, 0x90, 0x00), delay(8),
+        i2c_write(0x45, 0x91, 0x00), delay(108),
+        i2c_write(0x45, 0x83, 0x0F), delay(8),
     ],
 )

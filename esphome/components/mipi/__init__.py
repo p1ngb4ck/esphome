@@ -147,6 +147,7 @@ MADCTL_FLIP_FLAG = 0x100  # meta-flag to indicate use of axis flips
 
 # Special constant for delays in command sequences
 DELAY_FLAG = 0xFFF  # Special flag to indicate a delay
+I2C_FLAG = 0xFFE
 
 CONF_PAD_HEIGHT = "pad_height"
 CONF_PAD_WIDTH = "pad_width"
@@ -247,7 +248,11 @@ def flatten_sequence(sequence: tuple | list):
     """
     return sum(
         tuple(
-            (x[1], 0xFF) if x[0] == DELAY_FLAG else (x[0], len(x) - 1) + x[1:]
+            (x[1], 0xFF)
+            if x[0] == DELAY_FLAG
+            else (x[1], 0xFE) + x[2:]
+            if x[0] == I2C_FLAG
+            else (x[0], len(x) - 1) + x[1:]
             for x in sequence
         ),
         (),
@@ -256,6 +261,10 @@ def flatten_sequence(sequence: tuple | list):
 
 def delay(ms):
     return DELAY_FLAG, ms
+
+
+def i2c_write(address, reg, value):
+    return I2C_FLAG, address, reg, value
 
 
 # Generic placeholder model present in every DriverChip registry; skipped when
