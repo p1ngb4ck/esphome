@@ -39,6 +39,7 @@ TouchListener = touchscreen_ns.class_("TouchListener")
 CONF_TOUCHSCREEN_ID = "touchscreen_id"
 CONF_REPORT_INTERVAL = "report_interval"  # not used yet:
 CONF_TOUCH_TIMEOUT = "touch_timeout"
+CONF_EDT_READ_VARIANT = "edt_read_variant"
 
 
 CONF_X_MIN = "x_min"
@@ -145,6 +146,7 @@ def touchscreen_schema(
             cv.Optional(CONF_ON_TOUCH): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_UPDATE): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_RELEASE): automation.validate_automation(single=True),
+            cv.Optional(CONF_EDT_READ_VARIANT, default=False): cv.boolean,
         }
     ).extend(cv.polling_component_schema("50ms"))
 
@@ -178,6 +180,10 @@ async def register_touchscreen(var: MockObj, config: ConfigType) -> None:
             )
         )
 
+    if CONF_EDT_READ_VARIANT in config:
+        cg.add(
+            var.set_edt_read_variant(config[CONF_EDT_READ_VARIANT])
+        )
     if CONF_ON_TOUCH in config:
         await automation.build_automation(
             var.get_touch_trigger(),
