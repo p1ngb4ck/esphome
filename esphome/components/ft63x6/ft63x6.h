@@ -25,6 +25,9 @@ class FT63X6Touchscreen final : public Touchscreen, public i2c::I2CDevice {
   void set_interrupt_pin(InternalGPIOPin *pin) { this->interrupt_pin_ = pin; }
   void set_reset_pin(GPIOPin *pin) { this->reset_pin_ = pin; }
   void set_threshold(uint8_t threshold) { this->threshold_ = threshold; }
+  void set_edt_read_variant(bool enabled) {
+    this->edt_read_variant_ = enabled;
+  }
 
  protected:
   void hard_reset_();
@@ -33,6 +36,7 @@ class FT63X6Touchscreen final : public Touchscreen, public i2c::I2CDevice {
   InternalGPIOPin *interrupt_pin_{nullptr};
   GPIOPin *reset_pin_{nullptr};
   uint8_t threshold_{FT6X36_DEFAULT_THRESHOLD};
+  bool edt_read_variant_{false};
 
   uint8_t read_touch_number_();
 
