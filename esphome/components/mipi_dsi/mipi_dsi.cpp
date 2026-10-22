@@ -149,14 +149,19 @@ void MipiDsi::setup() {
       delay(cmd);
 #ifdef USE_I2C
     } else if (x == I2C_FLAG) {
-      if (len - index < 2) {
+      if (len - index < 3) {
         this->mark_failed(LOG_STR("Malformed init sequence"));
         return;
       }
       this->i2c_device_.set_i2c_address(cmd);
-      if (!this->i2c_device_.write_registers(reinterpret_cast<const i2c::I2CRegValue *>(seq + index), 1))
+      const uint8_t tries = seq[index + 2];
+      uint8_t t = 0;
+      const auto *entry = reinterpret_cast<const i2c::I2CRegValue *>(seq + index);
+      while (t != tries && !this->i2c_device_.write_registers(entry, 1))
+        t++;
+      if (t == tries)
         ESP_LOGW(TAG, "I2C write 0x%02X to 0x%02X failed", seq[index], cmd);
-      index += 2;
+      index += 3;
     } else if (x == I2C_READ_FLAG) {
       if (len - index < 4) {
         this->mark_failed(LOG_STR("Malformed init sequence"));

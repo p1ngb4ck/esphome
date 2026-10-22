@@ -266,8 +266,8 @@ def delay(ms):
     return DELAY_FLAG, ms
 
 
-def i2c_write(address, reg, value):
-    return I2C_FLAG, address, reg, value
+def i2c_write(address, reg, value, tries=1):
+    return I2C_FLAG, address, reg, value, tries
 
 
 def i2c_read(address, reg, mask=0, value=0, tries=1):
