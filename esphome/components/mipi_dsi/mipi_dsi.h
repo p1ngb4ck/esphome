@@ -36,6 +36,7 @@ const uint8_t DISPLAY_ON = 0x29;
 const uint8_t CMD2_BKSEL = 0xFF;
 const uint8_t DELAY_FLAG = 0xFF;
 const uint8_t I2C_FLAG = 0xFE;
+const uint8_t I2C_READ_FLAG = 0xFD;
 const uint8_t MADCTL_BGR = 0x08;
 const uint8_t MADCTL_MX = 0x40;
 const uint8_t MADCTL_MY = 0x80;

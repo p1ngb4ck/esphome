@@ -26,6 +26,7 @@ from esphome.components.mipi import (
     CONF_VSYNC_FRONT_PORCH,
     CONF_VSYNC_PULSE_WIDTH,
     I2C_FLAG,
+    I2C_READ_FLAG,
     MODE_BGR,
     PIXEL_MODE_16BIT,
     PIXEL_MODE_24BIT,
@@ -161,7 +162,8 @@ def model_schema(config: ConfigType) -> cv.All:
         }
     )
     if any(
-        isinstance(x, tuple) and x[0] == I2C_FLAG for x in model.initsequence or ()
+        isinstance(x, tuple) and x[0] in (I2C_FLAG, I2C_READ_FLAG)
+        for x in model.initsequence or ()
     ):
         schema = schema.extend({cv.GenerateID(CONF_I2C_ID): cv.use_id(i2c.I2CBus)})
     return cv.All(

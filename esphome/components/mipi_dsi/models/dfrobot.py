@@ -1,4 +1,4 @@
-from esphome.components.mipi import delay
+from esphome.components.mipi import delay, i2c_read, i2c_write
 
 from . import DsiDriverChip
 
@@ -27,6 +27,12 @@ DsiDriverChip(
     command_mode="generic",
     no_transform=True,
     initsequence=[
-        delay(10),
+        i2c_read(0x45, 0x80),
+        i2c_write(0x45, 0x85, 0x00), delay(25),
+        delay(100),
+        i2c_write(0x45, 0x85, 0x01), delay(25),
+        i2c_read(0x45, 0x82, 0x01, 0x01, 100),
+        i2c_write(0x45, 0x86, 0xFF),
+        i2c_write(0x45, 0x81, 0x04),
     ],
 )

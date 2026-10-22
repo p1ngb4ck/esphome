@@ -3,6 +3,7 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace esphome::ft5x06 {
@@ -29,6 +30,10 @@ void FT5x06Touchscreen::setup() {
 
   if (this->register_copy_)
     return;
+  if (this->edt_reads_) {
+    this->set_timeout(600, [this] { this->byte_reads_ready_ = true; });
+    return;
+  }
   if (this->byte_reads_) {
     if (!this->set_mode_(FT5X06_OP_MODE))
       return;
@@ -64,7 +69,29 @@ void FT5x06Touchscreen::update_touches() {
   uint8_t touch_cnt;
   uint8_t data[MAX_TOUCHES][6];
 
-  if (this->byte_reads_) {
+  if (this->edt_reads_) {
+    if (!this->byte_reads_ready_)
+      return;
+    uint8_t head[3];
+    if (this->read_register(FT5X06_MODE_REG, head, sizeof(head)) != i2c::ERROR_OK) {
+      ESP_LOGW(TAG, "Failed to read status");
+      return;
+    }
+    touch_cnt = std::min<uint8_t>(head[FT5X06_TD_STATUS] & 0x0F, MAX_TOUCHES);
+    if (this->init_td_status_ != 0) {
+      if (this->init_td_status_ < 0)
+        this->init_td_status_ = head[FT5X06_TD_STATUS];
+      if (touch_cnt != 0 && head[FT5X06_TD_STATUS] == this->init_td_status_)
+        return;
+      this->init_td_status_ = 0;
+    }
+    if (touch_cnt == 0)
+      return;
+    if (this->read_register(FT5X06_TOUCH_DATA, (uint8_t *) data, touch_cnt * 6) != i2c::ERROR_OK) {
+      ESP_LOGW(TAG, "Failed to read touch data");
+      return;
+    }
+  } else if (this->byte_reads_) {
     if (!this->byte_reads_ready_)
       return;
     if (!this->read_byte(FT5X06_TD_STATUS, &touch_cnt)) {

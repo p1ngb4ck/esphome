@@ -154,11 +154,31 @@ void MipiDsi::setup() {
         return;
       }
       this->i2c_device_.set_i2c_address(cmd);
-      if (!this->i2c_device_.write_registers(reinterpret_cast<const i2c::I2CRegValue *>(seq + index), 1)) {
-        this->mark_failed(LOG_STR("I2C write failed"));
+      if (!this->i2c_device_.write_registers(reinterpret_cast<const i2c::I2CRegValue *>(seq + index), 1))
+        ESP_LOGW(TAG, "I2C write 0x%02X to 0x%02X failed", seq[index], cmd);
+      index += 2;
+    } else if (x == I2C_READ_FLAG) {
+      if (len - index < 4) {
+        this->mark_failed(LOG_STR("Malformed init sequence"));
         return;
       }
-      index += 2;
+      const uint8_t reg = seq[index];
+      const uint8_t mask = seq[index + 1];
+      const uint8_t value = seq[index + 2];
+      const uint8_t tries = seq[index + 3];
+      index += 4;
+      this->i2c_device_.set_i2c_address(cmd);
+      for (uint8_t t = 0; t != tries; t++) {
+        uint8_t data = 0;
+        bool ok = this->i2c_device_.write(&reg, 1) == i2c::ERROR_OK;
+        if (ok) {
+          delayMicroseconds(200);
+          ok = this->i2c_device_.read(&data, 1) == i2c::ERROR_OK;
+        }
+        ESP_LOGD(TAG, "I2C read 0x%02X register 0x%02X: %s 0x%02X", cmd, reg, ok ? "ok" : "failed", data);
+        if (ok && (data & mask) == value)
+          break;
+      }
 #endif
     } else {
       uint8_t num_args = x & 0x7F;
