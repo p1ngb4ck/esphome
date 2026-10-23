@@ -9,6 +9,54 @@
 namespace esphome::audio {
 
 static const uint32_t READ_WRITE_TIMEOUT_MS = 20;
+static const uint8_t MAX_MIXED_CHANNELS = 8;
+
+static inline int32_t read_sample(const uint8_t *p, size_t bytes) {
+  switch (bytes) {
+    case 2:
+      return static_cast<int32_t>(static_cast<uint32_t>(p[0]) << 16 | static_cast<uint32_t>(p[1]) << 24);
+    case 3:
+      return static_cast<int32_t>(static_cast<uint32_t>(p[0]) << 8 | static_cast<uint32_t>(p[1]) << 16 |
+                                  static_cast<uint32_t>(p[2]) << 24);
+    default:
+      return static_cast<int32_t>(static_cast<uint32_t>(p[0]) | static_cast<uint32_t>(p[1]) << 8 |
+                                  static_cast<uint32_t>(p[2]) << 16 | static_cast<uint32_t>(p[3]) << 24);
+  }
+}
+
+static inline void write_sample(uint8_t *p, int32_t value, size_t bytes) {
+  const uint32_t v = static_cast<uint32_t>(value);
+  for (size_t i = 0; i < bytes; i++)
+    p[i] = static_cast<uint8_t>(v >> (32 - 8 * (bytes - i)));
+}
+
+static void convert_frame(const uint8_t *src, uint8_t *dst, uint8_t in_ch, uint8_t out_ch, size_t bytes) {
+  int32_t in[MAX_MIXED_CHANNELS];
+  for (uint8_t c = 0; c < in_ch; c++)
+    in[c] = read_sample(src + c * bytes, bytes);
+  if (out_ch == 1) {
+    int64_t sum = 0;
+    for (uint8_t c = 0; c < in_ch; c++)
+      sum += in[c];
+    write_sample(dst, static_cast<int32_t>(sum / in_ch), bytes);
+    return;
+  }
+  for (uint8_t c = 0; c < out_ch; c++)
+    write_sample(dst + c * bytes, in[c % in_ch], bytes);
+}
+
+static void convert_channels(const uint8_t *src, uint8_t *dst, uint32_t frames, uint8_t in_ch, uint8_t out_ch,
+                             size_t bytes) {
+  const size_t in_frame = in_ch * bytes;
+  const size_t out_frame = out_ch * bytes;
+  if (out_frame <= in_frame) {
+    for (uint32_t f = 0; f < frames; f++)
+      convert_frame(src + f * in_frame, dst + f * out_frame, in_ch, out_ch, bytes);
+  } else {
+    for (uint32_t f = frames; f-- > 0;)
+      convert_frame(src + f * in_frame, dst + f * out_frame, in_ch, out_ch, bytes);
+  }
+}
 
 AudioResampler::AudioResampler(size_t input_buffer_size, size_t output_buffer_size)
     : input_buffer_size_(input_buffer_size), output_buffer_size_(output_buffer_size) {
@@ -52,9 +100,17 @@ esp_err_t AudioResampler::start(AudioStreamInfo &input_stream_info, AudioStreamI
     return ESP_ERR_NO_MEM;
   }
 
-  if ((input_stream_info.get_bits_per_sample() > 32) || (output_stream_info.get_bits_per_sample() > 32) ||
-      (input_stream_info_.get_channels() != output_stream_info.get_channels())) {
+  if ((input_stream_info.get_bits_per_sample() > 32) || (output_stream_info.get_bits_per_sample() > 32)) {
     return ESP_ERR_NOT_SUPPORTED;
+  }
+  const uint8_t in_channels = input_stream_info.get_channels();
+  const uint8_t out_channels = output_stream_info.get_channels();
+  if (in_channels != out_channels) {
+    const uint8_t out_bits = output_stream_info.get_bits_per_sample();
+    if (in_channels == 0 || out_channels == 0 || in_channels > MAX_MIXED_CHANNELS ||
+        out_channels > MAX_MIXED_CHANNELS || (out_bits != 16 && out_bits != 24 && out_bits != 32)) {
+      return ESP_ERR_NOT_SUPPORTED;
+    }
   }
 
   // Reject frame sizes that can't be used as the zero-copy source's alignment up front, where the caller checks
@@ -138,7 +194,10 @@ AudioResamplerState AudioResampler::resample(bool stop_gracefully, int32_t *ms_d
   }
 
   const size_t bytes_free = this->output_transfer_buffer_->free();
-  const uint32_t frames_free = this->output_stream_info_.bytes_to_frames(bytes_free);
+  const uint8_t in_channels = this->input_stream_info_.get_channels();
+  const uint8_t out_channels = this->output_stream_info_.get_channels();
+  const size_t out_sample_bytes = this->output_stream_info_.get_bits_per_sample() / 8;
+  const uint32_t frames_free = bytes_free / (out_sample_bytes * std::max(in_channels, out_channels));
 
   const size_t bytes_available = this->audio_source_->available();
   const uint32_t frames_available = this->input_stream_info_.bytes_to_frames(bytes_available);
@@ -151,6 +210,10 @@ AudioResamplerState AudioResampler::resample(bool stop_gracefully, int32_t *ms_d
                                    frames_available, frames_free, -3);
 
     this->audio_source_->consume(this->input_stream_info_.frames_to_bytes(results.frames_used));
+    if (in_channels != out_channels) {
+      uint8_t *produced = this->output_transfer_buffer_->get_buffer_end();
+      convert_channels(produced, produced, results.frames_generated, in_channels, out_channels, out_sample_bytes);
+    }
     this->output_transfer_buffer_->increase_buffer_length(
         this->output_stream_info_.frames_to_bytes(results.frames_generated));
 
@@ -170,6 +233,15 @@ AudioResamplerState AudioResampler::resample(bool stop_gracefully, int32_t *ms_d
   } else {
     // No resampling required, copy samples directly to the output transfer buffer
     *ms_differential = 0;
+
+    if (in_channels != out_channels) {
+      const uint32_t frames = std::min(frames_free, frames_available);
+      convert_channels(this->audio_source_->data(), this->output_transfer_buffer_->get_buffer_end(), frames,
+                       in_channels, out_channels, out_sample_bytes);
+      this->audio_source_->consume(this->input_stream_info_.frames_to_bytes(frames));
+      this->output_transfer_buffer_->increase_buffer_length(this->output_stream_info_.frames_to_bytes(frames));
+      return AudioResamplerState::RESAMPLING;
+    }
 
     const size_t bytes_to_transfer = std::min(this->output_stream_info_.frames_to_bytes(frames_free),
                                               this->input_stream_info_.frames_to_bytes(frames_available));

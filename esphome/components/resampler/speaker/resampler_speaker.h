@@ -8,11 +8,14 @@
 #include "esphome/components/speaker/speaker.h"
 
 #include "esphome/core/component.h"
+#include "esphome/core/helpers.h"
+#include "esphome/core/preferences.h"
 #include "esphome/core/static_task.h"
 
 #include <freertos/event_groups.h>
 
 #include <atomic>
+#include <vector>
 
 namespace esphome::resampler {
 
@@ -43,6 +46,19 @@ class ResamplerSpeaker final : public Component, public speaker::Speaker {
   float get_volume() override { return this->output_speaker_->get_volume(); }
 
   void set_output_speaker(speaker::Speaker *speaker) { this->output_speaker_ = speaker; }
+  void add_output(speaker::Speaker *speaker, const char *name, uint32_t sample_rate, uint8_t bits_per_sample,
+                  uint8_t channels) {
+    this->outputs_.push_back({speaker, name, sample_rate, bits_per_sample, channels});
+  }
+  void set_preference_key(uint32_t key) { this->preference_key_ = key; }
+
+  void select_output(size_t index);
+  size_t active_output() const { return this->active_; }
+  size_t output_count() const { return this->outputs_.size(); }
+  const char *output_name(size_t index) const { return this->outputs_[index].name; }
+  template<typename F> void add_on_output_callback(F &&callback) {
+    this->output_callback_.add(std::forward<F>(callback));
+  }
   void set_task_stack_in_psram(bool task_stack_in_psram) { this->task_stack_in_psram_ = task_stack_in_psram; }
 
   void set_target_bits_per_sample(uint8_t target_bits_per_sample) {
@@ -80,6 +96,25 @@ class ResamplerSpeaker final : public Component, public speaker::Speaker {
 
   inline bool requires_resampling_() const;
   static void resample_task(void *params);
+
+  struct Output {
+    speaker::Speaker *speaker;
+    const char *name;
+    uint32_t sample_rate;
+    uint8_t bits_per_sample;
+    uint8_t channels;
+  };
+  void apply_output_(size_t index);
+  void take_pending_output_();
+
+  std::vector<Output> outputs_;
+  CallbackManager<void(size_t)> output_callback_;
+  ESPPreferenceObject pref_;
+  uint32_t preference_key_{0};
+  size_t active_{0};
+  size_t pending_output_{0};
+  bool switch_pending_{false};
+  bool restart_after_switch_{false};
 
   EventGroupHandle_t event_group_{nullptr};
 

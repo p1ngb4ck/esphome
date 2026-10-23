@@ -65,18 +65,37 @@ void ResamplerSpeaker::setup() {
     return;
   }
 
-  this->output_speaker_->add_audio_output_callback([this](uint32_t new_frames, int64_t write_timestamp) {
-    if (this->audio_stream_info_.get_sample_rate() != this->target_stream_info_.get_sample_rate()) {
-      // Convert the number of frames from the target sample rate to the source sample rate. Track the remainder to
-      // avoid losing frames from integer division truncation.
-      const uint64_t numerator = new_frames * this->audio_stream_info_.get_sample_rate() + this->callback_remainder_;
-      const uint64_t denominator = this->target_stream_info_.get_sample_rate();
-      this->callback_remainder_ = numerator % denominator;
-      this->audio_output_callback_(numerator / denominator, write_timestamp);
-    } else {
-      this->audio_output_callback_(new_frames, write_timestamp);
-    }
-  });
+  if (this->outputs_.empty()) {
+    this->outputs_.push_back({this->output_speaker_, "", this->target_sample_rate_,
+                              this->passthrough_bits_per_sample_ ? static_cast<uint8_t>(0) : this->target_bits_per_sample_,
+                              0});
+  }
+  if (this->preference_key_ != 0 && this->outputs_.size() > 1) {
+    this->pref_ = global_preferences->make_preference<uint32_t>(this->preference_key_);
+    uint32_t stored = 0;
+    if (this->pref_.load(&stored) && stored < this->outputs_.size())
+      this->active_ = stored;
+  }
+  this->pending_output_ = this->active_;
+  this->apply_output_(this->active_);
+
+  for (size_t index = 0; index < this->outputs_.size(); index++) {
+    this->outputs_[index].speaker->add_audio_output_callback([this, index](uint32_t new_frames,
+                                                                           int64_t write_timestamp) {
+      if (this->active_ != index)
+        return;
+      if (this->audio_stream_info_.get_sample_rate() != this->target_stream_info_.get_sample_rate()) {
+        // Convert the number of frames from the target sample rate to the source sample rate. Track the remainder to
+        // avoid losing frames from integer division truncation.
+        const uint64_t numerator = new_frames * this->audio_stream_info_.get_sample_rate() + this->callback_remainder_;
+        const uint64_t denominator = this->target_stream_info_.get_sample_rate();
+        this->callback_remainder_ = numerator % denominator;
+        this->audio_output_callback_(numerator / denominator, write_timestamp);
+      } else {
+        this->audio_output_callback_(new_frames, write_timestamp);
+      }
+    });
+  }
 
   // Start with loop disabled since no task is running and no commands are pending
   this->disable_loop();
@@ -171,6 +190,10 @@ void ResamplerSpeaker::loop() {
   switch (this->state_) {
     case speaker::STATE_STARTING: {
       if (!this->waiting_for_output_) {
+        if (this->switch_pending_) {
+          this->take_pending_output_();
+          this->restart_after_switch_ = false;
+        }
         esp_err_t err = this->start_();
         if (err == ESP_OK) {
           this->finishing_.store(false);
@@ -221,6 +244,14 @@ void ResamplerSpeaker::loop() {
       break;
     }
     case speaker::STATE_STOPPED:
+      if (this->switch_pending_) {
+        this->take_pending_output_();
+        if (this->restart_after_switch_) {
+          this->restart_after_switch_ = false;
+          this->state_ = speaker::STATE_STARTING;
+          break;
+        }
+      }
       event_group_bits = xEventGroupGetBits(this->event_group_);
       if (event_group_bits == 0) {
         // No pending events, disable loop to save CPU cycles
@@ -279,13 +310,55 @@ void ResamplerSpeaker::send_command_(uint32_t command_bit, bool wake_loop) {
 
 void ResamplerSpeaker::start() { this->send_command_(ResamplingEventGroupBits::COMMAND_START, true); }
 
+void ResamplerSpeaker::select_output(size_t index) {
+  if (index >= this->outputs_.size())
+    return;
+  this->pending_output_ = index;
+  if (index == this->active_ && !this->switch_pending_)
+    return;
+  this->switch_pending_ = true;
+  if (this->state_ == speaker::STATE_RUNNING || this->state_ == speaker::STATE_STARTING) {
+    this->restart_after_switch_ = true;
+    this->waiting_for_output_ = false;
+    this->enter_stopping_state_();
+  }
+  this->enable_loop();
+}
+
+void ResamplerSpeaker::take_pending_output_() {
+  this->switch_pending_ = false;
+  const bool pause = this->output_speaker_->get_pause_state();
+  this->apply_output_(this->pending_output_);
+  this->output_speaker_->set_volume(this->volume_);
+  this->output_speaker_->set_mute_state(this->mute_state_);
+  this->output_speaker_->set_pause_state(pause);
+  if (this->preference_key_ != 0 && this->outputs_.size() > 1) {
+    uint32_t stored = this->active_;
+    this->pref_.save(&stored);
+  }
+  ESP_LOGI(TAG, "Output: %s", this->output_name(this->active_));
+  this->output_callback_.call(this->active_);
+}
+
+void ResamplerSpeaker::apply_output_(size_t index) {
+  const Output &output = this->outputs_[index];
+  this->active_ = index;
+  this->output_speaker_ = output.speaker;
+  this->target_sample_rate_ = output.sample_rate;
+  this->passthrough_bits_per_sample_ = output.bits_per_sample == 0;
+  if (output.bits_per_sample != 0)
+    this->target_bits_per_sample_ = output.bits_per_sample;
+}
+
 esp_err_t ResamplerSpeaker::start_() {
   // In passthrough mode, the output keeps the input's bits per sample so only the sample rate is resampled.
   const uint8_t target_bits_per_sample = this->passthrough_bits_per_sample_
                                              ? this->audio_stream_info_.get_bits_per_sample()
                                              : this->target_bits_per_sample_;
-  this->target_stream_info_ = audio::AudioStreamInfo(target_bits_per_sample, this->audio_stream_info_.get_channels(),
-                                                     this->target_sample_rate_);
+  const uint8_t output_channels = this->outputs_[this->active_].channels;
+  this->target_stream_info_ = audio::AudioStreamInfo(
+      target_bits_per_sample, output_channels != 0 ? output_channels : this->audio_stream_info_.get_channels(),
+      this->target_sample_rate_);
 
   this->output_speaker_->set_audio_stream_info(this->target_stream_info_);
   this->output_speaker_->start();
@@ -340,6 +413,10 @@ void ResamplerSpeaker::set_volume(float volume) {
 
 bool ResamplerSpeaker::requires_resampling_() const {
   if (this->audio_stream_info_.get_sample_rate() != this->target_sample_rate_) {
+    return true;
+  }
+  const uint8_t output_channels = this->outputs_[this->active_].channels;
+  if (output_channels != 0 && output_channels != this->audio_stream_info_.get_channels()) {
     return true;
   }
   // In passthrough mode the bits per sample always matches the input, so it never forces resampling.
