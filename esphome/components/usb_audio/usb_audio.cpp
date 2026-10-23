@@ -1060,7 +1060,7 @@ const char *uac_transfer_status_str(uint16_t status) {
 
 bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, uint16_t value, uint16_t index,
                                             const uint8_t *out_data, size_t out_len, uint8_t *in_data,
-                                            size_t in_len) {
+                                            size_t in_len, bool *rejected) {
   if (out_len > UAC_CTRL_MAX_DATA_LEN || in_len > UAC_CTRL_MAX_DATA_LEN) {
     ESP_LOGE(TAG, "Control request 0x%02X wants more than %u bytes of data", request,
              static_cast<unsigned>(UAC_CTRL_MAX_DATA_LEN));
@@ -1193,16 +1193,19 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
     ESP_LOGW(TAG, "Control request 0x%02X to 0x%04X after %u attempts: %s", request, index,
              static_cast<unsigned>(UAC_CTRL_ATTEMPTS), uac_transfer_status_str(last_status));
   }
+  if (rejected != nullptr)
+    *rejected = true;
   return false;
 }
 
 bool USBAudioClient::uac_set_cur_interface_(uint8_t unit_id, uint8_t selector, uint8_t channel,
-                                             const uint8_t *data, size_t len) {
+                                             const uint8_t *data, size_t len, bool *rejected) {
   // wValue: (selector << 8) | channel
   // wIndex: (unit_id << 8) | ac_intf_num
   const uint16_t wValue = static_cast<uint16_t>((selector << 8) | channel);
   const uint16_t wIndex = static_cast<uint16_t>((unit_id << 8) | this->ac_intf_);
-  return this->uac_control_transfer_(UAC_REQ_TYPE_INTF_SET, UAC_SET_CUR, wValue, wIndex, data, len, nullptr, 0);
+  return this->uac_control_transfer_(UAC_REQ_TYPE_INTF_SET, UAC_SET_CUR, wValue, wIndex, data, len, nullptr, 0,
+                                     rejected);
 }
 
 bool USBAudioClient::uac_get_cur_interface_(uint8_t unit_id, uint8_t selector, uint8_t channel,
@@ -1533,6 +1536,10 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
     ESP_LOGD(TAG, "%s volume %.0f%% ignored: device has no volume control", what, ctl.volume * 100.0f);
     return false;
   }
+  if (ctl.volume_rejected) {
+    ESP_LOGD(TAG, "%s volume %.0f%% ignored: the device rejected its volume control", what, ctl.volume * 100.0f);
+    return false;
+  }
 
   // A Feature Unit volume is a dB scale, and MIN, MAX and RES are what the device says
   // about that scale. How a 0..1 setting is placed on it is the configured curve: as a
@@ -1590,9 +1597,15 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
              clamped * 100.0f, static_cast<float>(vol) / 256.0f, static_cast<int>(vol), buf[0], buf[1], channel_count);
   }
   uint8_t written = 0;
+  uint8_t refused = 0;
   for (uint8_t i = 0; i < channel_count; i++) {
-    if (this->uac_set_cur_interface_(ctl.fu.unit_id, UAC_FU_VOLUME_CONTROL, channels[i], buf, sizeof(buf)))
+    bool rejected = false;
+    if (this->uac_set_cur_interface_(ctl.fu.unit_id, UAC_FU_VOLUME_CONTROL, channels[i], buf, sizeof(buf),
+                                     &rejected)) {
       written++;
+    } else if (rejected) {
+      refused++;
+    }
   }
   const bool ok = written > 0;
   if (written > 0 && written < channel_count)
@@ -1600,6 +1613,10 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
   const float sent_db = static_cast<float>(vol) / 256.0f;
   if (!ok) {
     ESP_LOGW(TAG, "%s volume %.0f%% was not accepted by the device", what, clamped * 100.0f);
+    if (refused == channel_count) {
+      ctl.volume_rejected = true;
+      ESP_LOGW(TAG, "%s volume is not requested again until the device reconnects", what);
+    }
     return false;
   }
 
@@ -1634,17 +1651,30 @@ bool USBAudioClient::apply_mute_(UacControlState &ctl, const char *what) {
     ESP_LOGD(TAG, "%s mute %s ignored: device has no mute control", what, ONOFF(ctl.muted));
     return false;
   }
+  if (ctl.mute_rejected) {
+    ESP_LOGD(TAG, "%s mute %s ignored: the device rejected its mute control", what, ONOFF(ctl.muted));
+    return false;
+  }
 
   uint8_t val = ctl.muted ? 1 : 0;
   uint8_t written = 0;
+  uint8_t refused = 0;
   for (uint8_t i = 0; i < channel_count; i++) {
-    if (this->uac_set_cur_interface_(ctl.fu.unit_id, UAC_FU_MUTE_CONTROL, channels[i], &val, 1))
+    bool rejected = false;
+    if (this->uac_set_cur_interface_(ctl.fu.unit_id, UAC_FU_MUTE_CONTROL, channels[i], &val, 1, &rejected)) {
       written++;
+    } else if (rejected) {
+      refused++;
+    }
   }
   // A unit can carry the control on the master and on the channels at once and refuse some
   // of those entries, so a refusal is only a failure when nothing at all was written.
   if (written == 0) {
     ESP_LOGW(TAG, "%s mute %s was not accepted by the device", what, ONOFF(ctl.muted));
+    if (refused == channel_count) {
+      ctl.mute_rejected = true;
+      ESP_LOGW(TAG, "%s mute is not requested again until the device reconnects", what);
+    }
     return false;
   }
   if (written < channel_count) {
@@ -1942,9 +1972,13 @@ void USBAudioClient::on_disconnected() {
   this->spk_ctl_.volume_sent = false;
   this->spk_ctl_.mute_sent = false;
   this->spk_ctl_.range_known = false;
+  this->spk_ctl_.volume_rejected = false;
+  this->spk_ctl_.mute_rejected = false;
   this->mic_ctl_.volume_sent = false;
   this->mic_ctl_.mute_sent = false;
   this->mic_ctl_.range_known = false;
+  this->mic_ctl_.volume_rejected = false;
+  this->mic_ctl_.mute_rejected = false;
   this->spk_format_ok_ = false;
   this->mic_format_ok_ = false;
   this->spk_open_fails_ = 0;

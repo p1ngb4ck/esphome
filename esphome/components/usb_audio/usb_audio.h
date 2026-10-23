@@ -258,12 +258,13 @@ class USBAudioClient : public usb_host::USBClient {
   // Pass out_data for a request with an outgoing data stage, in_data to keep an incoming
   // one; both are limited to UAC_CTRL_MAX_DATA_LEN bytes.
   bool uac_control_transfer_(uint8_t req_type, uint8_t request, uint16_t value, uint16_t index,
-                             const uint8_t *out_data, size_t out_len, uint8_t *in_data, size_t in_len);
+                             const uint8_t *out_data, size_t out_len, uint8_t *in_data, size_t in_len,
+                             bool *rejected = nullptr);
   // Issue a class-specific control transfer and busy-wait for completion.
   // wIndex for interface requests: (unit_id << 8) | ac_intf_num
   // wIndex for endpoint requests:  ep_addr
   bool uac_set_cur_interface_(uint8_t unit_id, uint8_t selector, uint8_t channel,
-                               const uint8_t *data, size_t len);
+                               const uint8_t *data, size_t len, bool *rejected = nullptr);
   bool uac_get_cur_interface_(uint8_t unit_id, uint8_t selector, uint8_t channel,
                                uint8_t *data, size_t len);
   bool uac_set_cur_endpoint_(uint8_t ep_addr, uint8_t selector,

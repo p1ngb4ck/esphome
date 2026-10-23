@@ -273,6 +273,8 @@ struct UacControlState {
   // an unchanged setting is not requested again.
   bool  volume_sent{false};
   bool  mute_sent{false};
+  bool  volume_rejected{false};
+  bool  mute_rejected{false};
 
   // What the device answered when asked what its volume scale is. The endpoints are only
   // meaningful while range_known is set: they are the device's own, never a stand-in.
