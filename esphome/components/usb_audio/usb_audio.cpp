@@ -4,6 +4,8 @@
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include "usb/usb_helpers.h"
+#include "esp_heap_caps.h"
+#include "esp_timer.h"
 
 #include <algorithm>
 #include <atomic>
@@ -12,6 +14,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <new>
+#include <string>
 
 namespace esphome {
 namespace usb_audio {
@@ -54,13 +58,42 @@ static uint32_t uac_service_intervals_per_second(bool high_speed, uint8_t b_inte
   return std::max<uint32_t>(1, 1000u / period);
 }
 
-// -----------------------------------------------------------------------------
-// Configuration setters
-// -----------------------------------------------------------------------------
+
+static constexpr uint32_t CAPTURE_TASK_STACK_SIZE = 4096;
+static constexpr UBaseType_t CAPTURE_TASK_PRIORITY = 18;
+static constexpr uint32_t SINK_TIMER_BASE = 0x1000;
+static constexpr uint32_t CAPTURE_TIMER_BASE = 0x2000;
+// Upper bound on the time one play() call may spend pushing data into the USB ring buffer.
+static constexpr uint32_t MAX_WORK_TIME_MS = 20;
+// Share of the work budget a single blocking write may consume. The isochronous sink drains
+// at exactly real time, so a chunk worth more playback time than this can only time out.
+static constexpr uint32_t WRITE_BUDGET_DIVISOR = 2;
+// Window over which the accepted byte rate is measured before it is judged.
+static constexpr uint32_t RATE_WINDOW_MS = 1000;
+// Fraction of the nominal sample rate the sink must keep up with, in percent. A short write
+// is normal backpressure: the sink drains at exactly real time and the caller keeps the
+// remainder. Only a sustained shortfall below this means playback is actually breaking up.
+static constexpr uint32_t RATE_WARN_PERCENT = 80;
+// How long finish() waits for the queue to drain before stopping anyway.
+static constexpr uint32_t FINISH_TIMEOUT_MS = 1000;
+
+static std::unique_ptr<ring_buffer::RingBuffer> make_psram_ring(size_t size) {
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) < size)
+    return nullptr;
+  return ring_buffer::RingBuffer::create(size);
+}
+
+template<typename T> static T *make_in_psram(USBAudioClient *client) {
+  RAMAllocator<T> allocator(RAMAllocator<T>::ALLOC_EXTERNAL);
+  T *mem = allocator.allocate(1);
+  if (mem == nullptr)
+    return nullptr;
+  return new (mem) T(client);
+}
 
 // The pipes (host channels) of what this configuration plays or records only: the streaming interface
-// of a direction without a speaker / microphone platform, the speaker's feedback endpoint while
-// feedback is off, and the AudioControl interface (never claimed, its requests go over EP0) get none.
+// of a direction this block does not drive, the speaker's feedback endpoint while feedback is off,
+// and the AudioControl interface (never claimed, its requests go over EP0) get none.
 uint32_t USBAudioClient::skipped_endpoints_(const usb_device_desc_t *desc, const usb_config_desc_t *config,
                                             const usb_intf_desc_t *alt) const {
   static constexpr uint8_t SUBCLASS_AUDIOSTREAMING = 2;
@@ -84,14 +117,14 @@ uint32_t USBAudioClient::skipped_endpoints_(const usb_device_desc_t *desc, const
   if (alt->bInterfaceClass != USB_CLASS_AUDIO || alt->bInterfaceSubClass != SUBCLASS_AUDIOSTREAMING)
     return all;
   if (data_out) {
-    if (this->speaker_ == nullptr)
+    if (!this->spk_cfg_.configured)
       return all;
     // UAC1 asynchronous OUT: the feedback endpoint may be marked as data (bSynchAddress names it)
     if (!this->feedback_enabled_)
       return feedback | (all & 0xFFFF0000u);
     return 0;
   }
-  if (data_in && this->microphone_ == nullptr)
+  if (data_in && !this->mic_cfg_.configured)
     return all;
   return 0;
 }
@@ -109,10 +142,6 @@ void USBAudioClient::set_speaker_params(uint8_t channels, uint16_t bits, uint32_
   this->spk_cfg_.sample_rate = sample_rate;
   this->spk_cfg_.configured = true;
 }
-
-// -----------------------------------------------------------------------------
-// Component lifecycle
-// -----------------------------------------------------------------------------
 
 void USBAudioClient::setup() {
   if (this->spk_buf_size_ == 0)
@@ -133,17 +162,851 @@ void USBAudioClient::setup() {
     return;
   }
 
+  if (this->speaker_ != nullptr)
+    this->speaker_->set_timer_id(SINK_TIMER_BASE - 1);
+  if (this->mic_cfg_.configured) {
+    if (this->microphone_ != nullptr)
+      this->microphone_->set_timer_id(CAPTURE_TIMER_BASE - 1);
+    this->capture_lock_ = xSemaphoreCreateMutexStatic(&this->capture_lock_struct_);
+    this->capture_buffer_.reserve(this->mic_buf_size_);
+    if (this->capture_lock_ == nullptr ||
+        !this->capture_task_.create(&USBAudioClient::capture_task, "usb_mic", CAPTURE_TASK_STACK_SIZE, this,
+                                    CAPTURE_TASK_PRIORITY, true)) {
+      this->mark_failed(LOG_STR("Failed to create microphone task"));
+      return;
+    }
+  }
+
   usb_host::USBClient::setup();
 }
 
 void USBAudioClient::loop() {
   // Event-driven, no polling: woken by the client's USB events (USBClient::client_event_cb), the
-  // control task's completions, a stream request (resume_speaker / resume_microphone), usb_host when
-  // a stream died or finished closing, and the reopen backoff's timer. Idle it is disabled.
+  // control task's completions, a sink or capture request, usb_host when a stream died or
+  // finished closing, and the reopen backoff's timer. Idle it is disabled.
   const bool usb_work = this->process_usb_events_();
   if (const uint32_t errors = this->transfer_errors_.exchange(0, std::memory_order_relaxed); errors != 0)
     ESP_LOGW(TAG, "%" PRIu32 " USB transfer errors", errors);
 
+  bool pending = false;
+  uint32_t due_in = UINT32_MAX;
+  const uint32_t now = millis();
+  for (const auto &dev : this->devices()) {
+    auto *device = static_cast<USBAudioDevice *>(dev->context);
+    if (device == nullptr)
+      continue;
+    if (device->loop_())
+      pending = true;
+    // A wanted stream whose reopen waits for its backoff: woken when it is due.
+    if (device->spk_wanted_ && !device->spk_stream_open_ && device->spk_open_fails_ != 0)
+      due_in = std::min(due_in, static_cast<uint32_t>(std::max<int32_t>(0, (int32_t) (device->spk_reopen_at_ms_ - now))));
+    if (device->mic_wanted_ && !device->mic_stream_open_ && device->mic_open_fails_ != 0)
+      due_in = std::min(due_in, static_cast<uint32_t>(std::max<int32_t>(0, (int32_t) (device->mic_reopen_at_ms_ - now))));
+  }
+  for (USBAudioSink *sink : this->sinks_)
+    sink->check_finish();
+  if (this->speaker_ != nullptr)
+    this->speaker_->check_finish();
+  for (USBAudioCapture *capture : this->captures_)
+    capture->process();
+  if (this->microphone_ != nullptr)
+    this->microphone_->process();
+
+  if (due_in != UINT32_MAX)
+    this->set_timeout(REOPEN_TIMEOUT_ID, std::max<uint32_t>(1, due_in), [this]() { this->enable_loop(); });
+  if (!usb_work && !pending)
+    this->disable_loop();
+}
+
+bool USBAudioClient::teardown() {
+  bool done = true;
+  for (const auto &dev : this->devices()) {
+    auto *device = static_cast<USBAudioDevice *>(dev->context);
+    if (device == nullptr)
+      continue;
+    device->close_speaker_stream_();
+    device->close_microphone_stream_();
+    if (device->spk_stream_.pending_urbs.load(std::memory_order_acquire) != 0 ||
+        device->spk_fb_stream_.pending_urbs.load(std::memory_order_acquire) != 0 ||
+        device->mic_stream_.pending_urbs.load(std::memory_order_acquire) != 0 || device->ctrl_submitting_.load())
+      done = false;
+  }
+  return done;
+}
+
+bool USBAudioClient::device_connected() const {
+  for (const auto &dev : this->devices()) {
+    auto *device = static_cast<USBAudioDevice *>(dev->context);
+    if (device != nullptr && device->device_connected())
+      return true;
+  }
+  return false;
+}
+
+void USBAudioClient::set_speaker_volume_level(float volume) {
+  this->spk_volume_.store(std::clamp(volume, 0.0f, 1.0f));
+  for (const auto &dev : this->devices()) {
+    if (dev->context != nullptr)
+      static_cast<USBAudioDevice *>(dev->context)->set_speaker_volume_level(volume);
+  }
+}
+
+void USBAudioClient::set_speaker_mute_state(bool mute_state) {
+  this->spk_mute_.store(mute_state);
+  for (const auto &dev : this->devices()) {
+    if (dev->context != nullptr)
+      static_cast<USBAudioDevice *>(dev->context)->set_speaker_mute_state(mute_state);
+  }
+}
+
+USBAudioSink *USBAudioClient::take_sink_() {
+  for (USBAudioSink *sink : this->sinks_) {
+    if (sink->device() == nullptr && sink->idle())
+      return sink;
+  }
+  auto *sink = make_in_psram<USBAudioSink>(this);
+  if (sink == nullptr)
+    return nullptr;
+  sink->set_timer_id(SINK_TIMER_BASE + this->sinks_.size());
+  this->sinks_.push_back(sink);
+  return sink;
+}
+
+USBAudioCapture *USBAudioClient::take_capture_() {
+  for (USBAudioCapture *capture : this->captures_) {
+    if (capture->device() == nullptr && capture->idle())
+      return capture;
+  }
+  auto *capture = make_in_psram<USBAudioCapture>(this);
+  if (capture == nullptr)
+    return nullptr;
+  capture->set_timer_id(CAPTURE_TIMER_BASE + this->captures_.size());
+  xSemaphoreTake(this->capture_lock_, portMAX_DELAY);
+  this->captures_.push_back(capture);
+  xSemaphoreGive(this->capture_lock_);
+  return capture;
+}
+
+void USBAudioClient::make_name_unique_(USBAudioDevice *device) {
+  char base[sizeof(device->name_)];
+  memcpy(base, device->name_, sizeof(base));
+  for (uint8_t n = 2; n < 100; n++) {
+    bool taken = false;
+    for (const auto &dev : this->devices()) {
+      auto *other = static_cast<USBAudioDevice *>(dev->context);
+      if (other != nullptr && other != device && strcmp(other->name_, device->name_) == 0)
+        taken = true;
+    }
+    if (!taken)
+      return;
+    snprintf(device->name_, sizeof(device->name_), "%.40s (%u)", base, n);
+  }
+}
+
+void USBAudioClient::attach_routes_(USBAudioDevice *device) {
+  if (device->spk_format_ok_) {
+    for (size_t route = 0; route < this->speaker_routes_.size() && route < USBAudioDevice::MAX_SINKS; route++) {
+      auto ring = make_psram_ring(this->spk_buf_size_);
+      USBAudioSink *sink = ring != nullptr ? this->take_sink_() : nullptr;
+      if (sink == nullptr) {
+        ESP_LOGE(TAG, "%s: no PSRAM for its speaker buffer", device->name());
+        break;
+      }
+      device->slots_[route].ring = std::move(ring);
+      sink->attach(device, device->slots_[route].ring.get());
+      device->slots_[route].sink.store(sink);
+      this->speaker_routes_[route](sink, device->name(), device->key(), true);
+    }
+  }
+  if (device->mic_format_ok_ && !this->microphone_routes_.empty()) {
+    auto ring = make_psram_ring(this->mic_buf_size_);
+    USBAudioCapture *capture = ring != nullptr ? this->take_capture_() : nullptr;
+    if (capture == nullptr) {
+      ESP_LOGE(TAG, "%s: no PSRAM for its microphone buffer", device->name());
+      return;
+    }
+    device->mic_rb_ = std::move(ring);
+    device->capture_ = capture;
+    capture->attach(device, device->mic_rb_.get());
+    for (auto &route : this->microphone_routes_)
+      route(capture, device->name(), device->key(), true);
+  }
+}
+
+void USBAudioClient::attach_fixed_() {
+  const size_t slot = this->speaker_routes_.size();
+  if (this->speaker_ != nullptr && this->speaker_->device() == nullptr && slot < USBAudioDevice::MAX_SINKS) {
+    for (const auto &dev : this->devices()) {
+      auto *device = static_cast<USBAudioDevice *>(dev->context);
+      if (device == nullptr || device->gone_ || !device->spk_format_ok_ || device->slots_[slot].ring != nullptr)
+        continue;
+      device->slots_[slot].ring = make_psram_ring(this->spk_buf_size_);
+      if (device->slots_[slot].ring == nullptr) {
+        ESP_LOGE(TAG, "%s: no PSRAM for its speaker buffer", device->name());
+        break;
+      }
+      this->speaker_->attach(device, device->slots_[slot].ring.get());
+      device->slots_[slot].sink.store(this->speaker_);
+      break;
+    }
+  }
+  if (this->microphone_ != nullptr && this->microphone_->device() == nullptr) {
+    for (const auto &dev : this->devices()) {
+      auto *device = static_cast<USBAudioDevice *>(dev->context);
+      if (device == nullptr || device->gone_ || !device->mic_format_ok_ || device->capture_ != nullptr)
+        continue;
+      device->mic_rb_ = make_psram_ring(this->mic_buf_size_);
+      if (device->mic_rb_ == nullptr) {
+        ESP_LOGE(TAG, "%s: no PSRAM for its microphone buffer", device->name());
+        break;
+      }
+      device->capture_ = this->microphone_;
+      this->microphone_->attach(device, device->mic_rb_.get());
+      break;
+    }
+  }
+}
+
+void USBAudioClient::release_device_(USBAudioDevice *device) {
+  for (size_t slot = 0; slot < USBAudioDevice::MAX_SINKS; slot++) {
+    USBAudioSink *sink = device->slots_[slot].sink.load();
+    if (sink == nullptr)
+      continue;
+    if (slot < this->speaker_routes_.size())
+      this->speaker_routes_[slot](sink, device->name(), device->key(), false);
+    sink->detach();
+  }
+  USBAudioCapture *capture = device->capture_;
+  if (capture != nullptr) {
+    if (capture != this->microphone_) {
+      for (auto &route : this->microphone_routes_)
+        route(capture, device->name(), device->key(), false);
+    }
+    capture->detach();
+    device->capture_ = nullptr;
+  }
+}
+
+void USBAudioClient::on_device_connected(usb_host::UsbDevice &dev) {
+  RAMAllocator<USBAudioDevice> allocator(RAMAllocator<USBAudioDevice>::ALLOC_EXTERNAL);
+  USBAudioDevice *mem = allocator.allocate(1);
+  if (mem == nullptr) {
+    ESP_LOGE(TAG, "Device %d: no PSRAM for its context", dev.addr);
+    this->close_device(dev);
+    return;
+  }
+  auto *device = new (mem) USBAudioDevice(this, &dev);
+  dev.context = device;
+  device->on_connected();
+  this->make_name_unique_(device);
+  this->attach_routes_(device);
+  this->attach_fixed_();
+  this->enable_loop();
+}
+
+void USBAudioClient::on_device_disconnected(usb_host::UsbDevice &dev) {
+  auto *device = static_cast<USBAudioDevice *>(dev.context);
+  if (device == nullptr)
+    return;
+  device->on_disconnected();
+  this->release_device_(device);
+  this->attach_fixed_();
+}
+
+void USBAudioClient::free_device_context(usb_host::UsbDevice &dev) {
+  auto *device = static_cast<USBAudioDevice *>(dev.context);
+  if (device == nullptr)
+    return;
+  dev.context = nullptr;
+  device->~USBAudioDevice();
+  RAMAllocator<USBAudioDevice> allocator(RAMAllocator<USBAudioDevice>::ALLOC_EXTERNAL);
+  allocator.deallocate(device, 1);
+}
+
+bool USBAudioClient::device_busy_(const usb_host::UsbDevice &dev) const {
+  const auto *device = static_cast<const USBAudioDevice *>(dev.context);
+  return device != nullptr && device->busy_();
+}
+
+void USBAudioClient::on_stream_packet(usb_host::IsocStream &stream, const uint8_t *data, size_t len, bool error,
+                                      bool skipped) {
+  if (error && this->transfer_errors_.fetch_add(1, std::memory_order_relaxed) == 0)
+    this->enable_loop_soon_any_context();
+  USBAudioDevice *device = device_of_(stream);
+  if (device != nullptr)
+    device->on_stream_packet_(stream, data, len, error);
+}
+
+size_t USBAudioClient::on_stream_fill(usb_host::IsocStream &stream, uint8_t *data, size_t max_len) {
+  USBAudioDevice *device = device_of_(stream);
+  return device != nullptr ? device->fill_(data, max_len) : 0;
+}
+
+void USBAudioClient::on_stream_out_error(usb_host::IsocStream &stream) {
+  if (this->transfer_errors_.fetch_add(1, std::memory_order_relaxed) == 0)
+    this->enable_loop_soon_any_context();
+}
+
+void USBAudioClient::on_stream_open(usb_host::IsocStream &stream, bool ok) {
+  USBAudioDevice *device = device_of_(stream);
+  if (device != nullptr)
+    device->on_stream_open_(stream, ok);
+}
+
+bool USBAudioClient::post_ctrl_(CtrlOp op, USBAudioDevice *device, uint32_t seq) {
+  const CtrlRequest request{op, device, device->ctrl_gen_.load(), seq};
+  return xQueueSend(this->ctrl_queue_, &request, 0) == pdTRUE;
+}
+
+void USBAudioClient::ctrl_task(void *param) {
+  auto *self = static_cast<USBAudioClient *>(param);
+  CtrlRequest request;
+  while (true) {
+    if (xQueueReceive(self->ctrl_queue_, &request, portMAX_DELAY) == pdTRUE)
+      request.device->run_ctrl_(request);
+  }
+}
+
+void USBAudioClient::capture_task(void *param) { static_cast<USBAudioClient *>(param)->capture_task_loop_(); }
+
+void USBAudioClient::capture_task_loop_() {
+  while (true) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    bool more = true;
+    while (more) {
+      more = false;
+      for (size_t i = 0;; i++) {
+        xSemaphoreTake(this->capture_lock_, portMAX_DELAY);
+        USBAudioCapture *capture = nullptr;
+        if (i < this->captures_.size()) {
+          capture = this->captures_[i];
+        } else if (i == this->captures_.size()) {
+          capture = this->microphone_;
+        }
+        if (capture == nullptr) {
+          xSemaphoreGive(this->capture_lock_);
+          if (i >= this->captures_.size())
+            break;
+          continue;
+        }
+        if (!capture->running()) {
+          xSemaphoreGive(this->capture_lock_);
+          continue;
+        }
+        capture->set_delivering(true);
+        const size_t received = capture->read(this->capture_buffer_);
+        xSemaphoreGive(this->capture_lock_);
+        if (received > 0) {
+          capture->deliver(this->capture_buffer_);
+          more = true;
+        }
+        capture->set_delivering(false);
+        if (capture->stopping())
+          this->enable_loop_soon_any_context();
+      }
+    }
+  }
+}
+
+void USBAudioClient::wake_capture_task_() {
+  TaskHandle_t task = this->capture_task_.get_handle();
+  if (task != nullptr)
+    xTaskNotifyGive(task);
+}
+
+void USBAudioSink::attach(USBAudioDevice *device, ring_buffer::RingBuffer *ring) {
+  this->ring_.store(ring);
+  this->device_.store(device);
+  this->warned_unavailable_ = false;
+}
+
+void USBAudioSink::detach() {
+  this->device_.store(nullptr);
+  this->ring_.store(nullptr);
+  this->client_->enable_loop();
+}
+
+void USBAudioSink::start() {
+  if (this->state_ == speaker::STATE_RUNNING)
+    return;
+  this->last_play_ms_.store(millis(), std::memory_order_relaxed);
+  USBAudioDevice *device = this->device_.load();
+  if (device == nullptr || !device->speaker_available()) {
+    // No device, or an unusable format: a state to report once, not an error to repeat.
+    if (!this->warned_unavailable_)
+      ESP_LOGW(TAG, "USB audio stream not available yet");
+    this->warned_unavailable_ = true;
+    return;
+  }
+  this->warned_unavailable_ = false;
+  this->active_.store(true);
+  this->state_ = speaker::STATE_RUNNING;
+  // The device opens the stream on the client's main loop; writes wait for it.
+  this->client_->enable_loop_soon_any_context();
+}
+
+void USBAudioSink::stop() {
+  if (this->state_ == speaker::STATE_STOPPED)
+    return;
+  this->active_.store(false);
+  this->state_ = speaker::STATE_STOPPED;
+  this->finish_requested_.store(false);
+  if (this->finish_timer_set_) {
+    this->finish_timer_set_ = false;
+    this->client_->cancel_timeout(this->timer_id_);
+  }
+  this->paused_.store(false);
+  this->rate_window_start_ms_ = 0;
+  this->client_->enable_loop_soon_any_context();
+}
+
+void USBAudioSink::set_pause_state(bool pause_state) {
+  if (this->paused_.load() == pause_state)
+    return;
+  this->paused_.store(pause_state);
+  if (!pause_state)
+    this->rate_window_start_ms_ = 0;
+}
+
+void USBAudioSink::finish() {
+  if (!this->is_running()) {
+    this->stop();
+    return;
+  }
+  this->finish_requested_.store(true);
+  this->client_->enable_loop_soon_any_context();
+}
+
+void USBAudioSink::check_finish() {
+  if (!this->finish_requested_.load())
+    return;
+  if (!this->finish_timer_set_) {
+    this->finish_timer_set_ = true;
+    this->finish_deadline_ms_ = millis() + FINISH_TIMEOUT_MS;
+    this->client_->set_timeout(this->timer_id_, FINISH_TIMEOUT_MS, [this]() { this->client_->enable_loop(); });
+  }
+  if (!this->has_buffered_data() || (int32_t) (millis() - this->finish_deadline_ms_) >= 0)
+    this->stop();
+}
+
+size_t USBAudioSink::play(const uint8_t *data, size_t length, TickType_t ticks_to_wait) {
+  // The caller's block time is the budget; MAX_WORK_TIME_MS only caps how long one call may
+  // hold the audio task.
+  uint32_t time_budget_ms = MAX_WORK_TIME_MS;
+  if (ticks_to_wait != portMAX_DELAY) {
+    const uint32_t ticks_ms = static_cast<uint32_t>(ticks_to_wait) * portTICK_PERIOD_MS;
+    if (ticks_ms > 0) {
+      time_budget_ms = std::min(time_budget_ms, ticks_ms);
+    }
+  }
+  return this->play_internal_(data, length, time_budget_ms);
+}
+
+size_t USBAudioSink::play(const uint8_t *data, size_t length) {
+  return this->play_internal_(data, length, MAX_WORK_TIME_MS);
+}
+
+size_t USBAudioSink::play_internal_(const uint8_t *data, size_t length, uint32_t time_budget_ms) {
+  this->last_play_ms_.store(millis(), std::memory_order_relaxed);
+  this->writers_.fetch_add(1);
+  USBAudioDevice *device = this->device_.load();
+  ring_buffer::RingBuffer *ring = this->ring_.load();
+  if (!this->is_running() && device != nullptr)
+    this->start();
+  if (!this->is_running() || device == nullptr || ring == nullptr) {
+    this->writers_.fetch_sub(1);
+    if (device == nullptr)
+      this->client_->enable_loop_soon_any_context();
+    // No device: the caller waits its budget, as on a full buffer, instead of spinning.
+    vTaskDelay(std::max<TickType_t>(1, pdMS_TO_TICKS(std::max<uint32_t>(1, time_budget_ms))));
+    return 0;
+  }
+  if (data == nullptr || length == 0) {
+    this->writers_.fetch_sub(1);
+    return 0;
+  }
+
+  const EndpointConfig &cfg = this->client_->spk_cfg_;
+  const uint32_t work_budget_ms =
+      (time_budget_ms > 0) ? std::min<uint32_t>(time_budget_ms, MAX_WORK_TIME_MS) : MAX_WORK_TIME_MS;
+  const uint32_t start_ms = millis();
+
+  const size_t bytes_per_frame =
+      std::max<size_t>(1, static_cast<size_t>(cfg.channels) * std::max<size_t>(1, cfg.bits_per_sample / 8));
+
+  // Write granularity is the isochronous packet the sink consumes per service interval, so a
+  // write never leaves a partial packet behind. Fall back to a single audio frame while the
+  // stream is not open yet and the packet size is therefore unknown.
+  size_t packet_bytes = device->get_speaker_packet_bytes();
+  if (packet_bytes < bytes_per_frame) {
+    packet_bytes = bytes_per_frame;
+  }
+
+  // The sink drains at real time and never faster: sample_rate frames per second. Asking a
+  // blocking write for more playback time than it may block for can only ever time out, so
+  // cap one chunk at what drains within a fraction of the budget. Deriving this from the
+  // stream format keeps it correct for any rate the endpoint was opened with.
+  const size_t bytes_per_ms = std::max<size_t>(1, (static_cast<size_t>(cfg.sample_rate) * bytes_per_frame) / 1000);
+  size_t max_chunk = bytes_per_ms * std::max<uint32_t>(1, work_budget_ms / WRITE_BUDGET_DIVISOR);
+  max_chunk = (max_chunk / packet_bytes) * packet_bytes;
+  if (max_chunk == 0) {
+    max_chunk = packet_bytes;
+  }
+
+  size_t total_written = 0;
+  size_t remaining = length;
+  const uint8_t *current = data;
+
+  while (remaining >= bytes_per_frame) {
+    const uint32_t elapsed_ms = millis() - start_ms;
+    if (elapsed_ms >= work_budget_ms) {
+      break;
+    }
+
+    // Whole packets while there is enough left for one, whole frames for the tail.
+    size_t chunk = std::min(remaining, max_chunk);
+    size_t aligned = (chunk / packet_bytes) * packet_bytes;
+    if (aligned == 0) {
+      aligned = (chunk / bytes_per_frame) * bytes_per_frame;
+    }
+    chunk = aligned;
+    if (chunk == 0) {
+      break;
+    }
+
+    uint32_t call_timeout_ms = work_budget_ms - elapsed_ms;
+    if (call_timeout_ms == 0) {
+      call_timeout_ms = 1;
+    }
+
+    // A short write is a normal outcome: the sink drains at exactly real time and the
+    // caller keeps the remainder. Retrying with a smaller chunk cannot help, because the
+    // drain rate is fixed by the sample clock. Also while the stream still opens: the audio
+    // goes into the ring (the stream starts prefilled), and a full ring blocks the caller on
+    // its space - the drain is the event, nothing sleeps blind.
+    const TickType_t ticks = std::max<TickType_t>(1, pdMS_TO_TICKS(call_timeout_ms));
+    if (ring->write_without_replacement(current, chunk, ticks, false) != chunk)
+      break;
+
+    total_written += chunk;
+    current += chunk;
+    remaining -= chunk;
+
+    const size_t frames_written = chunk / bytes_per_frame;
+    if (frames_written > 0) {
+      const int64_t timestamp_us = esp_timer_get_time();
+      this->audio_output_callback_(static_cast<uint32_t>(frames_written), timestamp_us);
+    }
+  }
+
+  // Only a stream that runs can fall behind; one still opening (or without a free host channel)
+  // takes nothing, which is not an underrun.
+  if (device->get_speaker_packet_bytes() != 0) {
+    this->check_throughput_(total_written, bytes_per_ms);
+  } else {
+    this->rate_window_start_ms_ = 0;
+  }
+  this->writers_.fetch_sub(1);
+  return total_written;
+}
+
+// Judge the sink by throughput, not by whether a single write was short. Over a one second
+// window the accepted bytes have to track the sample clock; a sustained shortfall is the one
+// symptom that actually means the audio is breaking up (a stream that stopped draining, or a
+// device that fell behind), and it is worth one warning per window.
+void USBAudioSink::check_throughput_(size_t accepted, size_t bytes_per_ms) {
+  const uint32_t now = millis();
+  if (this->rate_window_start_ms_ == 0) {
+    this->rate_window_start_ms_ = now;
+    this->rate_window_bytes_ = accepted;
+    return;
+  }
+  this->rate_window_bytes_ += accepted;
+  const uint32_t elapsed_ms = now - this->rate_window_start_ms_;
+  if (elapsed_ms < RATE_WINDOW_MS)
+    return;
+
+  const size_t expected = bytes_per_ms * elapsed_ms;
+  const size_t floor_bytes = expected / 100 * RATE_WARN_PERCENT;
+  if (this->rate_window_bytes_ < floor_bytes) {
+    ESP_LOGW(TAG, "Speaker underrunning: accepted %u of %u bytes over %" PRIu32 " ms",
+             (unsigned) this->rate_window_bytes_, (unsigned) expected, elapsed_ms);
+  }
+  this->rate_window_start_ms_ = now;
+  this->rate_window_bytes_ = 0;
+}
+
+bool USBAudioSink::has_buffered_data() const {
+  if (!this->is_running())
+    return false;
+  // Ask the queue rather than inferring it from the time of the last write, which reports
+  // "buffered" for a stream that has long since drained and "empty" for a paused one.
+  auto *self = const_cast<USBAudioSink *>(this);
+  self->writers_.fetch_add(1);
+  ring_buffer::RingBuffer *ring = this->ring_.load();
+  const bool buffered = ring != nullptr && ring->available() > 0;
+  self->writers_.fetch_sub(1);
+  return buffered;
+}
+
+// The base class already forwards to a configured audio_dac. When that dac is the
+// usb_audio platform it drives the same Feature Unit, so forwarding here as well would
+// send every request twice.
+void USBAudioSink::set_volume(float volume) {
+  speaker::Speaker::set_volume(volume);
+#ifdef USE_AUDIO_DAC
+  if (this->audio_dac_ != nullptr)
+    return;
+#endif
+  this->client_->spk_volume_.store(std::clamp(volume, 0.0f, 1.0f));
+  USBAudioDevice *device = this->device_.load();
+  if (device != nullptr)
+    device->set_speaker_volume_level(volume);
+}
+
+void USBAudioSink::set_mute_state(bool mute_state) {
+  speaker::Speaker::set_mute_state(mute_state);
+#ifdef USE_AUDIO_DAC
+  if (this->audio_dac_ != nullptr)
+    return;
+#endif
+  this->client_->spk_mute_.store(mute_state);
+  USBAudioDevice *device = this->device_.load();
+  if (device != nullptr)
+    device->set_speaker_mute_state(mute_state);
+}
+
+void USBAudioCapture::attach(USBAudioDevice *device, ring_buffer::RingBuffer *ring) {
+  const EndpointConfig &cfg = this->client_->mic_cfg_;
+  this->audio_stream_info_ = audio::AudioStreamInfo(cfg.bits_per_sample, cfg.channels, cfg.sample_rate);
+  xSemaphoreTake(this->client_->capture_lock_, portMAX_DELAY);
+  this->ring_ = ring;
+  xSemaphoreGive(this->client_->capture_lock_);
+  this->device_ = device;
+  if (this->state_ == microphone::STATE_STARTING && this->listeners_.load() > 0)
+    this->open_stream_();
+}
+
+void USBAudioCapture::detach() {
+  xSemaphoreTake(this->client_->capture_lock_, portMAX_DELAY);
+  this->ring_ = nullptr;
+  xSemaphoreGive(this->client_->capture_lock_);
+  this->device_ = nullptr;
+  this->client_->cancel_timeout(this->timer_id_);
+  if (this->state_ == microphone::STATE_RUNNING)
+    this->state_ = microphone::STATE_STARTING;
+}
+
+void USBAudioCapture::request_(uint8_t set, uint8_t clear) {
+  this->commands_.fetch_and(static_cast<uint8_t>(~clear));
+  this->commands_.fetch_or(set);
+  this->client_->enable_loop_soon_any_context();
+}
+
+// Every MicrophoneSource forwards its own start() and stop(), so capture runs while any of
+// them is listening, like i2s_audio's listener count.
+void USBAudioCapture::start() {
+  uint8_t listeners = this->listeners_.load();
+  do {
+    if (listeners >= MAX_LISTENERS) {
+      return;
+    }
+  } while (!this->listeners_.compare_exchange_weak(listeners, listeners + 1));
+  if (listeners == 0) {
+    this->request_(COMMAND_START, COMMAND_STOP);
+  }
+}
+
+void USBAudioCapture::stop() {
+  uint8_t listeners = this->listeners_.load();
+  do {
+    if (listeners == 0) {
+      return;
+    }
+  } while (!this->listeners_.compare_exchange_weak(listeners, listeners - 1));
+  if (listeners == 1) {
+    this->request_(COMMAND_STOP, COMMAND_START);
+  }
+}
+
+void USBAudioCapture::process() {
+  const uint8_t commands = this->commands_.exchange(0);
+  if (commands & COMMAND_STOP) {
+    this->client_->cancel_timeout(this->timer_id_);
+    this->retry_delay_ms_ = RETRY_MIN_MS;
+    if (this->state_ == microphone::STATE_STARTING || this->state_ == microphone::STATE_RUNNING) {
+      if (this->device_ != nullptr)
+        this->device_->suspend_microphone();
+      xSemaphoreTake(this->client_->capture_lock_, portMAX_DELAY);
+      this->running_ = false;
+      xSemaphoreGive(this->client_->capture_lock_);
+      this->state_ = microphone::STATE_STOPPING;
+    }
+  }
+  if (this->state_ == microphone::STATE_STOPPING && !this->delivering_.load()) {
+    this->state_ = microphone::STATE_STOPPED;
+  }
+  if ((commands & COMMAND_START) && this->listeners_ > 0) {
+    if (this->state_ == microphone::STATE_STOPPED) {
+      this->state_ = microphone::STATE_STARTING;
+      this->open_stream_();
+    } else if (this->state_ == microphone::STATE_STOPPING) {
+      // Started again once the task is idle.
+      this->commands_.fetch_or(COMMAND_START);
+    }
+  }
+}
+
+// Answered by on_stream_event() when the open is still under way; a device that is not there
+// yet opens the stream itself once it connects.
+void USBAudioCapture::open_stream_() {
+  if (this->device_ == nullptr)
+    return;
+  if (!this->device_->resume_microphone()) {
+    if (this->device_->device_connected()) {
+      this->on_stream_event(MicStreamEvent::FAILED);
+    }
+    return;
+  }
+  if (this->device_->microphone_stream_open()) {
+    this->set_running_();
+  }
+}
+
+void USBAudioCapture::set_running_() {
+  this->state_ = microphone::STATE_RUNNING;
+  this->retry_delay_ms_ = RETRY_MIN_MS;
+  this->running_ = true;
+  this->client_->wake_capture_task_();
+}
+
+void USBAudioCapture::on_stream_event(MicStreamEvent event) {
+  switch (event) {
+    case MicStreamEvent::OPEN:
+      if (this->state_ == microphone::STATE_STARTING) {
+        this->set_running_();
+      }
+      break;
+    case MicStreamEvent::LOST:
+      if (this->state_ == microphone::STATE_RUNNING) {
+        ESP_LOGW(TAG, "Microphone stream lost, waiting for it to reopen");
+        this->state_ = microphone::STATE_STARTING;
+        // A stream that died with the device still there is not reopened by a reconnect.
+        if (this->device_ != nullptr && this->device_->device_connected()) {
+          this->on_stream_event(MicStreamEvent::FAILED);
+        }
+      }
+      break;
+    case MicStreamEvent::FAILED:
+      if (this->state_ == microphone::STATE_STARTING && this->listeners_ > 0) {
+        this->client_->set_timeout(this->timer_id_, this->retry_delay_ms_, [this]() {
+          if (this->listeners_ > 0 && this->state_ == microphone::STATE_STARTING) {
+            this->open_stream_();
+          }
+        });
+        this->retry_delay_ms_ = std::min(this->retry_delay_ms_ * 2, RETRY_MAX_MS);
+      }
+      break;
+  }
+}
+
+size_t USBAudioCapture::read(std::vector<uint8_t> &buffer) {
+  if (this->ring_ == nullptr)
+    return 0;
+  buffer.resize(buffer.capacity());
+  const size_t received = this->ring_->read(buffer.data(), buffer.size(), 0);
+  buffer.resize(received);
+  return received;
+}
+
+void USBAudioCapture::deliver(std::vector<uint8_t> &buffer) {
+  this->apply_channel_selection_(buffer.data(), buffer.size());
+  this->data_callbacks_.call(buffer);
+}
+
+void USBAudioCapture::apply_channel_selection_(uint8_t *data, size_t length) {
+  if (this->enabled_mask_ == 0) {
+    return;
+  }
+  const uint8_t channels = this->audio_stream_info_.get_channels();
+  const size_t bytes_per_sample = this->audio_stream_info_.get_bits_per_sample() / 8U;
+  const size_t channel_stride = static_cast<size_t>(channels) * bytes_per_sample;
+  if (bytes_per_sample == 0 || channel_stride == 0 || (length % channel_stride) != 0) {
+    if (!this->logged_invalid_frame_) {
+      ESP_LOGW(TAG, "Unable to apply channel selection: unexpected frame size (%u bytes)",
+               static_cast<unsigned int>(length));
+      this->logged_invalid_frame_ = true;
+    }
+    return;
+  }
+  const uint8_t primary_channel = static_cast<uint8_t>(__builtin_ctz(this->enabled_mask_));
+  const size_t sample_count = length / channel_stride;
+  for (size_t sample_index = 0; sample_index < sample_count; ++sample_index) {
+    uint8_t *sample_base = data + sample_index * channel_stride;
+    const uint8_t *primary_source = sample_base + primary_channel * bytes_per_sample;
+    for (size_t channel_index = 0; channel_index < channels; ++channel_index) {
+      if (!(this->enabled_mask_ & (1u << channel_index))) {
+        std::memcpy(sample_base + channel_index * bytes_per_sample, primary_source, bytes_per_sample);
+      }
+    }
+  }
+}
+
+USBAudioDevice::USBAudioDevice(USBAudioClient *client, usb_host::UsbDevice *dev) : client_(client), dev_(dev) {
+  this->spk_vol_req_.store(client->spk_volume_.load());
+  this->spk_mute_req_.store(client->spk_mute_.load());
+}
+
+void USBAudioDevice::read_identity_() {
+  const usb_device_desc_t *desc = this->dev_->desc;
+  char id[12];
+  snprintf(id, sizeof(id), "%04X:%04X", desc != nullptr ? desc->idVendor : 0, desc != nullptr ? desc->idProduct : 0);
+  std::string identity = id;
+  RAMAllocator<usb_host::UsbDeviceInfo> allocator(RAMAllocator<usb_host::UsbDeviceInfo>::ALLOC_EXTERNAL);
+  usb_host::UsbDeviceInfo *info = allocator.allocate(1);
+  if (info != nullptr && this->client_->get_device_info(*this->dev_, *info)) {
+    snprintf(this->name_, sizeof(this->name_), "USB: %.40s", info->product[0] != '\0' ? info->product : id);
+    identity += ':';
+    identity += info->serial_number;
+  } else {
+    snprintf(this->name_, sizeof(this->name_), "USB: %s", id);
+  }
+  if (info != nullptr)
+    allocator.deallocate(info, 1);
+  this->key_ = fnv1_hash(identity);
+}
+
+void USBAudioDevice::wake_loop() { this->client_->enable_loop_soon_any_context(); }
+
+bool USBAudioDevice::has_speaker_rings_() const {
+  for (const auto &slot : this->slots_) {
+    if (slot.ring != nullptr)
+      return true;
+  }
+  return false;
+}
+
+void USBAudioDevice::flush_speaker_buffer_() {
+  for (auto &slot : this->slots_) {
+    if (slot.ring != nullptr)
+      slot.ring->reset();
+  }
+}
+
+bool USBAudioDevice::busy_() const {
+  if (this->ctrl_refs_.load() != 0 || this->ctrl_submitting_.load())
+    return true;
+  if (!this->spk_stream_.is_closed() || !this->spk_fb_stream_.is_closed() || !this->mic_stream_.is_closed())
+    return true;
+  for (const auto &slot : this->slots_) {
+    const USBAudioSink *sink = slot.sink.load();
+    if (sink != nullptr && sink->writing())
+      return true;
+  }
+  return false;
+}
+
+bool USBAudioDevice::loop_() {
   if (this->setup_pending_ && this->setup_done_seq_.load() == this->setup_seq_)
     this->finish_connect_();
   if (this->spk_rate_pending_ && this->spk_rate_done_seq_.load() == this->spk_rate_seq_) {
@@ -170,48 +1033,170 @@ void USBAudioClient::loop() {
     this->note_open_result_(false, this->mic_reopen_at_ms_, this->mic_open_fails_);
   }
 
+  if (!this->gone_) {
+    bool wanted = false;
+    for (const auto &slot : this->slots_) {
+      const USBAudioSink *sink = slot.sink.load();
+      if (sink != nullptr && sink->device() == this && sink->wanted())
+        wanted = true;
+    }
+    if (wanted != this->spk_wanted_) {
+      this->spk_wanted_ = wanted;
+      if (wanted) {
+        this->client_->cancel_timeout(this->timer_id_(0));
+      } else if (this->client_->stream_idle_timeout_ms_ != 0) {
+        this->client_->set_timeout(this->timer_id_(0), this->client_->stream_idle_timeout_ms_,
+                                   [this]() { this->close_idle_speaker_(); });
+      }
+    }
+  }
+
   // A stream in use but not open: its open failed (no free host channel, a died stream) or
   // it was started again while an idle close still drained. Opened again, paced by the
   // backoff, once the previous one is fully closed.
-  if (this->spk_wanted_ && !this->spk_stream_open_ && this->device_connected_ && this->spk_cfg_.configured &&
+  if (this->spk_wanted_ && !this->spk_stream_open_ && this->device_connected_ && this->client_->spk_cfg_.configured &&
       this->spk_format_ok_ && this->spk_alt_.valid && this->spk_stream_.is_closed() &&
       this->spk_fb_stream_.is_closed() && this->reopen_due_(this->spk_reopen_at_ms_, this->spk_open_fails_))
-    this->ensure_started_speaker();
-  if (this->mic_wanted_ && !this->mic_stream_open_ && this->device_connected_ && this->mic_cfg_.configured &&
+    this->ensure_started_speaker_();
+  if (this->mic_wanted_ && !this->mic_stream_open_ && this->device_connected_ && this->client_->mic_cfg_.configured &&
       this->mic_format_ok_ && this->mic_alt_.valid && this->mic_stream_.is_closed() &&
       this->reopen_due_(this->mic_reopen_at_ms_, this->mic_open_fails_))
-    this->ensure_started_microphone();
+    this->ensure_started_microphone_();
 
-  // A wanted stream whose reopen waits for its backoff: woken when it is due.
-  uint32_t due_in = UINT32_MAX;
-  const uint32_t now = millis();
-  if (this->spk_wanted_ && !this->spk_stream_open_ && this->spk_open_fails_ != 0)
-    due_in = std::min(due_in, static_cast<uint32_t>(std::max<int32_t>(0, (int32_t) (this->spk_reopen_at_ms_ - now))));
-  if (this->mic_wanted_ && !this->mic_stream_open_ && this->mic_open_fails_ != 0)
-    due_in = std::min(due_in, static_cast<uint32_t>(std::max<int32_t>(0, (int32_t) (this->mic_reopen_at_ms_ - now))));
-  if (due_in != UINT32_MAX)
-    this->set_timeout(REOPEN_TIMEOUT_ID, std::max<uint32_t>(1, due_in), [this]() { this->enable_loop(); });
-  if (!usb_work && !this->setup_pending_ && !this->spk_rate_pending_ && !this->mic_rate_pending_)
-    this->disable_loop();
+  return this->setup_pending_ || this->spk_rate_pending_ || this->mic_rate_pending_;
 }
 
-bool USBAudioClient::teardown() {
-  this->close_speaker_stream_();
-  this->close_microphone_stream_();
-  return this->spk_stream_.pending_urbs.load(std::memory_order_acquire) == 0 &&
-         this->spk_fb_stream_.pending_urbs.load(std::memory_order_acquire) == 0 &&
-         this->mic_stream_.pending_urbs.load(std::memory_order_acquire) == 0 && !this->ctrl_submitting_.load();
+void USBAudioDevice::on_stream_packet_(usb_host::IsocStream &stream, const uint8_t *data, size_t len, bool error) {
+  // Async OUT feedback endpoint: the device reports its desired rate (samples per service
+  // interval, Q10.14 at full speed / Q16.16 at high speed). Feed it into the OUT pacing.
+  if (&stream == &this->spk_fb_stream_) {
+    const size_t need = this->device_is_high_speed_ ? 4u : 3u;
+    if (!error && len >= need) {
+      uint32_t value = static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
+                       (static_cast<uint32_t>(data[2]) << 16);
+      if (this->device_is_high_speed_)
+        value |= static_cast<uint32_t>(data[3]) << 24;
+      if (value != 0)
+        this->spk_stream_.fb_value.store(value, std::memory_order_relaxed);
+    }
+    return;
+  }
+
+  if (error || len == 0 || &stream != &this->mic_stream_)
+    return;
+
+  // -- Microphone IN: write PCM into the ring buffer --------------------------
+  if (this->mic_rb_ == nullptr || this->mic_suspended_)
+    return;
+  // Non-blocking send; if full, drop oldest data (overwrite) is not possible with
+  // RINGBUF_TYPE_BYTEBUF, so we just skip if full to avoid blocking.
+  if (this->mic_alt_.channel_map_active) {
+    this->push_mapped_capture_(data, len);
+  } else {
+    this->mic_rb_->write_without_replacement(data, len, 0, false);
+  }
+  this->client_->wake_capture_task_();
+}
+
+// -- Speaker OUT: drain the ring buffer into this packet's payload area ------
+// max_len is the sample-clock packet size the pacing layer chose for this packet. What is
+// not written is zero filled by the caller, so a short read is silence.
+size_t USBAudioDevice::fill_(uint8_t *data, size_t max_len) {
+  if (this->spk_alt_.channel_map_active)
+    return this->fill_mapped_(data, max_len);
+  return this->read_mixed_(data, max_len);
+}
+
+static void mix_add(uint8_t *dst, const uint8_t *src, size_t len, size_t sample) {
+  switch (sample) {
+    case 1:
+      for (size_t i = 0; i < len; i++) {
+        const int32_t sum = static_cast<int8_t>(dst[i]) + static_cast<int8_t>(src[i]);
+        dst[i] = static_cast<uint8_t>(static_cast<int8_t>(std::clamp<int32_t>(sum, INT8_MIN, INT8_MAX)));
+      }
+      break;
+    case 2:
+      for (size_t i = 0; i + 2 <= len; i += 2) {
+        int16_t a;
+        int16_t b;
+        memcpy(&a, dst + i, 2);
+        memcpy(&b, src + i, 2);
+        const int16_t sum = static_cast<int16_t>(std::clamp<int32_t>(int32_t(a) + b, INT16_MIN, INT16_MAX));
+        memcpy(dst + i, &sum, 2);
+      }
+      break;
+    case 3:
+      for (size_t i = 0; i + 3 <= len; i += 3) {
+        const int32_t a = static_cast<int32_t>((uint32_t(dst[i]) << 8) | (uint32_t(dst[i + 1]) << 16) |
+                                               (uint32_t(dst[i + 2]) << 24)) >> 8;
+        const int32_t b = static_cast<int32_t>((uint32_t(src[i]) << 8) | (uint32_t(src[i + 1]) << 16) |
+                                               (uint32_t(src[i + 2]) << 24)) >> 8;
+        const int32_t sum = std::clamp<int32_t>(a + b, -8388608, 8388607);
+        dst[i] = static_cast<uint8_t>(sum);
+        dst[i + 1] = static_cast<uint8_t>(sum >> 8);
+        dst[i + 2] = static_cast<uint8_t>(sum >> 16);
+      }
+      break;
+    case 4:
+      for (size_t i = 0; i + 4 <= len; i += 4) {
+        int32_t a;
+        int32_t b;
+        memcpy(&a, dst + i, 4);
+        memcpy(&b, src + i, 4);
+        const int32_t sum = static_cast<int32_t>(std::clamp<int64_t>(int64_t(a) + b, INT32_MIN, INT32_MAX));
+        memcpy(dst + i, &sum, 4);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+size_t USBAudioDevice::read_mixed_(uint8_t *dst, size_t len) {
+  const size_t sample = this->spk_alt_.sub_frame_size;
+  size_t produced = 0;
+  bool first = true;
+  for (auto &slot : this->slots_) {
+    USBAudioSink *sink = slot.sink.load(std::memory_order_acquire);
+    ring_buffer::RingBuffer *ring = slot.ring.get();
+    if (sink == nullptr || ring == nullptr || !sink->playing())
+      continue;
+    if (first) {
+      produced = ring->read(dst, len, 0);
+      first = false;
+    } else {
+      uint8_t scratch[96];
+      size_t offset = 0;
+      while (offset < len) {
+        const size_t want = std::min(sizeof(scratch), len - offset);
+        const size_t got = ring->read(scratch, want, 0);
+        if (got == 0)
+          break;
+        if (offset + got > produced) {
+          memset(dst + produced, 0, offset + got - produced);
+          produced = offset + got;
+        }
+        mix_add(dst + offset, scratch, got, sample);
+        offset += got;
+        if (got < want)
+          break;
+      }
+    }
+    if (sink->finishing() && ring->available() == 0)
+      this->client_->enable_loop_soon_any_context();
+  }
+  return produced;
 }
 
 // Backoff helpers. next_attempt_ms is an absolute millis() deadline; fail_count only sets
 // how far it is pushed out.
-bool USBAudioClient::reopen_due_(const uint32_t &next_attempt_ms, uint8_t fail_count) const {
+bool USBAudioDevice::reopen_due_(const uint32_t &next_attempt_ms, uint8_t fail_count) const {
   if (fail_count == 0)
     return true;
   return (int32_t) (millis() - next_attempt_ms) >= 0;
 }
 
-void USBAudioClient::note_open_result_(bool ok, uint32_t &next_attempt_ms, uint8_t &fail_count) {
+void USBAudioDevice::note_open_result_(bool ok, uint32_t &next_attempt_ms, uint8_t &fail_count) {
   if (ok) {
     fail_count = 0;
     next_attempt_ms = millis();
@@ -228,44 +1213,22 @@ void USBAudioClient::note_open_result_(bool ok, uint32_t &next_attempt_ms, uint8
   ESP_LOGD(TAG, "Stream open failed (%u in a row); next attempt in %" PRIu32 " ms", fail_count, delay_ms);
 }
 
-void USBAudioClient::set_stream_error_(const char *what) {
+void USBAudioDevice::set_stream_error_(const char *what) {
   ESP_LOGE(TAG, "%s", what);
-  this->status_set_error();
-}
-
-uint32_t USBAudioClient::get_speaker_queued_bytes() const {
-  if (this->spk_rb_ == nullptr)
-    return 0;
-  const size_t free_bytes = xRingbufferGetCurFreeSize(this->spk_rb_);
-  return (this->spk_buf_size_ > free_bytes) ? static_cast<uint32_t>(this->spk_buf_size_ - free_bytes) : 0;
-}
-
-void USBAudioClient::flush_speaker_buffer_() {
-  if (this->spk_rb_ == nullptr)
-    return;
-  // Drain whatever is left so a reopened stream does not start by playing stale audio.
-  while (true) {
-    size_t received = 0;
-    void *item = xRingbufferReceiveUpTo(this->spk_rb_, &received, 0, this->spk_buf_size_);
-    if (item == nullptr)
-      break;
-    vRingbufferReturnItem(this->spk_rb_, item);
-    if (received == 0)
-      break;
-  }
+  this->client_->status_set_error();
 }
 
 // -----------------------------------------------------------------------------
 // Descriptor parsing
 // -----------------------------------------------------------------------------
 
-void USBAudioClient::detect_uac_version_() {
+void USBAudioDevice::detect_uac_version_() {
   // Assume the older version until the device says otherwise: a device that does not
   // describe itself is far more likely to be a 1.0 one, and the 1.0 layouts are the ones a
   // 2.0 device would never be parsed with by accident.
   this->uac_version_ = UAC_VERSION_1;
 
-  const usb_config_desc_t *cfg = this->get_config_desc_();
+  const usb_config_desc_t *cfg = this->dev_->config;
   if (cfg == nullptr)
     return;
 
@@ -302,17 +1265,17 @@ void USBAudioClient::detect_uac_version_() {
   ESP_LOGD(TAG, "No AudioControl header found; assuming audio class 1.0");
 }
 
-bool USBAudioClient::find_ac_interface_() {
-  const usb_config_desc_t *cfg = this->get_config_desc_();
+bool USBAudioDevice::find_ac_interface_() {
+  const usb_config_desc_t *cfg = this->dev_->config;
   if (cfg == nullptr)
     return false;
 
   // The AudioStreaming interfaces this component is going to use, when they are known.
   uint8_t wanted[2];
   uint8_t wanted_count = 0;
-  if (this->spk_cfg_.configured && this->spk_format_ok_)
+  if (this->client_->spk_cfg_.configured && this->spk_format_ok_)
     wanted[wanted_count++] = this->spk_as_intf_;
-  if (this->mic_cfg_.configured && this->mic_format_ok_)
+  if (this->client_->mic_cfg_.configured && this->mic_format_ok_)
     wanted[wanted_count++] = this->mic_as_intf_;
 
   uint16_t total = cfg->wTotalLength;
@@ -471,8 +1434,8 @@ static uint8_t uac_find_feature_unit(const UacTopologyNode *nodes, uint8_t count
   return 0;
 }
 
-uint8_t USBAudioClient::collect_topology_(UacTopologyNode *nodes) {
-  const usb_config_desc_t *cfg = this->get_config_desc_();
+uint8_t USBAudioDevice::collect_topology_(UacTopologyNode *nodes) {
+  const usb_config_desc_t *cfg = this->dev_->config;
   if (cfg == nullptr)
     return 0;
 
@@ -521,8 +1484,8 @@ uint8_t USBAudioClient::collect_topology_(UacTopologyNode *nodes) {
   return count;
 }
 
-uint8_t USBAudioClient::collect_feature_units_(UacFeatureUnit *units, uint8_t max_count) {
-  const usb_config_desc_t *cfg = this->get_config_desc_();
+uint8_t USBAudioDevice::collect_feature_units_(UacFeatureUnit *units, uint8_t max_count) {
+  const usb_config_desc_t *cfg = this->dev_->config;
   if (cfg == nullptr)
     return 0;
 
@@ -606,7 +1569,7 @@ uint8_t USBAudioClient::collect_feature_units_(UacFeatureUnit *units, uint8_t ma
   return count;
 }
 
-bool USBAudioClient::parse_feature_units_() {
+bool USBAudioDevice::parse_feature_units_() {
   // Another device may have been attached before, so start from nothing.
   this->spk_ctl_.fu = {};
   this->mic_ctl_.fu = {};
@@ -634,14 +1597,14 @@ bool USBAudioClient::parse_feature_units_() {
   }
 
   for (uint8_t i = 0; i < unit_count; i++) {
-    if (this->spk_cfg_.configured && units[i].unit_id == spk_fu_id)
+    if (this->client_->spk_cfg_.configured && units[i].unit_id == spk_fu_id)
       this->spk_ctl_.fu = units[i];
-    if (this->mic_cfg_.configured && units[i].unit_id == mic_fu_id)
+    if (this->client_->mic_cfg_.configured && units[i].unit_id == mic_fu_id)
       this->mic_ctl_.fu = units[i];
   }
 
   // Unit ID 0 is reserved by the specification, so it marks "nothing found" here.
-  if (this->spk_cfg_.configured) {
+  if (this->client_->spk_cfg_.configured) {
     if (this->spk_ctl_.fu.unit_id != 0) {
       ESP_LOGD(TAG, "Speaker Feature Unit: id=%u mute=%s vol=%s", this->spk_ctl_.fu.unit_id,
                YESNO(this->spk_ctl_.fu.mute_available()), YESNO(this->spk_ctl_.fu.volume_available()));
@@ -649,7 +1612,7 @@ bool USBAudioClient::parse_feature_units_() {
       ESP_LOGW(TAG, "No Feature Unit in the playback path; volume and mute are unavailable");
     }
   }
-  if (this->mic_cfg_.configured) {
+  if (this->client_->mic_cfg_.configured) {
     if (this->mic_ctl_.fu.unit_id != 0) {
       ESP_LOGD(TAG, "Mic Feature Unit: id=%u mute=%s vol=%s", this->mic_ctl_.fu.unit_id,
                YESNO(this->mic_ctl_.fu.mute_available()), YESNO(this->mic_ctl_.fu.volume_available()));
@@ -707,8 +1670,8 @@ const char *uac_pair_name(UacChannelPair pair) {
 
 // Channel layout a Terminal declares. UAC 1.0 keeps it on the Terminal rather than on the
 // streaming interface, so a stream's layout is only reachable through its bTerminalLink.
-uint32_t USBAudioClient::terminal_channel_config_(uint8_t terminal_id) {
-  const usb_config_desc_t *cfg = this->get_config_desc_();
+uint32_t USBAudioDevice::terminal_channel_config_(uint8_t terminal_id) {
+  const usb_config_desc_t *cfg = this->dev_->config;
   if (cfg == nullptr || terminal_id == 0)
     return 0;
 
@@ -740,9 +1703,9 @@ uint32_t USBAudioClient::terminal_channel_config_(uint8_t terminal_id) {
   return 0;
 }
 
-bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_t bits, uint32_t sample_rate,
+bool USBAudioDevice::parse_as_interface_(bool want_out, uint8_t channels, uint8_t bits, uint32_t sample_rate,
                                           uint8_t &intf_out, UacAltInfo &alt_out) {
-  const usb_config_desc_t *cfg = this->get_config_desc_();
+  const usb_config_desc_t *cfg = this->dev_->config;
   if (cfg == nullptr)
     return false;
 
@@ -761,7 +1724,7 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
   // this only diverges there; older FS-only hosts always take the clamped path anyway.
   usb_device_info_t dev_info;
   const bool is_high_speed =
-      usb_host_device_info(this->device_handle_, &dev_info) == ESP_OK && dev_info.speed == USB_SPEED_HIGH;
+      usb_host_device_info(this->dev_->handle, &dev_info) == ESP_OK && dev_info.speed == USB_SPEED_HIGH;
   this->device_is_high_speed_ = is_high_speed;
 
   // The two class versions describe a streaming format in different descriptors, so which
@@ -782,7 +1745,7 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
   uint8_t mapped_intf = 0;
 
   // What the device offers, once per device (the first of the two searches): what a configuration can ask for
-  const bool log_formats = want_out == this->spk_cfg_.configured;
+  const bool log_formats = want_out == this->client_->spk_cfg_.configured;
   auto try_commit = [&]() {
     if (!format_seen || !cur_alt_info.valid)
       return;
@@ -853,7 +1816,7 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
       cur_alt_info.channel_config = this->terminal_channel_config_(cur_alt_info.terminal_link);
     uint8_t left = 0;
     uint8_t right = 1;
-    if (!uac_resolve_pair(cur_alt_info, this->channel_pair_, left, right))
+    if (!uac_resolve_pair(cur_alt_info, this->client_->channel_pair_, left, right))
       return;
     cur_alt_info.channel_map_active = true;
     cur_alt_info.map_left = left;
@@ -998,7 +1961,7 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
     intf_out = mapped_intf;
     alt_out = mapped_alt;
     ESP_LOGI(TAG, "%s: no %u-channel setting; taking the %s pair from %u channels (frame slots %u and %u)",
-             want_out ? "Speaker" : "Mic", channels, uac_pair_name(this->channel_pair_), alt_out.channels,
+             want_out ? "Speaker" : "Mic", channels, uac_pair_name(this->client_->channel_pair_), alt_out.channels,
              alt_out.map_left, alt_out.map_right);
   }
 
@@ -1058,7 +2021,7 @@ const char *uac_transfer_status_str(uint16_t status) {
 }
 }  // namespace
 
-bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, uint16_t value, uint16_t index,
+bool USBAudioDevice::uac_control_transfer_(uint8_t req_type, uint8_t request, uint16_t value, uint16_t index,
                                             const uint8_t *out_data, size_t out_len, uint8_t *in_data,
                                             size_t in_len, bool *rejected) {
   if (out_len > UAC_CTRL_MAX_DATA_LEN || in_len > UAC_CTRL_MAX_DATA_LEN) {
@@ -1078,7 +2041,7 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
   size_t buffer_len = out_len;
   const size_t w_length = (in_data != nullptr) ? in_len : out_len;
   if (in_data != nullptr) {
-    const usb_device_desc_t *dev_desc = this->get_device_desc_();
+    const usb_device_desc_t *dev_desc = this->dev_->desc;
     if (dev_desc == nullptr || dev_desc->bMaxPacketSize0 == 0) {
       ESP_LOGW(TAG, "Control request 0x%02X skipped: endpoint 0 packet size is unknown", request);
       return false;
@@ -1094,8 +2057,8 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
   // from the stream task did. Drive it here for as long as the wait lasts. Requests from
   // other tasks must not touch it, since it belongs to the loop task.
   const TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
-  const bool on_loop_task = (this->loop_task_ != nullptr && current_task == this->loop_task_);
-  const bool on_ctrl_task = (current_task == this->ctrl_task_.get_handle());
+  const bool on_loop_task = (this->client_->loop_task_ != nullptr && current_task == this->client_->loop_task_);
+  const bool on_ctrl_task = (current_task == this->client_->ctrl_task_.get_handle());
 
   uint16_t last_status = USB_TRANSFER_STATUS_COMPLETED;
   size_t last_len = 0;
@@ -1117,7 +2080,7 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
       }
     }
     const bool submitted =
-        this->control_transfer(req_type, request, value, index,
+        this->client_->control_transfer(*this->dev_, req_type, request, value, index,
                                [result, current_task, on_ctrl_task](const usb_host::TransferStatus &s) {
                                  result->success = s.success;
                                  result->status = s.error_code;
@@ -1198,7 +2161,7 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
   return false;
 }
 
-bool USBAudioClient::uac_set_cur_interface_(uint8_t unit_id, uint8_t selector, uint8_t channel,
+bool USBAudioDevice::uac_set_cur_interface_(uint8_t unit_id, uint8_t selector, uint8_t channel,
                                              const uint8_t *data, size_t len, bool *rejected) {
   // wValue: (selector << 8) | channel
   // wIndex: (unit_id << 8) | ac_intf_num
@@ -1208,7 +2171,7 @@ bool USBAudioClient::uac_set_cur_interface_(uint8_t unit_id, uint8_t selector, u
                                      rejected);
 }
 
-bool USBAudioClient::uac_get_cur_interface_(uint8_t unit_id, uint8_t selector, uint8_t channel,
+bool USBAudioDevice::uac_get_cur_interface_(uint8_t unit_id, uint8_t selector, uint8_t channel,
                                              uint8_t *data, size_t len) {
   const uint16_t wValue = static_cast<uint16_t>((selector << 8) | channel);
   const uint16_t wIndex = static_cast<uint16_t>((unit_id << 8) | this->ac_intf_);
@@ -1218,14 +2181,14 @@ bool USBAudioClient::uac_get_cur_interface_(uint8_t unit_id, uint8_t selector, u
   return this->uac_control_transfer_(UAC_REQ_TYPE_INTF_GET, request, wValue, wIndex, nullptr, 0, data, len);
 }
 
-bool USBAudioClient::uac_set_cur_endpoint_(uint8_t ep_addr, uint8_t selector,
+bool USBAudioDevice::uac_set_cur_endpoint_(uint8_t ep_addr, uint8_t selector,
                                             const uint8_t *data, size_t len) {
   const uint16_t wValue = static_cast<uint16_t>(selector << 8);
   return this->uac_control_transfer_(UAC_REQ_TYPE_EP_SET, UAC_SET_CUR, wValue, ep_addr, data, len, nullptr, 0);
 }
 
-uint8_t USBAudioClient::find_clock_source_(uint8_t terminal_id) {
-  const usb_config_desc_t *cfg = this->get_config_desc_();
+uint8_t USBAudioDevice::find_clock_source_(uint8_t terminal_id) {
+  const usb_config_desc_t *cfg = this->dev_->config;
   if (cfg == nullptr || terminal_id == 0)
     return 0;
 
@@ -1279,7 +2242,7 @@ uint8_t USBAudioClient::find_clock_source_(uint8_t terminal_id) {
   return (clock != 0) ? clock : source;
 }
 
-bool USBAudioClient::set_sample_rate_(const UacAltInfo &alt, const UacControlState &ctl, uint32_t freq) {
+bool USBAudioDevice::set_sample_rate_(const UacAltInfo &alt, const UacControlState &ctl, uint32_t freq) {
   if (this->uac_version_ < UAC_VERSION_2) {
     // UAC 1.0: a three byte control on the isochronous endpoint itself. A device is allowed
     // not to have it when it runs at one fixed rate, so a refusal is not fatal.
@@ -1353,7 +2316,7 @@ static uint8_t uac_control_channels(bool on_master, uint8_t channel_mask, uint8_
   return count;
 }
 
-void USBAudioClient::probe_volume_range_(UacControlState &ctl, const char *what) {
+void USBAudioDevice::probe_volume_range_(UacControlState &ctl, const char *what) {
   ctl.range_known = false;
   if (ctl.fu.unit_id == 0 || !ctl.fu.volume_available())
     return;
@@ -1462,7 +2425,7 @@ void USBAudioClient::probe_volume_range_(UacControlState &ctl, const char *what)
 // never moves, the answers are worthless and nothing is read back from this device again.
 // Whatever the volume was is restored before returning, so probing does not leave the
 // device somewhere it was not.
-void USBAudioClient::probe_sticky_volume_(UacControlState &ctl, const char *what, uint8_t channel) {
+void USBAudioDevice::probe_sticky_volume_(UacControlState &ctl, const char *what, uint8_t channel) {
   ctl.get_cur_broken = false;
   // The probe writes dB values and judges the answers on that scale. A device on the BYTE
   // quirk is on neither, so probing it would set it to two arbitrary levels for nothing.
@@ -1512,12 +2475,12 @@ void USBAudioClient::probe_sticky_volume_(UacControlState &ctl, const char *what
 // reliable either. Linux carries the equivalent as a per-device entry in its quirk table
 // rather than probing for it, and this does the same from the configuration. Without a
 // matching entry the class definition applies.
-void USBAudioClient::resolve_device_quirks_() {
+void USBAudioDevice::resolve_device_quirks_() {
   this->volume_encoding_ = VolumeEncoding::DB;
-  const usb_device_desc_t *dev = this->get_device_desc_();
+  const usb_device_desc_t *dev = this->dev_->desc;
   if (dev == nullptr)
     return;
-  for (const auto &quirk : this->quirks_) {
+  for (const auto &quirk : this->client_->quirks_) {
     if (quirk.vid != dev->idVendor || quirk.pid != dev->idProduct)
       continue;
     this->volume_encoding_ = quirk.volume_encoding;
@@ -1529,7 +2492,7 @@ void USBAudioClient::resolve_device_quirks_() {
   }
 }
 
-bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
+bool USBAudioDevice::apply_volume_(UacControlState &ctl, const char *what) {
   uint8_t channels[UAC_FU_MAX_TARGETS];
   const uint8_t channel_count = uac_control_channels(ctl.fu.has_volume, ctl.fu.volume_channels, channels);
   if (ctl.fu.unit_id == 0 || channel_count == 0) {
@@ -1552,11 +2515,11 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
   int16_t vol;
   if (ctl.range_known) {
     int32_t raw;
-    if (this->volume_curve_ == VolumeCurve::LOGARITHMIC && clamped > 0.0f) {
+    if (this->client_->volume_curve_ == VolumeCurve::LOGARITHMIC && clamped > 0.0f) {
       // Full scale is the top of what the device offers, and each halving of the amplitude
       // is 6.02 dB below that.
       raw = static_cast<int32_t>(ctl.vol_max) + std::lround(20.0 * std::log10(static_cast<double>(clamped)) * 256.0);
-    } else if (this->volume_curve_ == VolumeCurve::LOGARITHMIC) {
+    } else if (this->client_->volume_curve_ == VolumeCurve::LOGARITHMIC) {
       raw = ctl.vol_min;
     } else {
       const int32_t span = static_cast<int32_t>(ctl.vol_max) - ctl.vol_min;
@@ -1644,7 +2607,7 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
   return true;
 }
 
-bool USBAudioClient::apply_mute_(UacControlState &ctl, const char *what) {
+bool USBAudioDevice::apply_mute_(UacControlState &ctl, const char *what) {
   uint8_t channels[UAC_FU_MAX_TARGETS];
   const uint8_t channel_count = uac_control_channels(ctl.fu.has_mute, ctl.fu.mute_channels, channels);
   if (ctl.fu.unit_id == 0 || channel_count == 0) {
@@ -1686,24 +2649,15 @@ bool USBAudioClient::apply_mute_(UacControlState &ctl, const char *what) {
   return true;
 }
 
-bool USBAudioClient::open_speaker_stream_() {
+bool USBAudioDevice::open_speaker_stream_() {
   if (this->spk_stream_open_)
     return true;
-  if (!this->spk_cfg_.configured || !this->spk_alt_.valid)
+  if (!this->client_->spk_cfg_.configured || !this->spk_alt_.valid)
     return false;
   // An open already under way, or a previous one still draining. Either way, starting a
   // second sequence on the same stream would trample the first.
   if (!this->spk_stream_.is_closed())
     return true;
-
-  // Create ring buffer if not yet done.
-  if (this->spk_rb_ == nullptr) {
-    this->spk_rb_ = xRingbufferCreate(this->spk_buf_size_, RINGBUF_TYPE_BYTEBUF);
-    if (this->spk_rb_ == nullptr) {
-      this->set_stream_error_("Failed to allocate speaker ring buffer");
-      return false;
-    }
-  }
 
   this->spk_stream_.ep_addr        = this->spk_alt_.ep_addr;
   this->spk_stream_.mps            = this->spk_alt_.mps;
@@ -1733,7 +2687,7 @@ bool USBAudioClient::open_speaker_stream_() {
     // 1 ms frame, so an inflated interval rate starves the device by that same factor.
     // Halve back down to what mps actually describes, never below the 1 ms frame rate.
     while (frac_div > 1000u && this->spk_alt_.mps != 0 &&
-           ((this->spk_cfg_.sample_rate / frac_div) * frame_size) * 2 <= static_cast<uint32_t>(this->spk_alt_.mps)) {
+           ((this->client_->spk_cfg_.sample_rate / frac_div) * frame_size) * 2 <= static_cast<uint32_t>(this->spk_alt_.mps)) {
       frac_div /= 2;
     }
     if (frac_div != derived_ips) {
@@ -1744,8 +2698,8 @@ bool USBAudioClient::open_speaker_stream_() {
     this->spk_stream_.is_output       = true;
     this->spk_stream_.frame_size      = frame_size;
     this->spk_stream_.frac_div        = frac_div;
-    this->spk_stream_.packet_size      = (this->spk_cfg_.sample_rate / frac_div) * frame_size;
-    this->spk_stream_.packet_size_frac = this->spk_cfg_.sample_rate % frac_div;
+    this->spk_stream_.packet_size      = (this->client_->spk_cfg_.sample_rate / frac_div) * frame_size;
+    this->spk_stream_.packet_size_frac = this->client_->spk_cfg_.sample_rate % frac_div;
     this->spk_stream_.frac_accum      = 0;
     this->spk_stream_.fb_value.store(0, std::memory_order_relaxed);
     this->spk_stream_.fb_accum        = 0;
@@ -1758,24 +2712,16 @@ bool USBAudioClient::open_speaker_stream_() {
   }
 
   // Opening continues in on_stream_open() once the device has taken the alt-setting.
-  return this->stream_open(this->spk_stream_, this);
+  return this->client_->stream_open(*this->dev_, this->spk_stream_, this->client_);
 }
 
-bool USBAudioClient::open_microphone_stream_() {
+bool USBAudioDevice::open_microphone_stream_() {
   if (this->mic_stream_open_)
     return true;
-  if (!this->mic_cfg_.configured || !this->mic_alt_.valid)
+  if (!this->client_->mic_cfg_.configured || !this->mic_alt_.valid)
     return false;
   if (!this->mic_stream_.is_closed())
     return true;
-
-  if (this->mic_rb_ == nullptr) {
-    this->mic_rb_ = xRingbufferCreate(this->mic_buf_size_, RINGBUF_TYPE_BYTEBUF);
-    if (this->mic_rb_ == nullptr) {
-      this->set_stream_error_("Failed to allocate microphone ring buffer");
-      return false;
-    }
-  }
 
   this->mic_stream_.ep_addr        = this->mic_alt_.ep_addr;
   this->mic_stream_.mps            = this->mic_alt_.mps;
@@ -1785,17 +2731,17 @@ bool USBAudioClient::open_microphone_stream_() {
   this->mic_stream_.alt_setting    = this->mic_alt_.alt_setting;
 
   // Opening continues in on_stream_open() once the device has taken the alt-setting.
-  return this->stream_open(this->mic_stream_, this);
+  return this->client_->stream_open(*this->dev_, this->mic_stream_, this->client_);
 }
 
-void USBAudioClient::close_speaker_stream_() {
+void USBAudioDevice::close_speaker_stream_() {
   // Unconditional: an open that is still selecting its alt-setting has to be cancelled too,
   // and it has not set spk_stream_open_ yet.
   if (this->spk_fb_open_ || !this->spk_fb_stream_.is_closed()) {
-    this->stream_close(this->spk_fb_stream_);
+    this->client_->stream_close(this->spk_fb_stream_);
     this->spk_fb_open_ = false;
   }
-  this->stream_close(this->spk_stream_);
+  this->client_->stream_close(this->spk_stream_);
   this->spk_rate_pending_ = false;
   if (!this->spk_stream_open_)
     return;
@@ -1805,25 +2751,26 @@ void USBAudioClient::close_speaker_stream_() {
   ESP_LOGI(TAG, "Speaker stream closed");
 }
 
-void USBAudioClient::close_microphone_stream_() {
-  this->stream_close(this->mic_stream_);
+void USBAudioDevice::close_microphone_stream_() {
+  this->client_->stream_close(this->mic_stream_);
   this->mic_rate_pending_ = false;
   if (!this->mic_stream_open_)
     return;
   this->mic_stream_open_ = false;
   ESP_LOGI(TAG, "Microphone stream closed");
-  if (this->microphone_ != nullptr)
-    this->microphone_->on_stream_event(MicStreamEvent::LOST);
+  if (this->capture_ != nullptr)
+    this->capture_->on_stream_event(MicStreamEvent::LOST);
 }
 
 // -----------------------------------------------------------------------------
 // Connection lifecycle
 // -----------------------------------------------------------------------------
 
-void USBAudioClient::on_connected() {
-  const usb_device_desc_t *dev = this->get_device_desc_();
+void USBAudioDevice::on_connected() {
+  const usb_device_desc_t *dev = this->dev_->desc;
   if (dev != nullptr)
     ESP_LOGI(TAG, "USB Audio device connected: VID=0x%04X PID=0x%04X", dev->idVendor, dev->idProduct);
+  this->read_identity_();
 
   // Fresh device: forget everything the previous one taught us.
   this->resolve_device_quirks_();
@@ -1833,16 +2780,16 @@ void USBAudioClient::on_connected() {
   this->mic_open_fails_ = 0;
   this->spk_format_ok_ = false;
   this->mic_format_ok_ = false;
-  this->status_clear_error();
+  this->client_->status_clear_error();
 
   // Which version of the class the device speaks decides how its descriptors are laid out,
   // so it is settled before any of them is read.
   this->detect_uac_version_();
 
-  if (this->spk_cfg_.configured) {
-    this->spk_format_ok_ = this->parse_as_interface_(true, this->spk_cfg_.channels,
-                                                     static_cast<uint8_t>(this->spk_cfg_.bits_per_sample),
-                                                     this->spk_cfg_.sample_rate,
+  if (this->client_->spk_cfg_.configured) {
+    this->spk_format_ok_ = this->parse_as_interface_(true, this->client_->spk_cfg_.channels,
+                                                     static_cast<uint8_t>(this->client_->spk_cfg_.bits_per_sample),
+                                                     this->client_->spk_cfg_.sample_rate,
                                                      this->spk_as_intf_, this->spk_alt_);
     if (!this->spk_format_ok_) {
       // The device cannot do the configured format (its formats: "Offers" above). Retrying will not change that:
@@ -1851,10 +2798,10 @@ void USBAudioClient::on_connected() {
     }
   }
 
-  if (this->mic_cfg_.configured) {
-    this->mic_format_ok_ = this->parse_as_interface_(false, this->mic_cfg_.channels,
-                                                     static_cast<uint8_t>(this->mic_cfg_.bits_per_sample),
-                                                     this->mic_cfg_.sample_rate,
+  if (this->client_->mic_cfg_.configured) {
+    this->mic_format_ok_ = this->parse_as_interface_(false, this->client_->mic_cfg_.channels,
+                                                     static_cast<uint8_t>(this->client_->mic_cfg_.bits_per_sample),
+                                                     this->client_->mic_cfg_.sample_rate,
                                                      this->mic_as_intf_, this->mic_alt_);
     if (!this->mic_format_ok_) {
       ESP_LOGW(TAG, "Device does not offer the configured microphone format: no microphone on it");
@@ -1888,7 +2835,7 @@ void USBAudioClient::on_connected() {
 }
 
 // Control task: everything a fresh device has to be told before its streams open.
-void USBAudioClient::connect_setup_() {
+void USBAudioDevice::connect_setup_() {
   // Set the rate now, while every AudioStreaming interface is still on its zero-bandwidth
   // alt-setting. A Clock Source is addressed through the AudioControl interface and does
   // not need the stream, and a device is entitled to refuse or quietly ignore a clock
@@ -1897,9 +2844,9 @@ void USBAudioClient::connect_setup_() {
   // in the same order, before the interface is selected.
   if (this->uac_version_ >= UAC_VERSION_2) {
     if (this->spk_format_ok_)
-      this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_cfg_.sample_rate);
+      this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->client_->spk_cfg_.sample_rate);
     if (this->mic_format_ok_)
-      this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->mic_cfg_.sample_rate);
+      this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->client_->mic_cfg_.sample_rate);
   }
 
   // Feature Unit requests go to the AudioControl interface, so the saved volume and mute
@@ -1924,7 +2871,7 @@ void USBAudioClient::connect_setup_() {
 }
 
 // Main loop: the control task has told the device everything; open the streams.
-void USBAudioClient::finish_connect_() {
+void USBAudioDevice::finish_connect_() {
   this->setup_pending_ = false;
   this->device_connected_ = true;
   // Volume or mute set while the setup ran.
@@ -1933,41 +2880,28 @@ void USBAudioClient::finish_connect_() {
 
   // Open whichever streams are needed immediately.
   // With an idle timeout only a stream already in use; the others open when started.
-  const bool idle_close = this->stream_idle_timeout_ms_ != 0;
-  if (idle_close) {
-    // Their ring buffers still now, as the open at connect takes them without the timeout: not
-    // first at a playback, when internal RAM may no longer have the block.
-    if (this->spk_cfg_.configured && this->spk_format_ok_ && this->spk_rb_ == nullptr) {
-      this->spk_rb_ = xRingbufferCreate(this->spk_buf_size_, RINGBUF_TYPE_BYTEBUF);
-      if (this->spk_rb_ == nullptr)
-        this->set_stream_error_("Failed to allocate speaker ring buffer");
-    }
-    if (this->mic_cfg_.configured && this->mic_format_ok_ && this->mic_rb_ == nullptr) {
-      this->mic_rb_ = xRingbufferCreate(this->mic_buf_size_, RINGBUF_TYPE_BYTEBUF);
-      if (this->mic_rb_ == nullptr)
-        this->set_stream_error_("Failed to allocate microphone ring buffer");
-    }
-  }
-  if (this->spk_cfg_.configured && this->spk_format_ok_ && !this->spk_suspended_ &&
+  const bool idle_close = this->client_->stream_idle_timeout_ms_ != 0;
+  if (this->client_->spk_cfg_.configured && this->spk_format_ok_ && this->has_speaker_rings_() &&
       (!idle_close || this->spk_wanted_))
     this->note_open_result_(this->open_speaker_stream_(), this->spk_reopen_at_ms_, this->spk_open_fails_);
-  if (this->mic_cfg_.configured && this->mic_format_ok_ && !this->mic_suspended_ &&
-      (!idle_close || this->mic_wanted_))
+  if (this->client_->mic_cfg_.configured && this->mic_format_ok_ && this->mic_rb_ != nullptr &&
+      !this->mic_suspended_ && (!idle_close || this->mic_wanted_))
     this->note_open_result_(this->open_microphone_stream_(), this->mic_reopen_at_ms_, this->mic_open_fails_);
 }
 
-void USBAudioClient::on_disconnected() {
+void USBAudioDevice::on_disconnected() {
   // Requests of this connection are not sent any more. One being handed to the host right
   // now finishes first, before the device and its transfer buffers are released.
+  this->gone_ = true;
+  this->device_connected_ = false;
   this->ctrl_gen_.fetch_add(1);
   while (this->ctrl_submitting_.load())
     vTaskDelay(1);
   this->setup_pending_ = false;
   this->close_speaker_stream_();
   this->close_microphone_stream_();
-  this->cancel_timeout(SPK_IDLE_TIMEOUT_ID);
-  this->cancel_timeout(MIC_IDLE_TIMEOUT_ID);
-  this->device_connected_ = false;
+  this->client_->cancel_timeout(this->timer_id_(0));
+  this->client_->cancel_timeout(this->timer_id_(1));
   // The next device has to be told the state from scratch.
   this->spk_ctl_.volume_sent = false;
   this->spk_ctl_.mute_sent = false;
@@ -1986,56 +2920,14 @@ void USBAudioClient::on_disconnected() {
   // The device is gone, so nothing will ever drain the queued audio. Drop it rather than
   // playing it into the next device that shows up.
   this->flush_speaker_buffer_();
-  this->status_clear_error();
+  this->client_->status_clear_error();
   ESP_LOGI(TAG, "USB Audio device disconnected");
-}
-
-// -----------------------------------------------------------------------------
-// Isochronous packet dispatch (USB-task context)
-// -----------------------------------------------------------------------------
-
-void USBAudioClient::on_isoc_out_error(uint8_t ep_addr) {
-  if (this->transfer_errors_.fetch_add(1, std::memory_order_relaxed) == 0)
-    this->enable_loop_soon_any_context();
-}
-
-void USBAudioClient::on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t len, bool error) {
-  if (error && this->transfer_errors_.fetch_add(1, std::memory_order_relaxed) == 0)
-    this->enable_loop_soon_any_context();
-  // Async OUT feedback endpoint: the device reports its desired rate (samples per service
-  // interval, Q10.14 at full speed / Q16.16 at high speed). Feed it into the OUT pacing.
-  if (this->spk_fb_open_ && ep_addr == this->spk_alt_.feedback_ep_addr) {
-    const size_t need = this->device_is_high_speed_ ? 4u : 3u;
-    if (!error && len >= need) {
-      uint32_t value = static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
-                       (static_cast<uint32_t>(data[2]) << 16);
-      if (this->device_is_high_speed_)
-        value |= static_cast<uint32_t>(data[3]) << 24;
-      if (value != 0)
-        this->spk_stream_.fb_value.store(value, std::memory_order_relaxed);
-    }
-    return;
-  }
-
-  if (error || len == 0)
-    return;
-
-  // -- Microphone IN: write PCM into the ring buffer --------------------------
-  if (this->mic_rb_ == nullptr || this->mic_suspended_)
-    return;
-  // Non-blocking send; if full, drop oldest data (overwrite) is not possible with
-  // RINGBUF_TYPE_BYTEBUF, so we just skip if full to avoid blocking.
-  if (this->mic_alt_.channel_map_active) {
-    this->push_mapped_capture_(data, len);
-    return;
-  }
-  xRingbufferSend(this->mic_rb_, data, len, 0);
 }
 
 // Expand host stereo frames into the device's wider frame, writing the pair into its two
 // slots and leaving every other slot silent. Returns whole device frames only, so a packet
 // never ends mid-frame.
-size_t USBAudioClient::fill_mapped_(uint8_t *data, size_t max_len) {
+size_t USBAudioDevice::fill_mapped_(uint8_t *data, size_t max_len) {
   const size_t sample = this->spk_alt_.sub_frame_size;
   const size_t dev_frame = sample * this->spk_alt_.channels;
   const size_t host_frame = sample * 2;
@@ -2043,67 +2935,30 @@ size_t USBAudioClient::fill_mapped_(uint8_t *data, size_t max_len) {
     return 0;
 
   const size_t frames = max_len / dev_frame;
-  const size_t want = frames * host_frame;
   // Slots outside the pair are not touched below, so the packet is cleared first.
   memset(data, 0, frames * dev_frame);
 
-  // Carries a host frame split across a ring buffer wrap.
-  uint8_t partial[8];
-  size_t partial_len = 0;
+  uint8_t host[96];
+  const size_t chunk_frames = sizeof(host) / host_frame;
   size_t produced = 0;
-  size_t taken = 0;
-
-  auto emit = [&](const uint8_t *frame) {
-    uint8_t *dst = data + produced * dev_frame;
-    memcpy(dst + this->spk_alt_.map_left * sample, frame, sample);
-    memcpy(dst + this->spk_alt_.map_right * sample, frame + sample, sample);
-    produced++;
-  };
-
-  while (taken < want && produced < frames) {
-    size_t received = 0;
-    void *item = xRingbufferReceiveUpTo(this->spk_rb_, &received, 0, want - taken);
-    if (item == nullptr || received == 0) {
-      if (item != nullptr)
-        vRingbufferReturnItem(this->spk_rb_, item);
+  while (produced < frames) {
+    const size_t want = std::min(chunk_frames, frames - produced) * host_frame;
+    const size_t got = this->read_mixed_(host, want) / host_frame;
+    for (size_t i = 0; i < got; i++) {
+      uint8_t *dst = data + (produced + i) * dev_frame;
+      memcpy(dst + this->spk_alt_.map_left * sample, host + i * host_frame, sample);
+      memcpy(dst + this->spk_alt_.map_right * sample, host + i * host_frame + sample, sample);
+    }
+    produced += got;
+    if (got * host_frame < want)
       break;
-    }
-    const uint8_t *src = static_cast<const uint8_t *>(item);
-    size_t left = received;
-
-    if (partial_len != 0) {
-      const size_t need = host_frame - partial_len;
-      const size_t take = std::min(need, left);
-      memcpy(partial + partial_len, src, take);
-      partial_len += take;
-      src += take;
-      left -= take;
-      if (partial_len == host_frame) {
-        emit(partial);
-        partial_len = 0;
-      }
-    }
-    while (left >= host_frame && produced < frames) {
-      emit(src);
-      src += host_frame;
-      left -= host_frame;
-    }
-    if (left != 0 && left < host_frame && left <= sizeof(partial)) {
-      memcpy(partial, src, left);
-      partial_len = left;
-      left = 0;
-    }
-
-    taken += received;
-    vRingbufferReturnItem(this->spk_rb_, item);
   }
-
   return produced * dev_frame;
 }
 
 // The capture counterpart: keep the pair's two slots out of each device frame and drop the
 // rest, so the ring buffer only ever holds host stereo frames.
-void USBAudioClient::push_mapped_capture_(const uint8_t *data, size_t len) {
+void USBAudioDevice::push_mapped_capture_(const uint8_t *data, size_t len) {
   const size_t sample = this->mic_alt_.sub_frame_size;
   const size_t dev_frame = sample * this->mic_alt_.channels;
   const size_t host_frame = sample * 2;
@@ -2115,7 +2970,7 @@ void USBAudioClient::push_mapped_capture_(const uint8_t *data, size_t len) {
   size_t chunk_len = 0;
   for (size_t off = 0; off + dev_frame <= len; off += dev_frame) {
     if (chunk_len + host_frame > sizeof(chunk)) {
-      xRingbufferSend(this->mic_rb_, chunk, chunk_len, 0);
+      this->mic_rb_->write_without_replacement(chunk, chunk_len, 0, false);
       chunk_len = 0;
     }
     memcpy(chunk + chunk_len, data + off + this->mic_alt_.map_left * sample, sample);
@@ -2123,45 +2978,13 @@ void USBAudioClient::push_mapped_capture_(const uint8_t *data, size_t len) {
     chunk_len += host_frame;
   }
   if (chunk_len != 0)
-    xRingbufferSend(this->mic_rb_, chunk, chunk_len, 0);
-}
-
-size_t USBAudioClient::on_isoc_fill(uint8_t ep_addr, uint8_t *data, size_t max_len) {
-  // -- Speaker OUT: drain the ring buffer into this packet's payload area ------
-  // max_len is the sample-clock packet size the pacing layer chose for this packet. What is
-  // not written is zero filled by the caller, so a short read is silence.
-  if (this->spk_rb_ == nullptr || this->spk_suspended_)
-    return 0;
-
-  if (this->spk_alt_.channel_map_active)
-    return this->fill_mapped_(data, max_len);
-
-  size_t filled = 0;
-  // A byte ring buffer only hands out contiguous memory, so a receive that lands on the
-  // wrap returns a short block. Reading once and padding the rest with silence would drop
-  // the packet's remaining bytes' worth of playback time on every wrap: the data stays
-  // queued, the drain rate falls below real time and the buffer backs up permanently.
-  // Read again for the remainder instead.
-  while (filled < max_len) {
-    size_t received = 0;
-    void *item = xRingbufferReceiveUpTo(this->spk_rb_, &received, 0, max_len - filled);
-    if (item == nullptr)
-      break;
-    if (received > 0) {
-      memcpy(data + filled, item, received);
-      filled += received;
-    }
-    vRingbufferReturnItem(this->spk_rb_, item);
-    if (received == 0)
-      break;
-  }
-  return filled;
+    this->mic_rb_->write_without_replacement(chunk, chunk_len, 0, false);
 }
 
 // Second half of opening a stream. The endpoint only exists once the device has switched to
 // the alt-setting, which is a control transfer, so everything that talks to the running
 // stream waits until usb_host reports the outcome here.
-void USBAudioClient::on_stream_open(usb_host::IsocStream &stream, bool ok) {
+void USBAudioDevice::on_stream_open_(usb_host::IsocStream &stream, bool ok) {
   if (&stream == &this->spk_fb_stream_) {
     this->spk_fb_open_ = ok;
     if (ok) {
@@ -2182,7 +3005,7 @@ void USBAudioClient::on_stream_open(usb_host::IsocStream &stream, bool ok) {
     // endpoint: open it on the already-claimed AS interface so the device's own clock paces
     // playback. Adaptive/synchronous endpoints (or when disabled) stay on nominal pacing.
     const uint8_t sync_type = (this->spk_alt_.ep_attr >> 2) & 0x03;
-    if (this->feedback_enabled_ && sync_type == 0x01 && this->spk_alt_.feedback_ep_addr != 0) {
+    if (this->client_->feedback_enabled_ && sync_type == 0x01 && this->spk_alt_.feedback_ep_addr != 0) {
       this->spk_stream_.fb_shift = this->device_is_high_speed_ ? 16 : 14;
       this->spk_fb_stream_.ep_addr = this->spk_alt_.feedback_ep_addr;
       this->spk_fb_stream_.mps =
@@ -2193,10 +3016,10 @@ void USBAudioClient::on_stream_open(usb_host::IsocStream &stream, bool ok) {
       this->spk_fb_stream_.alt_setting = this->spk_alt_.alt_setting;
       this->spk_fb_stream_.is_output = false;
       this->spk_fb_stream_.owns_interface = false;  // shares the speaker OUT interface
-      this->stream_open(this->spk_fb_stream_, this);
+      this->client_->stream_open(*this->dev_, this->spk_fb_stream_, this->client_);
     } else {
       ESP_LOGD(TAG, "Speaker OUT sync type %u, feedback ep 0x%02X (feedback %s)", sync_type,
-               this->spk_alt_.feedback_ep_addr, this->feedback_enabled_ ? "enabled" : "disabled");
+               this->spk_alt_.feedback_ep_addr, this->client_->feedback_enabled_ ? "enabled" : "disabled");
     }
 
     // UAC 1.0 only: the sampling frequency is a control on the isochronous endpoint, which
@@ -2218,8 +3041,8 @@ void USBAudioClient::on_stream_open(usb_host::IsocStream &stream, bool ok) {
     if (!ok) {
       ESP_LOGE(TAG, "stream_open_ failed for microphone");
       this->note_open_result_(false, this->mic_reopen_at_ms_, this->mic_open_fails_);
-      if (this->microphone_ != nullptr)
-        this->microphone_->on_stream_event(MicStreamEvent::FAILED);
+      if (this->capture_ != nullptr)
+        this->capture_->on_stream_event(MicStreamEvent::FAILED);
       return;
     }
     if (this->uac_version_ < UAC_VERSION_2) {
@@ -2234,35 +3057,31 @@ void USBAudioClient::on_stream_open(usb_host::IsocStream &stream, bool ok) {
   }
 }
 
-void USBAudioClient::finish_speaker_open_() {
+void USBAudioDevice::finish_speaker_open_() {
   this->spk_stream_open_ = true;
   this->note_open_result_(true, this->spk_reopen_at_ms_, this->spk_open_fails_);
   ESP_LOGI(TAG, "Speaker stream open");
   // Streams that open and close while connected: some devices reset volume and mute when the
   // alt-setting changes, so they are told again.
-  if (this->stream_idle_timeout_ms_ != 0) {
+  if (this->client_->stream_idle_timeout_ms_ != 0) {
     this->ctrl_pending_.fetch_or(PENDING_SPK_VOLUME | PENDING_SPK_MUTE);
     this->post_controls_();
   }
 }
 
-void USBAudioClient::finish_microphone_open_() {
+void USBAudioDevice::finish_microphone_open_() {
   this->mic_stream_open_ = true;
   this->note_open_result_(true, this->mic_reopen_at_ms_, this->mic_open_fails_);
   ESP_LOGI(TAG, "Microphone stream open");
-  if (this->stream_idle_timeout_ms_ != 0) {
+  if (this->client_->stream_idle_timeout_ms_ != 0) {
     this->ctrl_pending_.fetch_or(PENDING_MIC_VOLUME | PENDING_MIC_MUTE);
     this->post_controls_();
   }
-  if (this->microphone_ != nullptr)
-    this->microphone_->on_stream_event(MicStreamEvent::OPEN);
+  if (this->capture_ != nullptr)
+    this->capture_->on_stream_event(MicStreamEvent::OPEN);
 }
 
-// -----------------------------------------------------------------------------
-// Subcomponent API
-// -----------------------------------------------------------------------------
-
-bool USBAudioClient::ensure_started_speaker() {
+bool USBAudioDevice::ensure_started_speaker_() {
   if (!this->device_connected_ || !this->spk_format_ok_)
     return false;
   if (this->spk_stream_open_)
@@ -2274,7 +3093,7 @@ bool USBAudioClient::ensure_started_speaker() {
   return ok;
 }
 
-bool USBAudioClient::ensure_started_microphone() {
+bool USBAudioDevice::ensure_started_microphone_() {
   if (!this->device_connected_ || !this->mic_format_ok_)
     return false;
   if (this->mic_stream_open_)
@@ -2286,61 +3105,36 @@ bool USBAudioClient::ensure_started_microphone() {
   return ok;
 }
 
-// Any task (the speaker's start comes from the audio pipeline's): only marks the stream as
-// wanted. Opening it is USB host work, done by loop() on the main loop.
-void USBAudioClient::resume_speaker() {
-  this->spk_suspended_ = false;
-  this->spk_wanted_ = true;
-  this->cancel_timeout(SPK_IDLE_TIMEOUT_ID);
-  // The open is loop() work: wake it now, not whenever the main loop next comes around.
-  this->enable_loop_soon_any_context();
-}
-
-void USBAudioClient::suspend_speaker() {
-  this->spk_suspended_ = true;
-}
-
-void USBAudioClient::release_speaker() {
-  this->spk_suspended_ = true;
-  this->spk_wanted_ = false;
-  if (this->stream_idle_timeout_ms_ != 0)
-    this->set_timeout(SPK_IDLE_TIMEOUT_ID, this->stream_idle_timeout_ms_, [this]() { this->close_idle_speaker_(); });
-}
-
 // Main loop, the speaker stopped for the idle timeout: its pipes go back to the host.
-void USBAudioClient::close_idle_speaker_() {
+void USBAudioDevice::close_idle_speaker_() {
   if (this->spk_wanted_ || this->spk_stream_.is_closed())
     return;
   this->close_speaker_stream_();
-  // What the stopped speaker left queued would otherwise play at the next start. Suspended,
+  // What the stopped speaker left queued would otherwise play at the next start. Stopped,
   // the USB task reads nothing more from it.
-  if (this->spk_rb_ != nullptr) {
-    size_t received = 0;
-    void *item;
-    while ((item = xRingbufferReceiveUpTo(this->spk_rb_, &received, 0, this->spk_buf_size_)) != nullptr)
-      vRingbufferReturnItem(this->spk_rb_, item);
-  }
+  this->flush_speaker_buffer_();
 }
 
-void USBAudioClient::close_idle_microphone_() {
+void USBAudioDevice::close_idle_microphone_() {
   if (this->mic_wanted_ || this->mic_stream_.is_closed())
     return;
   this->close_microphone_stream_();
 }
 
-bool USBAudioClient::resume_microphone() {
+bool USBAudioDevice::resume_microphone() {
   this->mic_suspended_ = false;
   this->mic_wanted_ = true;
-  this->cancel_timeout(MIC_IDLE_TIMEOUT_ID);
-  this->enable_loop_soon_any_context();  // a failed open is retried by loop()
-  return this->ensure_started_microphone();
+  this->client_->cancel_timeout(this->timer_id_(1));
+  this->client_->enable_loop_soon_any_context();  // a failed open is retried by loop()
+  return this->ensure_started_microphone_();
 }
 
-void USBAudioClient::suspend_microphone() {
+void USBAudioDevice::suspend_microphone() {
   this->mic_suspended_ = true;
   this->mic_wanted_ = false;
-  if (this->stream_idle_timeout_ms_ != 0)
-    this->set_timeout(MIC_IDLE_TIMEOUT_ID, this->stream_idle_timeout_ms_, [this]() { this->close_idle_microphone_(); });
+  if (this->client_->stream_idle_timeout_ms_ != 0)
+    this->client_->set_timeout(this->timer_id_(1), this->client_->stream_idle_timeout_ms_,
+                               [this]() { this->close_idle_microphone_(); });
 }
 
 // Take a volume or mute request for one direction. A request that cannot change what the
@@ -2349,7 +3143,7 @@ void USBAudioClient::suspend_microphone() {
 // it was just asked is a control request that cannot change anything.
 // The control task sends the value; a device that is not set up yet gets the latest one
 // with its setup.
-void USBAudioClient::set_volume_level_(std::atomic<float> &request, uint8_t pending_bit, float volume) {
+void USBAudioDevice::set_volume_level_(std::atomic<float> &request, uint8_t pending_bit, float volume) {
   const float clamped = std::clamp(volume, 0.0f, 1.0f);
   if (request.exchange(clamped) == clamped)
     return;
@@ -2358,7 +3152,7 @@ void USBAudioClient::set_volume_level_(std::atomic<float> &request, uint8_t pend
     this->post_controls_();
 }
 
-void USBAudioClient::set_mute_state_(std::atomic<bool> &request, uint8_t pending_bit, bool mute_state) {
+void USBAudioDevice::set_mute_state_(std::atomic<bool> &request, uint8_t pending_bit, bool mute_state) {
   if (request.exchange(mute_state) == mute_state)
     return;
   this->ctrl_pending_.fetch_or(pending_bit);
@@ -2366,19 +3160,19 @@ void USBAudioClient::set_mute_state_(std::atomic<bool> &request, uint8_t pending
     this->post_controls_();
 }
 
-void USBAudioClient::set_speaker_volume_level(float volume) {
+void USBAudioDevice::set_speaker_volume_level(float volume) {
   this->set_volume_level_(this->spk_vol_req_, PENDING_SPK_VOLUME, volume);
 }
 
-void USBAudioClient::set_speaker_mute_state(bool mute_state) {
+void USBAudioDevice::set_speaker_mute_state(bool mute_state) {
   this->set_mute_state_(this->spk_mute_req_, PENDING_SPK_MUTE, mute_state);
 }
 
-void USBAudioClient::set_microphone_volume_level(float volume) {
+void USBAudioDevice::set_microphone_volume_level(float volume) {
   this->set_volume_level_(this->mic_vol_req_, PENDING_MIC_VOLUME, volume);
 }
 
-void USBAudioClient::set_microphone_mute_state(bool mute_state) {
+void USBAudioDevice::set_microphone_mute_state(bool mute_state) {
   this->set_mute_state_(this->mic_mute_req_, PENDING_MIC_MUTE, mute_state);
 }
 
@@ -2386,13 +3180,16 @@ void USBAudioClient::set_microphone_mute_state(bool mute_state) {
 // Control task
 // -----------------------------------------------------------------------------
 
-bool USBAudioClient::post_ctrl_(CtrlOp op, uint32_t seq) {
-  const CtrlRequest request{op, this->ctrl_gen_.load(), seq};
-  return xQueueSend(this->ctrl_queue_, &request, 0) == pdTRUE;
+bool USBAudioDevice::post_ctrl_(CtrlOp op, uint32_t seq) {
+  this->ctrl_refs_.fetch_add(1);
+  if (this->client_->post_ctrl_(op, this, seq))
+    return true;
+  this->ctrl_refs_.fetch_sub(1);
+  return false;
 }
 
 // One CONTROLS request carries every pending change, so a burst of volume steps queues one.
-void USBAudioClient::post_controls_() {
+void USBAudioDevice::post_controls_() {
   if (this->ctrl_controls_queued_.exchange(true))
     return;
   if (!this->post_ctrl_(CtrlOp::CONTROLS, 0)) {
@@ -2401,43 +3198,38 @@ void USBAudioClient::post_controls_() {
   }
 }
 
-void USBAudioClient::ctrl_task(void *param) {
-  auto *self = static_cast<USBAudioClient *>(param);
-  CtrlRequest request;
-  while (true) {
-    if (xQueueReceive(self->ctrl_queue_, &request, portMAX_DELAY) == pdTRUE)
-      self->run_ctrl_(request);
-  }
-}
-
-void USBAudioClient::run_ctrl_(const CtrlRequest &request) {
+void USBAudioDevice::run_ctrl_(const CtrlRequest &request) {
   if (request.op == CtrlOp::CONTROLS)
     this->ctrl_controls_queued_.store(false);
   // A request of a connection that is gone; the next device gets its own.
-  if (request.gen != this->ctrl_gen_.load())
-    return;
-  this->ctrl_op_gen_ = request.gen;
-  switch (request.op) {
-    case CtrlOp::SETUP:
-      this->connect_setup_();
-      this->setup_done_seq_.store(request.seq);
-      break;
-    case CtrlOp::CONTROLS:
-      this->apply_pending_controls_();
-      return;
-    case CtrlOp::SPK_RATE:
-      this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_cfg_.sample_rate);
-      this->spk_rate_done_seq_.store(request.seq);
-      break;
-    case CtrlOp::MIC_RATE:
-      this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->mic_cfg_.sample_rate);
-      this->mic_rate_done_seq_.store(request.seq);
-      break;
+  if (!this->gone_.load() && request.gen == this->ctrl_gen_.load()) {
+    this->ctrl_op_gen_ = request.gen;
+    switch (request.op) {
+      case CtrlOp::SETUP:
+        this->connect_setup_();
+        this->setup_done_seq_.store(request.seq);
+        break;
+      case CtrlOp::CONTROLS:
+        this->apply_pending_controls_();
+        break;
+      case CtrlOp::SPK_RATE:
+        this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->client_->spk_cfg_.sample_rate);
+        this->spk_rate_done_seq_.store(request.seq);
+        break;
+      case CtrlOp::MIC_RATE:
+        this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->client_->mic_cfg_.sample_rate);
+        this->mic_rate_done_seq_.store(request.seq);
+        break;
+    }
   }
-  this->enable_loop_soon_any_context();
+  USBAudioClient *client = this->client_;
+  const bool wake = request.op != CtrlOp::CONTROLS || this->gone_.load();
+  this->ctrl_refs_.fetch_sub(1);
+  if (wake)
+    client->enable_loop_soon_any_context();
 }
 
-void USBAudioClient::apply_pending_controls_() {
+void USBAudioDevice::apply_pending_controls_() {
   const uint8_t pending = this->ctrl_pending_.exchange(0);
   if (pending & PENDING_SPK_VOLUME) {
     this->spk_ctl_.volume = this->spk_vol_req_.load();
@@ -2459,39 +3251,6 @@ void USBAudioClient::apply_pending_controls_() {
     this->apply_mute_(this->mic_ctl_, "Mic");
     this->mic_ctl_.mute_sent = true;
   }
-}
-
-esp_err_t USBAudioClient::write_speaker(const uint8_t *data, size_t length, uint32_t timeout_ms) {
-  if (this->spk_rb_ == nullptr)
-    return ESP_ERR_INVALID_STATE;
-  TickType_t ticks = (timeout_ms == 0) ? 0 : std::max<TickType_t>(1, pdMS_TO_TICKS(timeout_ms));
-  // Also while the stream still opens: the audio goes into the ring (the stream starts prefilled),
-  // and a full ring blocks the caller on its space - the drain is the event, nothing sleeps blind.
-  BaseType_t ok = xRingbufferSend(this->spk_rb_, data, length, ticks);
-  if (ok != pdTRUE)
-    return ESP_ERR_TIMEOUT;
-  return ESP_OK;
-}
-
-esp_err_t USBAudioClient::read_microphone(uint8_t *buffer, size_t size, size_t *bytes_read, uint32_t timeout_ms) {
-  if (this->mic_rb_ == nullptr || !this->mic_stream_open_) {
-    if (bytes_read != nullptr)
-      *bytes_read = 0;
-    return ESP_ERR_INVALID_STATE;
-  }
-  TickType_t ticks = (timeout_ms == 0) ? 0 : pdMS_TO_TICKS(timeout_ms);
-  size_t received = 0;
-  void *item = xRingbufferReceiveUpTo(this->mic_rb_, &received, ticks, size);
-  if (item == nullptr) {
-    if (bytes_read != nullptr)
-      *bytes_read = 0;
-    return ESP_ERR_TIMEOUT;
-  }
-  memcpy(buffer, item, received);
-  vRingbufferReturnItem(this->mic_rb_, item);
-  if (bytes_read != nullptr)
-    *bytes_read = received;
-  return ESP_OK;
 }
 
 }  // namespace usb_audio

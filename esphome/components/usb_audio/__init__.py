@@ -16,6 +16,7 @@ from esphome.const import (
     CONF_ID,
     CONF_MICROPHONE,
     CONF_NUM_CHANNELS,
+    CONF_OUTPUT_SPEAKER,
     CONF_PLATFORM,
     CONF_SAMPLE_RATE,
     CONF_SPEAKER,
@@ -27,7 +28,7 @@ _LOGGER = logging.getLogger(__name__)
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32"]
-AUTO_LOAD = ["audio", "usb_host"]
+AUTO_LOAD = ["audio", "usb_host", "speaker", "microphone"]
 MULTI_CONF = True
 DOMAIN = "usb_audio"
 KEY_FIFO_BIAS_APPLIED = "fifo_bias_applied"
@@ -50,6 +51,21 @@ CONF_CHANNEL_PAIR = "channel_pair"
 CONF_VID = "vid"
 CONF_PID = "pid"
 CONF_DEFAULT_BUFFER_SIZE = 6400
+MAX_SINKS = 4
+
+BITS_PER_SAMPLE_OPTIONS = [8, 16, 24, 32]
+
+
+def _format_schema(rate, channels):
+    return cv.Schema(
+        {
+            cv.Optional(CONF_SAMPLE_RATE, default=rate): cv.int_range(min=8000, max=96000),
+            cv.Optional(CONF_BITS_PER_SAMPLE, default="16bit"): cv.All(
+                cv.float_with_unit("bits", "bit"), cv.one_of(*BITS_PER_SAMPLE_OPTIONS)
+            ),
+            cv.Optional(CONF_NUM_CHANNELS, default=channels): cv.int_range(min=1, max=8),
+        }
+    )
 
 UacChannelPair = usb_audio_ns.enum("UacChannelPair", is_class=True)
 # ESPHome has no surround path, so a multichannel card is driven as one stereo pair. This
@@ -183,6 +199,18 @@ def _endpoint_mps(stream) -> int:
     return per_interval + frame
 
 
+def _stream_formats(full_config, domain, hub_id=None):
+    """Every usb_audio stream format of one direction: its platforms and the blocks' own."""
+    for entry in full_config.get(domain) or []:
+        if entry.get(CONF_PLATFORM) == "usb_audio" and (
+            hub_id is None or str(entry.get(CONF_USB_AUDIO_ID)) == hub_id
+        ):
+            yield entry
+    for block in full_config.get(DOMAIN) or []:
+        if domain in block and (hub_id is None or str(block[CONF_ID]) == hub_id):
+            yield block[domain]
+
+
 def _usb_audio_mps(full_config) -> tuple[int, int]:
     """Widest playback and capture packet over every usb_audio stream, 0 where there is none.
 
@@ -191,9 +219,8 @@ def _usb_audio_mps(full_config) -> tuple[int, int]:
     """
     widest = {}
     for domain in (CONF_SPEAKER, CONF_MICROPHONE):
-        for entry in full_config.get(domain) or []:
-            if entry.get(CONF_PLATFORM) == "usb_audio":
-                widest[domain] = max(widest.get(domain, 0), _endpoint_mps(entry))
+        for entry in _stream_formats(full_config, domain):
+            widest[domain] = max(widest.get(domain, 0), _endpoint_mps(entry))
     return widest.get(CONF_SPEAKER, 0), widest.get(CONF_MICROPHONE, 0)
 
 
@@ -230,12 +257,7 @@ def _apply_buffer_sizes(config, full_config):
         (CONF_MICROPHONE, CONF_MICROPHONE_BUFFER_SIZE),
     ):
         minimum = max(
-            (
-                _buffer_minimum(entry)
-                for entry in full_config.get(domain) or []
-                if entry.get(CONF_PLATFORM) == "usb_audio"
-                and str(entry.get(CONF_USB_AUDIO_ID)) == hub_id
-            ),
+            (_buffer_minimum(entry) for entry in _stream_formats(full_config, domain, hub_id)),
             default=0,
         )
         if key not in config:
@@ -248,7 +270,56 @@ def _apply_buffer_sizes(config, full_config):
             )
 
 
+def _route_count(full_config, domain, key, hub_id) -> int:
+    count = 0
+    for entry in full_config.get(domain) or []:
+        if entry.get(CONF_PLATFORM) != "resampler" or not isinstance(entry.get(key), list):
+            continue
+        count += sum(1 for item in entry[key] if str(item.get(DOMAIN)) == hub_id)
+    return count
+
+
+def _validate_routes(config, full_config):
+    hub_id = str(config[CONF_ID])
+    for domain in (CONF_SPEAKER, CONF_MICROPHONE):
+        platforms = [
+            entry
+            for entry in full_config.get(domain) or []
+            if entry.get(CONF_PLATFORM) == "usb_audio" and str(entry.get(CONF_USB_AUDIO_ID)) == hub_id
+        ]
+        if len(platforms) > 1:
+            raise cv.Invalid(f"usb_audio '{hub_id}': one {domain} platform per usb_audio block")
+        if platforms and domain in config:
+            own = config[domain]
+            if any(int(platforms[0][key]) != int(own[key]) for key in (CONF_SAMPLE_RATE, CONF_BITS_PER_SAMPLE, CONF_NUM_CHANNELS)):
+                raise cv.Invalid(
+                    f"usb_audio '{hub_id}': the {domain} platform's format differs from the block's '{domain}' format",
+                    path=[domain],
+                )
+    speakers = _route_count(full_config, CONF_SPEAKER, CONF_OUTPUT_SPEAKER, hub_id)
+    fixed = any(
+        entry.get(CONF_PLATFORM) == "usb_audio" and str(entry.get(CONF_USB_AUDIO_ID)) == hub_id
+        for entry in full_config.get(CONF_SPEAKER) or []
+    )
+    if speakers + (1 if fixed else 0) > MAX_SINKS:
+        raise cv.Invalid(f"usb_audio '{hub_id}': at most {MAX_SINKS} speakers per device (routes and platform)")
+    microphones = _route_count(full_config, CONF_MICROPHONE, CONF_MICROPHONE, hub_id)
+    fixed_mic = any(
+        entry.get(CONF_PLATFORM) == "usb_audio" and str(entry.get(CONF_USB_AUDIO_ID)) == hub_id
+        for entry in full_config.get(CONF_MICROPHONE) or []
+    )
+    if microphones and fixed_mic:
+        raise cv.Invalid(
+            f"usb_audio '{hub_id}': a microphone platform and resampler microphone sources cannot share a block"
+        )
+    if speakers and CONF_SPEAKER not in config:
+        raise cv.Invalid(f"usb_audio '{hub_id}': resampler outputs need the block's 'speaker' format")
+    if microphones and CONF_MICROPHONE not in config:
+        raise cv.Invalid(f"usb_audio '{hub_id}': resampler microphone sources need the block's 'microphone' format")
+
+
 def _final_validate(config):
+    _validate_routes(config, fv.full_config.get())
     _apply_buffer_sizes(config, fv.full_config.get())
     variant = esp32.get_esp32_variant()
     if not _needs_fifo_bias():
@@ -362,6 +433,8 @@ CONFIG_SCHEMA = cv.All(
                 VOLUME_CURVES, lower=True
             ),
             cv.Optional(CONF_DEVICE_QUIRKS): cv.ensure_list(DEVICE_QUIRK_SCHEMA),
+            cv.Optional(CONF_SPEAKER): _format_schema(48000, 2),
+            cv.Optional(CONF_MICROPHONE): _format_schema(16000, 1),
         }
     ),
     esp32.only_on_variant(supported=SUPPORTED_VARIANTS),
@@ -387,6 +460,10 @@ async def to_code(config):
                 quirk[CONF_VID], quirk[CONF_PID], quirk[CONF_VOLUME_ENCODING]
             )
         )
+
+    for domain, setter in ((CONF_SPEAKER, var.set_speaker_params), (CONF_MICROPHONE, var.set_microphone_params)):
+        if fmt := config.get(domain):
+            cg.add(setter(int(fmt[CONF_NUM_CHANNELS]), int(fmt[CONF_BITS_PER_SAMPLE]), int(fmt[CONF_SAMPLE_RATE])))
 
     cg.add_define("USE_USB_ISOC_TRANSFERS")
     cg.add_define("USE_USB_CONTROL_TRANSFERS")

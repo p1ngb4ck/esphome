@@ -83,20 +83,14 @@ CONFIG_SCHEMA = cv.All(
 
 
 async def to_code(config):
-    var = cg.new_Pvariable(config[CONF_ID])
+    parent = await cg.get_variable(config[CONF_USB_AUDIO_ID])
+    var = cg.new_Pvariable(config[CONF_ID], parent)
     await cg.register_component(var, config)
     await microphone.register_microphone(var, config)
-
-    parent = await cg.get_variable(config[CONF_USB_AUDIO_ID])
-    await cg.register_parented(var, config[CONF_USB_AUDIO_ID])
 
     sample_rate = int(config[CONF_SAMPLE_RATE])
     bits_per_sample = int(config[CONF_BITS_PER_SAMPLE])
     channels = int(config[CONF_NUM_CHANNELS])
-
-    cg.add(var.set_sample_rate(sample_rate))
-    cg.add(var.set_bits_per_sample(bits_per_sample))
-    cg.add(var.set_channels(channels))
 
     for channel in config.get(CONF_CHANNELS, []):
         cg.add(var.add_enabled_channel(channel))
