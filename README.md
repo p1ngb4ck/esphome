@@ -21,8 +21,7 @@ in separate transactions, no setup access. `firmware_reads: true` reads it that 
 - Backlight control: not available. According to our tests the STM32 does not act on any backlight or power
   command of the Raspberry Pi drivers (registers 0x82, 0x83, 0x85, 0x86 at 0x45) nor on registers 0x01-0x07;
   the backlight stays on.
-- Checks: upstream's CI jobs run locally (not on GitHub) and an own review; no open findings. One component-test
-  batch (`tca9548a` with `seeed_multi_channel_relay`) fails the same way on upstream `dev` without this branch.
+- Checks: upstream's CI jobs run locally (not on GitHub) and an own review; no open findings
 
 ## Example
 
