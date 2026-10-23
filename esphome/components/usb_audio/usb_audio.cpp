@@ -141,6 +141,8 @@ void USBAudioClient::loop() {
   // control task's completions, a stream request (resume_speaker / resume_microphone), usb_host when
   // a stream died or finished closing, and the reopen backoff's timer. Idle it is disabled.
   const bool usb_work = this->process_usb_events_();
+  if (const uint32_t errors = this->transfer_errors_.exchange(0, std::memory_order_relaxed); errors != 0)
+    ESP_LOGW(TAG, "%" PRIu32 " USB transfer errors", errors);
 
   if (this->setup_pending_ && this->setup_done_seq_.load() == this->setup_seq_)
     this->finish_connect_();
@@ -1958,7 +1960,14 @@ void USBAudioClient::on_disconnected() {
 // Isochronous packet dispatch (USB-task context)
 // -----------------------------------------------------------------------------
 
+void USBAudioClient::on_isoc_out_error(uint8_t ep_addr) {
+  if (this->transfer_errors_.fetch_add(1, std::memory_order_relaxed) == 0)
+    this->enable_loop_soon_any_context();
+}
+
 void USBAudioClient::on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t len, bool error) {
+  if (error && this->transfer_errors_.fetch_add(1, std::memory_order_relaxed) == 0)
+    this->enable_loop_soon_any_context();
   // Async OUT feedback endpoint: the device reports its desired rate (samples per service
   // interval, Q10.14 at full speed / Q16.16 at high speed). Feed it into the OUT pacing.
   if (this->spk_fb_open_ && ep_addr == this->spk_alt_.feedback_ep_addr) {

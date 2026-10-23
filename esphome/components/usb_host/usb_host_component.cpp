@@ -787,6 +787,8 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
       // Writing at an mps stride only matches while every packet happens to be exactly mps.
       const uint32_t fill = stream->is_output ? isoc_next_packet_size(stream) : stream->mps;
       if (stream->is_output) {
+        if (error)
+          client->on_isoc_out_error(xfer->bEndpointAddress);
         const size_t written = client->on_isoc_fill(xfer->bEndpointAddress, payload, fill);
         // Whatever the client did not produce is silence, not the previous packet again.
         if (written < fill)

@@ -532,6 +532,7 @@ class USBClient : public Component {
   // rest of the packet is zero filled, so a short return is silence rather than stale audio.
   // Called from USB-task context -- must be fast and non-blocking.
   virtual size_t on_isoc_fill(uint8_t ep_addr, uint8_t *data, size_t max_len) { return 0; }
+  virtual void on_isoc_out_error(uint8_t ep_addr) {}
   // Called on the main loop once the open sequence finished, successfully or not.
   virtual void on_stream_open(IsocStream &stream, bool ok) {}
 #endif
