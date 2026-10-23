@@ -171,6 +171,8 @@ def validate_host_config(config: ConfigType) -> ConfigType:
     return config
 
 
+CONF_BUS_RECOVERY = "bus_recovery"
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
@@ -211,6 +213,10 @@ CONFIG_SCHEMA = cv.All(
                 cv.positive_time_period,
             ),
             cv.Optional(CONF_SCAN, default=True): cv.boolean,
+            cv.Optional(CONF_BUS_RECOVERY): cv.All(
+                cv.only_with_framework(["arduino", "esp-idf"]),
+                cv.boolean,
+            ),
             cv.Optional(CONF_LOW_POWER_MODE): cv.All(
                 cv.only_on_esp32,
                 esp32.only_on_variant(
@@ -333,11 +339,9 @@ async def to_code(config: ConfigType) -> None:
         await cg.register_component(var, config)
 
         cg.add(var.set_sda_pin(config[CONF_SDA]))
-        if CONF_SDA_PULLUP_ENABLED in config:
-            cg.add(var.set_sda_pullup_enabled(config[CONF_SDA_PULLUP_ENABLED]))
+        cg.add_optional(var.set_sda_pullup_enabled, config.get(CONF_SDA_PULLUP_ENABLED))
         cg.add(var.set_scl_pin(config[CONF_SCL]))
-        if CONF_SCL_PULLUP_ENABLED in config:
-            cg.add(var.set_scl_pullup_enabled(config[CONF_SCL_PULLUP_ENABLED]))
+        cg.add_optional(var.set_scl_pullup_enabled, config.get(CONF_SCL_PULLUP_ENABLED))
 
         cg.add(var.set_frequency(int(config[CONF_FREQUENCY])))
         cg.add(var.set_scan(config[CONF_SCAN]))
@@ -350,16 +354,16 @@ async def to_code(config: ConfigType) -> None:
         await cg.register_component(var, config)
 
         cg.add(var.set_sda_pin(config[CONF_SDA]))
-        if CONF_SDA_PULLUP_ENABLED in config:
-            cg.add(var.set_sda_pullup_enabled(config[CONF_SDA_PULLUP_ENABLED]))
+        cg.add_optional(var.set_sda_pullup_enabled, config.get(CONF_SDA_PULLUP_ENABLED))
         cg.add(var.set_scl_pin(config[CONF_SCL]))
-        if CONF_SCL_PULLUP_ENABLED in config:
-            cg.add(var.set_scl_pullup_enabled(config[CONF_SCL_PULLUP_ENABLED]))
+        cg.add_optional(var.set_scl_pullup_enabled, config.get(CONF_SCL_PULLUP_ENABLED))
 
         cg.add(var.set_frequency(int(config[CONF_FREQUENCY])))
         cg.add(var.set_scan(config[CONF_SCAN]))
         if CONF_TIMEOUT in config:
             cg.add(var.set_timeout(int(config[CONF_TIMEOUT].total_microseconds)))
+        if CONF_BUS_RECOVERY in config:
+            cg.add(var.set_bus_recovery(config[CONF_BUS_RECOVERY]))
         if CORE.using_arduino and not CORE.is_esp32:
             cg.add_library("Wire", None)
         if CONF_LOW_POWER_MODE in config:
