@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from dataclasses import dataclass, field
 import ipaddress
 import logging
 from typing import Any
@@ -52,6 +54,13 @@ TCPIP_RECVMBOX_OPTIMIZED = 64
 # with PSRAM) as a deliberate conservative bound.
 TCP_SEND_BUFFER_MIN = 2880
 TCP_SEND_BUFFER_MAX = 65535
+
+
+@dataclass
+class NetworkData:
+    require_ipv4: set[str] = field(default_factory=set)
+    require_ipv6: set[str] = field(default_factory=set)
+    request_ipv4_off: set[str] = field(default_factory=set)
 
 # Network priority tracking infrastructure
 # Components can query this to determine their relative setup priority.
@@ -280,6 +289,34 @@ def validate_ipv6(value: bool) -> bool:
         raise cv.Invalid("On nRF52, enable_ipv6 must be true")
 
     return value
+
+
+def _get_data() -> NetworkData:
+    if DOMAIN not in CORE.data:
+        CORE.data[DOMAIN] = NetworkData()
+    return CORE.data[DOMAIN]
+
+
+def _ip_request(
+    update: Callable[[NetworkData], None],
+) -> Callable[[ConfigType], ConfigType]:
+    def validator(config: ConfigType) -> ConfigType:
+        update(_get_data())
+        return config
+
+    return validator
+
+
+def require_ipv4(name: str) -> Callable[[ConfigType], ConfigType]:
+    return _ip_request(lambda data: data.require_ipv4.add(name))
+
+
+def require_ipv6(name: str) -> Callable[[ConfigType], ConfigType]:
+    return _ip_request(lambda data: data.require_ipv6.add(name))
+
+
+def request_ipv4_off(name: str) -> Callable[[ConfigType], ConfigType]:
+    return _ip_request(lambda data: data.request_ipv4_off.add(name))
 
 
 def get_network_priority(iface: str) -> float | None:
