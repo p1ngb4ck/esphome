@@ -7,6 +7,8 @@
 #include "esphome/components/microphone/microphone_source.h"
 
 #include "esphome/core/component.h"
+#include "esphome/core/helpers.h"
+#include "esphome/core/preferences.h"
 
 #include <resampler.h>  // esp-audio-libs
 
@@ -23,9 +25,23 @@ namespace esphome::resampler {
 /// at runtime (set_source), so the components using this microphone follow without knowing.
 class ResamplerMicrophone final : public Component, public microphone::Microphone {
  public:
-  explicit ResamplerMicrophone(microphone::MicrophoneSource *source) { this->sources_.push_back(source); }
+  ResamplerMicrophone() = default;
+  explicit ResamplerMicrophone(microphone::MicrophoneSource *source) { this->add_source(source); }
   /// Codegen: a further source (index 1, 2, ...).
-  void add_source(microphone::MicrophoneSource *source) { this->sources_.push_back(source); }
+  void add_source(microphone::MicrophoneSource *source) {
+    this->sources_.push_back({source, nullptr, "", 0, this->next_order_++});
+  }
+  void set_source_name(size_t index, const char *name) {
+    this->sources_[index].name = name;
+    this->sources_[index].key = fnv1_hash(name);
+  }
+  size_t add_source_group(uint8_t bits_per_sample, int32_t gain_factor, uint8_t channels) {
+    this->groups_.push_back({bits_per_sample, gain_factor, channels, this->next_order_++});
+    return this->groups_.size() - 1;
+  }
+  void add_group_source(size_t group, microphone::Microphone *mic, const char *name, uint32_t key);
+  void remove_source(microphone::Microphone *mic);
+  void set_preference_key(uint32_t key) { this->preference_key_ = key; }
 
   void setup() override;
   void loop() override;
@@ -41,10 +57,15 @@ class ResamplerMicrophone final : public Component, public microphone::Microphon
   /// Main loop: the source passed on from now on (an index of the configured list), -1 (or out of range): none, no
   /// audio. While capturing, the old source is stopped and the new one started.
   void set_source(int index);
-  int get_source() const { return this->active_.load(); }
+  int get_source() const;
   size_t source_count() const { return this->sources_.size(); }
   microphone::MicrophoneSource *source_at(size_t index) const {
-    return index < this->sources_.size() ? this->sources_[index] : nullptr;
+    return index < this->sources_.size() ? this->sources_[index].source : nullptr;
+  }
+  const char *source_name(size_t index) const { return this->sources_[index].name; }
+  template<typename F> void add_on_source_callback(F &&callback) { this->source_callback_.add(std::forward<F>(callback)); }
+  template<typename F> void add_on_sources_changed_callback(F &&callback) {
+    this->sources_changed_callback_.add(std::forward<F>(callback));
   }
 
  protected:
@@ -53,15 +74,38 @@ class ResamplerMicrophone final : public Component, public microphone::Microphon
   bool init_resampler_(const audio::AudioStreamInfo &input_stream_info);
 
   /// @brief Resamples a chunk of source audio and passes it to the data callbacks. Source microphone task only.
-  void process_audio_(size_t index, const std::vector<uint8_t> &data);
-  void process_chunk_(size_t index, const std::vector<uint8_t> &data);
-  microphone::MicrophoneSource *active_source_() const {
-    const int index = this->active_.load();
-    return index >= 0 ? this->sources_[index] : nullptr;
-  }
+  void process_audio_(microphone::MicrophoneSource *source, const std::vector<uint8_t> &data);
+  void process_chunk_(microphone::MicrophoneSource *source, const std::vector<uint8_t> &data);
+  microphone::MicrophoneSource *active_source_() const { return this->active_.load(); }
+  void hook_(microphone::MicrophoneSource *source);
+  void switch_source_(microphone::MicrophoneSource *source);
+  size_t index_of_(const microphone::MicrophoneSource *source) const;
 
-  std::vector<microphone::MicrophoneSource *> sources_;
-  std::atomic<int> active_{0};
+  struct Source {
+    microphone::MicrophoneSource *source;
+    microphone::Microphone *mic;
+    const char *name;
+    uint32_t key;
+    uint8_t order;
+  };
+  struct Group {
+    uint8_t bits_per_sample;
+    int32_t gain_factor;
+    uint8_t channels;
+    uint8_t order;
+  };
+
+  std::vector<Source> sources_;
+  std::vector<Group> groups_;
+  std::vector<Source> made_;
+  std::atomic<microphone::MicrophoneSource *> active_{nullptr};
+  CallbackManager<void(int)> source_callback_;
+  CallbackManager<void()> sources_changed_callback_;
+  ESPPreferenceObject pref_;
+  uint32_t preference_key_{0};
+  uint32_t wanted_key_{0};
+  bool wanted_none_{false};
+  uint8_t next_order_{0};
   // A switch can let the old source's task and the new one's overlap for one chunk: the second is dropped
   std::atomic<bool> processing_{false};
   std::unique_ptr<esp_audio_libs::resampler::Resampler> resampler_;

@@ -6,6 +6,7 @@
 #include "esphome/core/log.h"
 
 #include <algorithm>
+#include <new>
 
 namespace esphome::resampler {
 
@@ -15,24 +16,108 @@ ESPHOME_LOG_TAG(TAG, "resampler.microphone");
 static constexpr uint32_t BUFFER_DURATION_MS = 16;
 
 void ResamplerMicrophone::setup() {
-  const audio::AudioStreamInfo input_stream_info = this->sources_[0]->get_audio_stream_info();
-  this->audio_stream_info_ = audio::AudioStreamInfo(input_stream_info.get_bits_per_sample(),
-                                                    input_stream_info.get_channels(), this->target_sample_rate_);
+  if (!this->sources_.empty()) {
+    const audio::AudioStreamInfo input_stream_info = this->sources_[0].source->get_audio_stream_info();
+    this->audio_stream_info_ = audio::AudioStreamInfo(input_stream_info.get_bits_per_sample(),
+                                                      input_stream_info.get_channels(), this->target_sample_rate_);
 
-  // Allocate now for the expected source format; process_audio_ only sets up again if that format changes
-  if (!this->init_resampler_(input_stream_info)) {
-    this->mark_failed();
-    return;
+    // Allocate now for the expected source format; process_audio_ only sets up again if that format changes
+    if (!this->init_resampler_(input_stream_info)) {
+      this->mark_failed();
+      return;
+    }
+  } else if (!this->groups_.empty()) {
+    this->audio_stream_info_ =
+        audio::AudioStreamInfo(this->groups_[0].bits_per_sample, __builtin_popcount(this->groups_[0].channels),
+                               this->target_sample_rate_);
   }
 
-  for (size_t i = 0; i < this->sources_.size(); i++) {
-    this->sources_[i]->add_data_callback([this, i](const std::vector<uint8_t> &data) {
-      if (this->active_.load() == static_cast<int>(i))
-        this->process_audio_(i, data);
-    });
+  if (this->preference_key_ != 0) {
+    this->pref_ = global_preferences->make_preference<uint32_t>(this->preference_key_);
+    uint32_t stored = 0;
+    if (this->pref_.load(&stored))
+      this->wanted_key_ = stored;
   }
+  microphone::MicrophoneSource *initial = this->sources_.empty() ? nullptr : this->sources_[0].source;
+  for (const Source &source : this->sources_) {
+    this->hook_(source.source);
+    if (this->wanted_key_ != 0 && source.key == this->wanted_key_)
+      initial = source.source;
+  }
+  this->active_.store(initial);
 
   this->disable_loop();
+}
+
+void ResamplerMicrophone::hook_(microphone::MicrophoneSource *source) {
+  source->add_data_callback([this, source](const std::vector<uint8_t> &data) {
+    if (this->active_.load() == source)
+      this->process_audio_(source, data);
+  });
+}
+
+size_t ResamplerMicrophone::index_of_(const microphone::MicrophoneSource *source) const {
+  for (size_t i = 0; i < this->sources_.size(); i++) {
+    if (this->sources_[i].source == source)
+      return i;
+  }
+  return this->sources_.size();
+}
+
+int ResamplerMicrophone::get_source() const {
+  const size_t index = this->index_of_(this->active_.load());
+  return index < this->sources_.size() ? static_cast<int>(index) : -1;
+}
+
+void ResamplerMicrophone::add_group_source(size_t group, microphone::Microphone *mic, const char *name, uint32_t key) {
+  if (group >= this->groups_.size())
+    return;
+  const Group &g = this->groups_[group];
+  microphone::MicrophoneSource *source = nullptr;
+  for (const Source &made : this->made_) {
+    if (made.mic == mic && made.order == g.order)
+      source = made.source;
+  }
+  if (source == nullptr) {
+    RAMAllocator<microphone::MicrophoneSource> allocator(RAMAllocator<microphone::MicrophoneSource>::ALLOC_EXTERNAL);
+    microphone::MicrophoneSource *mem = allocator.allocate(1);
+    if (mem == nullptr) {
+      ESP_LOGE(TAG, "No PSRAM for source %s", name);
+      return;
+    }
+    source = new (mem) microphone::MicrophoneSource(mic, g.bits_per_sample, g.gain_factor, false);
+    for (uint8_t channel = 0; channel < 8; channel++) {
+      if (g.channels & (1u << channel))
+        source->add_channel(channel);
+    }
+    this->hook_(source);
+    this->made_.push_back({source, mic, name, key, g.order});
+  }
+  if (this->index_of_(source) != this->sources_.size())
+    return;
+  size_t position = 0;
+  while (position < this->sources_.size() && this->sources_[position].order <= g.order)
+    position++;
+  this->sources_.insert(this->sources_.begin() + position, {source, mic, name, key, g.order});
+  ESP_LOGI(TAG, "Source added: %s", name);
+  if (!this->wanted_none_ &&
+      (key == this->wanted_key_ || (this->active_.load() == nullptr && this->sources_.size() == 1)))
+    this->switch_source_(source);
+  this->sources_changed_callback_.call();
+}
+
+void ResamplerMicrophone::remove_source(microphone::Microphone *mic) {
+  size_t index = 0;
+  while (index < this->sources_.size() && this->sources_[index].mic != mic)
+    index++;
+  if (index == this->sources_.size() || mic == nullptr)
+    return;
+  microphone::MicrophoneSource *source = this->sources_[index].source;
+  ESP_LOGI(TAG, "Source gone: %s", this->sources_[index].name);
+  this->sources_.erase(this->sources_.begin() + index);
+  if (this->active_.load() == source)
+    this->switch_source_(this->sources_.empty() ? nullptr : this->sources_[0].source);
+  this->sources_changed_callback_.call();
 }
 
 void ResamplerMicrophone::dump_config() {
@@ -43,26 +128,40 @@ void ResamplerMicrophone::dump_config() {
                 "  Filters: %u\n"
                 "  Sources: %u, active %d",
                 this->target_sample_rate_, this->taps_, this->filters_, static_cast<unsigned>(this->sources_.size()),
-                this->active_.load());
+                this->get_source());
 }
 
 void ResamplerMicrophone::set_source(int index) {
-  if (index < 0 || static_cast<size_t>(index) >= this->sources_.size())
-    index = -1;
-  const int old = this->active_.load();
-  if (index == old)
+  microphone::MicrophoneSource *next = nullptr;
+  if (index >= 0 && static_cast<size_t>(index) < this->sources_.size()) {
+    next = this->sources_[index].source;
+    this->wanted_key_ = this->sources_[index].key;
+    this->wanted_none_ = false;
+  } else {
+    this->wanted_key_ = 0;
+    this->wanted_none_ = true;
+  }
+  if (this->preference_key_ != 0)
+    this->pref_.save(&this->wanted_key_);
+  this->switch_source_(next);
+}
+
+void ResamplerMicrophone::switch_source_(microphone::MicrophoneSource *next) {
+  microphone::MicrophoneSource *old = this->active_.load();
+  if (next == old)
     return;
   // Nothing of the old one passed on from here; the new one's first chunk sets the resampler up for its rate
-  this->active_.store(-1);
+  this->active_.store(nullptr);
   if (this->state_ != microphone::STATE_STOPPED) {
-    if (old >= 0)
-      this->sources_[old]->stop();
-    if (index >= 0)
-      this->sources_[index]->start();
+    if (old != nullptr)
+      old->stop();
+    if (next != nullptr)
+      next->start();
     this->state_ = microphone::STATE_STARTING;
   }
-  this->active_.store(index);
-  ESP_LOGD(TAG, "Source %d", index);
+  this->active_.store(next);
+  ESP_LOGD(TAG, "Source %d", this->get_source());
+  this->source_callback_.call(this->get_source());
   this->enable_loop();
 }
 
@@ -158,15 +257,15 @@ bool ResamplerMicrophone::init_resampler_(const audio::AudioStreamInfo &input_st
   return true;
 }
 
-void ResamplerMicrophone::process_audio_(size_t index, const std::vector<uint8_t> &data) {
+void ResamplerMicrophone::process_audio_(microphone::MicrophoneSource *source, const std::vector<uint8_t> &data) {
   if (this->processing_.exchange(true))
     return;
-  this->process_chunk_(index, data);
+  this->process_chunk_(source, data);
   this->processing_.store(false);
 }
 
-void ResamplerMicrophone::process_chunk_(size_t index, const std::vector<uint8_t> &data) {
-  const audio::AudioStreamInfo input_stream_info = this->sources_[index]->get_audio_stream_info();
+void ResamplerMicrophone::process_chunk_(microphone::MicrophoneSource *source, const std::vector<uint8_t> &data) {
+  const audio::AudioStreamInfo input_stream_info = source->get_audio_stream_info();
   if (input_stream_info != this->input_stream_info_) {
     this->init_resampler_(input_stream_info);
   }

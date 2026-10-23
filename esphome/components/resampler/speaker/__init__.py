@@ -32,6 +32,7 @@ ResamplerSpeaker = resampler_ns.class_(
 PASSTHROUGH = "passthrough"
 
 CONF_SOURCE_SPEAKERS = "source_speakers"
+CONF_USB_AUDIO = "usb_audio"
 FORMAT_KEYS = (CONF_SAMPLE_RATE, CONF_BITS_PER_SAMPLE, CONF_NUM_CHANNELS)
 _CHANNEL_COUNTS = {"mono": 1, "left": 1, "right": 1, "stereo": 2}
 _LIMIT_KEYS = {
@@ -80,20 +81,34 @@ def resolve_speaker_format(fconf, speaker_id, known: dict | None = None) -> dict
 
 
 def _unique_names(outputs):
-    names = [o[CONF_NAME] for o in outputs]
+    names = [o[CONF_NAME] for o in outputs if CONF_NAME in o]
     if len(names) != len(set(names)):
         raise cv.Invalid("output names must be unique")
     return outputs
 
 
-OUTPUT_SCHEMA = cv.Schema(
-    {
-        cv.Required(CONF_SPEAKER): cv.use_id(speaker.Speaker),
-        cv.Required(CONF_NAME): cv.All(cv.string_strict, cv.Length(min=1, max=32)),
-        cv.Optional(CONF_SAMPLE_RATE): cv.int_range(min=8000, max=192000),
-        cv.Optional(CONF_BITS_PER_SAMPLE): cv.one_of(16, 24, 32, int=True),
-        cv.Optional(CONF_NUM_CHANNELS): cv.int_range(min=1, max=8),
-    }
+def _is_group(output) -> bool:
+    return CONF_USB_AUDIO in output
+
+
+def usb_audio_format(fconf, hub_id, domain) -> dict | None:
+    for block in fconf.get(CONF_USB_AUDIO) or []:
+        if str(block.get(CONF_ID)) == str(hub_id) and domain in block:
+            return {key: int(block[domain][key]) for key in FORMAT_KEYS}
+    return None
+
+
+OUTPUT_SCHEMA = cv.Any(
+    cv.Schema(
+        {
+            cv.Required(CONF_SPEAKER): cv.use_id(speaker.Speaker),
+            cv.Required(CONF_NAME): cv.All(cv.string_strict, cv.Length(min=1, max=32)),
+            cv.Optional(CONF_SAMPLE_RATE): cv.int_range(min=8000, max=192000),
+            cv.Optional(CONF_BITS_PER_SAMPLE): cv.one_of(16, 24, 32, int=True),
+            cv.Optional(CONF_NUM_CHANNELS): cv.int_range(min=1, max=8),
+        }
+    ),
+    cv.Schema({cv.Required(CONF_USB_AUDIO): cv.use_id(cg.Component)}),
 )
 
 
@@ -114,6 +129,19 @@ def _validate_output_list(config: ConfigType) -> None:
     fconf = fv.full_config.get()
     outputs = config[CONF_OUTPUT_SPEAKER]
     for output in outputs:
+        if _is_group(output):
+            fmt = usb_audio_format(fconf, output[CONF_USB_AUDIO], CONF_SPEAKER)
+            if fmt is None:
+                raise cv.Invalid(
+                    f"resampler output usb_audio '{output[CONF_USB_AUDIO]}': no usb_audio block with a 'speaker' format"
+                )
+            if fmt[CONF_BITS_PER_SAMPLE] not in (16, 24, 32):
+                raise cv.Invalid(
+                    f"resampler output usb_audio '{output[CONF_USB_AUDIO]}': {fmt[CONF_BITS_PER_SAMPLE]} bits per sample "
+                    "is not supported (16, 24 or 32)"
+                )
+            output.update(fmt)
+            continue
         known = {key: output[key] for key in FORMAT_KEYS if key in output}
         fmt = resolve_speaker_format(fconf, output[CONF_SPEAKER], known)
         if missing := [key for key in FORMAT_KEYS if key not in fmt]:
@@ -162,7 +190,7 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(): cv.declare_id(ResamplerSpeaker),
             cv.Required(CONF_OUTPUT_SPEAKER): cv.Any(
                 cv.use_id(speaker.Speaker),
-                cv.All(cv.ensure_list(OUTPUT_SCHEMA), cv.Length(min=2), _unique_names),
+                cv.All(cv.ensure_list(OUTPUT_SCHEMA), cv.Length(min=1), _unique_names),
             ),
             cv.Optional(CONF_BITS_PER_SAMPLE, default=PASSTHROUGH): cv.Any(
                 cv.one_of(PASSTHROUGH, lower=True), cv.int_range(8, 32)
@@ -189,7 +217,28 @@ async def to_code(config: ConfigType) -> None:
     await speaker.register_speaker(var, config)
 
     if _is_output_list(config):
+        groups = 0
         for output in config[CONF_OUTPUT_SPEAKER]:
+            if _is_group(output):
+                cg.add(
+                    var.add_output_group(
+                        output[CONF_SAMPLE_RATE],
+                        output[CONF_BITS_PER_SAMPLE],
+                        output[CONF_NUM_CHANNELS],
+                    )
+                )
+                hub = await cg.get_variable(output[CONF_USB_AUDIO])
+                cg.add(
+                    hub.add_speaker_route(
+                        cg.RawExpression(
+                            "[](esphome::speaker::Speaker *sink, const char *name, uint32_t key, bool added) { "
+                            f"if (added) {{ {var}->add_group_output({groups}, sink, name, key); }} "
+                            f"else {{ {var}->remove_output(sink); }} }}"
+                        )
+                    )
+                )
+                groups += 1
+                continue
             spk = await cg.get_variable(output[CONF_SPEAKER])
             cg.add(
                 var.add_output(

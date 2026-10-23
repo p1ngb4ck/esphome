@@ -20,6 +20,7 @@ class OutputSelect : public select::Select, public Component, public Parented<Re
 
  protected:
   void control(size_t index) override;
+  void publish_options_();
 };
 
 }
