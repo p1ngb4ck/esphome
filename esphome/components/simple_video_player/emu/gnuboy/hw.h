@@ -261,6 +261,9 @@ typedef struct
 	} compat;
 } gb_t;
 
+void gb_link_poll(void);
+byte gb_link_reply(void);
+
 extern gb_cart_t cart;
 extern gb_t *gb_ptr;
 #define GB (*gb_ptr)

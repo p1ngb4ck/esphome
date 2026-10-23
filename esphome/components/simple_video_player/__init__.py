@@ -147,6 +147,7 @@ GameCommandAction = simple_video_player_ns.class_("GameCommandAction", automatio
 GameStateAction = simple_video_player_ns.class_("GameStateAction", automation.Action)
 GamePlayersAction = simple_video_player_ns.class_("GamePlayersAction", automation.Action)
 GamePlayerSetAction = simple_video_player_ns.class_("GamePlayerSetAction", automation.Action)
+GameLinkAction = simple_video_player_ns.class_("GameLinkAction", automation.Action)
 ShowImageAction = simple_video_player_ns.class_("ShowImageAction", automation.Action)
 ScreenshotAction = simple_video_player_ns.class_("ScreenshotAction", automation.Action)
 ScreencastAction = simple_video_player_ns.class_("ScreencastAction", automation.Action)
@@ -260,6 +261,8 @@ CONF_BIOS_DIR = "bios_dir"
 CONF_HID_IDS = "hid_ids"
 CONF_ON_PLAYERS_CHANGED = "on_players_changed"
 CONF_ON_PLAYERS_CLOSED = "on_players_closed"
+CONF_LINK = "link"
+CONF_PEERS = "peers"
 
 EMU_SYSTEMS = {
     "nes": EmuSystem.NES,
@@ -335,6 +338,12 @@ EMULATOR_SCHEMA = cv.Schema(
         cv.Optional(CONF_ON_ENDED): automation.validate_automation(single=True),
         cv.Optional(CONF_ON_PLAYERS_CHANGED): automation.validate_automation(single=True),
         cv.Optional(CONF_ON_PLAYERS_CLOSED): automation.validate_automation(single=True),
+        cv.Optional(CONF_LINK): cv.Schema(
+            {
+                cv.Optional(CONF_PORT, default=6666): cv.port,
+                cv.Optional(CONF_PEERS, default=[]): cv.ensure_list(cv.string_strict),
+            }
+        ),
     }
 ).add_extra(_emu_bios)
 
@@ -1266,6 +1275,12 @@ async def _emulator_to_code(var, config):
         await automation.build_automation(emu.get_players_changed_trigger(), [], on_changed)
     if on_closed := config.get(CONF_ON_PLAYERS_CLOSED):
         await automation.build_automation(emu.get_players_closed_trigger(), [], on_closed)
+    if link := config.get(CONF_LINK):
+        cg.add_define("SVP_EMU_LINK")
+        require_vfs_select()
+        cg.add(emu.set_link_port(link[CONF_PORT]))
+        for peer in link[CONF_PEERS]:
+            cg.add(emu.add_peer(peer))
 
 
 async def to_code(config):
@@ -2129,6 +2144,33 @@ async def simple_video_player_emulator_players_to_code(config, action_id, templa
 
 
 CONF_SEAT = "seat"
+
+
+def _register_emulator_link(name, mode):
+    schema = SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA
+    if mode == 2:
+        schema = cv.Schema(
+            {
+                cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+                cv.Required(CONF_HOST): cv.templatable(cv.string_strict),
+            }
+        )
+
+    @automation.register_action(f"simple_video_player.emulator.{name}", GameLinkAction, schema, synchronous=True)
+    async def _to_code(config, action_id, template_arg, args):
+        paren = await cg.get_variable(config[CONF_ID])
+        var = cg.new_Pvariable(action_id, template_arg, paren)
+        cg.add(var.set_mode(mode))
+        if mode == 2:
+            cg.add(var.set_host(await cg.templatable(config[CONF_HOST], args, cg.std_string)))
+        return var
+
+    return _to_code
+
+
+_register_emulator_link("link_off", 0)
+_register_emulator_link("link_host", 1)
+_register_emulator_link("link_join", 2)
 
 
 @automation.register_action(

@@ -64,7 +64,9 @@ class GameEmulator
 #endif
 {
  public:
-  enum class State : uint8_t { IDLE, LOADING, WAIT_PANEL, RUNNING, PAUSING, PAUSED, STOPPING };
+  enum class State : uint8_t { IDLE, LOADING, LINKING, WAIT_PANEL, RUNNING, PAUSING, PAUSED, STOPPING };
+  enum class LinkMode : uint8_t { OFF, HOST, JOIN };
+  enum class LinkState : uint8_t { OFF, WAITING, CONNECTED, LOST };
   enum class Job : uint8_t { NONE, SAV_LOAD, SAV_STORE, STATE_SAVE, STATE_LOAD };
   static constexpr uint8_t SLOTS = 4;
 
@@ -89,6 +91,15 @@ class GameEmulator
     return index < this->player_count_ ? this->players_[index].label : "";
   }
   uint8_t players_player(uint8_t index) const { return index < this->player_count_ ? this->players_[index].player : 0; }
+  void set_link_port(uint16_t port) { this->link_port_ = port; }
+  void add_peer(const char *host);
+  size_t peer_count() const { return this->peer_count_; }
+  const char *peer(size_t index) const { return index < this->peer_count_ ? this->peers_[index] : ""; }
+  void link_host();
+  void link_join(const std::string &host);
+  void link_off();
+  LinkMode link_wanted() const { return this->link_wanted_; }
+  const char *link_state_name() const;
   Trigger<> *get_paused_trigger() { return &this->paused_trigger_; }
   Trigger<> *get_ended_trigger() { return &this->ended_trigger_; }
 
@@ -167,6 +178,20 @@ class GameEmulator
     size_t size;
   };
   static constexpr size_t MAX_BIOS = 12;
+  struct LinkMsg {
+    uint8_t type;
+    uint8_t a;
+    uint16_t b;
+    uint32_t c;
+  };
+  static constexpr size_t MAX_PEERS = 8;
+  static constexpr size_t LINK_HOST_MAX = 64;
+  static constexpr size_t LINK_BUF = 16 * sizeof(LinkMsg);
+  static constexpr uint8_t LINK_PAD = 0x10;
+  static constexpr uint8_t LINK_PAUSE = 0x11;
+  static constexpr uint8_t LINK_RESUME = 0x12;
+  static constexpr uint8_t LINK_BYE = 0x13;
+  static constexpr uint8_t LINK_HELLO = 0x20;
 
   bool start_(const std::string &path, bool assign);
   bool system_for_(const char *path, EmuSystem *system) const;
@@ -185,6 +210,24 @@ class GameEmulator
   void players_close_();
   uint16_t buttons_of_(uint16_t page, uint16_t usage) const;
   void go_panel_();
+  void ready_();
+  bool create_task_();
+  void start_pacing_();
+  bool frame_pads_(uint16_t *pads);
+  void link_begin_();
+  void link_connect_();
+  int link_listen_();
+  int link_dial_();
+  int link_wait_(int fd, bool write, uint32_t timeout_ms);
+  bool link_send_(uint8_t type, uint8_t a, uint16_t b, uint32_t c);
+  int link_take_(LinkMsg *msg, uint32_t wait_ms);
+  int net_pads_(uint16_t *pads);
+  void link_note_(uint8_t type);
+  void link_lost_(const char *why);
+  void link_wake_();
+  void link_close_();
+  static bool link_send_cb_(void *ctx, uint8_t type, uint8_t a, uint16_t b);
+  static bool link_recv_cb_(void *ctx, uint8_t *type, uint8_t *a, uint16_t *b, uint32_t wait_ms);
   bool side_path_(char *out, size_t len, const char *suffix) const;
   bool sram_changed_();
   void job_begin_();
@@ -307,6 +350,26 @@ class GameEmulator
   std::atomic<bool> task_done_{false};
   std::atomic<uint16_t> pads_[2]{};
   esp_timer_handle_t pace_timer_{nullptr};
+
+  const char *peers_[MAX_PEERS]{};
+  size_t peer_count_{0};
+  uint16_t link_port_{6666};
+  LinkMode link_wanted_{LinkMode::OFF};
+  LinkMode link_mode_{LinkMode::OFF};
+  char link_target_[LINK_HOST_MAX + 1]{};
+  char link_peer_[LINK_HOST_MAX + 1]{};
+  bool link_cable_{false};
+  int link_fd_{-1};
+  int link_efd_{-1};
+  std::atomic<uint8_t> link_state_{0};
+  std::atomic<bool> link_changed_{false};
+  bool peer_paused_{false};
+  uint32_t net_frame_{0};
+  bool net_sent_{false};
+  uint16_t net_local_{0};
+  uint16_t net_next_{0};
+  uint8_t link_buf_[LINK_BUF]{};
+  size_t link_buf_len_{0};
 };
 
 template<typename... Ts> class GameStartAction : public Action<Ts...> {
@@ -371,6 +434,33 @@ template<typename... Ts> class GamePlayerSetAction : public Action<Ts...> {
 
  protected:
   SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class GameLinkAction : public Action<Ts...> {
+ public:
+  explicit GameLinkAction(SimpleVideoPlayer *player) : player_(player) {}
+  TEMPLATABLE_VALUE(std::string, host)
+  void set_mode(uint8_t mode) { this->mode_ = mode; }
+  void play(const Ts &...x) override {
+    GameEmulator *emu = this->player_->get_emulator();
+    if (emu == nullptr)
+      return;
+    switch (this->mode_) {
+      case 0:
+        emu->link_off();
+        break;
+      case 1:
+        emu->link_host();
+        break;
+      default:
+        emu->link_join(this->host_.value(x...));
+        break;
+    }
+  }
+
+ protected:
+  SimpleVideoPlayer *player_;
+  uint8_t mode_{0};
 };
 
 template<typename... Ts> class GameCommandAction : public Action<Ts...> {

@@ -14,6 +14,13 @@ static ULONG s_up;
 static ULONG s_down;
 static ULONG s_left;
 static ULONG s_right;
+static bool s_cable;
+
+static void lynx_link_tx(int data, ULONG objref)
+{
+    (void)objref;
+    emu_link_send(4, (uint8_t)(data & 0xFF), (uint16_t)((data >> 8) & 0xFF));
+}
 
 static void lynx_rotation(void)
 {
@@ -110,6 +117,19 @@ void lynx_port_frame(uint16_t pad1, uint16_t pad2)
     if (pad1 & EMU_PORT_SELECT)
         buttons |= BUTTON_OPT1;
     s_lynx->SetButtonData(buttons);
+    if (emu_link_active() && !s_cable)
+    {
+        s_lynx->ComLynxTxCallback(lynx_link_tx, 0);
+        s_lynx->ComLynxCable(1);
+        s_cable = true;
+    }
+    uint8_t type, value;
+    uint16_t extra;
+    while (emu_link_active() && emu_link_recv(&type, &value, &extra, 0))
+    {
+        if (type == 4)
+            s_lynx->ComLynxRxData(value | (extra << 8));
+    }
     gAudioBufferPointer = 0;
     s_lynx->UpdateFrame(true);
     const size_t frames = gAudioBufferPointer / 2;

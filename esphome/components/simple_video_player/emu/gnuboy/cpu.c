@@ -209,11 +209,21 @@ static inline void serial_advance(int cycles)
 		GB.serial -= cycles << 1;
 		if (GB.serial <= 0)
 		{
-			R_SB = 0xFF;
+			R_SB = gb_link_reply();
 			R_SC &= 0x7f;
 			GB.serial = 0;
 			gb_hw_interrupt(IF_SERIAL, 1);
 			gb_hw_interrupt(IF_SERIAL, 0);
+		}
+	}
+	else if ((R_SC & 0x81) == 0x80)
+	{
+		static int link_cycles;
+		link_cycles += cycles;
+		if (link_cycles >= 1824)
+		{
+			link_cycles = 0;
+			gb_link_poll();
 		}
 	}
 }

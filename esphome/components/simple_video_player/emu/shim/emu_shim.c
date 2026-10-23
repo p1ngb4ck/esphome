@@ -16,6 +16,9 @@ static emu_free_fn_t s_free;
 static void *s_ctx;
 static emu_host_frame_fn_t s_host_frame;
 static void *s_host_ctx;
+static emu_link_send_fn_t s_link_send;
+static emu_link_recv_fn_t s_link_recv;
+static void *s_link_ctx;
 
 void emu_bss_clear(void)
 {
@@ -40,6 +43,28 @@ void emu_set_host(emu_host_frame_fn_t frame, void *ctx)
 bool emu_host_frame(uint16_t *pad1, uint16_t *pad2)
 {
     return s_host_frame != NULL && s_host_frame(s_host_ctx, pad1, pad2);
+}
+
+void emu_set_link(emu_link_send_fn_t send, emu_link_recv_fn_t recv, void *ctx)
+{
+    s_link_send = send;
+    s_link_recv = recv;
+    s_link_ctx = ctx;
+}
+
+bool emu_link_active(void)
+{
+    return s_link_send != NULL;
+}
+
+bool emu_link_send(uint8_t type, uint8_t a, uint16_t b)
+{
+    return s_link_send != NULL && s_link_send(s_link_ctx, type, a, b);
+}
+
+bool emu_link_recv(uint8_t *type, uint8_t *a, uint16_t *b, uint32_t wait_ms)
+{
+    return s_link_recv != NULL && s_link_recv(s_link_ctx, type, a, b, wait_ms);
 }
 
 void *emu_malloc(size_t size)

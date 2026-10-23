@@ -23,6 +23,39 @@
  ******************************************************************************/
 
 #include "shared.h"
+#include "emu_shim.h"
+
+#define SIO_QUEUE 16
+
+static uint8 sio_queue[SIO_QUEUE];
+static uint8 sio_head;
+static uint8 sio_tail;
+
+static void sio_deliver(void)
+{
+  if ((sms.sio.sctrl & 0x02) || !(sms.sio.sctrl & 0x20) || sio_head == sio_tail)
+    return;
+  sms.sio.rxdata = sio_queue[sio_head % SIO_QUEUE];
+  sio_head++;
+  sms.sio.sctrl |= 0x02;
+  if (sms.sio.sctrl & 0x08)
+  {
+    z80_set_irq_line(INPUT_LINE_NMI, ASSERT_LINE);
+    z80_set_irq_line(INPUT_LINE_NMI, CLEAR_LINE);
+  }
+}
+
+void sio_link_poll(void)
+{
+  uint8_t type, value;
+  uint16_t extra;
+  while (emu_link_active() && emu_link_recv(&type, &value, &extra, 0))
+  {
+    if (type == 3 && (uint8)(sio_tail - sio_head) < SIO_QUEUE)
+      sio_queue[sio_tail++ % SIO_QUEUE] = value;
+  }
+  sio_deliver();
+}
 #include <math.h>
 
 typedef struct {
@@ -404,7 +437,10 @@ uint8 sio_r(int offset)
       return sms.sio.txdata;
 
     case 4: /* Receive data buffer */
-      return sms.sio.rxdata;
+      temp = sms.sio.rxdata;
+      sms.sio.sctrl &= ~0x02;
+      sio_deliver();
+      return temp;
 
     case 5: /* Serial control */
       return sms.sio.sctrl;
@@ -434,6 +470,8 @@ void sio_w(int offset, int data)
 
     case 3: /* Transmit data buffer */
       sms.sio.txdata = data;
+      if ((sms.sio.sctrl & 0x10) && emu_link_active())
+        emu_link_send(3, (uint8_t)data, 0);
       return;
 
     case 4: /* Receive data buffer */

@@ -106,6 +106,8 @@ void sms_port_frame(uint16_t pad1, uint16_t pad2)
         if (pad1 & EMU_PORT_SELECT)
             system_reset();
     }
+    if (IS_GG && emu_link_active())
+        sio_link_poll();
     system_frame(0);
     uint16_t pal[256];
     if (render_copy_palette(pal))

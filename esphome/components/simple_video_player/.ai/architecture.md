@@ -28,6 +28,7 @@ Line numbers drift: search the symbol when a line doesn't match.
 | number/, text_sensor/ | Volume number, status text sensor |
 | emulator.cpp/.h | `emulator:` (`SVP_EMULATOR`): `GameEmulator`, the game app (section 12) |
 | emu_cores.cpp | The cores' C++ side (`EmuCore`), one class per system over its C port |
+| emu_link.cpp | `emulator: link:` (`SVP_EMU_LINK`): the TCP link between two panels, netplay and cable (section 12) |
 | emu/ | IDF component `emu` (`add_idf_component(override_path=...)`): the vendored cores (their authors' files, comments and licenses as they are), `ports/` (one C file per core: the narrow API svp calls), `shim/` (allocator hooks, `rg_system.h`), `linker.lf` (the component's `.bss` / `.sbss` / COMMON in PSRAM noinit, cleared at every game start), `Kconfig` (`CONFIG_SVP_EMU_<SYSTEM>`, set by codegen per `systems:` entry) |
 | `__init__.py` | Config schema and codegen (defines `SVP_*`) |
 
@@ -50,7 +51,7 @@ Main loop: `loopTask`, prio 1, core 1 (`CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1`, `Ap
 | svp_capture | `capture_task_entry_` (screen_capture.cpp; made at the first capture, kept) | 0 | 3 | 4096 | copies the changed areas into the back picture after a swap, HW JPEG encodes, composes the screencast's batches; task notification bits |
 | svp_cast_tx | `cast_tx_entry_` (made at the first screencast to svp_relay, kept) | any | 3 | 4096 | connects to svp_relay's cast port, sends the header and each batch (SO_SNDTIMEO 5 s) |
 | svp_cast (esp_timer) | `capture_tick_cb_` | – | – | – | the screencast's tick (1/fps) to svp_capture |
-| svp_game | `GameEmulator::task_entry_` (`esphome::StaticTask`, TCB and stack internal; made when a game's panel is ready, deallocated after it ended) | 1 | 1 | 8192 | one emulated frame, PPA into the scanout buffer not shown, flip, the frame's sound into `speaker_` (`play` 20 ms waits, the speaker's ring paces); parked on its notification while paused |
+| svp_game | `GameEmulator::task_entry_` (`esphome::StaticTask`, TCB and stack internal; made when a game's panel is ready, with a link before it to connect; deallocated after it ended) | 1 | 1 | 8192 | one emulated frame, PPA into the scanout buffer not shown, flip, the frame's sound into `speaker_` (`play` 20 ms waits, the speaker's ring paces); parked on its notification while paused; netplay: waits per frame for the other panel's input (select on the socket and the link eventfd) |
 | svp_game_pace (esp_timer) | only without a speaker | – | – | – | wakes svp_game at the core's frame rate |
 
 ## 3. Locks (and the order they nest in)
@@ -348,6 +349,24 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
   stdio state code goes to `emu_mem` by compile definitions: nofrendo state.c, gnuboy.c, smsplus state.c, pce-go.c,
   snes9x snapshot.c, handy; gwenesis, gw and fMSX are memory-based already), written / read by the worker; one job at a
   time, a resume asked during a job runs after it. `slot_time(slot)` stats a slot for the page (mtime, 1 when unknown).
+- Link (`link:` port, default 6666, `peers:` host names for the page; `SVP_EMU_LINK`, VFS select): `emulator.link_host`
+  / `link_join` (host) / `link_off` choose the next game's link (taken at its start). After the core load (and the
+  `.sav` read) state LINKING makes svp_game early: the host listens (until a guest comes or stop), the guest resolves
+  and connects (5 s); one plain TCP socket (`TCP_NODELAY`, keepalive, 5 s send timeout), messages of 8 bytes. Both
+  send a hello (version, system + cable flag, the ROM's CRC32) and play alone when it differs or does not come. The task
+  then parks, the main loop takes the panel as usual. Waits are `select()` on the socket and the link eventfd, which
+  `stop()` and `pause()` write: no polling, no timer. Netplay (every system without a cable): each frame sends the local
+  pads (all local devices together) for the next frame and waits for the other panel's pads of this frame (one frame
+  of input delay, host = player 1, guest = player 2; 5 s without input ends the link, a paused panel announces its
+  pause and the other waits without the timeout). Cable (Game Boy / Color, Game Gear, Lynx; each panel runs its own
+  game): shim `emu_set_link()` / `emu_link_send()` / `emu_link_recv()`; gnuboy sends the master's byte at the `RI_SC`
+  start and completes the transfer with the other panel's byte (300 ms, else 0xFF), a waiting slave answers with its
+  `SB` (polled every 1824 cycles and once per frame); smsplus sends `txdata` with TON and queues 16 received bytes,
+  delivered while RON is set (RXRD, NMI with 0x08); handy's ComLynx TX callback sends, received bytes go to
+  `ComLynxRxData` once per frame. Link loss (error, close, bye, timeout) ends the link, the game goes on alone (no
+  reconnect); status `link` ("off", "waiting", "connected", "lost"). The sockets and the eventfd exist only while the
+  linked game runs.
 - Actions: `simple_video_player.emulator.start` (path) / `.stop` / `.pause` / `.resume` / `.save_state` (slot) /
-  `.load_state` (slot); Home Assistant `svp_emu_start` (path), `svp_emu_stop`, `svp_emu_pause`, `svp_emu_resume`,
-  `svp_emu_save_state` (slot), `svp_emu_load_state` (slot); the status JSON's `game` ("", "running", "paused").
+  `.load_state` (slot) / `.link_host` / `.link_join` (host) / `.link_off`; Home Assistant `svp_emu_start` (path),
+  `svp_emu_stop`, `svp_emu_pause`, `svp_emu_resume`, `svp_emu_save_state` (slot), `svp_emu_load_state` (slot),
+  `svp_emu_host`, `svp_emu_join` (host); the status JSON's `game` ("", "running", "paused") and `link`.

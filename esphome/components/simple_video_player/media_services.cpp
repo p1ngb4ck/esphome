@@ -66,15 +66,18 @@ std::string SimpleVideoPlayer::status_json() {
   playlist = this->audio_playlist_active_();
 #endif
   const char *game = "";
+  const char *link = "off";
 #ifdef SVP_EMULATOR
-  if (this->emu_ != nullptr)
+  if (this->emu_ != nullptr) {
     game = this->emu_->state_name();
+    link = this->emu_->link_state_name();
+  }
 #endif
   char json[192];
   snprintf(json, sizeof(json),
-           "{\"svp\":1,\"port\":%u,\"state\":\"%s\",\"volume\":%.2f,\"muted\":%s,\"playlist\":%s,\"video\":%s,\"game\":\"%s\",",
+           "{\"svp\":1,\"port\":%u,\"state\":\"%s\",\"volume\":%.2f,\"muted\":%s,\"playlist\":%s,\"video\":%s,\"game\":\"%s\",\"link\":\"%s\",",
            port, state, this->get_volume(), muted ? "true" : "false", playlist ? "true" : "false",
-           this->local_video_active() ? "true" : "false", game);
+           this->local_video_active() ? "true" : "false", game, link);
   return std::string(json) + traits + "}";
 }
 
@@ -100,6 +103,10 @@ void SimpleVideoPlayer::setup_media_player_() {
     this->register_service(&SimpleVideoPlayer::on_svp_emu_resume, "svp_emu_resume");
     this->register_service(&SimpleVideoPlayer::on_svp_emu_save_state, "svp_emu_save_state", {"slot"});
     this->register_service(&SimpleVideoPlayer::on_svp_emu_load_state, "svp_emu_load_state", {"slot"});
+#ifdef SVP_EMU_LINK
+    this->register_service(&SimpleVideoPlayer::on_svp_emu_host, "svp_emu_host");
+    this->register_service(&SimpleVideoPlayer::on_svp_emu_join, "svp_emu_join", {"host"});
+#endif
   }
 #endif
   this->build_media_traits_();

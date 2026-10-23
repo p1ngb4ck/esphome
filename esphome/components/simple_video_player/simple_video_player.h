@@ -920,6 +920,10 @@ class SimpleVideoPlayer : public Component
   void on_svp_emu_resume();
   void on_svp_emu_save_state(int32_t slot);
   void on_svp_emu_load_state(int32_t slot);
+#ifdef SVP_EMU_LINK
+  void on_svp_emu_host();
+  void on_svp_emu_join(std::string host);
+#endif
 #endif
 #endif
 

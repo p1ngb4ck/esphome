@@ -32,6 +32,9 @@ typedef struct {
 } emu_port_video_t;
 
 bool emu_host_frame(uint16_t *pad1, uint16_t *pad2);
+bool emu_link_active(void);
+bool emu_link_send(uint8_t type, uint8_t a, uint16_t b);
+bool emu_link_recv(uint8_t *type, uint8_t *a, uint16_t *b, uint32_t wait_ms);
 
 bool nes_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels);
 void nes_port_frame(uint16_t pad1, uint16_t pad2);

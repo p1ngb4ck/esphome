@@ -11,6 +11,8 @@ gb_t *gb_ptr;
 
 #define hw GB
 
+#include "emu_shim.h"
+
 static void rtc_latch(byte b)
 {
 	if ((cart.rtc.latch ^ b) & b & 1)
@@ -550,7 +552,11 @@ void gb_hw_write(unsigned a, byte b)
 				break;
 			case RI_SC:
 				if ((b & 0x81) == 0x81)
+				{
 					hw.serial = 1952; // 8 * 122us;
+					if (emu_link_active())
+						emu_link_send(1, R_SB, 0);
+				}
 				else
 					hw.serial = 0;
 				REG(r) = b; /* & 0x7f; */
@@ -732,6 +738,43 @@ byte gb_hw_read(unsigned a)
 			// So, for speed, we'll assume that this is correct and always return REG(a)
 			return REG(a & 0xFF);
 		// }
+	}
+	return 0xFF;
+}
+
+void gb_link_poll(void)
+{
+	uint8_t type, value;
+	uint16_t extra;
+	while (emu_link_active() && emu_link_recv(&type, &value, &extra, 0))
+	{
+		if (type != 1)
+			continue;
+		if ((R_SC & 0x81) == 0x80)
+		{
+			emu_link_send(2, R_SB, 0);
+			R_SB = value;
+			R_SC &= 0x7f;
+			gb_hw_interrupt(IF_SERIAL, 1);
+			gb_hw_interrupt(IF_SERIAL, 0);
+		}
+		else
+		{
+			emu_link_send(2, 0xFF, 0);
+		}
+	}
+}
+
+byte gb_link_reply(void)
+{
+	uint8_t type, value;
+	uint16_t extra;
+	while (emu_link_active() && emu_link_recv(&type, &value, &extra, 300))
+	{
+		if (type == 2)
+			return value;
+		if (type == 1)
+			emu_link_send(2, 0xFF, 0);
 	}
 	return 0xFF;
 }

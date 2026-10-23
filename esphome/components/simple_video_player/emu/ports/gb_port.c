@@ -75,6 +75,8 @@ void gb_port_frame(uint16_t pad1, uint16_t pad2)
         s_pad = pad;
     }
     s_audio_count = 0;
+    if (emu_link_active())
+        gb_link_poll();
     gnuboy_run(true);
 }
 

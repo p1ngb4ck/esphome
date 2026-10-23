@@ -81,6 +81,46 @@ const char *GameEmulator::state_name() const {
   }
 }
 
+const char *GameEmulator::link_state_name() const {
+  switch (static_cast<LinkState>(this->link_state_.load(std::memory_order_acquire))) {
+    case LinkState::WAITING:
+      return "waiting";
+    case LinkState::CONNECTED:
+      return "connected";
+    case LinkState::LOST:
+      return "lost";
+    default:
+      return "off";
+  }
+}
+
+void GameEmulator::add_peer(const char *host) {
+  if (this->peer_count_ < MAX_PEERS)
+    this->peers_[this->peer_count_++] = host;
+}
+
+void GameEmulator::link_host() {
+#ifdef SVP_EMU_LINK
+  this->link_wanted_ = LinkMode::HOST;
+  this->parent_->status_callbacks_.call();
+#endif
+}
+
+void GameEmulator::link_join(const std::string &host) {
+#ifdef SVP_EMU_LINK
+  if (host.empty() || host.size() > LINK_HOST_MAX)
+    return;
+  memcpy(this->link_target_, host.c_str(), host.size() + 1);
+  this->link_wanted_ = LinkMode::JOIN;
+  this->parent_->status_callbacks_.call();
+#endif
+}
+
+void GameEmulator::link_off() {
+  this->link_wanted_ = LinkMode::OFF;
+  this->parent_->status_callbacks_.call();
+}
+
 bool GameEmulator::system_for_(const char *path, EmuSystem *system) const {
   for (size_t i = 0; i < this->system_count_; i++) {
     const size_t len = strlen(this->systems_[i].dir);
@@ -192,6 +232,13 @@ bool GameEmulator::start_(const std::string &path, bool assign) {
   this->pads_[0].store(0, std::memory_order_relaxed);
   this->pads_[1].store(0, std::memory_order_relaxed);
   this->assign_active_ = assign;
+  this->link_mode_ = this->link_wanted_;
+  this->link_wanted_ = LinkMode::OFF;
+  memcpy(this->link_peer_, this->link_target_, sizeof(this->link_peer_));
+  const char *dot = strrchr(this->path_, '.');
+  this->link_cable_ = this->system_ == EmuSystem::GB || this->system_ == EmuSystem::LYNX ||
+                      (this->system_ == EmuSystem::SMS && dot != nullptr && strcasecmp(dot + 1, "gg") == 0);
+  this->link_state_.store(static_cast<uint8_t>(LinkState::OFF), std::memory_order_release);
   this->state_ = State::LOADING;
   ESP_LOGI(TAG, "Starting %s (%s)", this->path_, SYSTEM_NAMES[static_cast<size_t>(this->system_)]);
   p->status_callbacks_.call();
@@ -199,6 +246,8 @@ bool GameEmulator::start_(const std::string &path, bool assign) {
 }
 
 void GameEmulator::service() {
+  if (this->link_changed_.exchange(false, std::memory_order_acq_rel))
+    this->parent_->status_callbacks_.call();
   if (this->players_open_)
     this->players_service_();
   if (this->job_wanted_ != Job::NONE && this->job_ == Job::NONE)
@@ -220,6 +269,10 @@ void GameEmulator::service() {
           return;
         this->next_file_();
       }
+      return;
+    case State::LINKING:
+      if (this->task_parked_.load(std::memory_order_acquire))
+        this->go_panel_();
       return;
     case State::PAUSING:
       if (this->task_parked_.load(std::memory_order_acquire)) {
@@ -436,6 +489,16 @@ void GameEmulator::loaded_() {
     this->job_wanted_ = Job::SAV_LOAD;
     return;
   }
+  this->ready_();
+}
+
+void GameEmulator::ready_() {
+#ifdef SVP_EMU_LINK
+  if (this->link_mode_ != LinkMode::OFF) {
+    this->link_begin_();
+    return;
+  }
+#endif
   this->go_panel_();
 }
 
@@ -466,6 +529,7 @@ void GameEmulator::stop() {
   }
   this->task_stop_.store(true, std::memory_order_release);
   this->state_ = State::STOPPING;
+  this->link_wake_();
   if (this->task_.is_created())
     xTaskNotifyGive(this->task_.get_handle());
 }
@@ -475,6 +539,7 @@ void GameEmulator::pause() {
     return;
   this->task_pause_.store(true, std::memory_order_release);
   this->state_ = State::PAUSING;
+  this->link_wake_();
 }
 
 void GameEmulator::resume() {
@@ -510,44 +575,49 @@ void GameEmulator::panel_ready(bool ready) {
   this->panel_ok_ = ready;
   if (!ready || this->state_ != State::WAIT_PANEL)
     return;
-  if (!this->task_.is_created()) {
-    this->task_pause_.store(false, std::memory_order_release);
-    if (!this->task_.create(&GameEmulator::task_entry_, "svp_game", TASK_STACK, this, 1, false, 1)) {
-      ESP_LOGE(TAG, "No task for the game");
-      this->task_stop_.store(true, std::memory_order_release);
-      this->state_ = State::STOPPING;
-      return;
-    }
-    if (this->core_->frame_us() != 0) {
-#ifdef USE_SPEAKER
-      const bool paced_by_sound = this->parent_->speaker_ != nullptr;
-#else
-      const bool paced_by_sound = false;
-#endif
-      if (!paced_by_sound && this->pace_timer_ == nullptr) {
-        esp_timer_create_args_t args{};
-        args.callback = [](void *arg) {
-          auto *emu = static_cast<GameEmulator *>(arg);
-          if (emu->task_.is_created())
-            xTaskNotifyGive(emu->task_.get_handle());
-        };
-        args.arg = this;
-        args.dispatch_method = ESP_TIMER_TASK;
-        args.name = "svp_game_pace";
-        if (esp_timer_create(&args, &this->pace_timer_) == ESP_OK)
-          esp_timer_start_periodic(this->pace_timer_, this->core_->frame_us());
-      }
-    }
-  } else {
-    this->task_pause_.store(false, std::memory_order_release);
+  this->task_pause_.store(false, std::memory_order_release);
+  if (this->task_.is_created()) {
     xTaskNotifyGive(this->task_.get_handle());
+  } else if (!this->create_task_()) {
+    return;
   }
+  this->start_pacing_();
   this->state_ = State::RUNNING;
   ESP_LOGI(TAG, "Running");
   this->parent_->status_callbacks_.call();
 }
 
+bool GameEmulator::create_task_() {
+  if (this->task_.create(&GameEmulator::task_entry_, "svp_game", TASK_STACK, this, 1, false, 1))
+    return true;
+  ESP_LOGE(TAG, "No task for the game");
+  this->task_stop_.store(true, std::memory_order_release);
+  this->state_ = State::STOPPING;
+  return false;
+}
+
+void GameEmulator::start_pacing_() {
+  if (this->core_->frame_us() == 0 || this->pace_timer_ != nullptr)
+    return;
+#ifdef USE_SPEAKER
+  if (this->parent_->speaker_ != nullptr)
+    return;
+#endif
+  esp_timer_create_args_t args{};
+  args.callback = [](void *arg) {
+    auto *emu = static_cast<GameEmulator *>(arg);
+    if (emu->task_.is_created())
+      xTaskNotifyGive(emu->task_.get_handle());
+  };
+  args.arg = this;
+  args.dispatch_method = ESP_TIMER_TASK;
+  args.name = "svp_game_pace";
+  if (esp_timer_create(&args, &this->pace_timer_) == ESP_OK)
+    esp_timer_start_periodic(this->pace_timer_, this->core_->frame_us());
+}
+
 void GameEmulator::end_() {
+  this->link_close_();
   if (this->pace_timer_ != nullptr) {
     esp_timer_stop(this->pace_timer_);
     esp_timer_delete(this->pace_timer_);
@@ -931,7 +1001,7 @@ void GameEmulator::job_finished_(bool ok) {
       if (!ok)
         ESP_LOGW(TAG, "%s not read", this->job_path_);
       if (this->state_ == State::LOADING && !this->task_stop_.load(std::memory_order_acquire))
-        this->go_panel_();
+        this->ready_();
       break;
     }
     case Job::SAV_STORE:
@@ -1146,6 +1216,7 @@ void GameEmulator::release_output_() {
 void GameEmulator::task_entry_(void *arg) {
   auto *emu = static_cast<GameEmulator *>(arg);
   emu->task_loop_();
+  emu->link_note_(LINK_BYE);
   emu->task_done_.store(true, std::memory_order_release);
   App.wake_loop_threadsafe();
   while (true)
@@ -1154,19 +1225,44 @@ void GameEmulator::task_entry_(void *arg) {
 
 bool GameEmulator::park_() {
   if (this->task_pause_.load(std::memory_order_acquire)) {
+    this->link_note_(LINK_PAUSE);
     this->task_parked_.store(true, std::memory_order_release);
     App.wake_loop_threadsafe();
     while (this->task_pause_.load(std::memory_order_acquire) && !this->task_stop_.load(std::memory_order_acquire))
       ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     this->task_parked_.store(false, std::memory_order_release);
+    if (!this->task_stop_.load(std::memory_order_acquire))
+      this->link_note_(LINK_RESUME);
   }
   return !this->task_stop_.load(std::memory_order_acquire);
 }
 
+bool GameEmulator::frame_pads_(uint16_t *pads) {
+#ifdef SVP_EMU_LINK
+  while (this->link_fd_ >= 0 && !this->link_cable_) {
+    const int got = this->net_pads_(pads);
+    if (got > 0)
+      return true;
+    if (got < 0 && !this->park_())
+      return false;
+  }
+#endif
+  pads[0] = this->pads_[0].load(std::memory_order_relaxed);
+  pads[1] = this->pads_[1].load(std::memory_order_relaxed);
+  return true;
+}
+
 void GameEmulator::task_loop_() {
+#ifdef SVP_EMU_LINK
+  if (this->link_mode_ != LinkMode::OFF) {
+    this->link_connect_();
+    this->task_pause_.store(true, std::memory_order_release);
+  }
+#endif
   while (this->park_()) {
-    const uint16_t pads[2] = {this->pads_[0].load(std::memory_order_relaxed),
-                              this->pads_[1].load(std::memory_order_relaxed)};
+    uint16_t pads[2];
+    if (!this->frame_pads_(pads))
+      return;
     this->core_->run_frame(pads);
     if (this->core_->owns_loop())
       return;
@@ -1188,8 +1284,11 @@ bool GameEmulator::host_frame_(uint16_t *pad1, uint16_t *pad2) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   if (!this->park_())
     return false;
-  *pad1 = this->pads_[0].load(std::memory_order_relaxed);
-  *pad2 = this->pads_[1].load(std::memory_order_relaxed);
+  uint16_t pads[2];
+  if (!this->frame_pads_(pads))
+    return false;
+  *pad1 = pads[0];
+  *pad2 = pads[1];
   return true;
 }
 
@@ -1336,6 +1435,10 @@ void SimpleVideoPlayer::on_svp_emu_pause() { this->emu_->pause(); }
 void SimpleVideoPlayer::on_svp_emu_resume() { this->emu_->resume(); }
 void SimpleVideoPlayer::on_svp_emu_save_state(int32_t slot) { this->emu_->save_state(static_cast<uint8_t>(slot)); }
 void SimpleVideoPlayer::on_svp_emu_load_state(int32_t slot) { this->emu_->load_state(static_cast<uint8_t>(slot)); }
+#ifdef SVP_EMU_LINK
+void SimpleVideoPlayer::on_svp_emu_host() { this->emu_->link_host(); }
+void SimpleVideoPlayer::on_svp_emu_join(std::string host) { this->emu_->link_join(host); }
+#endif
 #endif
 
 #ifdef USE_LVGL_HID
