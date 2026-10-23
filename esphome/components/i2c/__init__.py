@@ -333,9 +333,11 @@ async def to_code(config: ConfigType) -> None:
         await cg.register_component(var, config)
 
         cg.add(var.set_sda_pin(config[CONF_SDA]))
-        cg.add_optional(var.set_sda_pullup_enabled, config.get(CONF_SDA_PULLUP_ENABLED))
+        if CONF_SDA_PULLUP_ENABLED in config:
+            cg.add(var.set_sda_pullup_enabled(config[CONF_SDA_PULLUP_ENABLED]))
         cg.add(var.set_scl_pin(config[CONF_SCL]))
-        cg.add_optional(var.set_scl_pullup_enabled, config.get(CONF_SCL_PULLUP_ENABLED))
+        if CONF_SCL_PULLUP_ENABLED in config:
+            cg.add(var.set_scl_pullup_enabled(config[CONF_SCL_PULLUP_ENABLED]))
 
         cg.add(var.set_frequency(int(config[CONF_FREQUENCY])))
         cg.add(var.set_scan(config[CONF_SCAN]))
@@ -348,9 +350,11 @@ async def to_code(config: ConfigType) -> None:
         await cg.register_component(var, config)
 
         cg.add(var.set_sda_pin(config[CONF_SDA]))
-        cg.add_optional(var.set_sda_pullup_enabled, config.get(CONF_SDA_PULLUP_ENABLED))
+        if CONF_SDA_PULLUP_ENABLED in config:
+            cg.add(var.set_sda_pullup_enabled(config[CONF_SDA_PULLUP_ENABLED]))
         cg.add(var.set_scl_pin(config[CONF_SCL]))
-        cg.add_optional(var.set_scl_pullup_enabled, config.get(CONF_SCL_PULLUP_ENABLED))
+        if CONF_SCL_PULLUP_ENABLED in config:
+            cg.add(var.set_scl_pullup_enabled(config[CONF_SCL_PULLUP_ENABLED]))
 
         cg.add(var.set_frequency(int(config[CONF_FREQUENCY])))
         cg.add(var.set_scan(config[CONF_SCAN]))
