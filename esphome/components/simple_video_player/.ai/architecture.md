@@ -313,8 +313,9 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
   the pool.
 - Cores (`systems:` -> `CONFIG_SVP_EMU_<SYSTEM>`): nes (nofrendo), gb (gnuboy, GB / GBC), sms (smsplus: SMS, Game Gear,
   SG-1000 `.sg`, ColecoVision `.col`: keypad 1 / 2 / * / # on X / Y / L / R, SELECT resets), pce (pce-go, PSG rendered
-  per frame in chunks of 64), lynx (handy, 32 kHz, the cartridge's rotation). A frame without sound plays one frame of
-  silence, so the speaker paces every frame.
+  per frame in chunks of 64), lynx (handy, 32 kHz, the cartridge's rotation), snes (snes9x 2005, all PSRAM, the ROM
+  piece 64.5 KiB larger for its mapping), md (gwenesis, YM2612 at 26,633 Hz, PSG off as in retro-go, the ROM piece in
+  whole 64 KiB). A frame without sound plays one frame of silence, so the speaker paces every frame.
 - Picture: the largest whole factor that fits LVGL's screen, centred, black around (each scanout buffer cleared once
   per game and after a pause); turned only when LVGL's rotation is not 0 (PPA SRM: LVGL 90 -> PPA 270, 180 -> 180,
   270 -> 90); factor 1 at rotation 0 draws without the PPA; PPA errors fall back to the CPU. Own PPA client (registered

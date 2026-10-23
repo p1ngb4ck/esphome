@@ -61,6 +61,20 @@ void lynx_port_video(emu_port_video_t *video);
 const int16_t *lynx_port_audio(size_t *frames);
 uint32_t lynx_port_frame_us(void);
 
+bool snes_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels);
+void snes_port_frame(uint16_t pad1, uint16_t pad2);
+void snes_port_video(emu_port_video_t *video);
+const int16_t *snes_port_audio(size_t *frames);
+uint32_t snes_port_frame_us(void);
+
+bool md_port_load(uint8_t *rom, size_t size, uint8_t channels);
+void md_port_frame(uint16_t pad1, uint16_t pad2);
+void md_port_video(emu_port_video_t *video);
+const int16_t *md_port_audio(size_t *frames);
+uint32_t md_port_frame_us(void);
+size_t md_port_save_state(uint8_t *buf, size_t cap);
+bool md_port_load_state(const uint8_t *buf, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

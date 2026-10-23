@@ -258,6 +258,8 @@ EMU_SYSTEMS = {
     "sms": EmuSystem.SMS,
     "pce": EmuSystem.PCE,
     "lynx": EmuSystem.LYNX,
+    "snes": EmuSystem.SNES,
+    "md": EmuSystem.MD,
 }
 EMU_BUTTONS = {
     "up": 1 << 0,

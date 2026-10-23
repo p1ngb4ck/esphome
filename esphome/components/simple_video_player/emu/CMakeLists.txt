@@ -38,6 +38,25 @@ if(CONFIG_SVP_EMU_LYNX)
     set_source_files_properties(${lynx_srcs} "ports/lynx_port.cpp" PROPERTIES COMPILE_OPTIONS "-O2;-fno-rtti;-fno-exceptions")
 endif()
 
+if(CONFIG_SVP_EMU_SNES)
+    file(GLOB snes_srcs "${CMAKE_CURRENT_LIST_DIR}/snes9x/src/*.c")
+    list(APPEND srcs ${snes_srcs} "ports/snes_port.c")
+    list(APPEND priv_incs "snes9x" "snes9x/src")
+    set_source_files_properties(${snes_srcs} "ports/snes_port.c" PROPERTIES COMPILE_OPTIONS "-O2"
+                                COMPILE_DEFINITIONS "RIGHTSHIFT_IS_SAR;FAST_LSB_WORD_ACCESS;NO_ZERO_LUT")
+endif()
+
+if(CONFIG_SVP_EMU_MD)
+    file(GLOB md_srcs "${CMAKE_CURRENT_LIST_DIR}/gwenesis/src/bus/*.c" "${CMAKE_CURRENT_LIST_DIR}/gwenesis/src/cpus/M68K/*.c"
+         "${CMAKE_CURRENT_LIST_DIR}/gwenesis/src/cpus/Z80/*.c" "${CMAKE_CURRENT_LIST_DIR}/gwenesis/src/io/*.c"
+         "${CMAKE_CURRENT_LIST_DIR}/gwenesis/src/savestate/*.c" "${CMAKE_CURRENT_LIST_DIR}/gwenesis/src/sound/*.c"
+         "${CMAKE_CURRENT_LIST_DIR}/gwenesis/src/vdp/*.c")
+    list(APPEND srcs ${md_srcs} "ports/md_port.c")
+    list(APPEND priv_incs "gwenesis" "gwenesis/src/bus" "gwenesis/src/cpus/M68K" "gwenesis/src/cpus/Z80" "gwenesis/src/io"
+         "gwenesis/src/savestate" "gwenesis/src/sound" "gwenesis/src/vdp")
+    set_source_files_properties(${md_srcs} PROPERTIES COMPILE_OPTIONS "-O2")
+endif()
+
 idf_component_register(SRCS ${srcs} INCLUDE_DIRS "shim" "ports" PRIV_INCLUDE_DIRS ${priv_incs} PRIV_REQUIRES esp_rom
                        LDFRAGMENTS linker.lf)
 

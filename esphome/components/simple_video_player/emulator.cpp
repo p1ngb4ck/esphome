@@ -15,8 +15,8 @@ static const char *const TAG = "simple_video_player.emulator";
 
 static constexpr TickType_t EMU_AUDIO_WAIT = pdMS_TO_TICKS(20);
 
-static const char *const SYSTEM_NAMES[] = {"NES", "Game Boy", "Master System", "PC Engine", "Lynx", "MSX",
-                                           "Game & Watch"};
+static const char *const SYSTEM_NAMES[] = {"NES", "Game Boy",     "Master System", "PC Engine",          "Lynx",
+                                           "MSX", "Game & Watch", "Super Nintendo", "Mega Drive / Genesis"};
 
 struct SystemExtension {
   const char *ext;
@@ -27,7 +27,8 @@ static const SystemExtension SYSTEM_EXTENSIONS[] = {
     {"nes", EmuSystem::NES}, {"gb", EmuSystem::GB},   {"gbc", EmuSystem::GB},   {"sms", EmuSystem::SMS},
     {"gg", EmuSystem::SMS},  {"sg", EmuSystem::SMS},  {"col", EmuSystem::SMS},  {"pce", EmuSystem::PCE},
     {"lnx", EmuSystem::LYNX}, {"rom", EmuSystem::MSX}, {"mx1", EmuSystem::MSX}, {"mx2", EmuSystem::MSX},
-    {"dsk", EmuSystem::MSX}, {"gw", EmuSystem::GW},
+    {"dsk", EmuSystem::MSX}, {"gw", EmuSystem::GW},   {"sfc", EmuSystem::SNES}, {"smc", EmuSystem::SNES},
+    {"md", EmuSystem::MD},   {"gen", EmuSystem::MD},  {"smd", EmuSystem::MD},
 };
 
 GameEmulator *GameEmulator::create(SimpleVideoPlayer *parent) {
@@ -105,6 +106,17 @@ uint32_t GameEmulator::internal_budget_(EmuSystem system) const {
       return 25 * 1024;
     default:
       return 0;
+  }
+}
+
+size_t GameEmulator::rom_alloc_(EmuSystem system, size_t size) const {
+  switch (system) {
+    case EmuSystem::SNES:
+      return size + 0x10200;
+    case EmuSystem::MD:
+      return (size + 0xFFFF) & ~static_cast<size_t>(0xFFFF);
+    default:
+      return size;
   }
 }
 
@@ -218,11 +230,14 @@ void GameEmulator::read_next_() {
       return;
     }
     this->rom_size_ = static_cast<size_t>(st.size);
-    this->rom_ = this->parent_->pool_take_(this->rom_size_, SimpleVideoPlayer::POOL_USER_GAME);
+    const size_t alloc = this->rom_alloc_(this->system_, this->rom_size_);
+    this->rom_ = this->parent_->pool_take_(alloc, SimpleVideoPlayer::POOL_USER_GAME);
     if (this->rom_ == nullptr) {
       this->fail_("no PSRAM for the ROM");
       return;
     }
+    if (alloc > this->rom_size_)
+      memset(this->rom_ + this->rom_size_, 0, alloc - this->rom_size_);
     this->storage_ = ps;
     const storage::StorageError err = worker->begin_read(ps, rel, &this->stream_, [this](storage::StorageError e) {
       if (e != storage::StorageError::STORAGE_ERROR_OK) {

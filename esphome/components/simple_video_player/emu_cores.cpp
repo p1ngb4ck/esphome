@@ -96,6 +96,20 @@ static const PortApi LYNX_API = {lynx_load,       lynx_port_frame,    lynx_port_
                                  lynx_port_frame_us, 32000};
 #endif
 
+#ifdef SVP_EMU_SNES
+static bool snes_load(uint8_t *rom, size_t size, const char *path, uint32_t rate, uint8_t channels) {
+  return snes_port_load(rom, size, rate, channels);
+}
+static const PortApi SNES_API = {snes_load, snes_port_frame, snes_port_video, snes_port_audio, snes_port_frame_us, 0};
+#endif
+
+#ifdef SVP_EMU_MD
+static bool md_load(uint8_t *rom, size_t size, const char *path, uint32_t rate, uint8_t channels) {
+  return md_port_load(rom, size, channels);
+}
+static const PortApi MD_API = {md_load, md_port_frame, md_port_video, md_port_audio, md_port_frame_us, 26633};
+#endif
+
 EmuCore *emu_make_core(EmuSystem system, void *store) {
   const PortApi *api = nullptr;
   switch (system) {
@@ -122,6 +136,16 @@ EmuCore *emu_make_core(EmuSystem system, void *store) {
 #ifdef SVP_EMU_LYNX
     case EmuSystem::LYNX:
       api = &LYNX_API;
+      break;
+#endif
+#ifdef SVP_EMU_SNES
+    case EmuSystem::SNES:
+      api = &SNES_API;
+      break;
+#endif
+#ifdef SVP_EMU_MD
+    case EmuSystem::MD:
+      api = &MD_API;
       break;
 #endif
     default:

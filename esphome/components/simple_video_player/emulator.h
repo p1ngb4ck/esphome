@@ -24,7 +24,7 @@ enum EmuButton : uint16_t {
   EMU_SELECT = 1 << 11,
 };
 
-enum class EmuSystem : uint8_t { NES, GB, SMS, PCE, LYNX, MSX, GW, COUNT };
+enum class EmuSystem : uint8_t { NES, GB, SMS, PCE, LYNX, MSX, GW, SNES, MD, COUNT };
 
 struct EmuVideo {
   const uint8_t *pixels{nullptr};
@@ -118,6 +118,7 @@ class GameEmulator
 
   bool system_for_(const char *path, EmuSystem *system) const;
   uint32_t internal_budget_(EmuSystem system) const;
+  size_t rom_alloc_(EmuSystem system, size_t size) const;
   void read_next_();
   void read_done_(storage::StorageError err);
   void read_closed_();
