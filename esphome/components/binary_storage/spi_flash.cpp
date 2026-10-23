@@ -15,6 +15,24 @@ extern "C" {
 #else
 #include <spi_flash_chip_driver.h>
 #endif
+#ifdef USE_BINARY_STORAGE_FLASH_CHIP_ISSI
+extern const spi_flash_chip_t esp_flash_chip_issi;
+#endif
+#ifdef USE_BINARY_STORAGE_FLASH_CHIP_GD
+extern const spi_flash_chip_t esp_flash_chip_gd;
+#endif
+#ifdef USE_BINARY_STORAGE_FLASH_CHIP_MXIC
+extern const spi_flash_chip_t esp_flash_chip_mxic;
+#endif
+#ifdef USE_BINARY_STORAGE_FLASH_CHIP_WINBOND
+extern const spi_flash_chip_t esp_flash_chip_winbond;
+#endif
+#ifdef USE_BINARY_STORAGE_FLASH_CHIP_BOYA
+extern const spi_flash_chip_t esp_flash_chip_boya;
+#endif
+#ifdef USE_BINARY_STORAGE_FLASH_CHIP_TH
+extern const spi_flash_chip_t esp_flash_chip_th;
+#endif
 }
 #endif
 
@@ -23,6 +41,28 @@ namespace esphome::binary_storage {
 static const char *const TAG = "spi_flash";
 
 #ifdef USE_ESP_IDF
+static const spi_flash_chip_t *const EXTERNAL_CHIP_DRIVERS[] = {
+#ifdef USE_BINARY_STORAGE_FLASH_CHIP_ISSI
+    &esp_flash_chip_issi,
+#endif
+#ifdef USE_BINARY_STORAGE_FLASH_CHIP_GD
+    &esp_flash_chip_gd,
+#endif
+#ifdef USE_BINARY_STORAGE_FLASH_CHIP_MXIC
+    &esp_flash_chip_mxic,
+#endif
+#ifdef USE_BINARY_STORAGE_FLASH_CHIP_WINBOND
+    &esp_flash_chip_winbond,
+#endif
+#ifdef USE_BINARY_STORAGE_FLASH_CHIP_BOYA
+    &esp_flash_chip_boya,
+#endif
+#ifdef USE_BINARY_STORAGE_FLASH_CHIP_TH
+    &esp_flash_chip_th,
+#endif
+    nullptr,
+};
+
 struct FourByteChipDriver {
   spi_flash_chip_t drv;
   const spi_flash_chip_t *base;
@@ -362,11 +402,15 @@ bool SPIFlash::install_four_byte_driver_() {
   if (esp_flash_read_id(this->ext_chip_, &id) != ESP_OK)
     return true;
   const spi_flash_chip_t *base = nullptr;
-  for (const spi_flash_chip_t **drv = esp_flash_registered_chips; *drv != nullptr; drv++) {
-    if ((*drv)->probe(this->ext_chip_, id) == ESP_OK) {
-      base = *drv;
+  for (const spi_flash_chip_t *drv : EXTERNAL_CHIP_DRIVERS) {
+    if (drv != nullptr && drv->probe(this->ext_chip_, id) == ESP_OK) {
+      base = drv;
       break;
     }
+  }
+  for (const spi_flash_chip_t **drv = esp_flash_registered_chips; base == nullptr && *drv != nullptr; drv++) {
+    if ((*drv)->probe(this->ext_chip_, id) == ESP_OK)
+      base = *drv;
   }
   if (base == nullptr)
     return true;
