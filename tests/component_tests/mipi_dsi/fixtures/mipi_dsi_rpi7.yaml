@@ -1,0 +1,30 @@
+esphome:
+  name: p4-test
+
+esp32:
+  board: esp32-p4-evboard
+  framework:
+    type: esp-idf
+
+psram:
+  speed: 200MHz
+
+esp_ldo:
+  - channel: 3
+    voltage: 2.5V
+
+i2c:
+  - id: display_bus
+    sda: GPIO7
+    scl: GPIO8
+
+display:
+  - platform: mipi_dsi
+    id: rpi7_normal
+    model: RPI-7INCH-V1
+  - platform: mipi_dsi
+    id: rpi7_rotated
+    model: RPI-7INCH-V1
+    transform:
+      mirror_x: true
+      mirror_y: true
