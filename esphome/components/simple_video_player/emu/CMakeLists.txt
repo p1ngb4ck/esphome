@@ -9,6 +9,35 @@ if(CONFIG_SVP_EMU_NES)
     set_source_files_properties(${nes_srcs} PROPERTIES COMPILE_OPTIONS "-O3")
 endif()
 
+if(CONFIG_SVP_EMU_GB)
+    file(GLOB gb_srcs "${CMAKE_CURRENT_LIST_DIR}/gnuboy/*.c")
+    list(APPEND srcs ${gb_srcs} "ports/gb_port.c")
+    list(APPEND priv_incs "gnuboy")
+    set_source_files_properties(${gb_srcs} PROPERTIES COMPILE_OPTIONS "-O3")
+endif()
+
+if(CONFIG_SVP_EMU_SMS)
+    file(GLOB sms_srcs "${CMAKE_CURRENT_LIST_DIR}/smsplus/*.c" "${CMAKE_CURRENT_LIST_DIR}/smsplus/cpu/*.c"
+         "${CMAKE_CURRENT_LIST_DIR}/smsplus/sound/*.c")
+    list(APPEND srcs ${sms_srcs} "ports/sms_port.c")
+    list(APPEND priv_incs "smsplus" "smsplus/cpu" "smsplus/sound")
+    set_source_files_properties(${sms_srcs} PROPERTIES COMPILE_OPTIONS "-O3")
+endif()
+
+if(CONFIG_SVP_EMU_PCE)
+    file(GLOB pce_srcs "${CMAKE_CURRENT_LIST_DIR}/pce-go/*.c")
+    list(APPEND srcs ${pce_srcs} "ports/pce_port.c")
+    list(APPEND priv_incs "pce-go")
+    set_source_files_properties(${pce_srcs} PROPERTIES COMPILE_OPTIONS "-O3")
+endif()
+
+if(CONFIG_SVP_EMU_LYNX)
+    file(GLOB lynx_srcs "${CMAKE_CURRENT_LIST_DIR}/handy/*.cpp")
+    list(APPEND srcs ${lynx_srcs} "ports/lynx_port.cpp")
+    list(APPEND priv_incs "handy")
+    set_source_files_properties(${lynx_srcs} "ports/lynx_port.cpp" PROPERTIES COMPILE_OPTIONS "-O2;-fno-rtti;-fno-exceptions")
+endif()
+
 idf_component_register(SRCS ${srcs} INCLUDE_DIRS "shim" "ports" PRIV_INCLUDE_DIRS ${priv_incs} PRIV_REQUIRES esp_rom
                        LDFRAGMENTS linker.lf)
 

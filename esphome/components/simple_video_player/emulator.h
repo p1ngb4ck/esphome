@@ -37,7 +37,7 @@ struct EmuVideo {
 class EmuCore {
  public:
   virtual ~EmuCore() = default;
-  virtual bool load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels) = 0;
+  virtual bool load(uint8_t *rom, size_t size, const char *path, uint32_t rate, uint8_t channels) = 0;
   virtual void run_frame(const uint16_t *pads) = 0;
   virtual EmuVideo video() = 0;
   virtual const int16_t *audio(size_t *frames) = 0;
@@ -99,6 +99,7 @@ class GameEmulator
   static constexpr size_t READ_CHUNK = 64 * 1024;
   static constexpr uint32_t TASK_STACK = 8192;
   static constexpr uint32_t INTERNAL_PIECE_MAX = 16 * 1024;
+  static constexpr size_t FRAME_MIN_BYTES = 256 * 240 * 2;
 
   struct SystemEntry {
     EmuSystem system;
@@ -135,6 +136,7 @@ class GameEmulator
   Piece *piece_(void *ptr);
 
   bool setup_output_();
+  void layout_(uint16_t width, uint16_t height);
   void release_output_();
   static void task_entry_(void *arg);
   void task_loop_();
@@ -185,6 +187,10 @@ class GameEmulator
   ppa_srm_rotation_angle_t ppa_rotation_{PPA_SRM_ROTATION_ANGLE_0};
   display::DisplayRotation rotation_{display::DISPLAY_ROTATION_0_DEGREES};
   uint8_t black_{0};
+  uint16_t lay_w_{0};
+  uint16_t lay_h_{0};
+  uint8_t *silence_{nullptr};
+  size_t silence_frames_{0};
 
   StaticTask task_;
   std::atomic<bool> task_stop_{false};

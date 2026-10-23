@@ -37,6 +37,30 @@ void nes_port_video(emu_port_video_t *video);
 const int16_t *nes_port_audio(size_t *frames);
 uint32_t nes_port_frame_us(void);
 
+bool gb_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels);
+void gb_port_frame(uint16_t pad1, uint16_t pad2);
+void gb_port_video(emu_port_video_t *video);
+const int16_t *gb_port_audio(size_t *frames);
+uint32_t gb_port_frame_us(void);
+
+bool sms_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels, int console);
+void sms_port_frame(uint16_t pad1, uint16_t pad2);
+void sms_port_video(emu_port_video_t *video);
+const int16_t *sms_port_audio(size_t *frames);
+uint32_t sms_port_frame_us(void);
+
+bool pce_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels);
+void pce_port_frame(uint16_t pad1, uint16_t pad2);
+void pce_port_video(emu_port_video_t *video);
+const int16_t *pce_port_audio(size_t *frames);
+uint32_t pce_port_frame_us(void);
+
+bool lynx_port_load(uint8_t *rom, size_t size, uint8_t channels);
+void lynx_port_frame(uint16_t pad1, uint16_t pad2);
+void lynx_port_video(emu_port_video_t *video);
+const int16_t *lynx_port_audio(size_t *frames);
+uint32_t lynx_port_frame_us(void);
+
 #ifdef __cplusplus
 }
 #endif

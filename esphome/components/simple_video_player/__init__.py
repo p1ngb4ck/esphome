@@ -254,6 +254,10 @@ CONF_ON_ENDED = "on_ended"
 
 EMU_SYSTEMS = {
     "nes": EmuSystem.NES,
+    "gb": EmuSystem.GB,
+    "sms": EmuSystem.SMS,
+    "pce": EmuSystem.PCE,
+    "lynx": EmuSystem.LYNX,
 }
 EMU_BUTTONS = {
     "up": 1 << 0,

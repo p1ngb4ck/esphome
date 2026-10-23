@@ -301,7 +301,7 @@ void GameEmulator::loaded_() {
   channels = std::max<uint8_t>(1, std::min<uint8_t>(2, p->wanted_audio_channels_.load(std::memory_order_acquire)));
 #endif
   this->on_main_loop_ = true;
-  const bool ok = this->core_->load(this->rom_, this->rom_size_, rate, channels);
+  const bool ok = this->core_->load(this->rom_, this->rom_size_, this->path_, rate, channels);
   this->on_main_loop_ = false;
   if (!ok) {
     this->fail_("the ROM did not load");
@@ -311,6 +311,15 @@ void GameEmulator::loaded_() {
     this->fail_("no output");
     return;
   }
+  this->silence_frames_ =
+      static_cast<size_t>(static_cast<uint64_t>(this->core_->sample_rate()) * this->core_->frame_us() / 1000000u) + 1;
+  this->silence_ = p->pool_take_(this->silence_frames_ * this->core_->channels() * sizeof(int16_t),
+                                 SimpleVideoPlayer::POOL_USER_GAME);
+  if (this->silence_ == nullptr) {
+    this->fail_("no PSRAM for the sound");
+    return;
+  }
+  memset(this->silence_, 0, this->silence_frames_ * this->core_->channels() * sizeof(int16_t));
 #if defined(USE_SPEAKER) && defined(USE_AUDIO)
   if (p->speaker_ != nullptr)
     p->speaker_->set_audio_stream_info(audio::AudioStreamInfo(16, this->core_->channels(), this->core_->sample_rate()));
@@ -427,6 +436,9 @@ void GameEmulator::end_() {
     this->pace_timer_ = nullptr;
   }
   this->release_output_();
+  if (this->silence_ != nullptr)
+    this->parent_->pool_.free(this->silence_);
+  this->silence_ = nullptr;
   this->core_ = nullptr;
   this->release_all_();
   emu_set_allocator(nullptr, nullptr, nullptr, nullptr);
@@ -535,15 +547,39 @@ bool GameEmulator::setup_output_() {
   if (p->lvgl_component_ != nullptr)
     this->rotation_ = p->lvgl_component_->get_rotation();
 #endif
+  this->layout_(video.width, video.height);
+  if (this->factor_ == 1 && this->rotation_ == display::DISPLAY_ROTATION_0_DEGREES)
+    return true;
+  ppa_client_config_t cfg{};
+  cfg.oper_type = PPA_OPERATION_SRM;
+  cfg.max_pending_trans_num = 1;
+  if (ppa_register_client(&cfg, &this->ppa_) != ESP_OK) {
+    this->ppa_ = nullptr;
+    return true;
+  }
+  this->frame_size_ = std::max<size_t>(static_cast<size_t>(video.width) * video.height * 2, FRAME_MIN_BYTES);
+  this->frame_ = p->pool_take_(this->frame_size_, SimpleVideoPlayer::POOL_USER_GAME);
+  if (this->frame_ == nullptr) {
+    ppa_unregister_client(this->ppa_);
+    this->ppa_ = nullptr;
+    return false;
+  }
+  return true;
+}
+
+void GameEmulator::layout_(uint16_t width, uint16_t height) {
+  SimpleVideoPlayer *p = this->parent_;
+  this->lay_w_ = width;
+  this->lay_h_ = height;
   const int32_t W = p->dsi_out_w_;
   const int32_t H = p->dsi_out_h_;
   const bool turned =
       this->rotation_ == display::DISPLAY_ROTATION_90_DEGREES || this->rotation_ == display::DISPLAY_ROTATION_270_DEGREES;
   const int32_t lw = turned ? H : W;
   const int32_t lh = turned ? W : H;
-  const int32_t f = std::max<int32_t>(1, std::min(lw / video.width, lh / video.height));
-  const int32_t ow = std::min<int32_t>(video.width * f, lw);
-  const int32_t oh = std::min<int32_t>(video.height * f, lh);
+  const int32_t f = std::max<int32_t>(1, std::min<int32_t>(lw / width, lh / height));
+  const int32_t ow = std::min<int32_t>(width * f, lw);
+  const int32_t oh = std::min<int32_t>(height * f, lh);
   const int32_t lx = (lw - ow) / 2;
   const int32_t ly = (lh - oh) / 2;
   this->factor_ = static_cast<uint32_t>(f);
@@ -578,23 +614,6 @@ bool GameEmulator::setup_output_() {
       break;
   }
   this->black_ = 0;
-  if (this->factor_ == 1 && this->rotation_ == display::DISPLAY_ROTATION_0_DEGREES)
-    return true;
-  ppa_client_config_t cfg{};
-  cfg.oper_type = PPA_OPERATION_SRM;
-  cfg.max_pending_trans_num = 1;
-  if (ppa_register_client(&cfg, &this->ppa_) != ESP_OK) {
-    this->ppa_ = nullptr;
-    return true;
-  }
-  this->frame_size_ = static_cast<size_t>(video.width) * video.height * 2;
-  this->frame_ = p->pool_take_(this->frame_size_, SimpleVideoPlayer::POOL_USER_GAME);
-  if (this->frame_ == nullptr) {
-    ppa_unregister_client(this->ppa_);
-    this->ppa_ = nullptr;
-    return false;
-  }
-  return true;
 }
 
 void GameEmulator::release_output_() {
@@ -644,6 +663,8 @@ void GameEmulator::draw_frame_(const EmuVideo &video) {
   display::ColorBitness bitness{};
   if (fb == nullptr || fb == p->decode_target_ || p->dsi_->get_scanout_buffers(fbs, 2, &bitness) != 2)
     return;
+  if (video.width != this->lay_w_ || video.height != this->lay_h_)
+    this->layout_(video.width, video.height);
   const uint8_t index = fb == fbs[0] ? 0 : 1;
   if ((this->black_ & (1u << index)) == 0) {
     memset(fb, 0, len);
@@ -651,7 +672,8 @@ void GameEmulator::draw_frame_(const EmuVideo &video) {
     this->black_ |= static_cast<uint8_t>(1u << index);
   }
   bool drawn = false;
-  if (this->ppa_ != nullptr && this->frame_ != nullptr) {
+  if (this->ppa_ != nullptr && this->frame_ != nullptr &&
+      static_cast<size_t>(video.width) * video.height * 2 <= this->frame_size_) {
     auto *out = reinterpret_cast<uint16_t *>(this->frame_);
     for (uint16_t y = 0; y < video.height; y++) {
       const uint8_t *row = video.pixels + static_cast<size_t>(y) * video.stride;
@@ -754,8 +776,10 @@ void GameEmulator::play_audio_() {
     return;
   size_t frames = 0;
   const int16_t *pcm = this->core_->audio(&frames);
-  if (pcm == nullptr || frames == 0)
-    return;
+  if (pcm == nullptr || frames == 0) {
+    pcm = reinterpret_cast<const int16_t *>(this->silence_);
+    frames = this->silence_frames_;
+  }
   const auto *data = reinterpret_cast<const uint8_t *>(pcm);
   size_t left = frames * this->core_->channels() * sizeof(int16_t);
   while (left > 0 && !this->task_stop_.load(std::memory_order_acquire) &&

@@ -308,7 +308,13 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
   most 16 KiB internal while the system's internal budget lasts (NES 24 KiB, Game Boy 24 KiB, SMS 25 KiB, others 0),
   else the pool (`POOL_USER_GAME`, owner row: outputs, video, desktop); every piece in a table of 96, all given back at
   the end. The cores' hot structs (nofrendo: nes, cpu, mem with its RAM as a pointer, ppu, apu) are allocated in their
-  init functions through it. ROM, the PPA's RGB565 frame and everything larger come from the pool.
+  init functions through it (gnuboy: GB, cpu, snd, WRAM / VRAM per bank in the order VRAM 0, WRAM 0, WRAM 1, VRAM 1;
+  smsplus: sms, vdp, Z80; handy's `new` through `emu_new`). ROM, the PPA's RGB565 frame and everything larger come from
+  the pool.
+- Cores (`systems:` -> `CONFIG_SVP_EMU_<SYSTEM>`): nes (nofrendo), gb (gnuboy, GB / GBC), sms (smsplus: SMS, Game Gear,
+  SG-1000 `.sg`, ColecoVision `.col`: keypad 1 / 2 / * / # on X / Y / L / R, SELECT resets), pce (pce-go, PSG rendered
+  per frame in chunks of 64), lynx (handy, 32 kHz, the cartridge's rotation). A frame without sound plays one frame of
+  silence, so the speaker paces every frame.
 - Picture: the largest whole factor that fits LVGL's screen, centred, black around (each scanout buffer cleared once
   per game and after a pause); turned only when LVGL's rotation is not 0 (PPA SRM: LVGL 90 -> PPA 270, 180 -> 180,
   270 -> 90); factor 1 at rotation 0 draws without the PPA; PPA errors fall back to the CPU. Own PPA client (registered

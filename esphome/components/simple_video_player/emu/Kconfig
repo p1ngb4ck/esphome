@@ -4,4 +4,20 @@ menu "svp emulator"
         bool "NES"
         default n
 
+    config SVP_EMU_GB
+        bool "Game Boy / Color"
+        default n
+
+    config SVP_EMU_SMS
+        bool "Master System / Game Gear / SG-1000 / ColecoVision"
+        default n
+
+    config SVP_EMU_PCE
+        bool "PC Engine"
+        default n
+
+    config SVP_EMU_LYNX
+        bool "Lynx"
+        default n
+
 endmenu
