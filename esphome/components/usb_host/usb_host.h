@@ -533,6 +533,10 @@ class USBClient : public Component {
   // Called from USB-task context -- must be fast and non-blocking.
   virtual size_t on_isoc_fill(uint8_t ep_addr, uint8_t *data, size_t max_len) { return 0; }
   virtual void on_isoc_out_error(uint8_t ep_addr) {}
+  virtual size_t on_stream_fill(IsocStream &stream, uint8_t *data, size_t max_len) {
+    return this->on_isoc_fill(stream.ep_addr, data, max_len);
+  }
+  virtual void on_stream_out_error(IsocStream &stream) { this->on_isoc_out_error(stream.ep_addr); }
   // Called on the main loop once the open sequence finished, successfully or not.
   virtual void on_stream_open(IsocStream &stream, bool ok) {}
 #endif
