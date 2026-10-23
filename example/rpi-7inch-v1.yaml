@@ -1,0 +1,83 @@
+# Raspberry Pi 7" Touch Display v1 on an ESP32-P4: minimal config, ESPHome defaults, the display parts from the
+# branch rpi7-v1-upstream. Shows the display's test card. Tested with the Guition JC-ESP32P4-M3-Dev; should work on
+# any ESP32-P4 board with a DSI connector (set the board-specific options, see README).
+
+esphome:
+  name: esp32-p4-rpi7-generic
+  friendly_name: ESP32-P4-RPi7-Generic
+
+esp32:
+  variant: ESP32P4
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+external_components:
+  - source: github://p1ngb4ck/esphome@rpi7-v1-upstream
+    components:
+      - mipi      # changed upstream component: i2c_write in init sequences
+      - mipi_dsi  # changed upstream component: link options, generic commands, I2C init writes, model RPI-7INCH-V1
+      - ft5x06    # changed upstream component: other FT5x06-family vendor IDs, 0xFF touch count
+    refresh: always
+
+psram:
+  mode: hex
+  speed: 200MHz
+
+# MIPI DSI PHY supply
+esp_ldo:
+  - channel: 3
+    voltage: 2.5V
+
+# Wi-Fi through the ESP32-C6: add your board's pins (see README)
+esp32_hosted:
+  variant: ESP32C6
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+  encryption:
+    key: !secret esphome_encryption_key
+
+ota:
+  - platform: esphome
+
+logger:
+
+i2c:  # your board's I2C pins on the display connector
+  sda: GPIO7
+  scl: GPIO8
+
+i2c_device:
+  - id: attiny
+    address: 0x45
+
+display:
+  - platform: mipi_dsi
+    model: RPI-7INCH-V1
+    transform:
+      mirror_x: true
+      mirror_y: true
+    show_test_card: true
+
+touchscreen:
+  - platform: ft5x06
+    address: 0x38
+    transform:
+      mirror_x: true
+      mirror_y: true
+
+output:
+  - platform: template
+    id: backlight_output
+    type: float
+    write_action:
+      - lambda: id(attiny).write_byte(0x86, static_cast<uint8_t>(state * 255.0f));  # PWM
+
+light:
+  - platform: monochromatic
+    name: Backlight
+    output: backlight_output
+    restore_mode: ALWAYS_ON
