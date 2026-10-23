@@ -680,9 +680,13 @@ bool GameEmulator::players_wanted() {
 }
 
 void GameEmulator::players_open(const std::string &path) {
-  if (this->state_ != State::IDLE || path.size() > storage::STORAGE_VFS_PATH_MAX)
+  if (this->state_ != State::IDLE && this->state_ != State::PAUSED)
     return;
-  memcpy(this->players_path_, path.c_str(), path.size() + 1);
+  if (this->state_ == State::IDLE) {
+    if (path.size() > storage::STORAGE_VFS_PATH_MAX)
+      return;
+    memcpy(this->players_path_, path.c_str(), path.size() + 1);
+  }
   this->player_count_ = 0;
   this->tap_head_.store(this->tap_tail_.load(std::memory_order_acquire), std::memory_order_release);
   this->players_open_ = true;
@@ -711,6 +715,12 @@ void GameEmulator::players_start() {
     return;
   this->players_close_();
   this->players_closed_trigger_.trigger();
+  if (this->state_ == State::PAUSED) {
+    this->assign_active_ = true;
+    this->pads_[0].store(0, std::memory_order_relaxed);
+    this->pads_[1].store(0, std::memory_order_relaxed);
+    return;
+  }
   this->start_(this->players_path_, true);
 }
 

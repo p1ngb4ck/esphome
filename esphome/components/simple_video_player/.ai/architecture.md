@@ -341,7 +341,8 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
   device's first key adds it (not playing), its left / right move it to player 1 / 2, A or START of a playing device
   starts the game, B or a menu key cancels; touch through `emulator.players_set` (index, seat 0-2),
   `emulator.players_start` / `players_cancel`; triggers `on_players_changed` / `on_players_closed`. A game started so maps
-  each device's buttons to its player's pad; one started without the dialog maps all to player 1.
+  each device's buttons to its player's pad; one started without the dialog maps all to player 1. Opened while a
+  game is paused, Start maps the devices anew and the game stays paused.
 - Saves (`<rom without extension>.sav` and `.st1`..`.st4` next to the ROM): the cartridge RAM (nes, gb, sms, snes:
   `sram()`) is read from `.sav` before the panel is taken, and written while paused and at the end when its CRC32
   differs from the last read / write (a worker write stream straight from the core's memory; the end waits for it).
