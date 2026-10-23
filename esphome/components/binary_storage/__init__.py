@@ -117,6 +117,9 @@ IO_MODE_SINGLE = "single"
 IO_MODE_DUAL = "dual"
 IO_MODE_QUAD = "quad"
 IO_MODE_DATA_LINES = {IO_MODE_SINGLE: 1, IO_MODE_DUAL: 2, IO_MODE_QUAD: 4}
+CONF_FLASH_CHIP = "flash_chip"
+FLASH_CHIP_GENERIC = "generic"
+EXTERNAL_FLASH_CHIPS = ("issi", "gd", "mxic", "winbond", "boya", "th")
 CONF_MOUNT_ID = "mount_id"
 CONF_PARTITION_ID = "partition_id"
 CONF_STORAGE_NAME = "storage_name"
@@ -364,6 +367,9 @@ _SPI_FLASH_BASE_SCHEMA = (
                 "'type: quad' bus runs in quad mode"
             ),
             cv.Optional(CONF_IO_MODE): cv.one_of(*IO_MODE_DATA_LINES, lower=True),
+            cv.Optional(CONF_FLASH_CHIP): cv.one_of(
+                FLASH_CHIP_GENERIC, *EXTERNAL_FLASH_CHIPS, lower=True
+            ),
             cv.Optional(CONF_REGIONS): cv.ensure_list(REGION_SCHEMA),
             cv.Optional(CONF_STORAGE_NAME): cv.string,
             # Whether this device gets its own node in the file browser. Defaults to on when a
@@ -890,6 +896,11 @@ def _final_validate(config):
                 f"with ESP-IDF and '{CONF_ASSUME_EXCLUSIVE_BUS}: true'"
             )
         config[CONF_IO_MODE] = io_mode
+        if CONF_FLASH_CHIP in config and not _esp_partition_active(config):
+            raise cv.Invalid(
+                f"'{CONF_FLASH_CHIP}' picks the ESP-IDF flash chip driver: it needs esp32 with "
+                f"ESP-IDF and '{CONF_ASSUME_EXCLUSIVE_BUS}: true'"
+            )
     if (internal_type := TYPE_TO_DEVICE.get(device_type)) is not None:
         CORE.data.setdefault("binary_storage_device_types", set()).add(internal_type)
     regions = config.get(CONF_REGIONS) or []
@@ -1092,6 +1103,10 @@ async def to_code(config):
             cg.add(var.enable_esp_partition_mode(cg.RawExpression(host), cs_num, freq_mhz))
             if (data_lines := IO_MODE_DATA_LINES[config[CONF_IO_MODE]]) != 1:
                 cg.add(var.set_data_lines(data_lines))
+            flash_chip = config.get(CONF_FLASH_CHIP)
+            for chip in EXTERNAL_FLASH_CHIPS:
+                if flash_chip is None or flash_chip == chip:
+                    cg.add_define(f"USE_BINARY_STORAGE_FLASH_CHIP_{chip.upper()}")
         else:
             await spi.register_spi_device(var, config)
         if device_type in ["SPI_FLASH", "FLASH"]:
