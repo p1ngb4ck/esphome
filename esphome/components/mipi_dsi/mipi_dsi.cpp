@@ -2,6 +2,8 @@
 #include <utility>
 #include "mipi_dsi.h"
 #include "esphome/core/helpers.h"
+#include "hal/mipi_dsi_hal.h"
+#include "hal/mipi_dsi_host_ll.h"
 
 #include <algorithm>
 #include <cstring>
@@ -113,11 +115,14 @@ void MipiDsi::setup() {
     this->reset_pin_->digital_write(false);
     delay(5);
     this->reset_pin_->digital_write(true);
-  } else {
+  } else if (!this->generic_commands_) {
     esp_lcd_panel_io_tx_param(this->io_handle_, SW_RESET_CMD, nullptr, 0);
   }
   // need to know when the display is ready for SLPOUT command - will be 120ms after reset
   auto when = millis() + 120;
+  if (this->generic_commands_) {
+    MIPI_DSI_LL_GET_HOST(0)->cmd_mode_cfg.ack_rqst_en = 0;
+  }
   err = esp_lcd_panel_init(this->handle_);
   if (err != ESP_OK) {
     this->smark_failed(LOG_STR("esp_lcd_init failed"), err);
@@ -155,6 +160,11 @@ void MipiDsi::setup() {
 #endif
       ESP_LOGVV(TAG, "Command %02X, length %d, byte(s) %s", cmd, num_args,
                 format_hex_pretty_to(hex_buf, ptr, num_args, '.'));
+      if (this->generic_commands_) {
+        this->write_generic_(cmd, ptr, num_args);
+        index += num_args;
+        continue;
+      }
       err = esp_lcd_panel_io_tx_param(this->io_handle_, cmd, ptr, num_args);
       if (err != ESP_OK) {
         this->smark_failed(LOG_STR("lcd_panel_io_tx_param failed"), err);
@@ -411,6 +421,21 @@ int MipiDsi::get_height() {
   }
 }
 
+void MipiDsi::write_generic_(uint8_t cmd, const uint8_t *args, uint8_t num_args) {
+  mipi_dsi_hal_context_t hal{};
+  hal.host = MIPI_DSI_LL_GET_HOST(0);
+  if (num_args == 0) {
+    mipi_dsi_hal_host_gen_write_short_packet(&hal, 0, MIPI_DSI_DT_GENERIC_SHORT_WRITE_1, cmd);
+  } else if (num_args == 1) {
+    mipi_dsi_hal_host_gen_write_short_packet(&hal, 0, MIPI_DSI_DT_GENERIC_SHORT_WRITE_2, cmd | (args[0] << 8));
+  } else {
+    uint8_t payload[128];
+    payload[0] = cmd;
+    memcpy(payload + 1, args, num_args);
+    mipi_dsi_hal_host_gen_write_long_packet(&hal, 0, MIPI_DSI_DT_GENERIC_LONG_WRITE, payload, num_args + 1);
+  }
+}
+
 static const uint8_t PIXEL_MODES[] = {0, 16, 18, 24};
 
 void MipiDsi::dump_config() {
@@ -431,11 +456,13 @@ void MipiDsi::dump_config() {
                 "\n  Buffer Color Depth: %d bit"
                 "\n  Display Pixel Mode: %d bit"
                 "\n  Invert Colors: %s"
-                "\n  Pixel Clock: %.1fMHz",
+                "\n  Pixel Clock: %.1fMHz"
+                "\n  Commands: %s",
                 this->model_, this->width_, this->height_, this->rotation_, this->lanes_, this->lane_bit_rate_,
                 this->hsync_pulse_width_, this->hsync_back_porch_, this->hsync_front_porch_, this->vsync_pulse_width_,
                 this->vsync_back_porch_, this->vsync_front_porch_, (3 - this->color_depth_) * 8, this->pixel_mode_,
-                YESNO(this->invert_colors_), this->pclk_frequency_);
+                YESNO(this->invert_colors_), this->pclk_frequency_,
+                this->generic_commands_ ? "generic" : "DCS");
   LOG_PIN("  Reset Pin ", this->reset_pin_);
 }
 }  // namespace esphome::mipi_dsi
