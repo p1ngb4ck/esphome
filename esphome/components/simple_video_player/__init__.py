@@ -892,22 +892,19 @@ def _resolve_speaker_audio_format(config, fconf):
     this_path = fconf.get_path_for_id(config[CONF_ID])[:-1]
     this_conf = fconf.get_config_for_path(this_path)
 
-    if speaker_conf.get(CONF_PLATFORM) == CONF_AUDIO_ROUTER:
+    if speaker_conf.get(CONF_PLATFORM) == "resampler" and isinstance(speaker_conf.get(CONF_OUTPUT_SPEAKER), list):
         # The selected output's format, at runtime: the panel reports it and plays what comes in
-        # (the router converts channels and width). Buffers are sized for the largest output, at
-        # least 48 kHz stereo; sound reaches the router 16-bit (the relay sends no other).
-        from esphome.components.audio import CONF_MAX_SAMPLE_RATE
-        from esphome.components.audio_router.speaker import output_formats
+        # (the resampler converts to the output). Buffers are sized for the largest output, at
+        # least 48 kHz stereo; sound reaches it 16-bit (the relay sends no other).
+        from esphome.components.resampler.speaker import output_formats
 
         formats = output_formats(fconf, speaker_conf)
         this_conf[CONF_AUDIO_SAMPLE_RATE] = max(
-            [48000]
-            + [f[CONF_SAMPLE_RATE] for f in formats]
-            + [f[CONF_MAX_SAMPLE_RATE] for f in formats]
+            [48000] + [f[CONF_SAMPLE_RATE] for f in formats if CONF_SAMPLE_RATE in f]
         )
         this_conf[CONF_AUDIO_BITS_PER_SAMPLE] = 16
         this_conf[CONF_AUDIO_CHANNELS] = max(
-            [2] + [f[CONF_NUM_CHANNELS] for f in formats]
+            [2] + [f[CONF_NUM_CHANNELS] for f in formats if CONF_NUM_CHANNELS in f]
         )
         this_conf[CONF_RESOLVED_SPEAKER_CHANNEL] = "stereo"
         this_conf[CONF_AUDIO_ROUTER] = True
@@ -1004,12 +1001,15 @@ def _speaker_devices(fconf, speaker_id, seen=None) -> set[str]:
     except KeyError:
         return {key}
     conf = fconf.get_config_for_path(path)
-    if conf.get(CONF_PLATFORM) == CONF_AUDIO_ROUTER:
-        ends = set()
-        for output in conf.get("outputs") or []:
-            ends |= _speaker_devices(fconf, output[CONF_SPEAKER], seen)
-        return ends or {key}
     following = conf.get(CONF_OUTPUT_SPEAKER)
+    if isinstance(following, list):
+        ends = set()
+        for output in following:
+            if CONF_SPEAKER in output:
+                ends |= _speaker_devices(fconf, output[CONF_SPEAKER], seen)
+            else:
+                ends.add(f"usb_audio:{output.get('usb_audio')}")
+        return ends or {key}
     if following is None and len(path) >= 2 and path[-2] == "source_speakers":
         following = fconf.get_config_for_path(path[:-2]).get(CONF_OUTPUT_SPEAKER)
     if following is None:

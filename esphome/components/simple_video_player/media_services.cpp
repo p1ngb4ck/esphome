@@ -172,7 +172,7 @@ void SimpleVideoPlayer::on_svp_set_volume(float volume) { this->set_volume(clamp
 void SimpleVideoPlayer::on_audio_output_changed_() {
   // Main loop: the router switched outputs. Senders are told the new output's format; the relay
   // plays on in it.
-  const audio::AudioStreamInfo &format = this->audio_router_->active_format();
+  const audio::AudioStreamInfo format = this->audio_router_->active_format();
   this->wanted_audio_rate_.store(format.get_sample_rate(), std::memory_order_release);
   this->wanted_audio_min_rate_.store(this->audio_router_->active_min_sample_rate(), std::memory_order_release);
   this->wanted_audio_max_rate_.store(this->audio_router_->active_max_sample_rate(), std::memory_order_release);

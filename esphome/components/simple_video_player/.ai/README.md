@@ -25,7 +25,7 @@ round without the maintainer's go.
 | IDF | Must build with ESP-IDF 5.5.5 (ESPHome's) and 6.1 (reference device: 6.1, `release/v6.1`) |
 | Display | MIPI-DSI panel 800x1280 native, LVGL screen 1280x800 (rotated). DSI-direct video: decoded frame copied into the panel framebuffer; LVGL paused meanwhile |
 | Decoders | HW JPEG decoder (the only video path: MJPEG), shared by video, stream stills, pictures, cover (driver `codec_mutex` serialises). No H.264. PNG/BMP in software |
-| Audio out | Speakers: I2S (es8311), USB audio, Bluetooth A2DP. `audio_router` picks the output; mixers/resamplers in YAML. Speaker media player (HA audio) separate |
+| Audio out | Speakers: I2S (es8311), USB audio, Bluetooth A2DP. The resampler speaker with an output list (`media_out`) picks the output; mixers/resamplers in YAML. Speaker media player (HA audio) separate |
 | Network | Wi-Fi via esp32_hosted (ESP32-C6 over SDIO, `use_psram: true`) and Ethernet (IP101). wifi's scan-done handling holds ESP-Hosted's ~3.9 KB stack buffer for all records (wifi_component_esp_idf.cpp) |
 | Stacks | loopTask: `ESPHOME_LOOP_TASK_STACK_SIZE` (esp32 `advanced: loop_task_stack_size`, default 8192; not set in the device YAML); `CONFIG_ESP_MAIN_TASK_STACK_SIZE` 32768 (device YAML) is the IDF main task, not loopTask. LVGL event callbacks run deep inside `lv_timer_handler` on loopTask |
 | Storage | SD (sd_storage), USB mass storage, NFS, via the storage subsystem (`storage` component) |
@@ -66,7 +66,7 @@ round without the maintainer's go.
 
 ### Speakers
 - **Speakers are always on.** Playback only sends data to the currently selected speaker. svp never
-  starts, stops, pauses, re-formats or otherwise changes a speaker; only `audio_router` starts/stops
+  starts, stops, pauses, re-formats or otherwise changes a speaker; only the output-list resampler starts/stops
   its output when the output is switched. Speaker buffers belong to the speaker and are not touched.
   (Open: `file_speaker_` still violates this, see open-issues.)
 - The default audio path (speaker media player, HA audio to the device) stays as it is.

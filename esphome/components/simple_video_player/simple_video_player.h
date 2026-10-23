@@ -42,7 +42,7 @@
 #include "esphome/components/audio/audio_decoder.h"
 #endif
 #ifdef SVP_AUDIO_ROUTER
-#include "esphome/components/audio_router/speaker/audio_router.h"
+#include "esphome/components/resampler/speaker/resampler_speaker.h"
 #endif
 
 #ifdef SVP_CHANNEL_LIST
@@ -390,7 +390,7 @@ class SimpleVideoPlayer : public Component
 #endif
 #ifdef SVP_AUDIO_ROUTER
   /// The speaker is this router: sound is wanted in its selected output's rate and channel count.
-  void set_audio_router(audio_router::AudioRouter *router) { this->audio_router_ = router; }
+  void set_audio_router(resampler::ResamplerSpeaker *router) { this->audio_router_ = router; }
 #endif
 #ifdef SVP_AUDIO_FILES
   // Audio files (audio_file_speaker_id, a resampler in front of the speaker): a queue of their own,
@@ -1768,7 +1768,7 @@ class SimpleVideoPlayer : public Component
   std::atomic<uint32_t> wanted_audio_min_rate_{0};
   std::atomic<uint32_t> wanted_audio_max_rate_{0};
 #ifdef SVP_AUDIO_ROUTER
-  audio_router::AudioRouter *audio_router_{nullptr};
+  resampler::ResamplerSpeaker *audio_router_{nullptr};
   void on_audio_output_changed_();
 #endif
   std::atomic<bool> audio_enabled_{false};        // Audio stream available and enabled (playback, reader, audio tasks)
