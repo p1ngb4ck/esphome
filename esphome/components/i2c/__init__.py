@@ -362,8 +362,8 @@ async def to_code(config: ConfigType) -> None:
         cg.add(var.set_scan(config[CONF_SCAN]))
         if CONF_TIMEOUT in config:
             cg.add(var.set_timeout(int(config[CONF_TIMEOUT].total_microseconds)))
-        if CONF_BUS_RECOVERY in config:
-            cg.add(var.set_bus_recovery(config[CONF_BUS_RECOVERY]))
+        if (bus_recovery := config.get(CONF_BUS_RECOVERY)) is not None:
+            cg.add(var.set_bus_recovery(bus_recovery))
         if CORE.using_arduino and not CORE.is_esp32:
             cg.add_library("Wire", None)
         if CONF_LOW_POWER_MODE in config:
