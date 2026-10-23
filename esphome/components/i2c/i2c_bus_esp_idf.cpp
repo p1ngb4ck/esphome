@@ -28,7 +28,6 @@ void IDFI2CBus::setup() {
     this->timeout_ = 13000;
   }
 
-  this->recover_();
 
   i2c_master_bus_config_t bus_conf{};
   memset(&bus_conf, 0, sizeof(bus_conf));
