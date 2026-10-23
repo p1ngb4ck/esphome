@@ -83,6 +83,10 @@ static std::unique_ptr<ring_buffer::RingBuffer> make_psram_ring(size_t size) {
   return ring_buffer::RingBuffer::create(size);
 }
 
+static bool same_format(const EndpointConfig &a, const EndpointConfig &b) {
+  return a.sample_rate == b.sample_rate && a.bits_per_sample == b.bits_per_sample && a.channels == b.channels;
+}
+
 template<typename T> static T *make_in_psram(USBAudioClient *client) {
   RAMAllocator<T> allocator(RAMAllocator<T>::ALLOC_EXTERNAL);
   T *mem = allocator.allocate(1);
@@ -315,7 +319,9 @@ void USBAudioClient::attach_routes_(USBAudioDevice *device) {
       device->slots_[route].ring = std::move(ring);
       sink->attach(device, device->slots_[route].ring.get());
       device->slots_[route].sink.store(sink);
-      this->speaker_routes_[route](sink, device->name(), device->key(), true);
+      const EndpointConfig &fmt = device->spk_fmt_;
+      this->speaker_routes_[route](sink, device->name(), device->key(), fmt.sample_rate,
+                                   static_cast<uint8_t>(fmt.bits_per_sample), fmt.channels, true);
     }
   }
   if (device->mic_format_ok_ && !this->microphone_routes_.empty()) {
@@ -338,7 +344,8 @@ void USBAudioClient::attach_fixed_() {
   if (this->speaker_ != nullptr && this->speaker_->device() == nullptr && slot < USBAudioDevice::MAX_SINKS) {
     for (const auto &dev : this->devices()) {
       auto *device = static_cast<USBAudioDevice *>(dev->context);
-      if (device == nullptr || device->gone_ || !device->spk_format_ok_ || device->slots_[slot].ring != nullptr)
+      if (device == nullptr || device->gone_ || !device->spk_format_ok_ || device->slots_[slot].ring != nullptr ||
+          !same_format(device->spk_fmt_, this->spk_cfg_))
         continue;
       device->slots_[slot].ring = make_psram_ring(this->spk_buf_size_);
       if (device->slots_[slot].ring == nullptr) {
@@ -353,7 +360,8 @@ void USBAudioClient::attach_fixed_() {
   if (this->microphone_ != nullptr && this->microphone_->device() == nullptr) {
     for (const auto &dev : this->devices()) {
       auto *device = static_cast<USBAudioDevice *>(dev->context);
-      if (device == nullptr || device->gone_ || !device->mic_format_ok_ || device->capture_ != nullptr)
+      if (device == nullptr || device->gone_ || !device->mic_format_ok_ || device->capture_ != nullptr ||
+          !same_format(device->mic_fmt_, this->mic_cfg_))
         continue;
       device->mic_rb_ = make_psram_ring(this->mic_buf_size_);
       if (device->mic_rb_ == nullptr) {
@@ -373,7 +381,7 @@ void USBAudioClient::release_device_(USBAudioDevice *device) {
     if (sink == nullptr)
       continue;
     if (slot < this->speaker_routes_.size())
-      this->speaker_routes_[slot](sink, device->name(), device->key(), false);
+      this->speaker_routes_[slot](sink, device->name(), device->key(), 0, 0, 0, false);
     sink->detach();
   }
   USBAudioCapture *capture = device->capture_;
@@ -626,7 +634,7 @@ size_t USBAudioSink::play_internal_(const uint8_t *data, size_t length, uint32_t
     return 0;
   }
 
-  const EndpointConfig &cfg = this->client_->spk_cfg_;
+  const EndpointConfig &cfg = device->speaker_format();
   const uint32_t work_budget_ms =
       (time_budget_ms > 0) ? std::min<uint32_t>(time_budget_ms, MAX_WORK_TIME_MS) : MAX_WORK_TIME_MS;
   const uint32_t start_ms = millis();
@@ -777,7 +785,7 @@ void USBAudioSink::set_mute_state(bool mute_state) {
 }
 
 void USBAudioCapture::attach(USBAudioDevice *device, ring_buffer::RingBuffer *ring) {
-  const EndpointConfig &cfg = this->client_->mic_cfg_;
+  const EndpointConfig &cfg = device->microphone_format();
   this->audio_stream_info_ = audio::AudioStreamInfo(cfg.bits_per_sample, cfg.channels, cfg.sample_rate);
   xSemaphoreTake(this->client_->capture_lock_, portMAX_DELAY);
   this->ring_ = ring;
@@ -1703,8 +1711,26 @@ uint32_t USBAudioDevice::terminal_channel_config_(uint8_t terminal_id) {
   return 0;
 }
 
+static uint32_t uac_offered_rate(const UacAltInfo &alt, uint32_t wanted) {
+  if (alt.freq_from_clock)
+    return wanted;
+  if (alt.sample_freq_type == 0)
+    return std::clamp(wanted, alt.sample_freq_lower, alt.sample_freq_upper);
+  uint32_t best = 0;
+  for (uint8_t i = 0; i < alt.sample_freq_type && i < UAC_MAX_SAMPLE_FREQS; i++) {
+    const uint32_t rate = alt.sample_freq[i];
+    if (rate == 0)
+      continue;
+    const uint32_t diff = rate > wanted ? rate - wanted : wanted - rate;
+    const uint32_t best_diff = best > wanted ? best - wanted : wanted - best;
+    if (best == 0 || diff < best_diff)
+      best = rate;
+  }
+  return best;
+}
+
 bool USBAudioDevice::parse_as_interface_(bool want_out, uint8_t channels, uint8_t bits, uint32_t sample_rate,
-                                          uint8_t &intf_out, UacAltInfo &alt_out) {
+                                          uint8_t &intf_out, UacAltInfo &alt_out, EndpointConfig &fmt_out) {
   const usb_config_desc_t *cfg = this->dev_->config;
   if (cfg == nullptr)
     return false;
@@ -1713,6 +1739,7 @@ bool USBAudioDevice::parse_as_interface_(bool want_out, uint8_t channels, uint8_
   // search, otherwise the first-match rule below would keep a previous device's setting.
   intf_out = 0;
   alt_out = {};
+  fmt_out = {};
 
   uint16_t total = cfg->wTotalLength;
   int offset = 0;
@@ -1743,6 +1770,10 @@ bool USBAudioDevice::parse_as_interface_(bool want_out, uint8_t channels, uint8_
   // of the frame. Both are remembered so the choice does not depend on descriptor order.
   UacAltInfo mapped_alt{};
   uint8_t mapped_intf = 0;
+  UacAltInfo offered_alt{};
+  uint8_t offered_intf = 0;
+  uint32_t offered_rate = 0;
+  uint8_t offered_penalty = UINT8_MAX;
 
   // What the device offers, once per device (the first of the two searches): what a configuration can ask for
   const bool log_formats = want_out == this->client_->spk_cfg_.configured;
@@ -1766,6 +1797,18 @@ bool USBAudioDevice::parse_as_interface_(bool want_out, uint8_t channels, uint8_
       ESP_LOGD(TAG, "Offers %s: intf=%u alt=%u channels=%u bits=%u rate=%s Hz",
                (cur_alt_info.ep_addr & 0x80) == 0 ? "speaker" : "microphone", cur_intf, cur_alt_info.alt_setting,
                cur_alt_info.channels, cur_alt_info.bit_resolution, rates);
+    }
+    if (((cur_alt_info.ep_addr & 0x80) == 0) == want_out && cur_alt_info.sub_frame_size >= 2 &&
+        cur_alt_info.sub_frame_size <= 4 && cur_alt_info.channels >= 1 && cur_alt_info.channels <= 8) {
+      const uint32_t rate = uac_offered_rate(cur_alt_info, sample_rate);
+      const uint8_t penalty = (rate != sample_rate ? 4 : 0) + (cur_alt_info.channels != channels ? 2 : 0) +
+                              (cur_alt_info.sub_frame_size * 8u != bits ? 1 : 0);
+      if (rate != 0 && penalty < offered_penalty) {
+        offered_alt = cur_alt_info;
+        offered_intf = cur_intf;
+        offered_rate = rate;
+        offered_penalty = penalty;
+      }
     }
     if (cur_alt_info.bit_resolution != bits)
       return;
@@ -1965,11 +2008,25 @@ bool USBAudioDevice::parse_as_interface_(bool want_out, uint8_t channels, uint8_
              alt_out.map_left, alt_out.map_right);
   }
 
+  uint32_t rate = sample_rate;
+  if (!alt_out.valid && offered_alt.valid) {
+    intf_out = offered_intf;
+    alt_out = offered_alt;
+    rate = offered_rate;
+    ESP_LOGI(TAG, "%s: %u channels, %u bits, %" PRIu32 " Hz not offered; taking %u channels, %u bits, %" PRIu32 " Hz",
+             want_out ? "Speaker" : "Mic", channels, bits, sample_rate, alt_out.channels, alt_out.sub_frame_size * 8u,
+             rate);
+  }
+
   if (!alt_out.valid) {
     ESP_LOGD(TAG, "No %s AS alt-setting found for channels=%u bits=%u rate=%" PRIu32,
              want_out ? "speaker" : "microphone", channels, bits, sample_rate);
     return false;
   }
+  fmt_out.channels = alt_out.channel_map_active ? 2 : alt_out.channels;
+  fmt_out.bits_per_sample = alt_out.sub_frame_size * 8u;
+  fmt_out.sample_rate = rate;
+  fmt_out.configured = true;
 
   ESP_LOGI(TAG, "%s: intf=%u alt=%u ep=0x%02X mps=%u channels=%u bits=%u",
            want_out ? "Speaker" : "Mic", intf_out, alt_out.alt_setting, alt_out.ep_addr,
@@ -2687,7 +2744,7 @@ bool USBAudioDevice::open_speaker_stream_() {
     // 1 ms frame, so an inflated interval rate starves the device by that same factor.
     // Halve back down to what mps actually describes, never below the 1 ms frame rate.
     while (frac_div > 1000u && this->spk_alt_.mps != 0 &&
-           ((this->client_->spk_cfg_.sample_rate / frac_div) * frame_size) * 2 <= static_cast<uint32_t>(this->spk_alt_.mps)) {
+           ((this->spk_fmt_.sample_rate / frac_div) * frame_size) * 2 <= static_cast<uint32_t>(this->spk_alt_.mps)) {
       frac_div /= 2;
     }
     if (frac_div != derived_ips) {
@@ -2698,8 +2755,8 @@ bool USBAudioDevice::open_speaker_stream_() {
     this->spk_stream_.is_output       = true;
     this->spk_stream_.frame_size      = frame_size;
     this->spk_stream_.frac_div        = frac_div;
-    this->spk_stream_.packet_size      = (this->client_->spk_cfg_.sample_rate / frac_div) * frame_size;
-    this->spk_stream_.packet_size_frac = this->client_->spk_cfg_.sample_rate % frac_div;
+    this->spk_stream_.packet_size      = (this->spk_fmt_.sample_rate / frac_div) * frame_size;
+    this->spk_stream_.packet_size_frac = this->spk_fmt_.sample_rate % frac_div;
     this->spk_stream_.frac_accum      = 0;
     this->spk_stream_.fb_value.store(0, std::memory_order_relaxed);
     this->spk_stream_.fb_accum        = 0;
@@ -2790,11 +2847,11 @@ void USBAudioDevice::on_connected() {
     this->spk_format_ok_ = this->parse_as_interface_(true, this->client_->spk_cfg_.channels,
                                                      static_cast<uint8_t>(this->client_->spk_cfg_.bits_per_sample),
                                                      this->client_->spk_cfg_.sample_rate,
-                                                     this->spk_as_intf_, this->spk_alt_);
+                                                     this->spk_as_intf_, this->spk_alt_, this->spk_fmt_);
     if (!this->spk_format_ok_) {
       // The device cannot do the configured format (its formats: "Offers" above). Retrying will not change that:
       // said once, the speaker stays off for this device; its microphone (if configured) is served on
-      ESP_LOGW(TAG, "Device does not offer the configured speaker format: no speaker on it");
+      ESP_LOGW(TAG, "Device offers no usable speaker format: no speaker on it");
     }
   }
 
@@ -2802,9 +2859,9 @@ void USBAudioDevice::on_connected() {
     this->mic_format_ok_ = this->parse_as_interface_(false, this->client_->mic_cfg_.channels,
                                                      static_cast<uint8_t>(this->client_->mic_cfg_.bits_per_sample),
                                                      this->client_->mic_cfg_.sample_rate,
-                                                     this->mic_as_intf_, this->mic_alt_);
+                                                     this->mic_as_intf_, this->mic_alt_, this->mic_fmt_);
     if (!this->mic_format_ok_) {
-      ESP_LOGW(TAG, "Device does not offer the configured microphone format: no microphone on it");
+      ESP_LOGW(TAG, "Device offers no usable microphone format: no microphone on it");
     }
   }
 
@@ -2844,9 +2901,9 @@ void USBAudioDevice::connect_setup_() {
   // in the same order, before the interface is selected.
   if (this->uac_version_ >= UAC_VERSION_2) {
     if (this->spk_format_ok_)
-      this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->client_->spk_cfg_.sample_rate);
+      this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_fmt_.sample_rate);
     if (this->mic_format_ok_)
-      this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->client_->mic_cfg_.sample_rate);
+      this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->mic_fmt_.sample_rate);
   }
 
   // Feature Unit requests go to the AudioControl interface, so the saved volume and mute
@@ -3213,11 +3270,11 @@ void USBAudioDevice::run_ctrl_(const CtrlRequest &request) {
         this->apply_pending_controls_();
         break;
       case CtrlOp::SPK_RATE:
-        this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->client_->spk_cfg_.sample_rate);
+        this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_fmt_.sample_rate);
         this->spk_rate_done_seq_.store(request.seq);
         break;
       case CtrlOp::MIC_RATE:
-        this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->client_->mic_cfg_.sample_rate);
+        this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->mic_fmt_.sample_rate);
         this->mic_rate_done_seq_.store(request.seq);
         break;
     }

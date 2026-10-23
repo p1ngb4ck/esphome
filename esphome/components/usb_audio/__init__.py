@@ -52,6 +52,7 @@ CONF_VID = "vid"
 CONF_PID = "pid"
 CONF_DEFAULT_BUFFER_SIZE = 6400
 MAX_SINKS = 4
+PREFERRED_FORMATS = {CONF_SPEAKER: (48000, 2), CONF_MICROPHONE: (16000, 1)}
 
 BITS_PER_SAMPLE_OPTIONS = [8, 16, 24, 32]
 
@@ -312,10 +313,9 @@ def _validate_routes(config, full_config):
         raise cv.Invalid(
             f"usb_audio '{hub_id}': a microphone platform and resampler microphone sources cannot share a block"
         )
-    if speakers and CONF_SPEAKER not in config:
-        raise cv.Invalid(f"usb_audio '{hub_id}': resampler outputs need the block's 'speaker' format")
-    if microphones and CONF_MICROPHONE not in config:
-        raise cv.Invalid(f"usb_audio '{hub_id}': resampler microphone sources need the block's 'microphone' format")
+    for domain, routes in ((CONF_SPEAKER, speakers), (CONF_MICROPHONE, microphones)):
+        if routes and domain not in config:
+            config[domain] = _format_schema(*PREFERRED_FORMATS[domain])({})
 
 
 def _final_validate(config):

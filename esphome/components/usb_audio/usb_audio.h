@@ -126,7 +126,8 @@ struct EndpointConfig {
   bool configured{false};
 };
 
-using SpeakerRoute = std::function<void(speaker::Speaker *sink, const char *name, uint32_t key, bool added)>;
+using SpeakerRoute = std::function<void(speaker::Speaker *sink, const char *name, uint32_t key, uint32_t sample_rate,
+                                         uint8_t bits_per_sample, uint8_t channels, bool added)>;
 using MicrophoneRoute = std::function<void(microphone::Microphone *mic, const char *name, uint32_t key, bool added)>;
 
 class USBAudioSink : public speaker::Speaker {
@@ -265,6 +266,8 @@ class USBAudioDevice {
   uint32_t get_speaker_packet_bytes() const { return this->spk_stream_open_ ? this->spk_stream_.packet_size : 0; }
   const char *name() const { return this->name_; }
   uint32_t key() const { return this->key_; }
+  const EndpointConfig &speaker_format() const { return this->spk_fmt_; }
+  const EndpointConfig &microphone_format() const { return this->mic_fmt_; }
 
   // True when the stream is open or opening; on_stream_event() then reports the outcome.
   bool resume_microphone();
@@ -302,7 +305,7 @@ class USBAudioDevice {
   size_t fill_mapped_(uint8_t *data, size_t max_len);
   void push_mapped_capture_(const uint8_t *data, size_t len);
   bool parse_as_interface_(bool want_out, uint8_t channels, uint8_t bits,
-                            uint32_t sample_rate, uint8_t &intf_out, UacAltInfo &alt_out);
+                            uint32_t sample_rate, uint8_t &intf_out, UacAltInfo &alt_out, EndpointConfig &fmt_out);
 
   // -- UAC control requests --------------------------------------------------
   // Issue a class-specific control transfer and wait for it to finish, up to
@@ -402,6 +405,8 @@ class USBAudioDevice {
   UacAltInfo spk_alt_{};           // chosen alt-setting for speaker
   uint8_t mic_as_intf_{0};         // AudioStreaming interface for microphone
   UacAltInfo mic_alt_{};           // chosen alt-setting for microphone
+  EndpointConfig spk_fmt_{};
+  EndpointConfig mic_fmt_{};
 
   // -- Stream state ----------------------------------------------------------
   usb_host::IsocStream spk_stream_{};
