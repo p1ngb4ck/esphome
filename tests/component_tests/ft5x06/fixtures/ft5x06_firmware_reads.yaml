@@ -1,0 +1,30 @@
+esphome:
+  name: ft5x06-test
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+i2c:
+  - id: i2c_bus
+    sda: GPIO21
+    scl: GPIO22
+
+display:
+  - platform: ssd1306_i2c
+    id: test_display
+    model: SSD1306_128X64
+    lambda: |-
+      it.rectangle(0, 0, it.get_width(), it.get_height());
+
+touchscreen:
+  - platform: ft5x06
+    id: touch_default
+    display: test_display
+    address: 0x38
+  - platform: ft5x06
+    id: touch_firmware_reads
+    display: test_display
+    address: 0x39
+    firmware_reads: true

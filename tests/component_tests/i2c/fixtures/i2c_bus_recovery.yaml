@@ -1,0 +1,16 @@
+esphome:
+  name: i2c-test
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+i2c:
+  - id: bus_default
+    sda: GPIO21
+    scl: GPIO22
+  - id: bus_no_recovery
+    sda: GPIO16
+    scl: GPIO17
+    bus_recovery: false

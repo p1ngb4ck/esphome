@@ -93,7 +93,7 @@ void FT5x06Touchscreen::update_touches_firmware_() {
     ESP_LOGW(TAG, "Failed to read status");
     return;
   }
-  if (touch_cnt == 0xFF)
+  if (touch_cnt == FT5X06_NOT_TOUCHED)
     return;
   touch_cnt = std::min<uint8_t>(touch_cnt & 0x0F, MAX_TOUCHES);
   for (uint8_t i = 0; i != touch_cnt; i++) {
@@ -103,7 +103,7 @@ void FT5x06Touchscreen::update_touches_firmware_() {
       return;
     }
     uint8_t status = data[0] >> 6;
-    if (status != 1 && status != 2)
+    if (status != FT5X06_EVENT_UP && status != FT5X06_EVENT_CONTACT)
       continue;
     uint8_t id = data[2] >> 4;
     uint16_t x = encode_uint16(data[0] & 0x0F, data[1]);
