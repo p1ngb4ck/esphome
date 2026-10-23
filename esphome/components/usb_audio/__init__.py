@@ -218,7 +218,38 @@ def _select_fifo_bias(out_mps: int, in_mps: int):
     return None
 
 
+def _buffer_minimum(stream) -> int:
+    frame = int(stream[CONF_NUM_CHANNELS]) * (int(stream[CONF_BITS_PER_SAMPLE]) // 8)
+    return (-(-int(stream[CONF_SAMPLE_RATE]) // 1000) + 1) * frame
+
+
+def _apply_buffer_sizes(config, full_config):
+    hub_id = str(config[CONF_ID])
+    for domain, key in (
+        (CONF_SPEAKER, CONF_SPEAKER_BUFFER_SIZE),
+        (CONF_MICROPHONE, CONF_MICROPHONE_BUFFER_SIZE),
+    ):
+        minimum = max(
+            (
+                _buffer_minimum(entry)
+                for entry in full_config.get(domain) or []
+                if entry.get(CONF_PLATFORM) == "usb_audio"
+                and str(entry.get(CONF_USB_AUDIO_ID)) == hub_id
+            ),
+            default=0,
+        )
+        if key not in config:
+            config[key] = max(CONF_DEFAULT_BUFFER_SIZE, minimum)
+        elif config[key] < minimum:
+            raise cv.Invalid(
+                f"'{key}' must be at least {minimum} bytes (one 1 ms packet and one frame) "
+                f"for this {domain} format",
+                path=[key],
+            )
+
+
 def _final_validate(config):
+    _apply_buffer_sizes(config, fv.full_config.get())
     variant = esp32.get_esp32_variant()
     if not _needs_fifo_bias():
         return config
@@ -314,12 +345,8 @@ CONFIG_SCHEMA = cv.All(
     cv.COMPONENT_SCHEMA.extend(
         {
             cv.GenerateID(): cv.declare_id(USBAudioClient),
-            cv.Optional(
-                CONF_MICROPHONE_BUFFER_SIZE, default=CONF_DEFAULT_BUFFER_SIZE
-            ): cv.positive_int,
-            cv.Optional(
-                CONF_SPEAKER_BUFFER_SIZE, default=CONF_DEFAULT_BUFFER_SIZE
-            ): cv.positive_int,
+            cv.Optional(CONF_MICROPHONE_BUFFER_SIZE): cv.positive_int,
+            cv.Optional(CONF_SPEAKER_BUFFER_SIZE): cv.positive_int,
             cv.Optional(CONF_CHANNEL_PAIR, default="front"): cv.enum(
                 CHANNEL_PAIRS, lower=True
             ),

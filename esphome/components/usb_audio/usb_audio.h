@@ -144,6 +144,7 @@ class USBAudioClient : public usb_host::USBClient {
 
   void setup() override;
   void loop() override;
+  bool teardown() override;
   float get_setup_priority() const override { return setup_priority::IO; }
 
   // -- Configuration setters -------------------------------------------------

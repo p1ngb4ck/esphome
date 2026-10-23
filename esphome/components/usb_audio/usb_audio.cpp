@@ -193,6 +193,14 @@ void USBAudioClient::loop() {
     this->disable_loop();
 }
 
+bool USBAudioClient::teardown() {
+  this->close_speaker_stream_();
+  this->close_microphone_stream_();
+  return this->spk_stream_.pending_urbs.load(std::memory_order_acquire) == 0 &&
+         this->spk_fb_stream_.pending_urbs.load(std::memory_order_acquire) == 0 &&
+         this->mic_stream_.pending_urbs.load(std::memory_order_acquire) == 0 && !this->ctrl_submitting_.load();
+}
+
 // Backoff helpers. next_attempt_ms is an absolute millis() deadline; fail_count only sets
 // how far it is pushed out.
 bool USBAudioClient::reopen_due_(const uint32_t &next_attempt_ms, uint8_t fail_count) const {
