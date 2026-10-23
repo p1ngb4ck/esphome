@@ -87,17 +87,6 @@ void SPIFlash::setup() {
     return;
   }
 
-  // Enable quad mode if configured
-  if (this->quad_mode_) {
-    ESP_LOGCONFIG(TAG, "  Enabling Quad SPI mode...");
-    if (!this->enable_quad_mode_()) {
-      ESP_LOGW(TAG, "  Failed to enable Quad SPI mode, falling back to standard SPI");
-      this->quad_mode_ = false;
-    } else {
-      ESP_LOGCONFIG(TAG, "  Quad SPI mode enabled (4x faster reads)");
-    }
-  }
-
   // Call base class setup
   BinaryStorage::setup();
 
@@ -201,85 +190,6 @@ uint8_t SPIFlash::read_status_register2() {
   uint8_t status = this->read_byte();
   this->disable();
   return status;
-}
-
-bool SPIFlash::enable_quad_mode_() {
-  // Read current status registers
-  uint8_t status1 = this->read_status_register();
-  uint8_t status2 = this->read_status_register2();
-
-  // Check if QE bit is already set
-  if (status2 & STATUS2_QE) {
-    ESP_LOGD(TAG, "Quad mode already enabled");
-    return true;
-  }
-
-  // Set QE bit in status register 2
-  status2 |= STATUS2_QE;
-
-  // Write both status registers (must write SR1 and SR2 together)
-  if (!this->write_enable()) {
-    ESP_LOGE(TAG, "Write enable failed for quad mode");
-    return false;
-  }
-
-  this->enable();
-  this->write_byte(CMD_WRITE_STATUS_REG);
-  this->write_byte(status1);  // SR1
-  this->write_byte(status2);  // SR2
-  this->disable();
-
-  // Wait for write to complete
-  if (!this->wait_ready(100)) {
-    ESP_LOGE(TAG, "Timeout waiting for quad mode enable");
-    return false;
-  }
-
-  // Verify QE bit is set
-  status2 = this->read_status_register2();
-  if (!(status2 & STATUS2_QE)) {
-    ESP_LOGE(TAG, "Failed to enable quad mode");
-    return false;
-  }
-
-  ESP_LOGD(TAG, "Quad mode enabled successfully");
-  return true;
-}
-
-bool SPIFlash::disable_quad_mode_() {
-  // Read current status registers
-  uint8_t status1 = this->read_status_register();
-  uint8_t status2 = this->read_status_register2();
-
-  // Check if QE bit is already cleared
-  if (!(status2 & STATUS2_QE)) {
-    ESP_LOGD(TAG, "Quad mode already disabled");
-    return true;
-  }
-
-  // Clear QE bit in status register 2
-  status2 &= ~STATUS2_QE;
-
-  // Write both status registers
-  if (!this->write_enable()) {
-    ESP_LOGE(TAG, "Write enable failed for quad mode disable");
-    return false;
-  }
-
-  this->enable();
-  this->write_byte(CMD_WRITE_STATUS_REG);
-  this->write_byte(status1);  // SR1
-  this->write_byte(status2);  // SR2
-  this->disable();
-
-  // Wait for write to complete
-  if (!this->wait_ready(100)) {
-    ESP_LOGE(TAG, "Timeout waiting for quad mode disable");
-    return false;
-  }
-
-  ESP_LOGD(TAG, "Quad mode disabled successfully");
-  return true;
 }
 
 bool SPIFlash::wait_ready(uint32_t timeout_ms) {
@@ -393,22 +303,9 @@ bool SPIFlash::read_data_(uint32_t address, uint8_t *data, size_t length) {
   }
 
   this->enable();
-
-  if (this->quad_mode_) {
-    // Use Fast Read Quad Output command (0x6B)
-    // Command and address on 1 line, data on 4 lines
-    this->write_byte(CMD_FAST_READ_QUAD_OUTPUT);
-    this->write_address_(address);
-    this->write_byte(0xFF);  // Dummy byte required for fast read
-    // Note: Data is now read on 4 SPI lines (hardware handles this automatically)
-    this->read_array(data, length);
-  } else {
-    // Standard read command (single SPI line)
-    this->write_byte(CMD_READ_BYTES);
-    this->write_address_(address);
-    this->read_array(data, length);
-  }
-
+  this->write_byte(CMD_READ_BYTES);
+  this->write_address_(address);
+  this->read_array(data, length);
   this->disable();
 
   return true;
@@ -419,7 +316,7 @@ bool SPIFlash::esp_partition_setup_() {
   esp_flash_spi_device_config_t cfg = {};
   cfg.host_id = static_cast<spi_host_device_t>(this->spi_host_);
   cfg.cs_io_num = this->cs_pin_num_;
-  cfg.io_mode = SPI_FLASH_FASTRD;
+  cfg.io_mode = this->quad_mode_ ? SPI_FLASH_QOUT : SPI_FLASH_FASTRD;
   cfg.freq_mhz = this->flash_freq_mhz_;
 
   esp_err_t err = spi_bus_add_flash_device(&this->ext_chip_, &cfg);
