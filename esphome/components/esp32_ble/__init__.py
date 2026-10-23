@@ -478,7 +478,6 @@ def final_validation(config: ConfigType) -> None:
         add_idf_sdkconfig_option("CONFIG_BT_BLUEDROID_ENABLED", True)
         add_idf_sdkconfig_option("CONFIG_BT_CONTROLLER_DISABLED", True)
         add_idf_sdkconfig_option("CONFIG_ESP_HOSTED_HOST_FEAT_BT", True)
-            add_idf_sdkconfig_option("CONFIG_ESP_HOSTED_BLUEDROID_HCI_VHCI", True)
 
     # Check if BLE Client is needed (via esp32_ble_tracker or esp32_ble_client)
     has_ble_client = (
