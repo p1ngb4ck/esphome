@@ -121,7 +121,7 @@ void MipiDsi::setup() {
   // need to know when the display is ready for SLPOUT command - will be 120ms after reset
   auto when = millis() + 120;
   if (this->generic_commands_) {
-    MIPI_DSI_LL_GET_HOST(0)->cmd_mode_cfg.ack_rqst_en = 0;
+    mipi_dsi_host_ll_enable_cmd_ack(MIPI_DSI_LL_GET_HOST(0), false);
   }
   err = esp_lcd_panel_init(this->handle_);
   if (err != ESP_OK) {
@@ -147,7 +147,7 @@ void MipiDsi::setup() {
         this->mark_failed(LOG_STR("Malformed init sequence"));
         return;
       }
-      if (cmd == SLEEP_OUT) {
+      if (cmd == SLEEP_OUT && !this->generic_commands_) {
         // are we ready, boots?
         int duration = when - millis();
         if (duration > 0) {
