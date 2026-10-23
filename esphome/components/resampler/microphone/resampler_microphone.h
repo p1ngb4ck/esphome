@@ -66,7 +66,6 @@ class ResamplerMicrophone final : public Component, public microphone::Microphon
   microphone::Microphone *source_microphone(size_t index) const {
     return index < this->sources_.size() ? this->sources_[index].mic : nullptr;
   }
-  uint32_t source_key(size_t index) const { return this->sources_[index].key; }
   template<typename F> void add_on_source_callback(F &&callback) { this->source_callback_.add(std::forward<F>(callback)); }
   template<typename F> void add_on_sources_changed_callback(F &&callback) {
     this->sources_changed_callback_.add(std::forward<F>(callback));
