@@ -304,7 +304,6 @@ class SPIFlash : public BinaryStorage,
   static constexpr uint8_t CMD_READ_STATUS_REG2 = 0x35;
   static constexpr uint8_t CMD_WRITE_STATUS_REG = 0x01;
   static constexpr uint8_t CMD_PAGE_PROGRAM = 0x02;
-  static constexpr uint8_t CMD_QUAD_PAGE_PROGRAM = 0x32;
   // Erase unit sizes the 32K/64K block opcodes below operate on.
   static constexpr uint32_t BLOCK_SIZE_32K = 32768;
   static constexpr uint32_t BLOCK_SIZE_64K = 65536;
@@ -328,10 +327,6 @@ class SPIFlash : public BinaryStorage,
   static constexpr uint8_t CMD_EXIT_4BYTE_ADDR_MODE = 0xE9;
   static constexpr uint8_t CMD_READ_CONFIG_REG = 0x15;  // Macronix: bit 5 (ADP) = 4-byte mode active
 
-  // Quad SPI commands (4x faster reads)
-  static constexpr uint8_t CMD_FAST_READ_QUAD_OUTPUT = 0x6B;  // Address on 1 line, data on 4 lines
-  static constexpr uint8_t CMD_FAST_READ_QUAD_IO = 0xEB;      // Address and data on 4 lines
-
   // Status register 1 bits
   static constexpr uint8_t STATUS_BUSY = 0x01;  // Write in progress
   static constexpr uint8_t STATUS_WEL = 0x02;   // Write enable latch
@@ -342,30 +337,9 @@ class SPIFlash : public BinaryStorage,
   static constexpr uint8_t STATUS_SEC = 0x40;   // Sector protect
   static constexpr uint8_t STATUS_SRP = 0x80;   // Status register protect
 
-  // Status register 2 bits (Winbond/Macronix)
-  static constexpr uint8_t STATUS2_QE = 0x02;  // Quad Enable (bit 1 of SR2)
-
   //========================================================================
   // Internal Helpers
   //========================================================================
-
-  /**
-   * @brief Enable quad mode in status register
-   *
-   * Sets the QE (Quad Enable) bit in status register 2
-   *
-   * @return true on success
-   */
-  bool enable_quad_mode_();
-
-  /**
-   * @brief Disable quad mode in status register
-   *
-   * Clears the QE (Quad Enable) bit in status register 2
-   *
-   * @return true on success
-   */
-  bool disable_quad_mode_();
 
   /**
    * @brief Write a page (up to 256 bytes, must not cross page boundary)

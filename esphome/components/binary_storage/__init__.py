@@ -343,7 +343,7 @@ FRAM_SCHEMA = (
 )
 
 # SPI Flash Configuration Schema
-SPI_FLASH_SCHEMA = (
+_SPI_FLASH_BASE_SCHEMA = (
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(SPIFlash),
@@ -352,7 +352,10 @@ SPI_FLASH_SCHEMA = (
             cv.Optional(CONF_PAGE_SIZE): cv.int_range(min=256, max=256),
             cv.Optional(CONF_ERASE_SIZE): cv.one_of(4096, 32768, 65536, int=True),
             cv.Optional(CONF_JEDEC_ID): cv.hex_uint32_t,
-            cv.Optional(CONF_QUAD_MODE, default=False): cv.boolean,
+            cv.Optional(CONF_QUAD_MODE): cv.invalid(
+                f"'{CONF_QUAD_MODE}' is derived from the SPI bus: a flash wired to a "
+                "'type: quad' bus runs in quad mode"
+            ),
             cv.Optional(CONF_REGIONS): cv.ensure_list(REGION_SCHEMA),
             cv.Optional(CONF_STORAGE_NAME): cv.string,
             # Whether this device gets its own node in the file browser. Defaults to on when a
@@ -366,9 +369,36 @@ SPI_FLASH_SCHEMA = (
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
-    .extend(spi.spi_device_schema(cs_pin_required=True))
     .extend(_ASSUME_EXCLUSIVE_BUS_SCHEMA)
 )
+
+_SPI_FLASH_SCHEMAS = {
+    bus_mode: _SPI_FLASH_BASE_SCHEMA.extend(
+        spi.spi_device_schema(cs_pin_required=True, mode=bus_mode)
+    )
+    for bus_mode in spi.TYPE_CLASS
+}
+
+
+def _spi_bus_mode(config):
+    raw = CORE.raw_config
+    buses = raw.get(spi.DOMAIN) if isinstance(raw, dict) else None
+    if isinstance(buses, dict):
+        buses = [buses]
+    if not isinstance(buses, list):
+        return spi.TYPE_SINGLE
+    buses = [b for b in buses if isinstance(b, dict)]
+    if (bus_id := config.get(CONF_SPI_ID)) is not None:
+        buses = [b for b in buses if str(b.get(CONF_ID)) == str(bus_id)]
+    if len(buses) != 1:
+        return spi.TYPE_SINGLE
+    bus_mode = str(buses[0].get(CONF_TYPE, spi.TYPE_SINGLE)).lower()
+    return bus_mode if bus_mode in _SPI_FLASH_SCHEMAS else spi.TYPE_SINGLE
+
+
+def SPI_FLASH_SCHEMA(config):
+    return _SPI_FLASH_SCHEMAS[_spi_bus_mode(config)](config)
+
 
 # SPI FRAM Configuration Schema
 SPI_FRAM_SCHEMA = (
@@ -810,6 +840,23 @@ def _final_validate(config):
     if (node_name := _node_name_of(config)) is not None:
         config[CONF_DEVICE_NODE_NAME] = node_name
     device_type = config[CONF_TYPE].upper()
+    if device_type in ("SPI_FLASH", "FLASH"):
+        fconf = fv.full_config.get()
+        bus_conf = fconf.get_config_for_path(
+            fconf.get_path_for_id(config[CONF_SPI_ID])[:-1]
+        )
+        bus_mode = bus_conf.get(CONF_TYPE, spi.TYPE_SINGLE)
+        if bus_mode == spi.TYPE_OCTAL:
+            raise cv.Invalid(
+                "a SPI flash on a 'type: octal' bus is not supported: the ESP-IDF flash driver "
+                "drives a SPI flash on single or quad lines"
+            )
+        if bus_mode == spi.TYPE_QUAD and not _esp_partition_active(config):
+            raise cv.Invalid(
+                "a SPI flash on a 'type: quad' bus runs on the ESP-IDF flash driver: it needs "
+                f"esp32 with ESP-IDF and '{CONF_ASSUME_EXCLUSIVE_BUS}: true'"
+            )
+        config["_spi_bus_mode"] = bus_mode
     if (internal_type := TYPE_TO_DEVICE.get(device_type)) is not None:
         CORE.data.setdefault("binary_storage_device_types", set()).add(internal_type)
     regions = config.get(CONF_REGIONS) or []
@@ -1010,6 +1057,8 @@ async def to_code(config):
             cs_num = config[CONF_CS_PIN][CONF_NUMBER]
             freq_mhz = int(config.get(CONF_DATA_RATE, 40_000_000) // 1_000_000) or 40
             cg.add(var.enable_esp_partition_mode(cg.RawExpression(host), cs_num, freq_mhz))
+            if config["_spi_bus_mode"] == spi.TYPE_QUAD:
+                cg.add(var.set_quad_mode(True))
         else:
             await spi.register_spi_device(var, config)
         if device_type in ["SPI_FLASH", "FLASH"]:
@@ -1043,8 +1092,6 @@ async def to_code(config):
         cg.add(var.set_erase_size(erase_size))
     if (jedec_id := config.get(CONF_JEDEC_ID)) is not None:
         cg.add(var.set_jedec_id(jedec_id))
-    if (quad_mode := config.get(CONF_QUAD_MODE)) is not None:
-        cg.add(var.set_quad_mode(quad_mode))
     if (addr_bits := config.get(CONF_ADDRESSING_BITS)) is not None:
         cg.add(var.set_addressing_bits(addr_bits))
 
