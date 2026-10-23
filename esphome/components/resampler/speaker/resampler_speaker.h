@@ -69,6 +69,9 @@ class ResamplerSpeaker final : public Component, public speaker::Speaker {
   size_t output_count() const { return this->outputs_.size(); }
   const char *output_name(size_t index) const { return this->outputs_[index].name; }
   uint32_t output_key(size_t index) const { return this->outputs_[index].key; }
+  audio::AudioStreamInfo active_format() const;
+  uint32_t active_min_sample_rate() const { return this->target_sample_rate_; }
+  uint32_t active_max_sample_rate() const { return this->target_sample_rate_; }
   template<typename F> void add_on_output_callback(F &&callback) {
     this->output_callback_.add(std::forward<F>(callback));
   }
@@ -147,6 +150,9 @@ class ResamplerSpeaker final : public Component, public speaker::Speaker {
   uint8_t next_order_{0};
   uint8_t output_channels_{0};
   bool switch_pending_{false};
+  bool restart_after_format_{false};
+  std::atomic<bool> format_changed_{false};
+  audio::AudioStreamInfo started_info_;
   bool restart_after_switch_{false};
 
   EventGroupHandle_t event_group_{nullptr};

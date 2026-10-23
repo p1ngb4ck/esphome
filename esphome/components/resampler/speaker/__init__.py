@@ -127,6 +127,18 @@ def _set_stream_limits(config: ConfigType) -> ConfigType:
     return config
 
 
+def output_formats(fconf, conf) -> list[dict]:
+    formats = []
+    for output in conf[CONF_OUTPUT_SPEAKER]:
+        if _is_group(output):
+            fmt = usb_audio_format(fconf, output[CONF_USB_AUDIO], CONF_SPEAKER)
+        else:
+            known = {key: output[key] for key in FORMAT_KEYS if key in output}
+            fmt = resolve_speaker_format(fconf, output[CONF_SPEAKER], known)
+        formats.append(fmt or {})
+    return formats
+
+
 def _validate_output_list(config: ConfigType) -> None:
     fconf = fv.full_config.get()
     outputs = config[CONF_OUTPUT_SPEAKER]
