@@ -446,6 +446,14 @@ struct __attribute__((packed)) PublishSaved {
   uint8_t way;
 };
 
+static uint32_t publish_key(const EntityBase *entity) {
+#ifdef USE_DEVICES
+  return entity->get_object_id_hash() ^ entity->get_device_id();
+#else
+  return entity->get_object_id_hash();
+#endif
+}
+
 void MQTTClientComponent::publish_setup_() {
   if (this->publish_count_ == 0)
     return;
@@ -464,7 +472,7 @@ void MQTTClientComponent::publish_setup_() {
       if (saved[s].key == 0 || saved[s].way > PUBLISH_MQTT)
         continue;
       for (uint16_t i = 0; i < this->publish_count_; i++) {
-        if (const_cast<EntityBase *>(this->publish_[i].entity)->get_preference_hash() == saved[s].key) {
+        if (publish_key(this->publish_[i].entity) == saved[s].key) {
           this->publish_apply_(i, static_cast<PublishWay>(saved[s].way));
           break;
         }
@@ -489,7 +497,7 @@ void MQTTClientComponent::publish_save_() {
     return;
   for (uint16_t i = 0; i < this->publish_count_; i++) {
     const PublishEntry &entry = this->publish_[i];
-    saved[i].key = entry.way != entry.yaml_way ? const_cast<EntityBase *>(entry.entity)->get_preference_hash() : 0;
+    saved[i].key = entry.way != entry.yaml_way ? publish_key(entry.entity) : 0;
     saved[i].way = entry.way;
   }
   this->publish_pref_.save(reinterpret_cast<const uint8_t *>(saved), this->publish_count_ * sizeof(PublishSaved));
