@@ -77,6 +77,8 @@ def AUTO_LOAD(config):
         load.append("select")
     if CONF_LAYOUT_SENSOR in layouts:
         load.append("text_sensor")
+    if config and "emulator" in config:
+        load.append("hid")
     return load
 
 
@@ -143,6 +145,8 @@ EmuSystem = simple_video_player_ns.enum("EmuSystem", is_class=True)
 GameStartAction = simple_video_player_ns.class_("GameStartAction", automation.Action)
 GameCommandAction = simple_video_player_ns.class_("GameCommandAction", automation.Action)
 GameStateAction = simple_video_player_ns.class_("GameStateAction", automation.Action)
+GamePlayersAction = simple_video_player_ns.class_("GamePlayersAction", automation.Action)
+GamePlayerSetAction = simple_video_player_ns.class_("GamePlayerSetAction", automation.Action)
 ShowImageAction = simple_video_player_ns.class_("ShowImageAction", automation.Action)
 ScreenshotAction = simple_video_player_ns.class_("ScreenshotAction", automation.Action)
 ScreencastAction = simple_video_player_ns.class_("ScreencastAction", automation.Action)
@@ -253,6 +257,9 @@ CONF_MENU_KEYS = "menu_keys"
 CONF_ON_PAUSED = "on_paused"
 CONF_ON_ENDED = "on_ended"
 CONF_BIOS_DIR = "bios_dir"
+CONF_HID_IDS = "hid_ids"
+CONF_ON_PLAYERS_CHANGED = "on_players_changed"
+CONF_ON_PLAYERS_CLOSED = "on_players_closed"
 
 EMU_SYSTEMS = {
     "nes": EmuSystem.NES,
@@ -319,12 +326,15 @@ EMULATOR_SCHEMA = cv.Schema(
         cv.GenerateID(): cv.declare_id(GameEmulator),
         cv.Required(CONF_SYSTEMS): _emu_systems,
         cv.Optional(CONF_BIOS_DIR): _storage_dir,
+        cv.Optional(CONF_HID_IDS, default=[]): cv.ensure_list(cv.use_id(HIDInput)),
         cv.Optional(CONF_KEYS, default={}): cv.Schema(
             {cv.Optional(button): cv.ensure_list(_emu_key) for button in EMU_BUTTONS}
         ),
         cv.Optional(CONF_MENU_KEYS, default=["BUTTON_11"]): cv.ensure_list(_emu_key),
         cv.Optional(CONF_ON_PAUSED): automation.validate_automation(single=True),
         cv.Optional(CONF_ON_ENDED): automation.validate_automation(single=True),
+        cv.Optional(CONF_ON_PLAYERS_CHANGED): automation.validate_automation(single=True),
+        cv.Optional(CONF_ON_PLAYERS_CLOSED): automation.validate_automation(single=True),
     }
 ).add_extra(_emu_bios)
 
@@ -1250,6 +1260,12 @@ async def _emulator_to_code(var, config):
         await automation.build_automation(emu.get_paused_trigger(), [], on_paused)
     if on_ended := config.get(CONF_ON_ENDED):
         await automation.build_automation(emu.get_ended_trigger(), [], on_ended)
+    for hid_id in config[CONF_HID_IDS]:
+        cg.add(emu.add_hid(await cg.get_variable(hid_id)))
+    if on_changed := config.get(CONF_ON_PLAYERS_CHANGED):
+        await automation.build_automation(emu.get_players_changed_trigger(), [], on_changed)
+    if on_closed := config.get(CONF_ON_PLAYERS_CLOSED):
+        await automation.build_automation(emu.get_players_closed_trigger(), [], on_closed)
 
 
 async def to_code(config):
@@ -2042,7 +2058,7 @@ async def simple_video_player_emulator_start_to_code(config, action_id, template
     return var
 
 
-EMULATOR_COMMANDS = {"stop": 0, "pause": 1, "resume": 2}
+EMULATOR_COMMANDS = {"stop": 0, "pause": 1, "resume": 2, "players_start": 3, "players_cancel": 4}
 
 
 def _register_emulator_command(name, command):
@@ -2092,3 +2108,44 @@ def _register_emulator_state(name, save):
 
 _register_emulator_state("save_state", True)
 _register_emulator_state("load_state", False)
+
+
+@automation.register_action(
+    "simple_video_player.emulator.players",
+    GamePlayersAction,
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+            cv.Required(CONF_PATH): cv.templatable(cv.string),
+        }
+    ),
+    synchronous=True,
+)
+async def simple_video_player_emulator_players_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    cg.add(var.set_path(await cg.templatable(config[CONF_PATH], args, cg.std_string)))
+    return var
+
+
+CONF_SEAT = "seat"
+
+
+@automation.register_action(
+    "simple_video_player.emulator.players_set",
+    GamePlayerSetAction,
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+            cv.Required(CONF_INDEX): cv.templatable(cv.int_range(min=0, max=3)),
+            cv.Required(CONF_SEAT): cv.templatable(cv.int_range(min=0, max=2)),
+        }
+    ),
+    synchronous=True,
+)
+async def simple_video_player_emulator_players_set_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    cg.add(var.set_index(await cg.templatable(config[CONF_INDEX], args, cg.uint8)))
+    cg.add(var.set_seat(await cg.templatable(config[CONF_SEAT], args, cg.uint8)))
+    return var

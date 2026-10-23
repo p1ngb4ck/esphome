@@ -160,6 +160,8 @@ class HIDInput : public key_provider::KeyProvider {
 
   // -- Device details ----------------------------------------------------------------------
   const HIDDeviceDetails &get_details() const { return this->details_; }
+  uint32_t key_source() const { return this->key_source_; }
+  const char *key_source_label() const { return this->key_source_label_; }
   /// Asks the radio for the link's signal; it comes back as the SIGNAL control (Generic Device
   /// Controls). False without a radio link.
   virtual bool request_signal() { return false; }
@@ -210,6 +212,7 @@ class HIDInput : public key_provider::KeyProvider {
  protected:
   /// A transport that can light the lock LEDs sends them to the keyboard.
   virtual void write_leds_(uint8_t leds) {}
+  virtual const char *device_label_() const { return this->log_name_; }
 
   /// Transport, main loop: the device is there, by bus and identity; picks its driver.
   void gamepad_attach_(HIDBus bus, uint16_t vid, uint16_t pid, uint16_t version);
@@ -235,6 +238,10 @@ class HIDInput : public key_provider::KeyProvider {
   char32_t compose_(char32_t mark, char32_t base) const;
 
   CallbackManager<void(uint16_t, uint16_t, bool)> key_cb_;
+  uint32_t key_source_{0};
+  const char *key_source_label_{""};
+  uint32_t forward_source_{0};
+  const char *forward_label_{nullptr};
   CallbackManager<void(const std::string &)> text_cb_;
   CallbackManager<void(int16_t, int16_t, int16_t, int16_t, uint8_t)> pointer_cb_;
   CallbackManager<void(uint16_t, uint16_t, int32_t)> control_cb_;

@@ -272,6 +272,9 @@ void HIDInput::key_(uint16_t page, uint16_t usage, bool pressed) {
     const uint8_t bit = 1u << (usage - KEY_LEFT_CTRL);
     this->modifiers_ = pressed ? (this->modifiers_ | bit) : (this->modifiers_ & ~bit);
   }
+  this->key_source_ =
+      this->forward_source_ != 0 ? this->forward_source_ : static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this));
+  this->key_source_label_ = this->forward_label_ != nullptr ? this->forward_label_ : this->device_label_();
   this->key_cb_.call(page, usage, pressed);
   if (pressed && page == PAGE_KEYBOARD)
     this->type_key_(usage);

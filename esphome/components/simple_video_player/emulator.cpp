@@ -129,7 +129,9 @@ size_t GameEmulator::rom_alloc_(EmuSystem system, size_t size) const {
   }
 }
 
-bool GameEmulator::start(const std::string &path) {
+bool GameEmulator::start(const std::string &path) { return this->start_(path, false); }
+
+bool GameEmulator::start_(const std::string &path, bool assign) {
   if (!this->usable_) {
     ESP_LOGE(TAG, "No PSRAM for the emulator");
     return false;
@@ -189,6 +191,7 @@ bool GameEmulator::start(const std::string &path) {
   this->task_done_.store(false, std::memory_order_relaxed);
   this->pads_[0].store(0, std::memory_order_relaxed);
   this->pads_[1].store(0, std::memory_order_relaxed);
+  this->assign_active_ = assign;
   this->state_ = State::LOADING;
   ESP_LOGI(TAG, "Starting %s (%s)", this->path_, SYSTEM_NAMES[static_cast<size_t>(this->system_)]);
   p->status_callbacks_.call();
@@ -196,6 +199,8 @@ bool GameEmulator::start(const std::string &path) {
 }
 
 void GameEmulator::service() {
+  if (this->players_open_)
+    this->players_service_();
   if (this->job_wanted_ != Job::NONE && this->job_ == Job::NONE)
     this->job_begin_();
   switch (this->state_) {
@@ -578,6 +583,127 @@ void GameEmulator::end_() {
   ESP_LOGI(TAG, "Game %s", was_loading ? "not started" : "ended");
   this->parent_->status_callbacks_.call();
   this->ended_trigger_.trigger();
+}
+
+void GameEmulator::add_hid(hid::HIDInput *input) {
+  if (this->hid_count_ < MAX_HIDS)
+    this->hids_[this->hid_count_++] = input;
+}
+
+bool GameEmulator::players_wanted() {
+  size_t devices = 0;
+  std::vector<hid::InputDevice> list;
+  for (size_t i = 0; i < this->hid_count_; i++) {
+    list.clear();
+    this->hids_[i]->list_devices(list);
+    if (!list.empty()) {
+      for (const auto &device : list) {
+        const bool keys = device.kinds == 0 || (device.kinds & (hid::HID_DEVICE_KEYBOARD | hid::HID_DEVICE_GAMEPAD)) != 0;
+        if (device.connected && keys)
+          devices++;
+      }
+    } else if (this->hids_[i]->get_device_kinds() != 0) {
+      devices++;
+    }
+  }
+  return devices >= 2;
+}
+
+void GameEmulator::players_open(const std::string &path) {
+  if (this->state_ != State::IDLE || path.size() > storage::STORAGE_VFS_PATH_MAX)
+    return;
+  memcpy(this->players_path_, path.c_str(), path.size() + 1);
+  this->player_count_ = 0;
+  this->tap_head_.store(this->tap_tail_.load(std::memory_order_acquire), std::memory_order_release);
+  this->players_open_ = true;
+#ifdef USE_LVGL_HID
+  if (this->parent_->lvgl_component_ != nullptr)
+    this->parent_->lvgl_component_->set_key_tap(this);
+#endif
+  this->players_changed_trigger_.trigger();
+}
+
+void GameEmulator::players_close_() {
+#ifdef USE_LVGL_HID
+  if (this->parent_->lvgl_component_ != nullptr)
+    this->parent_->lvgl_component_->set_key_tap(nullptr);
+#endif
+  this->players_open_ = false;
+}
+
+void GameEmulator::players_start() {
+  if (!this->players_open_)
+    return;
+  bool any = false;
+  for (uint8_t i = 0; i < this->player_count_; i++)
+    any = any || this->players_[i].player != 0;
+  if (!any)
+    return;
+  this->players_close_();
+  this->players_closed_trigger_.trigger();
+  this->start_(this->players_path_, true);
+}
+
+void GameEmulator::players_cancel() {
+  if (!this->players_open_)
+    return;
+  this->players_close_();
+  this->players_closed_trigger_.trigger();
+}
+
+void GameEmulator::players_set(uint8_t index, uint8_t player) {
+  if (index >= this->player_count_ || player > 2)
+    return;
+  this->players_[index].player = player;
+  this->players_changed_trigger_.trigger();
+}
+
+void GameEmulator::players_service_() {
+  bool changed = false;
+  while (this->tap_head_.load(std::memory_order_relaxed) != this->tap_tail_.load(std::memory_order_acquire)) {
+    const uint8_t head = this->tap_head_.load(std::memory_order_relaxed);
+    const TapEvent event = this->tap_ring_[head % TAP_EVENTS];
+    this->tap_head_.store(static_cast<uint8_t>(head + 1), std::memory_order_release);
+    for (size_t i = 0; i < this->menu_key_count_; i++) {
+      if (this->menu_keys_[i].page == event.page && this->menu_keys_[i].usage == event.usage) {
+        this->players_cancel();
+        return;
+      }
+    }
+    PlayerDevice *device = nullptr;
+    for (uint8_t i = 0; i < this->player_count_; i++) {
+      if (this->players_[i].source == event.source)
+        device = &this->players_[i];
+    }
+    if (device == nullptr) {
+      if (this->player_count_ >= MAX_PLAYER_DEVICES)
+        continue;
+      device = &this->players_[this->player_count_++];
+      device->source = event.source;
+      memcpy(device->label, event.label, sizeof(device->label));
+      device->player = 0;
+      changed = true;
+      continue;
+    }
+    const uint16_t buttons = this->buttons_of_(event.page, event.usage);
+    if ((buttons & EMU_LEFT) != 0) {
+      device->player = device->player == 2 ? 0 : 1;
+      changed = true;
+    } else if ((buttons & EMU_RIGHT) != 0) {
+      device->player = device->player == 1 ? 0 : 2;
+      changed = true;
+    } else if ((buttons & (EMU_A | EMU_START)) != 0 && device->player != 0) {
+      if (changed)
+        this->players_changed_trigger_.trigger();
+      this->players_start();
+      return;
+    } else if ((buttons & EMU_B) != 0) {
+      this->players_cancel();
+      return;
+    }
+  }
+  if (changed)
+    this->players_changed_trigger_.trigger();
 }
 
 bool GameEmulator::save_state(uint8_t slot) {
@@ -1214,7 +1340,7 @@ void SimpleVideoPlayer::on_svp_emu_load_state(int32_t slot) { this->emu_->load_s
 
 #ifdef USE_LVGL_HID
 bool GameEmulator::paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action,
-                              uint32_t codepoint, bool level3) {
+                              uint32_t codepoint, bool level3, uint32_t source) {
   for (size_t i = 0; i < this->menu_key_count_; i++) {
     if (this->menu_keys_[i].page == page && this->menu_keys_[i].usage == usage) {
       if (pressed && this->state_ == State::RUNNING)
@@ -1226,18 +1352,51 @@ bool GameEmulator::paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool 
     this->core_->key(usage, pressed);
     return true;
   }
+  const uint16_t buttons = this->buttons_of_(page, usage);
+  if (buttons == 0)
+    return true;
+  uint8_t pad = 0;
+  if (this->assign_active_) {
+    uint8_t player = 0;
+    for (uint8_t i = 0; i < this->player_count_; i++) {
+      if (this->players_[i].source == source)
+        player = this->players_[i].player;
+    }
+    if (player == 0)
+      return true;
+    pad = player - 1;
+  }
+  if (pressed) {
+    this->pads_[pad].fetch_or(buttons, std::memory_order_relaxed);
+  } else {
+    this->pads_[pad].fetch_and(static_cast<uint16_t>(~buttons), std::memory_order_relaxed);
+  }
+  return true;
+}
+
+uint16_t GameEmulator::buttons_of_(uint16_t page, uint16_t usage) const {
   uint16_t buttons = 0;
   for (size_t i = 0; i < this->key_count_; i++) {
     if (this->keys_[i].page == page && this->keys_[i].usage == usage)
       buttons |= this->keys_[i].buttons;
   }
-  if (buttons != 0) {
-    if (pressed) {
-      this->pads_[0].fetch_or(buttons, std::memory_order_relaxed);
-    } else {
-      this->pads_[0].fetch_and(static_cast<uint16_t>(~buttons), std::memory_order_relaxed);
-    }
-  }
+  return buttons;
+}
+
+bool GameEmulator::key_tap(uint32_t source, const char *label, uint16_t page, uint16_t usage, bool pressed) {
+  if (!pressed)
+    return true;
+  const uint8_t tail = this->tap_tail_.load(std::memory_order_relaxed);
+  if (static_cast<uint8_t>(tail - this->tap_head_.load(std::memory_order_acquire)) >= TAP_EVENTS)
+    return true;
+  TapEvent &event = this->tap_ring_[tail % TAP_EVENTS];
+  event.source = source;
+  event.page = page;
+  event.usage = usage;
+  strncpy(event.label, label != nullptr ? label : "", sizeof(event.label) - 1);
+  event.label[sizeof(event.label) - 1] = '\0';
+  this->tap_tail_.store(static_cast<uint8_t>(tail + 1), std::memory_order_release);
+  App.wake_loop_threadsafe();
   return true;
 }
 #endif

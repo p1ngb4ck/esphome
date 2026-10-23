@@ -6,6 +6,7 @@
 
 #include "driver/ppa.h"
 #include "esphome/core/static_task.h"
+#include "esphome/components/hid/hid_input.h"
 
 namespace esphome::simple_video_player {
 
@@ -58,7 +59,8 @@ EmuCore *emu_make_core(EmuSystem system, void *store);
 
 class GameEmulator
 #ifdef USE_LVGL_HID
-    : public lvgl::LvglComponent::PausedInput
+    : public lvgl::LvglComponent::PausedInput,
+      public lvgl::LvglComponent::KeyTap
 #endif
 {
  public:
@@ -72,6 +74,21 @@ class GameEmulator
   void add_key(uint16_t page, uint16_t usage, uint16_t buttons);
   void add_menu_key(uint16_t page, uint16_t usage);
   void set_bios_dir(const char *dir) { this->bios_dir_ = dir; }
+  void add_hid(hid::HIDInput *input);
+  Trigger<> *get_players_changed_trigger() { return &this->players_changed_trigger_; }
+  Trigger<> *get_players_closed_trigger() { return &this->players_closed_trigger_; }
+
+  bool players_wanted();
+  void players_open(const std::string &path);
+  void players_start();
+  void players_cancel();
+  void players_set(uint8_t index, uint8_t player);
+  bool players_shown() const { return this->players_open_; }
+  uint8_t players_count() const { return this->player_count_; }
+  const char *players_label(uint8_t index) const {
+    return index < this->player_count_ ? this->players_[index].label : "";
+  }
+  uint8_t players_player(uint8_t index) const { return index < this->player_count_ ? this->players_[index].player : 0; }
   Trigger<> *get_paused_trigger() { return &this->paused_trigger_; }
   Trigger<> *get_ended_trigger() { return &this->ended_trigger_; }
 
@@ -98,7 +115,8 @@ class GameEmulator
 
 #ifdef USE_LVGL_HID
   bool paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action, uint32_t codepoint,
-                  bool level3) override;
+                  bool level3, uint32_t source) override;
+  bool key_tap(uint32_t source, const char *label, uint16_t page, uint16_t usage, bool pressed) override;
   bool paused_text(uint32_t codepoint) override { return true; }
   bool paused_pointer(int16_t dx, int16_t dy, int16_t wheel, uint8_t buttons) override { return true; }
 #endif
@@ -129,6 +147,20 @@ class GameEmulator
     size_t size;
     bool internal;
   };
+  struct PlayerDevice {
+    uint32_t source;
+    char label[24];
+    uint8_t player;
+  };
+  struct TapEvent {
+    uint32_t source;
+    uint16_t page;
+    uint16_t usage;
+    char label[24];
+  };
+  static constexpr size_t MAX_PLAYER_DEVICES = 4;
+  static constexpr size_t TAP_EVENTS = 8;
+  static constexpr size_t MAX_HIDS = 8;
   struct BiosFile {
     const char *name;
     uint8_t *data;
@@ -136,6 +168,7 @@ class GameEmulator
   };
   static constexpr size_t MAX_BIOS = 12;
 
+  bool start_(const std::string &path, bool assign);
   bool system_for_(const char *path, EmuSystem *system) const;
   uint32_t internal_budget_(EmuSystem system) const;
   size_t rom_alloc_(EmuSystem system, size_t size) const;
@@ -148,6 +181,9 @@ class GameEmulator
   void end_();
   void release_all_();
   void set_wants_panel_(bool wants);
+  void players_service_();
+  void players_close_();
+  uint16_t buttons_of_(uint16_t page, uint16_t usage) const;
   void go_panel_();
   bool side_path_(char *out, size_t len, const char *suffix) const;
   bool sram_changed_();
@@ -188,6 +224,18 @@ class GameEmulator
   size_t menu_key_count_{0};
   Trigger<> paused_trigger_;
   Trigger<> ended_trigger_;
+  Trigger<> players_changed_trigger_;
+  Trigger<> players_closed_trigger_;
+  hid::HIDInput *hids_[MAX_HIDS]{};
+  size_t hid_count_{0};
+  PlayerDevice players_[MAX_PLAYER_DEVICES]{};
+  uint8_t player_count_{0};
+  bool players_open_{false};
+  bool assign_active_{false};
+  char players_path_[storage::STORAGE_VFS_PATH_MAX + 1]{};
+  TapEvent tap_ring_[TAP_EVENTS]{};
+  std::atomic<uint8_t> tap_head_{0};
+  std::atomic<uint8_t> tap_tail_{0};
 
   State state_{State::IDLE};
   EmuSystem system_{EmuSystem::NES};
@@ -296,6 +344,35 @@ template<typename... Ts> class GameStateAction : public Action<Ts...> {
   bool save_{true};
 };
 
+template<typename... Ts> class GamePlayersAction : public Action<Ts...> {
+ public:
+  explicit GamePlayersAction(SimpleVideoPlayer *player) : player_(player) {}
+  TEMPLATABLE_VALUE(std::string, path)
+  void play(const Ts &...x) override {
+    GameEmulator *emu = this->player_->get_emulator();
+    if (emu != nullptr)
+      emu->players_open(this->path_.value(x...));
+  }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class GamePlayerSetAction : public Action<Ts...> {
+ public:
+  explicit GamePlayerSetAction(SimpleVideoPlayer *player) : player_(player) {}
+  TEMPLATABLE_VALUE(uint8_t, index)
+  TEMPLATABLE_VALUE(uint8_t, seat)
+  void play(const Ts &...x) override {
+    GameEmulator *emu = this->player_->get_emulator();
+    if (emu != nullptr)
+      emu->players_set(this->index_.value(x...), this->seat_.value(x...));
+  }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
 template<typename... Ts> class GameCommandAction : public Action<Ts...> {
  public:
   explicit GameCommandAction(SimpleVideoPlayer *player) : player_(player) {}
@@ -311,8 +388,14 @@ template<typename... Ts> class GameCommandAction : public Action<Ts...> {
       case 1:
         emu->pause();
         break;
-      default:
+      case 2:
         emu->resume();
+        break;
+      case 3:
+        emu->players_start();
+        break;
+      default:
+        emu->players_cancel();
         break;
     }
   }

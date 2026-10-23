@@ -199,8 +199,11 @@ USBHIDDevice::USBHIDDevice(USBHIDClient *client, usb_host::UsbDevice *dev, uint3
   this->log_name_ = client->log_name_;
   this->leds_ = client->leds_;
   // Its keys, text, pointer and controls are the input's (the client is what everything listens to)
-  this->add_on_key_event_callback(
-      [client](uint16_t page, uint16_t usage, bool pressed) { client->key_cb_.call(page, usage, pressed); });
+  this->add_on_key_event_callback([client, this](uint16_t page, uint16_t usage, bool pressed) {
+    client->key_source_ = this->key_source_;
+    client->key_source_label_ = this->key_source_label_;
+    client->key_cb_.call(page, usage, pressed);
+  });
   this->add_on_text_callback([client](const std::string &text) { client->text_cb_.call(text); });
   this->add_on_pointer_callback([client](int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
     client->pointer_cb_.call(dx, dy, wheel, pan, buttons);

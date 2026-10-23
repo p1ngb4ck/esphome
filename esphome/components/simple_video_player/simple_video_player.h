@@ -227,7 +227,7 @@ class StreamInputTaker : public lvgl::LvglComponent::PausedInput {
  public:
   explicit StreamInputTaker(SimpleVideoPlayer *parent) : parent_(parent) {}
   bool paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action, uint32_t codepoint,
-                  bool level3) override;
+                  bool level3, uint32_t source) override;
   bool paused_text(uint32_t codepoint) override;
   bool paused_pointer(int16_t dx, int16_t dy, int16_t wheel, uint8_t buttons) override;
 

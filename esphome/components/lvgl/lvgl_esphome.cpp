@@ -1353,10 +1353,13 @@ LVHIDKeypadListener::LVHIDKeypadListener(hid::HIDInput *input, KeyBindings *bind
   if (input == nullptr)
     return;
   input->add_on_key_event_callback([this, input](uint16_t page, uint16_t usage, bool pressed) {
+    LvglComponent::KeyTap *tap = this->parent_ != nullptr ? this->parent_->get_key_tap() : nullptr;
+    if (tap != nullptr && tap->key_tap(input->key_source(), input->key_source_label(), page, usage, pressed))
+      return;
     const bool keyboard = page == hid::PAGE_KEYBOARD;
     this->push_(static_cast<uint32_t>(page) << 16 | usage, KeyBindings::modifiers_of(input->get_modifiers()),
                 pressed ? KEY_PRESS : KEY_RELEASE, keyboard ? input->layout_char(usage) : 0,
-                keyboard && usage == 0xE6 && input->layout_has_level3());
+                keyboard && usage == 0xE6 && input->layout_has_level3(), input->key_source());
   });
   // Typed characters; Enter and Tab are keys.
   input->add_on_text_callback([this](const std::string &text) { this->push_text(text); });
@@ -1381,7 +1384,8 @@ bool LVHIDKeypadListener::push_action(int action) {
 }
 
 // From the HID transport's task; read_() takes them on the LVGL thread.
-bool LVHIDKeypadListener::push_(uint32_t code, uint8_t mods, EventKind kind, uint32_t layout_char, bool level3) {
+bool LVHIDKeypadListener::push_(uint32_t code, uint8_t mods, EventKind kind, uint32_t layout_char, bool level3,
+                                uint32_t source) {
   if (this->parent_->is_paused()) {
     if (kind == KEY_RELEASE)
       this->parent_->maybe_wakeup();
@@ -1391,7 +1395,7 @@ bool LVHIDKeypadListener::push_(uint32_t code, uint8_t mods, EventKind kind, uin
   const uint8_t tail = this->tail_.load(std::memory_order_relaxed);
   if (static_cast<uint8_t>(tail - this->head_.load(std::memory_order_acquire)) == QUEUE_SIZE)
     return false;
-  this->queue_[tail % QUEUE_SIZE] = {code, layout_char, mods, kind, level3};
+  this->queue_[tail % QUEUE_SIZE] = {code, layout_char, mods, kind, level3, source};
   this->tail_.store(tail + 1, std::memory_order_release);
   return true;
 }
@@ -1490,7 +1494,7 @@ void LVHIDKeypadListener::run_paused() {
       }
       if (taker != nullptr)
         taker->paused_key(page, usage, event.mods, false, this->bindings_->resolve(page, usage, event.mods),
-                          event.layout_char, event.level3);
+                          event.layout_char, event.level3, event.source);
       continue;
     }
     if (event.kind != KEY_PRESS)
@@ -1499,7 +1503,8 @@ void LVHIDKeypadListener::run_paused() {
       continue;
     const int combo = this->bindings_->resolve_combo(page, usage, this->down_, this->down_count_);
     const int action = combo >= 0 ? combo : this->bindings_->resolve(page, usage, event.mods);
-    if (taker != nullptr && taker->paused_key(page, usage, event.mods, true, action, event.layout_char, event.level3) &&
+    if (taker != nullptr &&
+        taker->paused_key(page, usage, event.mods, true, action, event.layout_char, event.level3, event.source) &&
         action < KeyBindings::BUILTIN_COUNT)
       continue;
     this->bindings_->fire(action);

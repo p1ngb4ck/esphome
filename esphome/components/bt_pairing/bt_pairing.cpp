@@ -765,7 +765,7 @@ uint8_t BTPairing::get_device_kinds() const {
 void BTPairing::add_hid_slot(hid::HIDInput *input, PairingTarget *target) {
   this->hid_slots_.push_back(input);
   this->hid_targets_.push_back(target);
-  input->add_on_key_event_callback([this, target](uint16_t page, uint16_t usage, bool pressed) {
+  input->add_on_key_event_callback([this, target, input](uint16_t page, uint16_t usage, bool pressed) {
     this->event_device_ = this->device_label(target);
 #if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
     ESP_LOGD(TAG, "[%s] %s %s", this->event_device_.c_str(), hid::key_name(page, usage).c_str(),
@@ -773,7 +773,11 @@ void BTPairing::add_hid_slot(hid::HIDInput *input, PairingTarget *target) {
 #endif
     // The key types with the layout of the device it came from.
     this->device_layout_ = this->slot_layout_(target);
+    this->forward_source_ = input->key_source();
+    this->forward_label_ = this->event_device_.c_str();
     this->key_(page, usage, pressed);
+    this->forward_source_ = 0;
+    this->forward_label_ = nullptr;
     this->device_layout_ = nullptr;
   });
   input->add_on_pointer_callback([this, target](int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {

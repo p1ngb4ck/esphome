@@ -332,6 +332,15 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
 - Keys: `GameEmulator` is LVGL's `PausedInput` while it wants the panel (else svp's stream taker again,
   `paused_input_default_()`); `keys:` per button (hid key names, defaults positional pad buttons + keyboard),
   `menu_keys:` (default BUTTON_11) pauses; every key is taken, the configuration's own key_bindings actions still fire.
+  Keyboard keys go to a core with a keyboard (MSX) instead of the button map.
+- Players: every key event carries its device (hid `key_source()`: the device-level HIDInput, forwarded by usb_hid's
+  client and bt_pairing; `key_source_label()` its name; LVGL queues it and passes it to `paused_key`). With `hid_ids:`
+  and two or more key devices connected (`players_wanted()`), the page opens the Players dialog
+  (`emulator.players` path): LVGL's KeyTap gives every key to the emulator (a ring of 8, drained in `service()`): a
+  device's first key adds it (not playing), its left / right move it to player 1 / 2, A or START of a playing device
+  starts the game, B or a menu key cancels; touch through `emulator.players_set` (index, seat 0-2),
+  `emulator.players_start` / `players_cancel`; triggers `on_players_changed` / `on_players_closed`. A game started so maps
+  each device's buttons to its player's pad; one started without the dialog maps all to player 1.
 - Saves (`<rom without extension>.sav` and `.st1`..`.st4` next to the ROM): the cartridge RAM (nes, gb, sms, snes:
   `sram()`) is read from `.sav` before the panel is taken, and written while paused and at the end when its CRC32
   differs from the last read / write (a worker write stream straight from the core's memory; the end waits for it).

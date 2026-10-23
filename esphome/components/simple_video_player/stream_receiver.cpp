@@ -966,7 +966,7 @@ bool SimpleVideoPlayer::stream_on_input(const uint8_t *message, uint8_t length) 
 // now (bit 31: a dead key, the combining mark it puts on the next; 0: nothing); level3 1: Right Alt is
 // the layout's AltGr.
 bool StreamInputTaker::paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action,
-                                  uint32_t codepoint, bool level3) {
+                                  uint32_t codepoint, bool level3, uint32_t source) {
   const uint8_t kind = action < 0 ? 0xFF : action < lvgl::KeyBindings::BUILTIN_COUNT ? action : 0xFE;
   const uint8_t message[13] = {'K',
                                kind,

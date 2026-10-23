@@ -89,6 +89,7 @@ class USBHIDDevice final : public hid::HIDInput {
   std::vector<Interface> interfaces_{};
   std::string device_key_;  // "usb:vvvv:pppp[:serial]"
   std::string device_name_;
+  const char *device_label_() const override { return this->device_name_.c_str(); }
   std::atomic<uint32_t> generation_{0};
   size_t pad_index_{0};  // the interface the gamepad driver talks to
   bool ready_{false};

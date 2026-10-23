@@ -289,12 +289,18 @@ class LvglComponent final : public PollingComponent {
     /// the key at its level now (hid::HIDInput::layout_char(): bit 31 a dead key), 0 for none; level3:
     /// Right Alt is the layout's AltGr.
     virtual bool paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action,
-                            uint32_t codepoint, bool level3) = 0;
+                            uint32_t codepoint, bool level3, uint32_t source) = 0;
     virtual bool paused_text(uint32_t codepoint) = 0;
     virtual bool paused_pointer(int16_t dx, int16_t dy, int16_t wheel, uint8_t buttons) = 0;
   };
   void set_paused_input(PausedInput *input) { this->paused_input_ = input; }
   PausedInput *get_paused_input() const { return this->paused_input_; }
+  class KeyTap {
+   public:
+    virtual bool key_tap(uint32_t source, const char *label, uint16_t page, uint16_t usage, bool pressed) = 0;
+  };
+  void set_key_tap(KeyTap *tap) { this->key_tap_.store(tap, std::memory_order_release); }
+  KeyTap *get_key_tap() const { return this->key_tap_.load(std::memory_order_acquire); }
   /// The pointer the keypads' direction keys and Enter move and click in its key mode (the first
   /// hid_pointers entry).
   void set_key_pointer(LVHIDPointerListener *pointer) { this->key_pointer_ = pointer; }
@@ -487,6 +493,7 @@ class LvglComponent final : public PollingComponent {
 #ifdef USE_LVGL_HID
   std::vector<LVHIDKeypadListener *> hid_keypads_{};
   PausedInput *paused_input_{nullptr};
+  std::atomic<KeyTap *> key_tap_{nullptr};
   LVHIDPointerListener *key_pointer_{nullptr};
 #endif
   std::vector<LvPageType *> pages_{};
@@ -684,6 +691,7 @@ class LVHIDKeypadListener final : public Parented<LvglComponent> {
     uint8_t mods;
     EventKind kind;
     bool level3;
+    uint32_t source;
   };
   struct Held {
     uint32_t code;
@@ -693,7 +701,8 @@ class LVHIDKeypadListener final : public Parented<LvglComponent> {
   static constexpr uint8_t HELD_SIZE = 4;
 
   /// False when the queue is full (or the text has no place while paused).
-  bool push_(uint32_t code, uint8_t mods, EventKind kind, uint32_t layout_char = 0, bool level3 = false);
+  bool push_(uint32_t code, uint8_t mods, EventKind kind, uint32_t layout_char = 0, bool level3 = false,
+             uint32_t source = 0);
   void read_(lv_indev_data_t *data);
   /// The LVGL key a key press becomes, 0 when it is done here (or nothing).
   uint32_t press_(uint16_t page, uint16_t usage, uint8_t mods);
