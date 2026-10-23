@@ -507,6 +507,17 @@ class SimpleVideoPlayer : public Component
   // The output a stream's picture is made for: the display (fullscreen) or the canvas. A connected
   // sender is told the new picture at once.
   void set_stream_fullscreen(bool fullscreen);
+  bool canvas_upright_() const {
+#ifdef SVP_USE_LVGL
+    if (this->lvgl_component_ != nullptr)
+      return this->lvgl_component_->get_rotation() == display::DISPLAY_ROTATION_0_DEGREES;
+#endif
+#ifdef SVP_DSI_OUTPUT
+    if (this->dsi_ != nullptr)
+      return this->dsi_->get_rotation() == display::DISPLAY_ROTATION_0_DEGREES;
+#endif
+    return true;
+  }
   void init_stream_fullscreen(bool fullscreen) { this->stream_fullscreen_.store(fullscreen); }
   bool is_stream_fullscreen() const { return this->stream_direct_(); }
   // A line per second while a sender is connected (stream_statistics): what arrived, what was drawn.
@@ -1263,7 +1274,7 @@ class SimpleVideoPlayer : public Component
   /// Whether a sender's picture is made for the display (else the canvas).
   bool stream_direct_() const {
 #if defined(SVP_DSI_OUTPUT) && defined(SVP_CANVAS_OUTPUT)
-    return this->stream_fullscreen_.load(std::memory_order_acquire);
+    return this->stream_fullscreen_.load(std::memory_order_acquire) || !this->canvas_upright_();
 #elif defined(SVP_DSI_OUTPUT)
     return true;
 #else

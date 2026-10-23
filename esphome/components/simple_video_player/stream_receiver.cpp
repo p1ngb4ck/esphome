@@ -254,6 +254,10 @@ void SimpleVideoPlayer::set_stream_fullscreen(bool fullscreen) {
     return;
 #endif
 #if defined(SVP_DSI_OUTPUT) && defined(SVP_CANVAS_OUTPUT)
+  if (!fullscreen && !this->canvas_upright_()) {
+    ESP_LOGW(TAG, "Streams stay made for the display: the canvas takes them only with LVGL rotation 0");
+    return;
+  }
   if (this->stream_fullscreen_.exchange(fullscreen, std::memory_order_acq_rel) == fullscreen)
     return;
   ESP_LOGI(TAG, "Streams are made for the %s", fullscreen ? "display" : "canvas");
