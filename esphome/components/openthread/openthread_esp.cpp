@@ -66,7 +66,7 @@ void OpenThreadComponent::setup() {
   // Network interface setup handled by network component.
   // Preferences opens NVS in app_main(); OpenThread keeps its dataset there, and esp_openthread_init()
   // aborts without it, so fail this component instead.
-  if (global_preferences->nvs_handle == 0) {
+  if (!global_preferences->nvs_ready) {
     ESP_LOGE(TAG, "NVS unavailable");
     this->teardown_stage_ = TeardownStage::TEARDOWN_STAGE_COMPLETED;
     this->mark_failed();

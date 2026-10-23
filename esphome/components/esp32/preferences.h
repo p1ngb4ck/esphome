@@ -35,6 +35,7 @@ class ESP32Preferences final : public PreferencesMixin<ESP32Preferences> {
   bool reset();
 
   uint32_t nvs_handle;
+  bool nvs_ready{false};
 
  protected:
   ESP32PreferenceBackend make_backend_(uint32_t type) const;

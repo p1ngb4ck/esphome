@@ -163,7 +163,12 @@ void ESP32Preferences::open() {
   // Runs from app_main() before the logger is initialized; any logging here
   // must be deferred. See s_open_err and make_preference() below.
   // Components that need NVS check nvs_handle instead of initializing it again.
-  nvs_flash_init();
+  esp_err_t init_err = nvs_flash_init();
+  if (init_err == ESP_ERR_NVS_NO_FREE_PAGES || init_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    nvs_flash_erase();
+    init_err = nvs_flash_init();
+  }
+  this->nvs_ready = init_err == ESP_OK;
 #ifdef USE_ESP32_PREFERENCES_NO_INTERNAL
   // Preferences are backed by an external store bound later (set_external_preferences_store);
   // do not open the internal "esphome" namespace or fall back to it. nvs_flash_init() above is
@@ -186,7 +191,7 @@ void ESP32Preferences::open() {
   s_open_err = err;
   nvs_flash_deinit();
   nvs_flash_erase();
-  nvs_flash_init();
+  this->nvs_ready = nvs_flash_init() == ESP_OK;
 
   err = nvs_open("esphome", NVS_READWRITE, &this->nvs_handle);
   if (err != 0) {

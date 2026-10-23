@@ -81,7 +81,7 @@ static constexpr uint32_t HOSTED_BT_WDT_TIMEOUT_MS = 60000;
 void ESP32BLE::setup() {
   global_ble = this;
   // Preferences opens NVS in app_main(); a zero handle means it could not be opened, even after an erase
-  if (global_preferences->nvs_handle == 0) {
+  if (!global_preferences->nvs_ready) {
     ESP_LOGE(TAG, "NVS unavailable");
     this->mark_failed();
     return;

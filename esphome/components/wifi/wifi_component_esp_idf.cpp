@@ -276,7 +276,7 @@ void WiFiComponent::wifi_lazy_init_() {
   }
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-  if (global_preferences->nvs_handle == 0) {
+  if (!global_preferences->nvs_ready) {
     ESP_LOGW(TAG, "starting wifi without nvs");
     cfg.nvs_enable = false;
   }
