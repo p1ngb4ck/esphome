@@ -83,6 +83,7 @@ from .const import (
     KEY_REF,
     KEY_REPO,
     KEY_SDKCONFIG_OPTIONS,
+    KEY_SRC_CMAKE,
     KEY_VARIANT,
     VARIANT_ESP32,
     VARIANT_ESP32C2,
