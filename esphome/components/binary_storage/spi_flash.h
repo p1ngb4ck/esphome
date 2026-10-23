@@ -84,15 +84,7 @@ class SPIFlash : public BinaryStorage,
    */
   void set_sector_size(uint32_t sector_size) { this->sector_size_ = sector_size; }
 
-  /**
-   * @brief Enable/disable Quad SPI mode for faster reads
-   *
-   * Quad SPI uses 4 data lines instead of 1, providing 4x faster read performance.
-   * Most modern flash chips support this (W25Q, MX25, etc.)
-   *
-   * @param enable true to enable quad mode, false for standard SPI
-   */
-  void set_quad_mode(bool enable) { this->quad_mode_ = enable; }
+  void set_data_lines(uint8_t data_lines) { this->data_lines_ = data_lines; }
 
 #ifdef USE_ESP_IDF
   // esp_partition mode: drive the flash with the IDF esp_flash driver on a dedicated (exclusive)
@@ -280,7 +272,7 @@ class SPIFlash : public BinaryStorage,
   uint32_t page_size_{256};     // Standard page size
   uint32_t sector_size_{4096};  // Standard sector size (4KB)
   uint32_t jedec_id_{0};
-  bool quad_mode_{false};       // Quad SPI mode for faster reads
+  uint8_t data_lines_{1};
   bool four_byte_mode_{false};  // 4-byte addressing for chips > 16MB
 
 #ifdef USE_ESP_IDF

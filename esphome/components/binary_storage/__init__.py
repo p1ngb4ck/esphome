@@ -110,6 +110,11 @@ CONF_STORAGE_DEVICE = "storage_device"
 CONF_ERASE_SIZE = "erase_size"
 CONF_JEDEC_ID = "jedec_id"
 CONF_QUAD_MODE = "quad_mode"
+CONF_IO_MODE = "io_mode"
+IO_MODE_SINGLE = "single"
+IO_MODE_DUAL = "dual"
+IO_MODE_QUAD = "quad"
+IO_MODE_DATA_LINES = {IO_MODE_SINGLE: 1, IO_MODE_DUAL: 2, IO_MODE_QUAD: 4}
 CONF_MOUNT_ID = "mount_id"
 CONF_PARTITION_ID = "partition_id"
 CONF_STORAGE_NAME = "storage_name"
@@ -356,6 +361,7 @@ _SPI_FLASH_BASE_SCHEMA = (
                 f"'{CONF_QUAD_MODE}' is derived from the SPI bus: a flash wired to a "
                 "'type: quad' bus runs in quad mode"
             ),
+            cv.Optional(CONF_IO_MODE): cv.one_of(*IO_MODE_DATA_LINES, lower=True),
             cv.Optional(CONF_REGIONS): cv.ensure_list(REGION_SCHEMA),
             cv.Optional(CONF_STORAGE_NAME): cv.string,
             # Whether this device gets its own node in the file browser. Defaults to on when a
@@ -856,7 +862,20 @@ def _final_validate(config):
                 "a SPI flash on a 'type: quad' bus runs on the ESP-IDF flash driver: it needs "
                 f"esp32 with ESP-IDF and '{CONF_ASSUME_EXCLUSIVE_BUS}: true'"
             )
-        config["_spi_bus_mode"] = bus_mode
+        io_mode = config.get(
+            CONF_IO_MODE, IO_MODE_QUAD if bus_mode == spi.TYPE_QUAD else IO_MODE_SINGLE
+        )
+        if io_mode == IO_MODE_QUAD and bus_mode != spi.TYPE_QUAD:
+            raise cv.Invalid(
+                f"'{CONF_IO_MODE}: {IO_MODE_QUAD}' needs the flash on a 'type: quad' bus "
+                "(IO2 / IO3 wired)"
+            )
+        if io_mode != IO_MODE_SINGLE and not _esp_partition_active(config):
+            raise cv.Invalid(
+                f"'{CONF_IO_MODE}: {io_mode}' runs on the ESP-IDF flash driver: it needs esp32 "
+                f"with ESP-IDF and '{CONF_ASSUME_EXCLUSIVE_BUS}: true'"
+            )
+        config[CONF_IO_MODE] = io_mode
     if (internal_type := TYPE_TO_DEVICE.get(device_type)) is not None:
         CORE.data.setdefault("binary_storage_device_types", set()).add(internal_type)
     regions = config.get(CONF_REGIONS) or []
@@ -1057,8 +1076,8 @@ async def to_code(config):
             cs_num = config[CONF_CS_PIN][CONF_NUMBER]
             freq_mhz = int(config.get(CONF_DATA_RATE, 40_000_000) // 1_000_000) or 40
             cg.add(var.enable_esp_partition_mode(cg.RawExpression(host), cs_num, freq_mhz))
-            if config["_spi_bus_mode"] == spi.TYPE_QUAD:
-                cg.add(var.set_quad_mode(True))
+            if (data_lines := IO_MODE_DATA_LINES[config[CONF_IO_MODE]]) != 1:
+                cg.add(var.set_data_lines(data_lines))
         else:
             await spi.register_spi_device(var, config)
         if device_type in ["SPI_FLASH", "FLASH"]:
