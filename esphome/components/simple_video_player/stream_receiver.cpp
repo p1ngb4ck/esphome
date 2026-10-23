@@ -261,6 +261,8 @@ void SimpleVideoPlayer::set_stream_fullscreen(bool fullscreen) {
   if (this->stream_fullscreen_.exchange(fullscreen, std::memory_order_acq_rel) == fullscreen)
     return;
   ESP_LOGI(TAG, "Streams are made for the %s", fullscreen ? "display" : "canvas");
+  if (this->stream_avi_.load(std::memory_order_acquire))
+    this->stream_switch_.store(true, std::memory_order_release);
   // A connected sender gets the new picture ('V') and restarts its stream for it.
   this->stream_depth_pending_.store(true, std::memory_order_release);
   this->stream_wake_();
@@ -352,6 +354,7 @@ void SimpleVideoPlayer::stream_net_loop_() {
       this->stream_last_touch_valid_ = false;
 #endif
       this->stream_echo_.store(0, std::memory_order_relaxed);
+      this->stream_switch_.store(false, std::memory_order_release);
 #ifdef SVP_STREAM_INPUT
       this->stream_input_wanted_.store(false, std::memory_order_release);
       if (this->stream_input_q_ != nullptr)
@@ -533,6 +536,8 @@ void SimpleVideoPlayer::stream_net_loop_() {
           }
         }
         const int received = ::recv(client, buffer, STREAM_RECV_BYTES, 0);
+        if (received == 0 && sink != nullptr && this->stream_switch_.load(std::memory_order_acquire))
+          break;
         if (received == 0 && sink != nullptr) {
           // The sender has sent all of its AVI (svp_relay half-closes): the rest of the ring plays, and
           // closing the connection once it has played tells the sender the end was reached.
@@ -566,6 +571,11 @@ void SimpleVideoPlayer::stream_net_loop_() {
         BufferedFileReader *sink = this->stream_sink_.load(std::memory_order_acquire);
         if (sink != nullptr)
           sink->end_stream();
+        if (this->stream_switch_.exchange(false, std::memory_order_acq_rel) &&
+            xSemaphoreTake(this->session_lock_, pdMS_TO_TICKS(SESSION_END_WAIT_MS)) == pdTRUE) {
+          this->end_session_();
+          xSemaphoreGive(this->session_lock_);
+        }
       }
       hold_wifi_(wifi_held, false);
       if (this->stream_current_ != nullptr) {

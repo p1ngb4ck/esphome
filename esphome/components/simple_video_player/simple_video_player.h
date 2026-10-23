@@ -2474,6 +2474,7 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> stream_awake_{true};   // false while a file plays
   std::atomic<bool> stream_asleep_{false};  // stream_sleep()
   std::atomic<bool> stream_fullscreen_{true};  // set_stream_fullscreen()
+  std::atomic<bool> stream_switch_{false};
   std::atomic<bool> stream_status_pending_{false};
   std::atomic<uint32_t> stream_echo_{0};  // bit 16 set: echo the low 16 bits back ('R'), udisp 0x22
   std::atomic<bool> stream_depth_pending_{false};
