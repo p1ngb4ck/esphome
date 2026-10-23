@@ -4,8 +4,8 @@ ESPHome `dev` plus all changes this display needs. The display powers up through
 model's init sequence, once the DSI lanes are up: no `on_boot` lambda, the picture comes up after a power cycle, a
 reset and an OTA restart alike. Each change as its own pull request branch:
 
-- [pr/ft5x06-vendor-ids](https://github.com/p1ngb4ck/esphome/tree/pr/ft5x06-vendor-ids): ft5x06 accepts other FT5x06-family vendor IDs and treats an
-  invalid touch count as no touch.
+- [pr/ft5x06-vendor-ids](https://github.com/p1ngb4ck/esphome/tree/pr/ft5x06-vendor-ids): ft5x06 accepts vendor ID 0x79 and treats an invalid touch
+  count as no touch.
 - [pr/mipi-dsi-link-options](https://github.com/p1ngb4ck/esphome/tree/pr/mipi-dsi-link-options): mipi_dsi options `frame_ack`, `continuous_clock`, `eotp`,
   `lp_horizontal_blanking`, `lp_vertical_active`.
 - [pr/mipi-dsi-generic-commands](https://github.com/p1ngb4ck/esphome/tree/pr/mipi-dsi-generic-commands): mipi_dsi `command_mode: generic` for bridge
@@ -102,7 +102,7 @@ external_components:
     components:
       - mipi      # changed upstream component: i2c_write in init sequences
       - mipi_dsi  # changed upstream component: link options, generic commands, I2C init writes, model RPI-7INCH-V1
-      - ft5x06    # changed upstream component: other FT5x06-family vendor IDs, 0xFF touch count
+      - ft5x06    # changed upstream component: vendor ID 0x79, 0xFF touch count
     refresh: always
 
 psram:

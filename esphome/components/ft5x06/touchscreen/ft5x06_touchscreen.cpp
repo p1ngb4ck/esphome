@@ -40,13 +40,15 @@ void FT5x06Touchscreen::continue_setup_() {
     case FT5X06_ID_1:
     case FT5X06_ID_2:
     case FT5X06_ID_3:
+    case FT5X06_ID_4:
       this->vendor_id_ = (VendorId) data[0];
       ESP_LOGD(TAG, "Read vendor ID 0x%X", data[0]);
       break;
 
     default:
-      ESP_LOGW(TAG, "Unknown vendor ID 0x%X, using the FT5x06 register map", data[0]);
-      break;
+      ESP_LOGE(TAG, "Unknown vendor ID 0x%X", data[0]);
+      this->mark_failed();
+      return;
   }
 }
 

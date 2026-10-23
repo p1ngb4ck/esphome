@@ -1,11 +1,12 @@
 from esphome.components.mipi import delay, flatten_sequence, i2c_write
 from esphome.const import CONF_INIT_SEQUENCE, CONF_MIRROR_X, CONF_MIRROR_Y
+from esphome.types import ConfigType
 
 from . import DsiDriverChip
 
 
 # fmt: off
-def init_sequence(porta):
+def init_sequence(porta: int) -> list[tuple[int, ...]]:
     return [
         i2c_write(0x45, 0x85, 0x00), delay(30),
         i2c_write(0x45, 0x86, 0x00), delay(8),
@@ -42,7 +43,9 @@ def init_sequence(porta):
 
 
 class RpiTouchDisplayV1(DsiDriverChip):
-    def get_sequence(self, config, add_madctl=True, add_reset=False):
+    def get_sequence(
+        self, config: ConfigType, add_madctl: bool = True, add_reset: bool = False
+    ) -> tuple[int, ...]:
         transform = self.get_transform(config)
         porta = (0x00 if transform[CONF_MIRROR_X] else 0x04) | (
             0x08 if transform[CONF_MIRROR_Y] else 0x00

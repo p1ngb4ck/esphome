@@ -102,7 +102,7 @@ void MipiDsi::setup() {
     this->smark_failed(LOG_STR("esp_lcd_new_panel_dpi failed"), err);
     return;
   }
-  MIPI_DSI_LL_GET_HOST(0)->vid_mode_cfg.frame_bta_ack_en = this->frame_ack_;
+  mipi_dsi_host_ll_dpi_enable_frame_ack(MIPI_DSI_LL_GET_HOST(0), this->frame_ack_);
   mipi_dsi_host_ll_enable_tx_eotp(MIPI_DSI_LL_GET_HOST(0), this->eotp_, false);
   mipi_dsi_host_ll_dpi_enable_lp_horizontal_timing(MIPI_DSI_LL_GET_HOST(0), this->lp_horizontal_blanking_,
                                                    this->lp_horizontal_blanking_);
@@ -127,7 +127,7 @@ void MipiDsi::setup() {
   // need to know when the display is ready for SLPOUT command - will be 120ms after reset
   auto when = millis() + 120;
   if (this->generic_commands_) {
-    MIPI_DSI_LL_GET_HOST(0)->cmd_mode_cfg.ack_rqst_en = 0;
+    mipi_dsi_host_ll_enable_cmd_ack(MIPI_DSI_LL_GET_HOST(0), false);
   }
   err = esp_lcd_panel_init(this->handle_);
   if (err != ESP_OK) {
@@ -166,7 +166,7 @@ void MipiDsi::setup() {
         this->mark_failed(LOG_STR("Malformed init sequence"));
         return;
       }
-      if (cmd == SLEEP_OUT) {
+      if (cmd == SLEEP_OUT && !this->generic_commands_) {
         // are we ready, boots?
         int duration = when - millis();
         if (duration > 0) {

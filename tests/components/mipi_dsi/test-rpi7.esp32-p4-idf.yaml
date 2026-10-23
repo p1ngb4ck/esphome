@@ -1,0 +1,16 @@
+packages:
+  i2c: !include ../../test_build_components/common/i2c/esp32-p4-idf.yaml
+
+esp_ldo:
+  - id: ldo_id
+    channel: 3
+    voltage: 2.5V
+
+display:
+  - platform: mipi_dsi
+    model: RPI-7INCH-V1
+    transform:
+      mirror_x: true
+      mirror_y: true
+
+psram:
