@@ -1,7 +1,7 @@
-# ft5x06: other FT5x06-family vendor IDs
+# ft5x06: vendor ID 0x79, invalid touch count
 
-- A vendor ID other than the three known ones no longer marks the touchscreen failed: a warning is logged and the
-  FT5x06 register map is used (e.g. the Raspberry Pi 7" Touch Display v1, vendor ID 0x79).
+- Vendor ID 0x79 (Raspberry Pi 7" Touch Display v1) is accepted next to the three known ones; other vendor IDs
+  still mark the touchscreen failed.
 - A touch count above the maximum (some controllers read 0xFF until the first touch) is treated as no touch instead
   of logging "Failed to read status" on every update.
 
