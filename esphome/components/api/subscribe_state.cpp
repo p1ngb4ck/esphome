@@ -1,6 +1,7 @@
 #include "subscribe_state.h"
 #ifdef USE_API
 #include "api_connection.h"
+#include "api_server.h"
 #include "esphome/core/log.h"
 
 namespace esphome::api {

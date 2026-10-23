@@ -90,7 +90,8 @@ void APIServer::setup() {
 #endif
 
 #ifdef USE_CAMERA
-  if (camera::Camera::instance() != nullptr && !camera::Camera::instance()->is_internal()) {
+  if (camera::Camera::instance() != nullptr && !camera::Camera::instance()->is_internal() &&
+      !this->is_hidden(camera::Camera::instance())) {
     camera::Camera::instance()->add_listener(this);
   }
 #endif
@@ -394,7 +395,7 @@ void APIServer::handle_disconnect(APIConnection *conn) {}
 // Macro for controller update dispatch
 #define API_DISPATCH_UPDATE(entity_type, entity_name) \
   void APIServer::on_##entity_name##_update(entity_type *obj) { /* NOLINT(bugprone-macro-parentheses) */ \
-    if (obj->is_internal()) \
+    if (obj->is_internal() || this->is_hidden(obj)) \
       return; \
     for (auto &c : this->active_clients()) { \
       if (c->flags_.state_subscription) \
@@ -476,7 +477,7 @@ API_DISPATCH_UPDATE(water_heater::WaterHeater, water_heater)
 
 #ifdef USE_EVENT
 void APIServer::on_event(event::Event *obj) {
-  if (obj->is_internal())
+  if (obj->is_internal() || this->is_hidden(obj))
     return;
   for (auto &c : this->active_clients()) {
     if (c->flags_.state_subscription)
@@ -488,7 +489,7 @@ void APIServer::on_event(event::Event *obj) {
 #ifdef USE_UPDATE
 // Update is a special case - the method is called on_update, not on_update_update
 void APIServer::on_update(update::UpdateEntity *obj) {
-  if (obj->is_internal())
+  if (obj->is_internal() || this->is_hidden(obj))
     return;
   for (auto &c : this->active_clients()) {
     if (c->flags_.state_subscription)

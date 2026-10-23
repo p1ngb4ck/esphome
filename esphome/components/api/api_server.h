@@ -72,6 +72,22 @@ class APIServer final : public Component
   void on_camera_image(const std::shared_ptr<camera::CameraImage> &image) override;
 #endif
   void set_port(uint16_t port) { this->port_ = port; }
+  void set_hidden_count(uint16_t count) {
+    RAMAllocator<const EntityBase *> allocator(RAMAllocator<const EntityBase *>::ALLOC_EXTERNAL);
+    this->hidden_ = allocator.allocate(count);
+    this->hidden_capacity_ = this->hidden_ != nullptr ? count : 0;
+  }
+  void hide_entity(const EntityBase *entity) {
+    if (this->hidden_count_ < this->hidden_capacity_)
+      this->hidden_[this->hidden_count_++] = entity;
+  }
+  bool is_hidden(const EntityBase *entity) const {
+    for (uint16_t i = 0; i < this->hidden_count_; i++) {
+      if (this->hidden_[i] == entity)
+        return true;
+    }
+    return false;
+  }
   void set_reboot_timeout(uint32_t reboot_timeout) { this->reboot_timeout_ = reboot_timeout; }
   void set_batch_delay(uint16_t batch_delay) { this->batch_delay_ = batch_delay; }
   uint16_t get_batch_delay() const { return batch_delay_; }
@@ -277,6 +293,9 @@ class APIServer final : public Component
 #endif
 
  protected:
+  const EntityBase **hidden_{nullptr};
+  uint16_t hidden_count_{0};
+  uint16_t hidden_capacity_{0};
   // Accept incoming socket connections. Only called when socket has pending connections.
   void __attribute__((noinline)) accept_new_connections_();
   /// Takes the socket into a new connection and starts it; callers must have
