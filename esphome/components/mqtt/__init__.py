@@ -39,6 +39,7 @@ from esphome.const import (
     CONF_LEVEL,
     CONF_LOG_TOPIC,
     CONF_MQTT,
+    CONF_MQTT_ID,
     CONF_ON_CONNECT,
     CONF_ON_DISCONNECT,
     CONF_ON_JSON_MESSAGE,
@@ -70,6 +71,7 @@ from esphome.const import (
     PlatformFramework,
 )
 from esphome.core import CORE, CoroPriority, coroutine_with_priority
+import esphome.final_validate as fv
 from esphome.types import ConfigType
 
 DEPENDENCIES = ["network"]
@@ -304,11 +306,92 @@ JSON_MESSAGE_AUTOMATION_SCHEMA = automation.validate_synchronous_automation(
     },
 )
 
+CONF_PUBLISH_DEFAULT = "publish_default"
+PUBLISH_WAYS = ("api", "mqtt", "both")
+_KEY_API_ONLY = "_api_only"
+_KEY_MQTT_ONLY = "_mqtt_only"
+MQTT_COMPONENT_TYPES = {
+    "MQTTAlarmControlPanelComponent": "alarm_control_panel",
+    "MQTTBinarySensorComponent": "binary_sensor",
+    "MQTTButtonComponent": "button",
+    "MQTTClimateComponent": "climate",
+    "MQTTCoverComponent": "cover",
+    "MQTTDateComponent": "date",
+    "MQTTDateTimeComponent": "datetime",
+    "MQTTEventComponent": "event",
+    "MQTTFanComponent": "fan",
+    "MQTTJSONLightComponent": "light",
+    "MQTTLockComponent": "lock",
+    "MQTTNumberComponent": "number",
+    "MQTTSelectComponent": "select",
+    "MQTTSensorComponent": "sensor",
+    "MQTTSwitchComponent": "switch",
+    "MQTTTextComponent": "text",
+    "MQTTTextSensor": "sensor",
+    "MQTTTimeComponent": "time",
+    "MQTTUpdateComponent": "update",
+    "MQTTValveComponent": "valve",
+}
+
+
+def _entity_configs(value):
+    if isinstance(value, dict):
+        yield value
+        for item in value.values():
+            yield from _entity_configs(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _entity_configs(item)
+
+
+def _final_validate(config):
+    fconf = fv.full_config.get()
+    chosen = {}
+    for way in PUBLISH_WAYS:
+        for entity_id in config.get(f"publish_{way}", []):
+            if str(entity_id) in chosen:
+                raise cv.Invalid(f"{entity_id} is in more than one publish_ list", [f"publish_{way}"])
+            chosen[str(entity_id)] = way
+    if (chosen or config[CONF_PUBLISH_DEFAULT] != "both") and "api" not in fconf:
+        raise cv.Invalid("publishing per way needs the api: component next to mqtt:", [CONF_PUBLISH_DEFAULT])
+    api_only = []
+    mqtt_only = []
+    found = set()
+    for domain, conf in fconf.items():
+        if domain == "mqtt":
+            continue
+        for entity in _entity_configs(conf):
+            if CONF_MQTT_ID not in entity or CONF_ID not in entity:
+                continue
+            key = str(entity[CONF_ID])
+            found.add(key)
+            way = chosen.get(key, config[CONF_PUBLISH_DEFAULT])
+            if way == "mqtt":
+                mqtt_only.append(entity[CONF_ID])
+            elif way == "api":
+                mqtt_id = entity.pop(CONF_MQTT_ID)
+                component_type = MQTT_COMPONENT_TYPES.get(str(mqtt_id.type).split("::")[-1])
+                if component_type is not None:
+                    api_only.append((component_type, entity[CONF_ID]))
+    if missing := [key for key in chosen if key not in found]:
+        raise cv.Invalid(f"not an entity with MQTT support: {', '.join(missing)}")
+    config[_KEY_API_ONLY] = api_only
+    config[_KEY_MQTT_ONLY] = mqtt_only
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate
+
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(MQTTClientComponent),
             cv.Required(CONF_BROKER): cv.string_strict,
+            cv.Optional(CONF_PUBLISH_DEFAULT, default="both"): cv.one_of(*PUBLISH_WAYS, lower=True),
+            cv.Optional("publish_api"): cv.ensure_list(cv.use_id(cg.EntityBase)),
+            cv.Optional("publish_mqtt"): cv.ensure_list(cv.use_id(cg.EntityBase)),
+            cv.Optional("publish_both"): cv.ensure_list(cv.use_id(cg.EntityBase)),
             cv.Optional(CONF_ENABLE_ON_BOOT, default=True): cv.boolean,
             cv.Optional(CONF_PORT): cv.port,
             cv.Optional(CONF_USERNAME, default=""): cv.string,
@@ -454,6 +537,17 @@ async def to_code(config):
     cg.add(var.set_password(config[CONF_PASSWORD]))
     cg.add(var.set_clean_session(config[CONF_CLEAN_SESSION]))
     cg.add_optional(var.set_client_id, config.get(CONF_CLIENT_ID))
+
+    if api_only := config.get(_KEY_API_ONLY):
+        calls = []
+        for component_type, entity_id in api_only:
+            entity = await cg.get_variable(entity_id)
+            calls.append(f'client->clear_discovery("{component_type}", {entity});')
+        cg.add(
+            var.set_api_only(
+                cg.RawExpression(f"[](esphome::mqtt::MQTTClientComponent *client) {{ {' '.join(calls)} }}")
+            )
+        )
 
     discovery = config[CONF_DISCOVERY]
     discovery_retain = config[CONF_DISCOVERY_RETAIN]

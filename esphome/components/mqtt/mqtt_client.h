@@ -144,6 +144,9 @@ class MQTTClientComponent final : public Component {
   const MQTTDiscoveryInfo &get_discovery_info() const;
   /// Globally disable Home Assistant discovery.
   void disable_discovery();
+  using ApiOnlyFn = void (*)(MQTTClientComponent *client);
+  void set_api_only(ApiOnlyFn api_only) { this->api_only_ = api_only; }
+  void clear_discovery(const char *component_type, EntityBase *entity);
   bool is_discovery_enabled() const;
   bool is_discovery_ip_enabled() const;
 
@@ -302,6 +305,7 @@ class MQTTClientComponent final : public Component {
 
  protected:
   void send_device_info_();
+  ApiOnlyFn api_only_{nullptr};
 
   /// Reconnect to the MQTT broker if not already connected.
   void start_connect_();

@@ -391,9 +391,24 @@ void MQTTClientComponent::check_connected() {
   }
 #endif
   this->send_device_info_();
+  if (this->api_only_ != nullptr)
+    this->api_only_(this);
 
   for (MQTTComponent *component : this->children_)
     component->schedule_resend_state();
+}
+
+void MQTTClientComponent::clear_discovery(const char *component_type, EntityBase *entity) {
+  if (!this->is_discovery_enabled())
+    return;
+  char name[ESPHOME_DEVICE_NAME_MAX_LEN + 1];
+  str_sanitize_to(name, App.get_name().c_str());
+  char object_id[OBJECT_ID_MAX_LEN];
+  const StringRef id = entity->get_object_id_to(object_id);
+  std::string topic = this->discovery_info_.prefix;
+  topic.append("/").append(component_type).append("/").append(name).append("/");
+  topic.append(id.c_str(), id.size()).append("/config");
+  this->publish(topic.c_str(), "", 0, 0, true);
 }
 
 void MQTTClientComponent::loop() {
