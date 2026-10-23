@@ -37,12 +37,8 @@ def test_command_mode_validation(set_core_config: SetCoreConfigCallable) -> None
     from esphome.components.mipi_dsi.display import CONFIG_SCHEMA
 
     assert CONFIG_SCHEMA({**BASE, "id": "dcs_default"})["command_mode"] == "dcs"
-    assert (
-        CONFIG_SCHEMA({**BASE, "id": "generic_upper", "command_mode": "GENERIC"})[
-            "command_mode"
-        ]
-        == "generic"
-    )
+    config = CONFIG_SCHEMA({**BASE, "id": "generic_upper", "command_mode": "GENERIC"})
+    assert config["command_mode"] == "generic"
     with pytest.raises(cv.Invalid, match="Unknown value 'bta'"):
         CONFIG_SCHEMA({**BASE, "id": "invalid_mode", "command_mode": "bta"})
 
@@ -54,7 +50,10 @@ def test_generic_commands_code_generation(
     main_cpp = generate_main(component_fixture_path("mipi_dsi_generic_commands.yaml"))
     assert "generic_display->set_generic_commands(true);" in main_cpp
     assert "dcs_display->set_generic_commands(false);" in main_cpp
-    assert init_sequence(main_cpp, "generic_display") == "100, 5, 4, 15, 4, 0, 0, 10, 255, 17, 0"
+    assert (
+        init_sequence(main_cpp, "generic_display")
+        == "100, 5, 4, 15, 4, 0, 0, 10, 255, 17, 0"
+    )
     dcs = init_sequence(main_cpp, "dcs_display")
     assert dcs.startswith("100, 5, 4, 15, 4, 0, 0, ")
-    assert dcs.endswith("17, 0, 41, 0")
+    assert dcs.endswith("17, 0, 10, 255, 41, 0, 10, 255")
