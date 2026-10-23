@@ -3,6 +3,7 @@ from esphome.components import select
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_NAME, CONF_OUTPUT_SPEAKER
 from esphome.core import CORE
+import esphome.final_validate as fv
 
 from .. import resampler_ns
 from ..speaker import ResamplerSpeaker
@@ -27,7 +28,7 @@ CONFIG_SCHEMA = (
 
 
 def _final_validate(config):
-    for conf in CORE.config.get("speaker") or []:
+    for conf in fv.full_config.get().get("speaker") or []:
         if str(conf.get(CONF_ID)) == str(config[CONF_RESAMPLER_ID]):
             if not isinstance(conf.get(CONF_OUTPUT_SPEAKER), list):
                 raise cv.Invalid(
