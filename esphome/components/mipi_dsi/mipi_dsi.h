@@ -13,6 +13,9 @@
 
 #include "esphome/components/display/display.h"
 #include "esphome/components/display/display_color_utils.h"
+#ifdef USE_I2C
+#include "esphome/components/i2c/i2c.h"
+#endif
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_io.h"
 
@@ -32,6 +35,7 @@ const uint8_t INVERT_ON = 0x21;
 const uint8_t DISPLAY_ON = 0x29;
 const uint8_t CMD2_BKSEL = 0xFF;
 const uint8_t DELAY_FLAG = 0xFF;
+const uint8_t I2C_FLAG = 0xFE;
 const uint8_t MADCTL_BGR = 0x08;
 const uint8_t MADCTL_MX = 0x40;
 const uint8_t MADCTL_MY = 0x80;
@@ -65,6 +69,9 @@ class MipiDsi final : public display::Display {
   void set_model(const char *model) { this->model_ = model; }
   void set_lane_bit_rate(float lane_bit_rate) { this->lane_bit_rate_ = lane_bit_rate; }
   void set_lanes(uint8_t lanes) { this->lanes_ = lanes; }
+#ifdef USE_I2C
+  void set_i2c_bus(i2c::I2CBus *bus) { this->i2c_device_.set_i2c_bus(bus); }
+#endif
 
   void smark_failed(const LogString *message, esp_err_t err);
 
@@ -130,6 +137,9 @@ class MipiDsi final : public display::Display {
   float pclk_frequency_ = 16;  // in MHz
   float lane_bit_rate_{1500};  // in Mbps
   uint8_t lanes_{2};           // 1, 2, 3 or 4 lanes
+#ifdef USE_I2C
+  i2c::I2CDevice i2c_device_;
+#endif
 
   bool invert_colors_{};
   display::ColorBitness color_depth_;

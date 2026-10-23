@@ -136,6 +136,19 @@ void MipiDsi::setup() {
     if (x == DELAY_FLAG) {
       ESP_LOGD(TAG, "Delay %dms", cmd);
       delay(cmd);
+#ifdef USE_I2C
+    } else if (x == I2C_FLAG) {
+      if (len - index < 2) {
+        this->mark_failed(LOG_STR("Malformed init sequence"));
+        return;
+      }
+      this->i2c_device_.set_i2c_address(cmd);
+      if (!this->i2c_device_.write_registers(reinterpret_cast<const i2c::I2CRegValue *>(seq + index), 1)) {
+        this->mark_failed(LOG_STR("I2C write failed"));
+        return;
+      }
+      index += 2;
+#endif
     } else {
       uint8_t num_args = x & 0x7F;
       if (len - index < num_args) {

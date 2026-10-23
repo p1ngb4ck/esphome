@@ -4,7 +4,7 @@ import pkgutil
 
 from esphome import pins
 import esphome.codegen as cg
-from esphome.components import display
+from esphome.components import display, i2c
 from esphome.components.const import (
     BYTE_ORDER_BIG,
     BYTE_ORDER_LITTLE,
@@ -25,6 +25,7 @@ from esphome.components.mipi import (
     CONF_VSYNC_BACK_PORCH,
     CONF_VSYNC_FRONT_PORCH,
     CONF_VSYNC_PULSE_WIDTH,
+    I2C_FLAG,
     MODE_BGR,
     PIXEL_MODE_16BIT,
     PIXEL_MODE_24BIT,
@@ -42,6 +43,7 @@ from esphome.const import (
     CONF_COLOR_ORDER,
     CONF_DIMENSIONS,
     CONF_ENABLE_PIN,
+    CONF_I2C_ID,
     CONF_ID,
     CONF_INIT_SEQUENCE,
     CONF_INVERT_COLORS,
@@ -140,6 +142,10 @@ def model_schema(config: ConfigType) -> cv.All:
             model.option(CONF_VSYNC_FRONT_PORCH): cv.int_,
         }
     )
+    if any(
+        isinstance(x, tuple) and x[0] == I2C_FLAG for x in model.initsequence or ()
+    ):
+        schema = schema.extend({cv.GenerateID(CONF_I2C_ID): cv.use_id(i2c.I2CBus)})
     return cv.All(
         schema,
         cv.only_on_esp32,
@@ -213,6 +219,8 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_pclk_frequency(config[CONF_PCLK_FREQUENCY] / 1.0e6))
     cg.add(var.set_lanes(int(config[CONF_LANES])))
     cg.add(var.set_lane_bit_rate(config[CONF_LANE_BIT_RATE] / 1.0e6))
+    if CONF_I2C_ID in config:
+        cg.add(var.set_i2c_bus(await cg.get_variable(config[CONF_I2C_ID])))
     await cg.add_pin(var.set_reset_pin, config.get(CONF_RESET_PIN))
     if enable_pin := config.get(CONF_ENABLE_PIN):
         enable = [await cg.gpio_pin_expression(pin) for pin in enable_pin]
