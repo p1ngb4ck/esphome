@@ -464,7 +464,7 @@ void MQTTClientComponent::publish_setup_() {
       if (saved[s].key == 0 || saved[s].way > PUBLISH_MQTT)
         continue;
       for (uint16_t i = 0; i < this->publish_count_; i++) {
-        if (this->publish_[i].entity->get_preference_hash() == saved[s].key) {
+        if (const_cast<EntityBase *>(this->publish_[i].entity)->get_preference_hash() == saved[s].key) {
           this->publish_apply_(i, static_cast<PublishWay>(saved[s].way));
           break;
         }
@@ -489,7 +489,7 @@ void MQTTClientComponent::publish_save_() {
     return;
   for (uint16_t i = 0; i < this->publish_count_; i++) {
     const PublishEntry &entry = this->publish_[i];
-    saved[i].key = entry.way != entry.yaml_way ? entry.entity->get_preference_hash() : 0;
+    saved[i].key = entry.way != entry.yaml_way ? const_cast<EntityBase *>(entry.entity)->get_preference_hash() : 0;
     saved[i].way = entry.way;
   }
   this->publish_pref_.save(reinterpret_cast<const uint8_t *>(saved), this->publish_count_ * sizeof(PublishSaved));
