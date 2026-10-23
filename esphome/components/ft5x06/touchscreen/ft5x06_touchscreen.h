@@ -15,6 +15,13 @@ enum VendorId {
   FT5X06_ID_3 = 0xCD,
 };
 
+enum FTEvent : uint8_t {
+  FT5X06_EVENT_UP = 1,
+  FT5X06_EVENT_CONTACT = 2,
+};
+
+static constexpr uint8_t FT5X06_NOT_TOUCHED = 0xFF;
+
 enum FTCmd : uint8_t {
   FT5X06_MODE_REG = 0x00,
   FT5X06_ORIGIN_REG = 0x08,
