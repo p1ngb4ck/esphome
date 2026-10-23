@@ -308,29 +308,12 @@ JSON_MESSAGE_AUTOMATION_SCHEMA = automation.validate_synchronous_automation(
 
 CONF_PUBLISH_DEFAULT = "publish_default"
 PUBLISH_WAYS = ("api", "mqtt", "both")
-_KEY_API_ONLY = "_api_only"
-_KEY_MQTT_ONLY = "_mqtt_only"
-MQTT_COMPONENT_TYPES = {
-    "MQTTAlarmControlPanelComponent": "alarm_control_panel",
-    "MQTTBinarySensorComponent": "binary_sensor",
-    "MQTTButtonComponent": "button",
-    "MQTTClimateComponent": "climate",
-    "MQTTCoverComponent": "cover",
-    "MQTTDateComponent": "date",
-    "MQTTDateTimeComponent": "datetime",
-    "MQTTEventComponent": "event",
-    "MQTTFanComponent": "fan",
-    "MQTTJSONLightComponent": "light",
-    "MQTTLockComponent": "lock",
-    "MQTTNumberComponent": "number",
-    "MQTTSelectComponent": "select",
-    "MQTTSensorComponent": "sensor",
-    "MQTTSwitchComponent": "switch",
-    "MQTTTextComponent": "text",
-    "MQTTTextSensor": "sensor",
-    "MQTTTimeComponent": "time",
-    "MQTTUpdateComponent": "update",
-    "MQTTValveComponent": "valve",
+_KEY_PUBLISH = "_publish"
+PublishWay = mqtt_ns.enum("PublishWay")
+PUBLISH_WAY_ENUM = {
+    "both": PublishWay.PUBLISH_BOTH,
+    "api": PublishWay.PUBLISH_API,
+    "mqtt": PublishWay.PUBLISH_MQTT,
 }
 
 
@@ -354,8 +337,7 @@ def _final_validate(config):
             chosen[str(entity_id)] = way
     if (chosen or config[CONF_PUBLISH_DEFAULT] != "both") and "api" not in fconf:
         raise cv.Invalid("publishing per way needs the api: component next to mqtt:", [CONF_PUBLISH_DEFAULT])
-    api_only = []
-    mqtt_only = []
+    publish = []
     found = set()
     for domain, conf in fconf.items():
         if domain == "mqtt":
@@ -365,18 +347,10 @@ def _final_validate(config):
                 continue
             key = str(entity[CONF_ID])
             found.add(key)
-            way = chosen.get(key, config[CONF_PUBLISH_DEFAULT])
-            if way == "mqtt":
-                mqtt_only.append(entity[CONF_ID])
-            elif way == "api":
-                mqtt_id = entity.pop(CONF_MQTT_ID)
-                component_type = MQTT_COMPONENT_TYPES.get(str(mqtt_id.type).split("::")[-1])
-                if component_type is not None:
-                    api_only.append((component_type, entity[CONF_ID]))
+            publish.append((entity[CONF_ID], entity[CONF_MQTT_ID], chosen.get(key, config[CONF_PUBLISH_DEFAULT])))
     if missing := [key for key in chosen if key not in found]:
         raise cv.Invalid(f"not an entity with MQTT support: {', '.join(missing)}")
-    config[_KEY_API_ONLY] = api_only
-    config[_KEY_MQTT_ONLY] = mqtt_only
+    config[_KEY_PUBLISH] = publish if "api" in fconf else []
     return config
 
 
@@ -538,16 +512,12 @@ async def to_code(config):
     cg.add(var.set_clean_session(config[CONF_CLEAN_SESSION]))
     cg.add_optional(var.set_client_id, config.get(CONF_CLIENT_ID))
 
-    if api_only := config.get(_KEY_API_ONLY):
-        calls = []
-        for component_type, entity_id in api_only:
+    if publish := config.get(_KEY_PUBLISH):
+        cg.add(var.set_publish_count(len(publish)))
+        for entity_id, mqtt_id, way in publish:
             entity = await cg.get_variable(entity_id)
-            calls.append(f'client->clear_discovery("{component_type}", {entity});')
-        cg.add(
-            var.set_api_only(
-                cg.RawExpression(f"[](esphome::mqtt::MQTTClientComponent *client) {{ {' '.join(calls)} }}")
-            )
-        )
+            component = await cg.get_variable(mqtt_id)
+            cg.add(var.add_publish_entry(entity, component, PUBLISH_WAY_ENUM[way]))
 
     discovery = config[CONF_DISCOVERY]
     discovery_retain = config[CONF_DISCOVERY_RETAIN]

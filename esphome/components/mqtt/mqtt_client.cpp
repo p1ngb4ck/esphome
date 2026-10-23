@@ -2,6 +2,8 @@
 
 #ifdef USE_MQTT
 
+#include <algorithm>
+#include <functional>
 #include <utility>
 #include "esphome/components/network/util.h"
 #include "esphome/core/application.h"
@@ -58,6 +60,7 @@ static void format_esphome_topic(char (&topic)[ESPHOME_TOPIC_BUFFER_SIZE], const
 }
 
 void MQTTClientComponent::setup() {
+  this->publish_setup_();
   this->mqtt_backend_.set_on_message(
       [this](const char *topic, const char *payload, size_t len, size_t index, size_t total) {
         if (index == 0) {
@@ -391,24 +394,132 @@ void MQTTClientComponent::check_connected() {
   }
 #endif
   this->send_device_info_();
-  if (this->api_only_ != nullptr)
-    this->api_only_(this);
 
   for (MQTTComponent *component : this->children_)
     component->schedule_resend_state();
 }
 
-void MQTTClientComponent::clear_discovery(const char *component_type, EntityBase *entity) {
-  if (!this->is_discovery_enabled())
+void MQTTClientComponent::set_publish_count(uint16_t count) {
+  RAMAllocator<PublishEntry> entries(RAMAllocator<PublishEntry>::ALLOC_EXTERNAL);
+  RAMAllocator<uint16_t> order(RAMAllocator<uint16_t>::ALLOC_EXTERNAL);
+  this->publish_ = entries.allocate(count);
+  this->publish_order_ = order.allocate(count);
+  if (this->publish_ == nullptr || this->publish_order_ == nullptr) {
+    ESP_LOGE(TAG, "No PSRAM for the publish table of %u entities", count);
     return;
-  char name[ESPHOME_DEVICE_NAME_MAX_LEN + 1];
-  str_sanitize_to(name, App.get_name().c_str());
-  char object_id[OBJECT_ID_MAX_LEN];
-  const StringRef id = entity->get_object_id_to(object_id);
-  std::string topic = this->discovery_info_.prefix;
-  topic.append("/").append(component_type).append("/").append(name).append("/");
-  topic.append(id.c_str(), id.size()).append("/config");
-  this->publish(topic.c_str(), "", 0, 0, true);
+  }
+  this->publish_capacity_ = count;
+}
+
+void MQTTClientComponent::add_publish_entry(const EntityBase *entity, MQTTComponent *component, PublishWay way) {
+  if (this->publish_count_ >= this->publish_capacity_)
+    return;
+  this->publish_[this->publish_count_] = {entity, component, way, way};
+  this->publish_order_[this->publish_count_] = this->publish_count_;
+  this->publish_count_++;
+  component->set_publish_off(way == PUBLISH_API);
+}
+
+const char *MQTTClientComponent::publish_kind(uint16_t index) const {
+  return this->publish_[index].component->component_type();
+}
+
+PublishWay MQTTClientComponent::publish_way_of(const EntityBase *entity) const {
+  const std::less<const EntityBase *> less;
+  uint16_t low = 0;
+  uint16_t high = this->publish_count_;
+  while (low < high) {
+    const uint16_t middle = (low + high) / 2;
+    if (less(this->publish_[this->publish_order_[middle]].entity, entity)) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  if (low < this->publish_count_ && this->publish_[this->publish_order_[low]].entity == entity)
+    return static_cast<PublishWay>(this->publish_[this->publish_order_[low]].way);
+  return PUBLISH_BOTH;
+}
+
+struct __attribute__((packed)) PublishSaved {
+  uint32_t key;
+  uint8_t way;
+};
+
+void MQTTClientComponent::publish_setup_() {
+  if (this->publish_count_ == 0)
+    return;
+  const std::less<const EntityBase *> less;
+  std::sort(this->publish_order_, this->publish_order_ + this->publish_count_, [this, &less](uint16_t a, uint16_t b) {
+    return less(this->publish_[a].entity, this->publish_[b].entity);
+  });
+  this->publish_pref_ = global_preferences->make_preference(this->publish_count_ * sizeof(PublishSaved),
+                                                            fnv1_hash("mqtt_publish_ways"));
+  RAMAllocator<PublishSaved> allocator(RAMAllocator<PublishSaved>::ALLOC_EXTERNAL);
+  PublishSaved *saved = allocator.allocate(this->publish_count_);
+  if (saved == nullptr)
+    return;
+  if (this->publish_pref_.load(reinterpret_cast<uint8_t *>(saved), this->publish_count_ * sizeof(PublishSaved))) {
+    for (uint16_t s = 0; s < this->publish_count_; s++) {
+      if (saved[s].key == 0 || saved[s].way > PUBLISH_MQTT)
+        continue;
+      for (uint16_t i = 0; i < this->publish_count_; i++) {
+        if (this->publish_[i].entity->get_preference_hash() == saved[s].key) {
+          this->publish_apply_(i, static_cast<PublishWay>(saved[s].way));
+          break;
+        }
+      }
+    }
+  }
+  allocator.deallocate(saved, this->publish_count_);
+}
+
+bool MQTTClientComponent::publish_apply_(uint16_t index, PublishWay way) {
+  PublishEntry &entry = this->publish_[index];
+  const bool api_changed = (entry.way == PUBLISH_MQTT) != (way == PUBLISH_MQTT);
+  entry.way = way;
+  entry.component->set_publish_off(way == PUBLISH_API);
+  return api_changed;
+}
+
+void MQTTClientComponent::publish_save_() {
+  RAMAllocator<PublishSaved> allocator(RAMAllocator<PublishSaved>::ALLOC_EXTERNAL);
+  PublishSaved *saved = allocator.allocate(this->publish_count_);
+  if (saved == nullptr)
+    return;
+  for (uint16_t i = 0; i < this->publish_count_; i++) {
+    const PublishEntry &entry = this->publish_[i];
+    saved[i].key = entry.way != entry.yaml_way ? entry.entity->get_preference_hash() : 0;
+    saved[i].way = entry.way;
+  }
+  this->publish_pref_.save(reinterpret_cast<const uint8_t *>(saved), this->publish_count_ * sizeof(PublishSaved));
+  allocator.deallocate(saved, this->publish_count_);
+}
+
+void MQTTClientComponent::set_publish_way(uint16_t index, PublishWay way) {
+  if (index >= this->publish_count_ || way > PUBLISH_MQTT || this->publish_[index].way == way)
+    return;
+  const bool api_changed = this->publish_apply_(index, way);
+  this->publish_save_();
+#ifdef USE_API
+  if (api_changed && api::global_api_server != nullptr)
+    api::global_api_server->relist_clients();
+#endif
+}
+
+void MQTTClientComponent::set_publish_way_all(PublishWay way) {
+  if (way > PUBLISH_MQTT)
+    return;
+  bool api_changed = false;
+  for (uint16_t i = 0; i < this->publish_count_; i++) {
+    if (this->publish_[i].way != way)
+      api_changed |= this->publish_apply_(i, way);
+  }
+  this->publish_save_();
+#ifdef USE_API
+  if (api_changed && api::global_api_server != nullptr)
+    api::global_api_server->relist_clients();
+#endif
 }
 
 void MQTTClientComponent::loop() {

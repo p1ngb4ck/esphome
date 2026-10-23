@@ -818,6 +818,14 @@ void APIServer::on_shutdown() {
   }
 }
 
+void APIServer::relist_clients() {
+  for (auto &c : this->active_clients()) {
+    DisconnectRequest req;
+    if (!c->send_message(req))
+      c->schedule_message_front_(nullptr, DisconnectRequest::MESSAGE_TYPE, DisconnectRequest::ESTIMATED_SIZE);
+  }
+}
+
 bool APIServer::teardown() {
   // If network is disconnected, no point trying to flush buffers
   if (!network::is_connected()) {

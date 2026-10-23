@@ -591,10 +591,15 @@ async def to_code(config: ConfigType) -> None:
 
     CORE.register_controller(var)
 
-    if mqtt_only := (CORE.config.get("mqtt") or {}).get("_mqtt_only"):
-        cg.add(var.set_hidden_count(len(mqtt_only)))
-        for entity_id in mqtt_only:
-            cg.add(var.hide_entity(await cg.get_variable(entity_id)))
+    if (CORE.config.get("mqtt") or {}).get("_publish"):
+        cg.add(
+            var.set_hidden_fn(
+                cg.RawExpression(
+                    "[](const esphome::EntityBase *entity) { "
+                    "return esphome::mqtt::global_mqtt_client->is_mqtt_only(entity); }"
+                )
+            )
+        )
 
     # Request a log listener slot for API log streaming
     request_log_listener()

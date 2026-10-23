@@ -105,6 +105,8 @@ class MQTTComponent : public Component {
 
   /// Returns cached is_internal result (computed once during setup).
   bool is_internal() const { return this->is_internal_; }
+  void set_publish_off(bool off);
+  bool is_publish_off() const { return this->publish_off_; }
 
   /// Set QOS for state messages.
   void set_qos(uint8_t qos);
@@ -351,6 +353,7 @@ class MQTTComponent : public Component {
   bool discovery_enabled_ : 1 {true};
   bool resend_state_ : 1 {false};
   bool is_internal_ : 1 {false};  ///< Cached result of compute_is_internal_(), set during setup
+  bool publish_off_ : 1 {false};
 
   /// Compute is_internal status based on topics and entity state.
   /// Called once during setup to cache the result.

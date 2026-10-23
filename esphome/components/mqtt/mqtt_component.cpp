@@ -145,6 +145,8 @@ bool MQTTComponent::publish(const std::string &topic, const char *payload, size_
 }
 
 bool MQTTComponent::publish(const char *topic, const char *payload, size_t payload_length) {
+  if (this->publish_off_)
+    return true;
   if (topic[0] == '\0')
     return false;
   return global_mqtt_client->publish(topic, payload, payload_length, this->qos_, this->retain_);
@@ -160,6 +162,8 @@ bool MQTTComponent::publish(const std::string &topic, ProgmemStr payload) {
 }
 
 bool MQTTComponent::publish(const char *topic, ProgmemStr payload) {
+  if (this->publish_off_)
+    return true;
   if (topic[0] == '\0')
     return false;
   // On ESP8266, ProgmemStr is __FlashStringHelper* - need to copy from flash
@@ -175,6 +179,8 @@ bool MQTTComponent::publish_json(const std::string &topic, const json::json_buil
 }
 
 bool MQTTComponent::publish_json(const char *topic, const json::json_build_t &f) {
+  if (this->publish_off_)
+    return true;
   if (topic[0] == '\0')
     return false;
   return global_mqtt_client->publish_json(topic, f, this->qos_, this->retain_);
@@ -186,7 +192,7 @@ bool MQTTComponent::send_discovery_() {
   char discovery_topic_buf[MQTT_DISCOVERY_TOPIC_MAX_LEN];
   StringRef discovery_topic = this->get_discovery_topic_to_(discovery_topic_buf, discovery_info);
 
-  if (discovery_info.clean) {
+  if (discovery_info.clean || this->publish_off_) {
     ESP_LOGV(TAG, "'%s': Cleaning discovery", LOG_STR_ARG(this->log_name_()));
     return global_mqtt_client->publish(discovery_topic.c_str(), "", 0, this->qos_, true);
   }
@@ -400,6 +406,12 @@ void MQTTComponent::process_resend() {
   }
 }
 void MQTTComponent::schedule_resend_state() { this->resend_state_ = true; }
+void MQTTComponent::set_publish_off(bool off) {
+  if (this->publish_off_ == off)
+    return;
+  this->publish_off_ = off;
+  this->schedule_resend_state();
+}
 bool MQTTComponent::is_connected_() const { return global_mqtt_client->is_connected(); }
 
 // Pull these properties from EntityBase if not overridden
