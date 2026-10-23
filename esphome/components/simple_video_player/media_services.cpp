@@ -1,4 +1,5 @@
 #include "simple_video_player.h"
+#include "emulator.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -64,11 +65,16 @@ std::string SimpleVideoPlayer::status_json() {
 #ifdef SVP_AUDIO_FILES
   playlist = this->audio_playlist_active_();
 #endif
-  char json[176];
+  const char *game = "";
+#ifdef SVP_EMULATOR
+  if (this->emu_ != nullptr)
+    game = this->emu_->state_name();
+#endif
+  char json[192];
   snprintf(json, sizeof(json),
-           "{\"svp\":1,\"port\":%u,\"state\":\"%s\",\"volume\":%.2f,\"muted\":%s,\"playlist\":%s,\"video\":%s,", port,
-           state, this->get_volume(), muted ? "true" : "false", playlist ? "true" : "false",
-           this->local_video_active() ? "true" : "false");
+           "{\"svp\":1,\"port\":%u,\"state\":\"%s\",\"volume\":%.2f,\"muted\":%s,\"playlist\":%s,\"video\":%s,\"game\":\"%s\",",
+           port, state, this->get_volume(), muted ? "true" : "false", playlist ? "true" : "false",
+           this->local_video_active() ? "true" : "false", game);
   return std::string(json) + traits + "}";
 }
 
@@ -85,6 +91,14 @@ void SimpleVideoPlayer::setup_media_player_() {
 #endif
 #ifdef SVP_STREAM_STATS
   this->register_service(&SimpleVideoPlayer::set_stream_statistics, "svp_stream_statistics", {"enable"});
+#endif
+#ifdef SVP_EMULATOR
+  if (this->emu_ != nullptr) {
+    this->register_service(&SimpleVideoPlayer::on_svp_emu_start, "svp_emu_start", {"path"});
+    this->register_service(&SimpleVideoPlayer::on_svp_emu_stop, "svp_emu_stop");
+    this->register_service(&SimpleVideoPlayer::on_svp_emu_pause, "svp_emu_pause");
+    this->register_service(&SimpleVideoPlayer::on_svp_emu_resume, "svp_emu_resume");
+  }
 #endif
   this->build_media_traits_();
   this->media_player_->add_on_state_callback([this](media_player::MediaPlayerState state) {
@@ -133,6 +147,10 @@ void SimpleVideoPlayer::build_media_traits_() {
 
 void SimpleVideoPlayer::on_svp_play_audio(std::string url, bool announce) {
   ESP_LOGD(TAG, "Play audio%s: %s", announce ? " (announcement)" : "", url.c_str());
+#ifdef SVP_EMULATOR
+  if (!announce && this->emu_refuses_())
+    return;
+#endif
 #if defined(SVP_AUDIO_FILES) && defined(SVP_CHANNEL_LIST)
   // svp_relay plays the queue's Home Assistant track asked for.
   uint8_t asked = AUDIO_REMOTE_ASKED;

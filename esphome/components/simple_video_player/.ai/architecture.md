@@ -26,6 +26,9 @@ Line numbers drift: search the symbol when a line doesn't match.
 | screen_capture.cpp | `screen_capture:`: screenshots and screencasts of what LVGL shows (section 11) |
 | cast_avi.* | `CastAvi`: the bytes of a screencast's AVI (OpenDML as ffmpeg's avienc: RIFF 'AVI ' + 'AVIX' up to 1 GB, ix00/ix01 per movi list, indx super indexes of 256 entries) |
 | number/, text_sensor/ | Volume number, status text sensor |
+| emulator.cpp/.h | `emulator:` (`SVP_EMULATOR`): `GameEmulator`, the game app (section 12) |
+| emu_cores.cpp | The cores' C++ side (`EmuCore`), one class per system over its C port |
+| emu/ | IDF component `emu` (`add_idf_component(override_path=...)`): the vendored cores (their authors' files, comments and licenses as they are), `ports/` (one C file per core: the narrow API svp calls), `shim/` (allocator hooks, `rg_system.h`), `linker.lf` (the component's `.bss` / `.sbss` / COMMON in PSRAM noinit, cleared at every game start), `Kconfig` (`CONFIG_SVP_EMU_<SYSTEM>`, set by codegen per `systems:` entry) |
 | `__init__.py` | Config schema and codegen (defines `SVP_*`) |
 
 ## 2. Tasks
@@ -47,6 +50,8 @@ Main loop: `loopTask`, prio 1, core 1 (`CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1`, `Ap
 | svp_capture | `capture_task_entry_` (screen_capture.cpp; made at the first capture, kept) | 0 | 3 | 4096 | copies the changed areas into the back picture after a swap, HW JPEG encodes, composes the screencast's batches; task notification bits |
 | svp_cast_tx | `cast_tx_entry_` (made at the first screencast to svp_relay, kept) | any | 3 | 4096 | connects to svp_relay's cast port, sends the header and each batch (SO_SNDTIMEO 5 s) |
 | svp_cast (esp_timer) | `capture_tick_cb_` | – | – | – | the screencast's tick (1/fps) to svp_capture |
+| svp_game | `GameEmulator::task_entry_` (`esphome::StaticTask`, TCB and stack internal; made when a game's panel is ready, deallocated after it ended) | 1 | 1 | 8192 | one emulated frame, PPA into the scanout buffer not shown, flip, the frame's sound into `speaker_` (`play` 20 ms waits, the speaker's ring paces); parked on its notification while paused |
+| svp_game_pace (esp_timer) | only without a speaker | – | – | – | wakes svp_game at the core's frame rate |
 
 ## 3. Locks (and the order they nest in)
 
@@ -210,6 +215,7 @@ screencast and answers once they are back; its index and ring go when its file i
 | pictures and cover art (main loop) | outputs, video, desktop; only when nothing plays or streams |
 | desktop (spice task: cursors, USB) | capture, pictures, video |
 | capture (main loop: screenshot, screencast) | video, outputs (only idle: nothing plays or streams); never pictures |
+| game (main loop: ROM, the core's pieces, the PPA frame; section 12) | outputs, video, desktop |
 
 The video's buffers go only while no video session runs or starts (`video_session_()`); the stream
 never takes a file's output. A task's step is a request to the main loop (`pool_request_()`); the
@@ -286,3 +292,31 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
   ends it (`capture_loop_()`, and POOL_CAPTURE in their rows), with the reason in
   `on_screencast_stopped` (the device YAML shows it as a notice). Starting is refused the same way, and
   when the pool has no room (the capture row hands back only idle video buffers and outputs).
+
+## 12. Game emulator (emulator.cpp, emu_cores.cpp, emu/, `SVP_EMULATOR`)
+
+- An app (`AppKind::GAME`): `app_take(GAME)` ends a video, a desktop session, pictures and the camera; the audio file
+  session and the media player's sound stop. While a game runs or is paused (`emu_on_`) every other start is refused
+  (`emu_refuses_()`: `play()`, `play_index_()`, `audio_start_()`, `app_take()` of another app, SPICE / VNC connects,
+  stream senders, `svp_play_audio` without announce).
+- States (main loop): LOADING (waits until no video session runs, stat, the ROM's pool piece, worker read stream
+  straight into it), core load (main loop), WAIT_PANEL (`wants_panel()`: `loop()` pauses LVGL as for the camera;
+  `panel_ready()` once LVGL let go), RUNNING (svp_game), PAUSING / PAUSED (the menu key; the task parks, the panel goes
+  back to LVGL, `on_paused`), STOPPING (the task ends, `StaticTask::deallocate()`), then everything is given back
+  (`on_ended`).
+- Memory: the cores' `malloc` / `calloc` / `realloc` / `free` (forced `emu_force.h`) go to `GameEmulator`: a piece of at
+  most 16 KiB internal while the system's internal budget lasts (NES 24 KiB, Game Boy 24 KiB, SMS 25 KiB, others 0),
+  else the pool (`POOL_USER_GAME`, owner row: outputs, video, desktop); every piece in a table of 96, all given back at
+  the end. The cores' hot structs (nofrendo: nes, cpu, mem with its RAM as a pointer, ppu, apu) are allocated in their
+  init functions through it. ROM, the PPA's RGB565 frame and everything larger come from the pool.
+- Picture: the largest whole factor that fits LVGL's screen, centred, black around (each scanout buffer cleared once
+  per game and after a pause); turned only when LVGL's rotation is not 0 (PPA SRM: LVGL 90 -> PPA 270, 180 -> 180,
+  270 -> 90); factor 1 at rotation 0 draws without the PPA; PPA errors fall back to the CPU. Own PPA client (registered
+  per game, core 1 like the other DMA2D users).
+- Sound: the core renders in `wanted_audio_rate_` (8-48 kHz, else 32 kHz) and `wanted_audio_channels_`;
+  `set_audio_stream_info` once per game; the speaker is never started or stopped.
+- Keys: `GameEmulator` is LVGL's `PausedInput` while it wants the panel (else svp's stream taker again,
+  `paused_input_default_()`); `keys:` per button (hid key names, defaults positional pad buttons + keyboard),
+  `menu_keys:` (default BUTTON_11) pauses; every key is taken, the configuration's own key_bindings actions still fire.
+- Actions: `simple_video_player.emulator.start` (path) / `.stop` / `.pause` / `.resume`; Home Assistant `svp_emu_start`
+  (path), `svp_emu_stop`, `svp_emu_pause`, `svp_emu_resume`; the status JSON's `game` ("", "running", "paused").

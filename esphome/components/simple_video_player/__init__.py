@@ -138,6 +138,10 @@ TogglePauseAction = simple_video_player_ns.class_("TogglePauseAction", automatio
 PreviousAction = simple_video_player_ns.class_("PreviousAction", automation.Action)
 RepeatAction = simple_video_player_ns.class_("RepeatAction", automation.Action)
 VolumeStepAction = simple_video_player_ns.class_("VolumeStepAction", automation.Action)
+GameEmulator = simple_video_player_ns.class_("GameEmulator")
+EmuSystem = simple_video_player_ns.enum("EmuSystem", is_class=True)
+GameStartAction = simple_video_player_ns.class_("GameStartAction", automation.Action)
+GameCommandAction = simple_video_player_ns.class_("GameCommandAction", automation.Action)
 ShowImageAction = simple_video_player_ns.class_("ShowImageAction", automation.Action)
 ScreenshotAction = simple_video_player_ns.class_("ScreenshotAction", automation.Action)
 ScreencastAction = simple_video_player_ns.class_("ScreencastAction", automation.Action)
@@ -239,6 +243,73 @@ def _storage_dir(value):
     if not value.startswith("/") or value.endswith("/"):
         raise cv.Invalid("a directory's storage path, as /sd/keyboard")
     return value
+
+
+CONF_EMULATOR = "emulator"
+CONF_SYSTEMS = "systems"
+CONF_KEYS = "keys"
+CONF_MENU_KEYS = "menu_keys"
+CONF_ON_PAUSED = "on_paused"
+CONF_ON_ENDED = "on_ended"
+
+EMU_SYSTEMS = {
+    "nes": EmuSystem.NES,
+}
+EMU_BUTTONS = {
+    "up": 1 << 0,
+    "down": 1 << 1,
+    "left": 1 << 2,
+    "right": 1 << 3,
+    "a": 1 << 4,
+    "b": 1 << 5,
+    "x": 1 << 6,
+    "y": 1 << 7,
+    "l": 1 << 8,
+    "r": 1 << 9,
+    "start": 1 << 10,
+    "select": 1 << 11,
+}
+EMU_DEFAULT_KEYS = {
+    "up": ["0x01:0x90", "UP"],
+    "down": ["0x01:0x91", "DOWN"],
+    "left": ["0x01:0x93", "LEFT"],
+    "right": ["0x01:0x92", "RIGHT"],
+    "a": ["BUTTON_2", "X"],
+    "b": ["BUTTON_1", "Z"],
+    "x": ["BUTTON_4", "S"],
+    "y": ["BUTTON_3", "A"],
+    "l": ["BUTTON_5", "Q"],
+    "r": ["BUTTON_6", "W"],
+    "start": ["BUTTON_8", "ENTER"],
+    "select": ["BUTTON_7", "RIGHT_SHIFT"],
+}
+
+
+def _emu_key(value):
+    from esphome.components.hid.keys import validate_key
+
+    return validate_key(value)
+
+
+def _emu_systems(value):
+    value = cv.Schema({cv.Optional(name): _storage_dir for name in EMU_SYSTEMS})(value)
+    if not value:
+        raise cv.Invalid(f"list at least one of {', '.join(EMU_SYSTEMS)} with its ROM directory")
+    return value
+
+
+EMULATOR_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.declare_id(GameEmulator),
+        cv.Required(CONF_SYSTEMS): _emu_systems,
+        cv.Optional(CONF_KEYS, default={}): cv.Schema(
+            {cv.Optional(button): cv.ensure_list(_emu_key) for button in EMU_BUTTONS}
+        ),
+        cv.Optional(CONF_MENU_KEYS, default=["BUTTON_11"]): cv.ensure_list(_emu_key),
+        cv.Optional(CONF_ON_PAUSED): automation.validate_automation(single=True),
+        cv.Optional(CONF_ON_ENDED): automation.validate_automation(single=True),
+    }
+)
 
 
 def _spice(value):
@@ -709,6 +780,7 @@ CONFIG_SCHEMA = cv.All(
             # Screenshots and screencasts of what LVGL shows, as it shows it (HW JPEG; a screencast
             # is an MJPEG AVI with the microphone's PCM, into its folder and/or to svp_relay).
             cv.Optional(CONF_SCREEN_CAPTURE): cv.All(cv.requires_component("lvgl"), _screen_capture_schema()),
+            cv.Optional(CONF_EMULATOR): cv.All(cv.requires_component("lvgl"), EMULATOR_SCHEMA),
             # Touches go back to the stream sender, which replays them into its page.
             cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
             # Channel list from the svp_relay Home Assistant integration, shown in an LVGL dropdown;
@@ -1063,6 +1135,16 @@ def _final_validate(config):
                     "lvgl: block."
                 )
 
+    if CONF_EMULATOR in config:
+        if CONF_DISPLAY_ID not in config:
+            raise cv.Invalid(f"{CONF_EMULATOR}: games play on the display's direct output; set {CONF_DISPLAY_ID}")
+        for block in fconf.get("lvgl") or []:
+            if block.get("resume_on_input", True):
+                raise cv.Invalid(
+                    f"{CONF_EMULATOR}: LVGL is paused while a game runs, and a touch would resume it on top "
+                    "of the game. Add `resume_on_input: false` to the lvgl: block."
+                )
+
     if CONF_CANVAS_ID in config:
         _resolve_canvas_size(config, fconf)
 
@@ -1122,6 +1204,33 @@ async def _resolve_display_output(var, display_id):
     cg.add(var.set_dsi(disp))
     cg.add(var.set_dsi_color_depth(_display_depth(CORE.config, display_id)))
     cg.add_define("SVP_DSI_OUTPUT")
+
+
+async def _emulator_to_code(var, config):
+    from pathlib import Path
+
+    from esphome.components.esp32 import add_idf_component
+
+    cg.add_define("SVP_EMULATOR")
+    add_idf_sdkconfig_option("CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY", True)
+    add_idf_component(name="emu", override_path=str(Path(__file__).parent / "emu"))
+    emu = cg.Pvariable(config[CONF_ID], var.make_emulator())
+    for name, directory in config[CONF_SYSTEMS].items():
+        cg.add_define(f"SVP_EMU_{name.upper()}")
+        add_idf_sdkconfig_option(f"CONFIG_SVP_EMU_{name.upper()}", True)
+        cg.add(emu.add_system(EMU_SYSTEMS[name], directory))
+    for button, bit in EMU_BUTTONS.items():
+        keys = config[CONF_KEYS].get(button)
+        if keys is None:
+            keys = [_emu_key(key) for key in EMU_DEFAULT_KEYS[button]]
+        for page, usage in keys:
+            cg.add(emu.add_key(page, usage, bit))
+    for page, usage in config[CONF_MENU_KEYS]:
+        cg.add(emu.add_menu_key(page, usage))
+    if on_paused := config.get(CONF_ON_PAUSED):
+        await automation.build_automation(emu.get_paused_trigger(), [], on_paused)
+    if on_ended := config.get(CONF_ON_ENDED):
+        await automation.build_automation(emu.get_ended_trigger(), [], on_ended)
 
 
 async def to_code(config):
@@ -1211,6 +1320,9 @@ async def to_code(config):
             cg.add_define("SVP_KEYBOARD_ENTITIES")
             sensor = await text_sensor_domain.new_text_sensor(layout_sensor)
             cg.add(var.set_keyboard_layout_sensor(sensor))
+
+    if emu_conf := config.get(CONF_EMULATOR):
+        await _emulator_to_code(var, emu_conf)
 
     if capture := config.get(CONF_SCREEN_CAPTURE):
         cg.add_define("SVP_CAPTURE")
@@ -1891,3 +2003,44 @@ def _register_screencast(name, command):
 
 for _name, _command in SCREENCAST_COMMANDS.items():
     _register_screencast(_name, _command)
+
+
+@automation.register_action(
+    "simple_video_player.emulator.start",
+    GameStartAction,
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+            cv.Required(CONF_PATH): cv.templatable(cv.string),
+        }
+    ),
+    synchronous=True,
+)
+async def simple_video_player_emulator_start_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    cg.add(var.set_path(await cg.templatable(config[CONF_PATH], args, cg.std_string)))
+    return var
+
+
+EMULATOR_COMMANDS = {"stop": 0, "pause": 1, "resume": 2}
+
+
+def _register_emulator_command(name, command):
+    @automation.register_action(
+        f"simple_video_player.emulator.{name}",
+        GameCommandAction,
+        SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+        synchronous=True,
+    )
+    async def _to_code(config, action_id, template_arg, args):
+        paren = await cg.get_variable(config[CONF_ID])
+        var = cg.new_Pvariable(action_id, template_arg, paren)
+        cg.add(var.set_command(command))
+        return var
+
+    return _to_code
+
+
+for _name, _command in EMULATOR_COMMANDS.items():
+    _register_emulator_command(_name, _command)

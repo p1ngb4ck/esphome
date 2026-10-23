@@ -1,0 +1,805 @@
+#include "emulator.h"
+
+#ifdef SVP_EMULATOR
+
+#include <cstring>
+#include <strings.h>
+
+#include "emu_shim.h"
+#include "esp_cache.h"
+#include "esphome/core/log.h"
+
+namespace esphome::simple_video_player {
+
+static const char *const TAG = "simple_video_player.emulator";
+
+static constexpr TickType_t EMU_AUDIO_WAIT = pdMS_TO_TICKS(20);
+
+static const char *const SYSTEM_NAMES[] = {"NES", "Game Boy", "Master System", "PC Engine", "Lynx", "MSX",
+                                           "Game & Watch"};
+
+struct SystemExtension {
+  const char *ext;
+  EmuSystem system;
+};
+
+static const SystemExtension SYSTEM_EXTENSIONS[] = {
+    {"nes", EmuSystem::NES}, {"gb", EmuSystem::GB},   {"gbc", EmuSystem::GB},   {"sms", EmuSystem::SMS},
+    {"gg", EmuSystem::SMS},  {"sg", EmuSystem::SMS},  {"col", EmuSystem::SMS},  {"pce", EmuSystem::PCE},
+    {"lnx", EmuSystem::LYNX}, {"rom", EmuSystem::MSX}, {"mx1", EmuSystem::MSX}, {"mx2", EmuSystem::MSX},
+    {"dsk", EmuSystem::MSX}, {"gw", EmuSystem::GW},
+};
+
+GameEmulator *GameEmulator::create(SimpleVideoPlayer *parent) {
+  void *mem = heap_caps_calloc(1, sizeof(GameEmulator), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (mem != nullptr)
+    return new (mem) GameEmulator(parent);
+  auto *emu = new GameEmulator(parent);
+  emu->usable_ = false;
+  return emu;
+}
+
+void GameEmulator::add_system(EmuSystem system, const char *dir) {
+  if (this->system_count_ < MAX_SYSTEMS)
+    this->systems_[this->system_count_++] = {system, dir};
+}
+
+void GameEmulator::add_key(uint16_t page, uint16_t usage, uint16_t buttons) {
+  if (this->key_count_ < MAX_KEYS)
+    this->keys_[this->key_count_++] = {page, usage, buttons};
+}
+
+void GameEmulator::add_menu_key(uint16_t page, uint16_t usage) {
+  if (this->menu_key_count_ < MAX_MENU_KEYS)
+    this->menu_keys_[this->menu_key_count_++] = {page, usage, 0};
+}
+
+const char *GameEmulator::system_name(size_t index) const {
+  if (index >= this->system_count_)
+    return "";
+  return SYSTEM_NAMES[static_cast<size_t>(this->systems_[index].system)];
+}
+
+const char *GameEmulator::state_name() const {
+  switch (this->state_) {
+    case State::IDLE:
+      return "";
+    case State::PAUSED:
+      return "paused";
+    default:
+      return "running";
+  }
+}
+
+bool GameEmulator::system_for_(const char *path, EmuSystem *system) const {
+  for (size_t i = 0; i < this->system_count_; i++) {
+    const size_t len = strlen(this->systems_[i].dir);
+    if (len != 0 && strncmp(path, this->systems_[i].dir, len) == 0 && path[len] == '/') {
+      *system = this->systems_[i].system;
+      return true;
+    }
+  }
+  const char *dot = strrchr(path, '.');
+  if (dot == nullptr)
+    return false;
+  for (const auto &entry : SYSTEM_EXTENSIONS) {
+    if (strcasecmp(dot + 1, entry.ext) != 0)
+      continue;
+    for (size_t i = 0; i < this->system_count_; i++) {
+      if (this->systems_[i].system == entry.system) {
+        *system = entry.system;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+uint32_t GameEmulator::internal_budget_(EmuSystem system) const {
+  switch (system) {
+    case EmuSystem::NES:
+      return 24 * 1024;
+    case EmuSystem::GB:
+      return 24 * 1024;
+    case EmuSystem::SMS:
+      return 25 * 1024;
+    default:
+      return 0;
+  }
+}
+
+bool GameEmulator::start(const std::string &path) {
+  if (!this->usable_) {
+    ESP_LOGE(TAG, "No PSRAM for the emulator");
+    return false;
+  }
+  if (this->state_ != State::IDLE) {
+    ESP_LOGW(TAG, "A game runs already");
+    return false;
+  }
+  if (path.size() > storage::STORAGE_VFS_PATH_MAX) {
+    ESP_LOGE(TAG, "Path too long");
+    return false;
+  }
+  if (!this->system_for_(path.c_str(), &this->system_)) {
+    ESP_LOGE(TAG, "No configured system for %s", path.c_str());
+    return false;
+  }
+  SimpleVideoPlayer *p = this->parent_;
+  if (p->dsi_ == nullptr || !p->direct_flips_()) {
+    ESP_LOGE(TAG, "Games need the display's direct output with two scanout buffers");
+    return false;
+  }
+#ifdef SVP_STREAM
+  if (p->stream_connected_.load(std::memory_order_acquire)) {
+    ESP_LOGW(TAG, "Refused: a stream holds the panel");
+    return false;
+  }
+#endif
+#ifdef SVP_SPICE
+  if (p->spice_on_.load(std::memory_order_acquire)) {
+    ESP_LOGW(TAG, "Refused: a desktop session holds the panel");
+    return false;
+  }
+#endif
+  if (!p->app_take(SimpleVideoPlayer::AppKind::GAME))
+    return false;
+  p->emu_on_.store(true, std::memory_order_release);
+  p->sound_take_over_();
+  if (p->is_audio_session())
+    p->stop();
+  memcpy(this->path_, path.c_str(), path.size() + 1);
+  this->rom_ = nullptr;
+  this->rom_size_ = 0;
+  this->read_bytes_ = 0;
+  this->storage_ = nullptr;
+  this->task_stop_.store(false, std::memory_order_relaxed);
+  this->task_pause_.store(true, std::memory_order_relaxed);
+  this->task_parked_.store(false, std::memory_order_relaxed);
+  this->task_done_.store(false, std::memory_order_relaxed);
+  this->pads_[0].store(0, std::memory_order_relaxed);
+  this->pads_[1].store(0, std::memory_order_relaxed);
+  this->state_ = State::LOADING;
+  ESP_LOGI(TAG, "Starting %s (%s)", this->path_, SYSTEM_NAMES[static_cast<size_t>(this->system_)]);
+  p->status_callbacks_.call();
+  return true;
+}
+
+void GameEmulator::service() {
+  switch (this->state_) {
+    case State::LOADING:
+      if (this->storage_ == nullptr && !this->stream_open_) {
+        if (this->task_stop_.load(std::memory_order_acquire)) {
+          this->end_();
+          return;
+        }
+        if (this->parent_->video_session_() || this->parent_->playback_busy_.load(std::memory_order_acquire))
+          return;
+        this->read_next_();
+      }
+      return;
+    case State::PAUSING:
+      if (this->task_parked_.load(std::memory_order_acquire)) {
+        this->state_ = State::PAUSED;
+        this->set_wants_panel_(false);
+        ESP_LOGI(TAG, "Paused");
+        this->parent_->status_callbacks_.call();
+        this->paused_trigger_.trigger();
+      }
+      return;
+    case State::STOPPING:
+      if (this->task_.is_created() && !this->task_done_.load(std::memory_order_acquire))
+        return;
+      if (this->task_.is_created() && !this->task_.deallocate())
+        return;
+      this->end_();
+      return;
+    default:
+      return;
+  }
+}
+
+void GameEmulator::read_next_() {
+  storage::StorageWorker *worker = storage::global_storage_worker;
+  if (this->storage_ == nullptr) {
+    const char *rel = nullptr;
+    storage::PathStorage *ps =
+        storage::global_storage_registry != nullptr ? storage::global_storage_registry->resolve_path(this->path_, &rel)
+                                                    : nullptr;
+    if (ps == nullptr || worker == nullptr) {
+      this->fail_("no storage for the path");
+      return;
+    }
+    if (worker->has_active_task_io(ps))
+      return;
+    storage::FileStat st{};
+    if (ps->stat(rel, &st) != storage::StorageError::STORAGE_ERROR_OK || st.is_dir || st.size == 0) {
+      this->fail_("not readable");
+      return;
+    }
+    this->rom_size_ = static_cast<size_t>(st.size);
+    this->rom_ = this->parent_->pool_take_(this->rom_size_, SimpleVideoPlayer::POOL_USER_GAME);
+    if (this->rom_ == nullptr) {
+      this->fail_("no PSRAM for the ROM");
+      return;
+    }
+    this->storage_ = ps;
+    const storage::StorageError err = worker->begin_read(ps, rel, &this->stream_, [this](storage::StorageError e) {
+      if (e != storage::StorageError::STORAGE_ERROR_OK) {
+        this->read_done_(e);
+        return;
+      }
+      this->read_next_();
+    });
+    if (err != storage::StorageError::STORAGE_ERROR_OK) {
+      this->fail_("storage busy");
+      return;
+    }
+    this->stream_open_ = true;
+    return;
+  }
+  if (this->task_stop_.load(std::memory_order_acquire)) {
+    this->read_done_(storage::StorageError::STORAGE_ERROR_OK);
+    return;
+  }
+  const size_t want = std::min(READ_CHUNK, this->rom_size_ - this->read_bytes_);
+  const storage::StorageError err = worker->read_chunk(
+      this->stream_, this->rom_ + this->read_bytes_, want, &this->chunk_bytes_, [this](storage::StorageError e) {
+        if (e != storage::StorageError::STORAGE_ERROR_OK || this->chunk_bytes_ == 0) {
+          this->read_done_(e != storage::StorageError::STORAGE_ERROR_OK ? e
+                                                                        : storage::StorageError::STORAGE_ERROR_READ_ERROR);
+          return;
+        }
+        this->read_bytes_ += this->chunk_bytes_;
+        if (this->read_bytes_ >= this->rom_size_) {
+          this->read_done_(storage::StorageError::STORAGE_ERROR_OK);
+          return;
+        }
+        this->read_next_();
+      });
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
+    this->read_done_(err);
+}
+
+void GameEmulator::read_done_(storage::StorageError err) {
+  this->read_err_ = err;
+  if (storage::global_storage_worker->end_read(this->stream_, [this](storage::StorageError) { this->read_closed_(); }) !=
+      storage::StorageError::STORAGE_ERROR_OK)
+    this->read_closed_();
+}
+
+void GameEmulator::read_closed_() {
+  this->stream_open_ = false;
+  if (this->task_stop_.load(std::memory_order_acquire)) {
+    this->end_();
+    return;
+  }
+  if (this->read_err_ != storage::StorageError::STORAGE_ERROR_OK || this->read_bytes_ < this->rom_size_) {
+    this->fail_("read failed");
+    return;
+  }
+  this->loaded_();
+}
+
+void GameEmulator::loaded_() {
+  SimpleVideoPlayer *p = this->parent_;
+  emu_bss_clear();
+  emu_set_allocator(&GameEmulator::alloc_cb_, &GameEmulator::realloc_cb_, &GameEmulator::free_cb_, this);
+  this->internal_used_ = 0;
+  this->internal_budget_now_ = this->internal_budget_(this->system_);
+  this->core_ = emu_make_core(this->system_, this->core_store_);
+  if (this->core_ == nullptr) {
+    this->fail_("system not built in");
+    return;
+  }
+  uint32_t rate = 32000;
+  uint8_t channels = 1;
+#ifdef USE_AUDIO
+  const uint32_t wanted = p->wanted_audio_rate_.load(std::memory_order_acquire);
+  if (wanted >= 8000 && wanted <= 48000)
+    rate = wanted;
+  channels = std::max<uint8_t>(1, std::min<uint8_t>(2, p->wanted_audio_channels_.load(std::memory_order_acquire)));
+#endif
+  this->on_main_loop_ = true;
+  const bool ok = this->core_->load(this->rom_, this->rom_size_, rate, channels);
+  this->on_main_loop_ = false;
+  if (!ok) {
+    this->fail_("the ROM did not load");
+    return;
+  }
+  if (!this->setup_output_()) {
+    this->fail_("no output");
+    return;
+  }
+#if defined(USE_SPEAKER) && defined(USE_AUDIO)
+  if (p->speaker_ != nullptr)
+    p->speaker_->set_audio_stream_info(audio::AudioStreamInfo(16, this->core_->channels(), this->core_->sample_rate()));
+#endif
+  ESP_LOGI(TAG, "Loaded: %zu bytes, %u x %u x%u, %u Hz %u ch, internal %zu bytes", this->rom_size_,
+           this->core_->video().width, this->core_->video().height, static_cast<unsigned>(this->factor_),
+           static_cast<unsigned>(this->core_->sample_rate()), this->core_->channels(), this->internal_used_);
+  this->state_ = State::WAIT_PANEL;
+  this->set_wants_panel_(true);
+}
+
+void GameEmulator::fail_(const char *why) {
+  ESP_LOGE(TAG, "%s: %s", this->path_, why);
+  if (this->stream_open_) {
+    this->task_stop_.store(true, std::memory_order_release);
+    return;
+  }
+  this->end_();
+}
+
+void GameEmulator::stop() {
+  switch (this->state_) {
+    case State::IDLE:
+    case State::STOPPING:
+      return;
+    case State::LOADING:
+      this->task_stop_.store(true, std::memory_order_release);
+      return;
+    default:
+      break;
+  }
+  this->task_stop_.store(true, std::memory_order_release);
+  this->state_ = State::STOPPING;
+  if (this->task_.is_created())
+    xTaskNotifyGive(this->task_.get_handle());
+}
+
+void GameEmulator::pause() {
+  if (this->state_ != State::RUNNING)
+    return;
+  this->task_pause_.store(true, std::memory_order_release);
+  this->state_ = State::PAUSING;
+}
+
+void GameEmulator::resume() {
+  if (this->state_ != State::PAUSED)
+    return;
+  this->black_ = 0;
+  this->state_ = State::WAIT_PANEL;
+  this->set_wants_panel_(true);
+}
+
+void GameEmulator::app_ended() { this->stop(); }
+
+void GameEmulator::set_wants_panel_(bool wants) {
+  if (this->wants_panel_ == wants)
+    return;
+  this->wants_panel_ = wants;
+#ifdef USE_LVGL_HID
+  if (this->parent_->lvgl_component_ != nullptr) {
+    if (wants)
+      this->parent_->lvgl_component_->set_paused_input(this);
+    else
+      this->parent_->paused_input_default_();
+  }
+#endif
+}
+
+void GameEmulator::panel_ready(bool ready) {
+  this->panel_ok_ = ready;
+  if (!ready || this->state_ != State::WAIT_PANEL)
+    return;
+  if (!this->task_.is_created()) {
+    this->task_pause_.store(false, std::memory_order_release);
+    if (!this->task_.create(&GameEmulator::task_entry_, "svp_game", TASK_STACK, this, 1, false, 1)) {
+      ESP_LOGE(TAG, "No task for the game");
+      this->task_stop_.store(true, std::memory_order_release);
+      this->state_ = State::STOPPING;
+      return;
+    }
+    if (this->core_->frame_us() != 0) {
+#ifdef USE_SPEAKER
+      const bool paced_by_sound = this->parent_->speaker_ != nullptr;
+#else
+      const bool paced_by_sound = false;
+#endif
+      if (!paced_by_sound && this->pace_timer_ == nullptr) {
+        esp_timer_create_args_t args{};
+        args.callback = [](void *arg) {
+          auto *emu = static_cast<GameEmulator *>(arg);
+          if (emu->task_.is_created())
+            xTaskNotifyGive(emu->task_.get_handle());
+        };
+        args.arg = this;
+        args.dispatch_method = ESP_TIMER_TASK;
+        args.name = "svp_game_pace";
+        if (esp_timer_create(&args, &this->pace_timer_) == ESP_OK)
+          esp_timer_start_periodic(this->pace_timer_, this->core_->frame_us());
+      }
+    }
+  } else {
+    this->task_pause_.store(false, std::memory_order_release);
+    xTaskNotifyGive(this->task_.get_handle());
+  }
+  this->state_ = State::RUNNING;
+  ESP_LOGI(TAG, "Running");
+  this->parent_->status_callbacks_.call();
+}
+
+void GameEmulator::end_() {
+  if (this->pace_timer_ != nullptr) {
+    esp_timer_stop(this->pace_timer_);
+    esp_timer_delete(this->pace_timer_);
+    this->pace_timer_ = nullptr;
+  }
+  this->release_output_();
+  this->core_ = nullptr;
+  this->release_all_();
+  emu_set_allocator(nullptr, nullptr, nullptr, nullptr);
+  if (this->rom_ != nullptr)
+    this->parent_->pool_.free(this->rom_);
+  this->rom_ = nullptr;
+  this->rom_size_ = 0;
+  this->storage_ = nullptr;
+  this->set_wants_panel_(false);
+  const bool was_loading = this->state_ == State::LOADING;
+  this->state_ = State::IDLE;
+  this->parent_->app_release(SimpleVideoPlayer::AppKind::GAME);
+  this->parent_->emu_on_.store(false, std::memory_order_release);
+  ESP_LOGI(TAG, "Game %s", was_loading ? "not started" : "ended");
+  this->parent_->status_callbacks_.call();
+  this->ended_trigger_.trigger();
+}
+
+void *GameEmulator::alloc_cb_(void *ctx, size_t size, bool zero) {
+  return static_cast<GameEmulator *>(ctx)->alloc_(size, zero);
+}
+
+void *GameEmulator::realloc_cb_(void *ctx, void *ptr, size_t size) {
+  return static_cast<GameEmulator *>(ctx)->realloc_(ptr, size);
+}
+
+void GameEmulator::free_cb_(void *ctx, void *ptr) { static_cast<GameEmulator *>(ctx)->free_(ptr); }
+
+GameEmulator::Piece *GameEmulator::piece_(void *ptr) {
+  for (auto &piece : this->pieces_) {
+    if (piece.ptr == ptr)
+      return &piece;
+  }
+  return nullptr;
+}
+
+void *GameEmulator::alloc_(size_t size, bool zero) {
+  if (size == 0)
+    size = 1;
+  Piece *slot = this->piece_(nullptr);
+  if (slot == nullptr)
+    return nullptr;
+  void *ptr = nullptr;
+  bool internal = false;
+  if (size <= INTERNAL_PIECE_MAX && this->internal_used_ + size <= this->internal_budget_now_) {
+    ptr = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    internal = ptr != nullptr;
+  }
+  if (ptr == nullptr) {
+    ptr = this->on_main_loop_ ? this->parent_->pool_take_(size, SimpleVideoPlayer::POOL_USER_GAME)
+                              : this->parent_->pool_.alloc(size);
+  }
+  if (ptr == nullptr)
+    return nullptr;
+  if (zero)
+    memset(ptr, 0, size);
+  *slot = {ptr, size, internal};
+  if (internal)
+    this->internal_used_ += size;
+  return ptr;
+}
+
+void *GameEmulator::realloc_(void *ptr, size_t size) {
+  Piece *piece = this->piece_(ptr);
+  if (piece == nullptr)
+    return nullptr;
+  if (size <= piece->size)
+    return ptr;
+  void *grown = this->alloc_(size, false);
+  if (grown == nullptr)
+    return nullptr;
+  piece = this->piece_(ptr);
+  memcpy(grown, ptr, piece->size);
+  this->free_(ptr);
+  return grown;
+}
+
+void GameEmulator::free_(void *ptr) {
+  Piece *piece = this->piece_(ptr);
+  if (piece == nullptr)
+    return;
+  if (piece->internal) {
+    this->internal_used_ -= piece->size;
+    heap_caps_free(piece->ptr);
+  } else {
+    this->parent_->pool_.free(static_cast<uint8_t *>(piece->ptr));
+  }
+  *piece = {nullptr, 0, false};
+}
+
+void GameEmulator::release_all_() {
+  for (auto &piece : this->pieces_) {
+    if (piece.ptr != nullptr)
+      this->free_(piece.ptr);
+  }
+  this->internal_used_ = 0;
+}
+
+bool GameEmulator::setup_output_() {
+  SimpleVideoPlayer *p = this->parent_;
+  const EmuVideo video = this->core_->video();
+  if (video.width == 0 || video.height == 0)
+    return false;
+  this->rotation_ = display::DISPLAY_ROTATION_0_DEGREES;
+#ifdef SVP_USE_LVGL
+  if (p->lvgl_component_ != nullptr)
+    this->rotation_ = p->lvgl_component_->get_rotation();
+#endif
+  const int32_t W = p->dsi_out_w_;
+  const int32_t H = p->dsi_out_h_;
+  const bool turned =
+      this->rotation_ == display::DISPLAY_ROTATION_90_DEGREES || this->rotation_ == display::DISPLAY_ROTATION_270_DEGREES;
+  const int32_t lw = turned ? H : W;
+  const int32_t lh = turned ? W : H;
+  const int32_t f = std::max<int32_t>(1, std::min(lw / video.width, lh / video.height));
+  const int32_t ow = std::min<int32_t>(video.width * f, lw);
+  const int32_t oh = std::min<int32_t>(video.height * f, lh);
+  const int32_t lx = (lw - ow) / 2;
+  const int32_t ly = (lh - oh) / 2;
+  this->factor_ = static_cast<uint32_t>(f);
+  switch (this->rotation_) {
+    case display::DISPLAY_ROTATION_90_DEGREES:
+      this->out_x_ = W - ly - oh;
+      this->out_y_ = lx;
+      this->out_w_ = oh;
+      this->out_h_ = ow;
+      this->ppa_rotation_ = PPA_SRM_ROTATION_ANGLE_270;
+      break;
+    case display::DISPLAY_ROTATION_180_DEGREES:
+      this->out_x_ = W - lx - ow;
+      this->out_y_ = H - ly - oh;
+      this->out_w_ = ow;
+      this->out_h_ = oh;
+      this->ppa_rotation_ = PPA_SRM_ROTATION_ANGLE_180;
+      break;
+    case display::DISPLAY_ROTATION_270_DEGREES:
+      this->out_x_ = ly;
+      this->out_y_ = H - lx - ow;
+      this->out_w_ = oh;
+      this->out_h_ = ow;
+      this->ppa_rotation_ = PPA_SRM_ROTATION_ANGLE_90;
+      break;
+    default:
+      this->out_x_ = lx;
+      this->out_y_ = ly;
+      this->out_w_ = ow;
+      this->out_h_ = oh;
+      this->ppa_rotation_ = PPA_SRM_ROTATION_ANGLE_0;
+      break;
+  }
+  this->black_ = 0;
+  if (this->factor_ == 1 && this->rotation_ == display::DISPLAY_ROTATION_0_DEGREES)
+    return true;
+  ppa_client_config_t cfg{};
+  cfg.oper_type = PPA_OPERATION_SRM;
+  cfg.max_pending_trans_num = 1;
+  if (ppa_register_client(&cfg, &this->ppa_) != ESP_OK) {
+    this->ppa_ = nullptr;
+    return true;
+  }
+  this->frame_size_ = static_cast<size_t>(video.width) * video.height * 2;
+  this->frame_ = p->pool_take_(this->frame_size_, SimpleVideoPlayer::POOL_USER_GAME);
+  if (this->frame_ == nullptr) {
+    ppa_unregister_client(this->ppa_);
+    this->ppa_ = nullptr;
+    return false;
+  }
+  return true;
+}
+
+void GameEmulator::release_output_() {
+  if (this->ppa_ != nullptr)
+    ppa_unregister_client(this->ppa_);
+  this->ppa_ = nullptr;
+  if (this->frame_ != nullptr)
+    this->parent_->pool_.free(this->frame_);
+  this->frame_ = nullptr;
+  this->frame_size_ = 0;
+}
+
+void GameEmulator::task_entry_(void *arg) {
+  auto *emu = static_cast<GameEmulator *>(arg);
+  emu->task_loop_();
+  emu->task_done_.store(true, std::memory_order_release);
+  App.wake_loop_threadsafe();
+  while (true)
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+}
+
+void GameEmulator::task_loop_() {
+  while (!this->task_stop_.load(std::memory_order_acquire)) {
+    if (this->task_pause_.load(std::memory_order_acquire)) {
+      this->task_parked_.store(true, std::memory_order_release);
+      App.wake_loop_threadsafe();
+      while (this->task_pause_.load(std::memory_order_acquire) && !this->task_stop_.load(std::memory_order_acquire))
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+      this->task_parked_.store(false, std::memory_order_release);
+      continue;
+    }
+    const uint16_t pads[2] = {this->pads_[0].load(std::memory_order_relaxed),
+                              this->pads_[1].load(std::memory_order_relaxed)};
+    this->core_->run_frame(pads);
+    this->draw_frame_(this->core_->video());
+    this->play_audio_();
+    if (this->pace_timer_ != nullptr)
+      ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+  }
+}
+
+void GameEmulator::draw_frame_(const EmuVideo &video) {
+  SimpleVideoPlayer *p = this->parent_;
+  size_t len = 0;
+  uint8_t *fb = p->direct_target_(true, &len);
+  void *fbs[2]{};
+  display::ColorBitness bitness{};
+  if (fb == nullptr || fb == p->decode_target_ || p->dsi_->get_scanout_buffers(fbs, 2, &bitness) != 2)
+    return;
+  const uint8_t index = fb == fbs[0] ? 0 : 1;
+  if ((this->black_ & (1u << index)) == 0) {
+    memset(fb, 0, len);
+    esp_cache_msync(fb, len, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    this->black_ |= static_cast<uint8_t>(1u << index);
+  }
+  bool drawn = false;
+  if (this->ppa_ != nullptr && this->frame_ != nullptr) {
+    auto *out = reinterpret_cast<uint16_t *>(this->frame_);
+    for (uint16_t y = 0; y < video.height; y++) {
+      const uint8_t *row = video.pixels + static_cast<size_t>(y) * video.stride;
+      if (video.palette != nullptr) {
+        for (uint16_t x = 0; x < video.width; x++)
+          *out++ = video.palette[row[x]];
+      } else {
+        memcpy(out, row, static_cast<size_t>(video.width) * 2);
+        out += video.width;
+      }
+    }
+    esp_cache_msync(this->frame_, this->frame_size_,
+                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    ppa_srm_oper_config_t cfg{};
+    cfg.in.buffer = this->frame_;
+    cfg.in.pic_w = video.width;
+    cfg.in.pic_h = video.height;
+    cfg.in.block_w = video.width;
+    cfg.in.block_h = video.height;
+    cfg.in.block_offset_x = 0;
+    cfg.in.block_offset_y = 0;
+    cfg.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+    cfg.out.buffer = fb;
+    cfg.out.buffer_size = len;
+    cfg.out.pic_w = p->dsi_out_w_;
+    cfg.out.pic_h = p->dsi_out_h_;
+    cfg.out.block_offset_x = this->out_x_;
+    cfg.out.block_offset_y = this->out_y_;
+    cfg.out.srm_cm = p->dsi_fb_bpp_ == 3 ? PPA_SRM_COLOR_MODE_RGB888 : PPA_SRM_COLOR_MODE_RGB565;
+    cfg.rotation_angle = this->ppa_rotation_;
+    cfg.scale_x = static_cast<float>(this->factor_);
+    cfg.scale_y = static_cast<float>(this->factor_);
+    cfg.mode = PPA_TRANS_MODE_BLOCKING;
+    drawn = ppa_do_scale_rotate_mirror(this->ppa_, &cfg) == ESP_OK;
+  }
+  if (!drawn)
+    drawn = this->draw_cpu_(video, fb);
+  if (drawn)
+    p->direct_show_(fb, 0, 0, static_cast<int>(p->dsi_out_w_), static_cast<int>(p->dsi_out_h_), 0);
+}
+
+bool GameEmulator::draw_cpu_(const EmuVideo &video, uint8_t *fb) {
+  SimpleVideoPlayer *p = this->parent_;
+  const int32_t W = p->dsi_out_w_;
+  const int32_t H = p->dsi_out_h_;
+  const size_t bpp = p->dsi_fb_bpp_;
+  const int32_t f = static_cast<int32_t>(this->factor_);
+  const bool turned =
+      this->rotation_ == display::DISPLAY_ROTATION_90_DEGREES || this->rotation_ == display::DISPLAY_ROTATION_270_DEGREES;
+  const int32_t ow = turned ? this->out_h_ : this->out_w_;
+  const int32_t oh = turned ? this->out_w_ : this->out_h_;
+  for (int32_t ly = 0; ly < oh; ly++) {
+    const uint8_t *row = video.pixels + static_cast<size_t>(ly / f) * video.stride;
+    for (int32_t lx = 0; lx < ow; lx++) {
+      const int32_t sx = lx / f;
+      const uint16_t color = video.palette != nullptr ? video.palette[row[sx]]
+                                                      : reinterpret_cast<const uint16_t *>(row)[sx];
+      int32_t px;
+      int32_t py;
+      switch (this->rotation_) {
+        case display::DISPLAY_ROTATION_90_DEGREES:
+          px = this->out_x_ + this->out_w_ - 1 - ly;
+          py = this->out_y_ + lx;
+          break;
+        case display::DISPLAY_ROTATION_180_DEGREES:
+          px = this->out_x_ + this->out_w_ - 1 - lx;
+          py = this->out_y_ + this->out_h_ - 1 - ly;
+          break;
+        case display::DISPLAY_ROTATION_270_DEGREES:
+          px = this->out_x_ + ly;
+          py = this->out_y_ + this->out_h_ - 1 - lx;
+          break;
+        default:
+          px = this->out_x_ + lx;
+          py = this->out_y_ + ly;
+          break;
+      }
+      if (px < 0 || py < 0 || px >= W || py >= H)
+        continue;
+      uint8_t *dst = fb + (static_cast<size_t>(py) * W + px) * bpp;
+      if (bpp == 2) {
+        *reinterpret_cast<uint16_t *>(dst) = color;
+      } else {
+        dst[0] = static_cast<uint8_t>((color & 0x1F) << 3);
+        dst[1] = static_cast<uint8_t>(((color >> 5) & 0x3F) << 2);
+        dst[2] = static_cast<uint8_t>(((color >> 11) & 0x1F) << 3);
+      }
+    }
+  }
+  const size_t stride = static_cast<size_t>(W) * bpp;
+  esp_cache_msync(fb + static_cast<size_t>(this->out_y_) * stride, static_cast<size_t>(this->out_h_) * stride,
+                  ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+  return true;
+}
+
+void GameEmulator::play_audio_() {
+#ifdef USE_SPEAKER
+  speaker::Speaker *spk = this->parent_->speaker_;
+  if (spk == nullptr)
+    return;
+  size_t frames = 0;
+  const int16_t *pcm = this->core_->audio(&frames);
+  if (pcm == nullptr || frames == 0)
+    return;
+  const auto *data = reinterpret_cast<const uint8_t *>(pcm);
+  size_t left = frames * this->core_->channels() * sizeof(int16_t);
+  while (left > 0 && !this->task_stop_.load(std::memory_order_acquire) &&
+         !this->task_pause_.load(std::memory_order_acquire)) {
+    const size_t written = spk->play(data, left, EMU_AUDIO_WAIT);
+    data += written;
+    left -= written;
+  }
+#endif
+}
+
+#ifdef SVP_MEDIA_PLAYER
+void SimpleVideoPlayer::on_svp_emu_start(std::string path) { this->emu_->start(path); }
+void SimpleVideoPlayer::on_svp_emu_stop() { this->emu_->stop(); }
+void SimpleVideoPlayer::on_svp_emu_pause() { this->emu_->pause(); }
+void SimpleVideoPlayer::on_svp_emu_resume() { this->emu_->resume(); }
+#endif
+
+#ifdef USE_LVGL_HID
+bool GameEmulator::paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action,
+                              uint32_t codepoint, bool level3) {
+  for (size_t i = 0; i < this->menu_key_count_; i++) {
+    if (this->menu_keys_[i].page == page && this->menu_keys_[i].usage == usage) {
+      if (pressed && this->state_ == State::RUNNING)
+        this->pause();
+      return true;
+    }
+  }
+  uint16_t buttons = 0;
+  for (size_t i = 0; i < this->key_count_; i++) {
+    if (this->keys_[i].page == page && this->keys_[i].usage == usage)
+      buttons |= this->keys_[i].buttons;
+  }
+  if (buttons != 0) {
+    if (pressed) {
+      this->pads_[0].fetch_or(buttons, std::memory_order_relaxed);
+    } else {
+      this->pads_[0].fetch_and(static_cast<uint16_t>(~buttons), std::memory_order_relaxed);
+    }
+  }
+  return true;
+}
+#endif
+
+}
+
+#endif

@@ -1,0 +1,21 @@
+[sections:emu_bss]
+entries:
+    .bss+
+    .sbss+
+
+[sections:emu_common]
+entries:
+    COMMON
+
+[scheme:emu_extram_noinit]
+entries:
+    emu_bss -> extram_noinit
+    emu_common -> extram_noinit
+
+[mapping:emu_bss_psram]
+archive: libemu.a
+entries:
+    if SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY = y:
+        * (emu_extram_noinit);
+            emu_bss -> extram_noinit ALIGN(4) ALIGN(4, post) SURROUND(emu_bss),
+            emu_common -> extram_noinit ALIGN(4) ALIGN(4, post) SURROUND(emu_common)

@@ -2020,6 +2020,10 @@ void SimpleVideoPlayer::spice_connect(const std::string &host, uint16_t port, co
     ESP_LOGW(TAG, "A SPICE session runs: disconnect it first");
     return;
   }
+#ifdef SVP_EMULATOR
+  if (this->emu_refuses_())
+    return;
+#endif
   if (password.size() > PASSWORD_MAX) {
     ESP_LOGE(TAG, "The password is longer than %u characters", static_cast<unsigned>(PASSWORD_MAX));
     return;
@@ -2046,6 +2050,10 @@ void SimpleVideoPlayer::spice_connect_browser() {
     ESP_LOGW(TAG, "A SPICE session runs: disconnect it first");
     return;
   }
+#ifdef SVP_EMULATOR
+  if (this->emu_refuses_())
+    return;
+#endif
   this->spice_active_saved_ = -1;
   xSemaphoreTake(this->spice_lock_, portMAX_DELAY);
   this->spice_->host[0] = 0;

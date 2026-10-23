@@ -1,0 +1,7 @@
+menu "svp emulator"
+
+    config SVP_EMU_NES
+        bool "NES"
+        default n
+
+endmenu

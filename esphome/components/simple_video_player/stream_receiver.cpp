@@ -314,6 +314,13 @@ void SimpleVideoPlayer::stream_net_loop_() {
       this->desktop_cursor_left_ = 0;
       this->stream_desktop_sender_ = desktop_sender;
 #endif
+#ifdef SVP_EMULATOR
+      if (this->emu_on_.load(std::memory_order_acquire)) {
+        ESP_LOGI(TAG, "Sender from %s refused: a game holds the panel", peer_text);
+        ::close(client);
+        continue;
+      }
+#endif
       this->stream_sender_busy_.store(true, std::memory_order_release);
       this->app_end_req_.store(true, std::memory_order_release);  // pictures / the camera end (main loop)
       App.wake_loop_threadsafe();

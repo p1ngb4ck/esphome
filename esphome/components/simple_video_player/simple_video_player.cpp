@@ -1,4 +1,5 @@
 #include "simple_video_player.h"
+#include "emulator.h"
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
 #include "esphome/core/helpers.h"
@@ -276,6 +277,10 @@ void SimpleVideoPlayer::loop() {
 #endif
   this->pool_service_();
   this->camera_service_();
+#ifdef SVP_EMULATOR
+  if (this->emu_ != nullptr)
+    this->emu_->service();
+#endif
   if (this->finished_pending_.exchange(false, std::memory_order_acq_rel))
     this->on_finished_callbacks_.call();
 #ifdef SVP_AUDIO_FILES
@@ -384,7 +389,12 @@ void SimpleVideoPlayer::loop() {
 #endif
     // The camera full screen takes the panel as a direct stream does
     const bool cam_direct = this->cam_direct_.load(std::memory_order_acquire);
-    const bool panel_taken = streaming || cam_direct;
+#ifdef SVP_EMULATOR
+    const bool game = this->emu_ != nullptr && this->emu_->wants_panel();
+#else
+    const bool game = false;
+#endif
+    const bool panel_taken = streaming || cam_direct || game;
 #ifdef SVP_USE_LVGL
     if (panel_taken && this->lvgl_component_ != nullptr && !this->dsi_lvgl_paused_) {
       this->lvgl_component_->set_paused(true, false);
@@ -439,6 +449,12 @@ void SimpleVideoPlayer::loop() {
 #endif
     // The camera's frames are drawn once LVGL lets go of the panel
     this->cam_direct_ready_.store(cam_direct && lvgl_off, std::memory_order_release);
+#ifdef SVP_EMULATOR
+    if (this->emu_ != nullptr && (game && lvgl_off) != this->emu_ready_) {
+      this->emu_ready_ = game && lvgl_off;
+      this->emu_->panel_ready(this->emu_ready_);
+    }
+#endif
 #if defined(SVP_STREAM) && defined(USE_AUDIO)
     // Stream sound stopped arriving (the speaker runs on).
     if (this->stream_audio_on_.load(std::memory_order_acquire) &&
@@ -550,6 +566,10 @@ void SimpleVideoPlayer::play(const std::string &video_path, bool folder_playlist
   if (this->spice_refuses_())
     return;
 #endif
+#ifdef SVP_EMULATOR
+  if (this->emu_refuses_())
+    return;
+#endif
   this->sound_take_over_();  // a video plays alone
   this->app_end_();          // and without pictures or the camera
   this->start_path_ = video_path;
@@ -589,6 +609,10 @@ void SimpleVideoPlayer::play_list(std::vector<std::string> paths, size_t start) 
 void SimpleVideoPlayer::play_index_(size_t index) {
 #ifdef SVP_SPICE
   if (this->spice_refuses_())
+    return;
+#endif
+#ifdef SVP_EMULATOR
+  if (this->emu_refuses_())
     return;
 #endif
   this->start_path_.clear();
@@ -929,10 +953,46 @@ void SimpleVideoPlayer::app_end_() {
   this->app_ = AppKind::NONE;
   if (was == AppKind::PICTURES)
     this->close_picture();
+#ifdef SVP_EMULATOR
+  if (was == AppKind::GAME && this->emu_ != nullptr)
+    this->emu_->app_ended();
+#endif
   this->app_end_callbacks_.call(was);
 }
 
-void SimpleVideoPlayer::app_take(AppKind app, size_t need_bytes) {
+#ifdef SVP_EMULATOR
+bool SimpleVideoPlayer::emu_refuses_() const {
+  if (!this->emu_on_.load(std::memory_order_acquire))
+    return false;
+  ESP_LOGW(TAG, "Refused: a game holds the panel");
+  return true;
+}
+
+GameEmulator *SimpleVideoPlayer::make_emulator() {
+  this->emu_ = GameEmulator::create(this);
+  return this->emu_;
+}
+
+void SimpleVideoPlayer::paused_input_default_() {
+#if defined(USE_LVGL_HID) && defined(SVP_USE_LVGL)
+  if (this->lvgl_component_ == nullptr)
+    return;
+#ifdef SVP_STREAM_INPUT
+  if (this->stream_input_q_ != nullptr) {
+    this->lvgl_component_->set_paused_input(&this->stream_input_taker_);
+    return;
+  }
+#endif
+  this->lvgl_component_->set_paused_input(nullptr);
+#endif
+}
+#endif
+
+bool SimpleVideoPlayer::app_take(AppKind app, size_t need_bytes) {
+#ifdef SVP_EMULATOR
+  if (app != AppKind::GAME && this->emu_refuses_())
+    return false;
+#endif
 #ifdef SVP_SPICE
   if (this->is_spice_connected())
     this->spice_disconnect();  // a desktop session ends
@@ -952,6 +1012,7 @@ void SimpleVideoPlayer::app_take(AppKind app, size_t need_bytes) {
     this->stop();
   }
 #endif
+  return true;
 }
 
 void SimpleVideoPlayer::app_release(AppKind app) {
@@ -2495,7 +2556,7 @@ uint8_t *SimpleVideoPlayer::pool_take_(size_t size, uint8_t user) {
 }
 
 bool SimpleVideoPlayer::pool_give_back_(uint8_t groups, uint8_t user) {
-  if (user == POOL_USER_PICTURES || user == POOL_USER_CAPTURE)
+  if (user == POOL_USER_PICTURES || user == POOL_USER_CAPTURE || user == POOL_USER_GAME)
     return this->give_back_media_(groups);  // main loop
   if (groups == POOL_CAPTURE) {
 #ifdef SVP_CAPTURE
@@ -3531,6 +3592,10 @@ void SimpleVideoPlayer::audio_order_build_(size_t first) {
 void SimpleVideoPlayer::audio_start_(size_t pos) {
   if (pos >= this->audio_order_.size())
     return;
+#ifdef SVP_EMULATOR
+  if (this->emu_refuses_())
+    return;
+#endif
 #ifdef SVP_SPICE
   if (this->spice_sound_on_.load(std::memory_order_acquire) && this->spice_sound_shares_files_) {
     ESP_LOGW(TAG, "Refused: the SPICE session's sound plays on this device");

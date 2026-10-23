@@ -464,8 +464,8 @@ bool SimpleVideoPlayer::show_image(size_t index) {
     ESP_LOGW(TAG, "No picture %u (of %u)", static_cast<unsigned>(index), static_cast<unsigned>(this->images_.size()));
     return false;
   }
-  if (this->app_ != AppKind::PICTURES)
-    this->app_take(AppKind::PICTURES);  // a video, a desktop session, the camera end
+  if (this->app_ != AppKind::PICTURES && !this->app_take(AppKind::PICTURES))  // a video, a desktop session, the camera end
+    return false;
   this->pic_wanted_ = static_cast<int>(index);
   return true;
 }
