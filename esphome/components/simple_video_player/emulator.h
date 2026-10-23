@@ -48,6 +48,9 @@ class EmuCore {
   virtual bool keyboard() const { return false; }
   virtual void key(uint16_t usage, bool pressed) {}
   virtual void add_file(const char *name, const uint8_t *data, size_t size) {}
+  virtual uint8_t *sram(size_t *size) { return nullptr; }
+  virtual size_t save_state(uint8_t *buf, size_t cap) { return 0; }
+  virtual bool load_state(const uint8_t *buf, size_t len) { return false; }
 };
 
 static constexpr size_t EMU_CORE_STORE = 768;
@@ -60,6 +63,8 @@ class GameEmulator
 {
  public:
   enum class State : uint8_t { IDLE, LOADING, WAIT_PANEL, RUNNING, PAUSING, PAUSED, STOPPING };
+  enum class Job : uint8_t { NONE, SAV_LOAD, SAV_STORE, STATE_SAVE, STATE_LOAD };
+  static constexpr uint8_t SLOTS = 4;
 
   static GameEmulator *create(SimpleVideoPlayer *parent);
 
@@ -74,6 +79,10 @@ class GameEmulator
   void stop();
   void pause();
   void resume();
+  bool save_state(uint8_t slot);
+  bool load_state(uint8_t slot);
+  uint32_t slot_time(uint8_t slot);
+  bool busy() const { return this->job_ != Job::NONE || this->job_wanted_ != Job::NONE; }
   State state() const { return this->state_; }
   bool active() const { return this->state_ != State::IDLE; }
   const char *state_name() const;
@@ -139,6 +148,15 @@ class GameEmulator
   void end_();
   void release_all_();
   void set_wants_panel_(bool wants);
+  void go_panel_();
+  bool side_path_(char *out, size_t len, const char *suffix) const;
+  bool sram_changed_();
+  void job_begin_();
+  void job_read_next_();
+  void job_write_next_();
+  void job_close_(storage::StorageError err);
+  void job_finished_(bool ok);
+  void job_release_();
 
   static void *alloc_cb_(void *ctx, size_t size, bool zero);
   static void *realloc_cb_(void *ctx, void *ptr, size_t size);
@@ -215,6 +233,25 @@ class GameEmulator
   uint8_t *silence_{nullptr};
   size_t silence_frames_{0};
 
+  static constexpr size_t STATE_MAX = 768 * 1024;
+  Job job_{Job::NONE};
+  Job job_wanted_{Job::NONE};
+  uint8_t job_slot_{1};
+  bool job_write_{false};
+  bool job_open_{false};
+  storage::StreamHandle job_stream_{};
+  uint8_t *job_data_{nullptr};
+  size_t job_len_{0};
+  size_t job_done_{0};
+  size_t job_chunk_{0};
+  uint32_t job_crc_{0};
+  storage::StorageError job_err_{storage::StorageError::STORAGE_ERROR_OK};
+  char job_path_[storage::STORAGE_VFS_PATH_MAX + 1]{};
+  uint8_t *state_buf_{nullptr};
+  uint32_t sram_crc_{0};
+  bool sram_stored_{false};
+  bool resume_pending_{false};
+
   StaticTask task_;
   std::atomic<bool> task_stop_{false};
   std::atomic<bool> task_pause_{false};
@@ -236,6 +273,27 @@ template<typename... Ts> class GameStartAction : public Action<Ts...> {
 
  protected:
   SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class GameStateAction : public Action<Ts...> {
+ public:
+  explicit GameStateAction(SimpleVideoPlayer *player) : player_(player) {}
+  TEMPLATABLE_VALUE(uint8_t, slot)
+  void set_save(bool save) { this->save_ = save; }
+  void play(const Ts &...x) override {
+    GameEmulator *emu = this->player_->get_emulator();
+    if (emu == nullptr)
+      return;
+    if (this->save_) {
+      emu->save_state(this->slot_.value(x...));
+    } else {
+      emu->load_state(this->slot_.value(x...));
+    }
+  }
+
+ protected:
+  SimpleVideoPlayer *player_;
+  bool save_{true};
 };
 
 template<typename... Ts> class GameCommandAction : public Action<Ts...> {

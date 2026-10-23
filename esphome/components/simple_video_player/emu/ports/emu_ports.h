@@ -38,36 +38,52 @@ void nes_port_frame(uint16_t pad1, uint16_t pad2);
 void nes_port_video(emu_port_video_t *video);
 const int16_t *nes_port_audio(size_t *frames);
 uint32_t nes_port_frame_us(void);
+uint8_t *nes_port_sram(size_t *size);
+size_t nes_port_save_state(uint8_t *buf, size_t cap);
+bool nes_port_load_state(const uint8_t *buf, size_t len);
 
 bool gb_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels);
 void gb_port_frame(uint16_t pad1, uint16_t pad2);
 void gb_port_video(emu_port_video_t *video);
 const int16_t *gb_port_audio(size_t *frames);
 uint32_t gb_port_frame_us(void);
+uint8_t *gb_port_sram(size_t *size);
+size_t gb_port_save_state(uint8_t *buf, size_t cap);
+bool gb_port_load_state(const uint8_t *buf, size_t len);
 
 bool sms_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels, int console);
 void sms_port_frame(uint16_t pad1, uint16_t pad2);
 void sms_port_video(emu_port_video_t *video);
 const int16_t *sms_port_audio(size_t *frames);
 uint32_t sms_port_frame_us(void);
+uint8_t *sms_port_sram(size_t *size);
+size_t sms_port_save_state(uint8_t *buf, size_t cap);
+bool sms_port_load_state(const uint8_t *buf, size_t len);
 
 bool pce_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels);
 void pce_port_frame(uint16_t pad1, uint16_t pad2);
 void pce_port_video(emu_port_video_t *video);
 const int16_t *pce_port_audio(size_t *frames);
 uint32_t pce_port_frame_us(void);
+size_t pce_port_save_state(uint8_t *buf, size_t cap);
+bool pce_port_load_state(const uint8_t *buf, size_t len);
 
 bool lynx_port_load(uint8_t *rom, size_t size, uint8_t channels);
 void lynx_port_frame(uint16_t pad1, uint16_t pad2);
 void lynx_port_video(emu_port_video_t *video);
 const int16_t *lynx_port_audio(size_t *frames);
 uint32_t lynx_port_frame_us(void);
+size_t lynx_port_save_state(uint8_t *buf, size_t cap);
+bool lynx_port_load_state(const uint8_t *buf, size_t len);
 
 bool snes_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels);
 void snes_port_frame(uint16_t pad1, uint16_t pad2);
 void snes_port_video(emu_port_video_t *video);
 const int16_t *snes_port_audio(size_t *frames);
 uint32_t snes_port_frame_us(void);
+uint8_t *snes_port_sram(size_t *size);
+size_t snes_port_save_state(uint8_t *buf, size_t cap);
+bool snes_port_load_state(const uint8_t *buf, size_t len);
 
 bool md_port_load(uint8_t *rom, size_t size, uint8_t channels);
 void md_port_frame(uint16_t pad1, uint16_t pad2);
@@ -92,6 +108,8 @@ void msx_port_key(uint16_t usage, bool pressed);
 void msx_port_video(emu_port_video_t *video);
 const int16_t *msx_port_audio(size_t *frames);
 uint32_t msx_port_frame_us(void);
+size_t msx_port_save_state(uint8_t *buf, size_t cap);
+bool msx_port_load_state(const uint8_t *buf, size_t len);
 
 #ifdef __cplusplus
 }

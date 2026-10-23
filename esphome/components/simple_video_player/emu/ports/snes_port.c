@@ -1,5 +1,6 @@
 #include "emu_ports.h"
 
+#include "emu_mem.h"
 #include "snes9x.h"
 
 static uint16_t *s_frame;
@@ -152,4 +153,32 @@ const int16_t *snes_port_audio(size_t *frames)
 uint32_t snes_port_frame_us(void)
 {
     return Memory.ROMFramesPerSecond == 50 ? 20000u : 16667u;
+}
+
+uint8_t *snes_port_sram(size_t *size)
+{
+    if (Memory.SRAM == NULL || Memory.SRAMSize == 0)
+        return NULL;
+    size_t bytes = (size_t)1024 << Memory.SRAMSize;
+    if (bytes > SRAM_SIZE)
+        bytes = SRAM_SIZE;
+    *size = bytes;
+    return Memory.SRAM;
+}
+
+size_t snes_port_save_state(uint8_t *buf, size_t cap)
+{
+    emu_mem_arm(buf, cap, 0);
+    const bool ok = S9xSaveState("state") && !emu_mem_failed();
+    const size_t len = emu_mem_length();
+    emu_mem_arm(NULL, 0, 0);
+    return ok ? len : 0;
+}
+
+bool snes_port_load_state(const uint8_t *buf, size_t len)
+{
+    emu_mem_arm((uint8_t *)buf, len, len);
+    const bool ok = S9xLoadState("state");
+    emu_mem_arm(NULL, 0, 0);
+    return ok;
 }

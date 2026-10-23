@@ -1,6 +1,8 @@
 #include "emu_ports.h"
 
+#include "emu_mem.h"
 #include "nofrendo.h"
+#include "nes/state.h"
 
 static nes_t *s_nes;
 static uint8_t *s_vidbuf;
@@ -71,4 +73,29 @@ const int16_t *nes_port_audio(size_t *frames)
 uint32_t nes_port_frame_us(void)
 {
     return s_nes->refresh_rate > 0 ? 1000000u / (uint32_t)s_nes->refresh_rate : 16667u;
+}
+
+uint8_t *nes_port_sram(size_t *size)
+{
+    if (s_nes == NULL || s_nes->cart == NULL || !s_nes->cart->battery || s_nes->cart->prg_ram_banks <= 0)
+        return NULL;
+    *size = (size_t)s_nes->cart->prg_ram_banks * ROM_PRG_BANK_SIZE;
+    return s_nes->cart->prg_ram;
+}
+
+size_t nes_port_save_state(uint8_t *buf, size_t cap)
+{
+    emu_mem_arm(buf, cap, 0);
+    const bool ok = state_save("state") == 0 && !emu_mem_failed();
+    const size_t len = emu_mem_length();
+    emu_mem_arm(NULL, 0, 0);
+    return ok ? len : 0;
+}
+
+bool nes_port_load_state(const uint8_t *buf, size_t len)
+{
+    emu_mem_arm((uint8_t *)buf, len, len);
+    const bool ok = state_load("state") == 0;
+    emu_mem_arm(NULL, 0, 0);
+    return ok;
 }

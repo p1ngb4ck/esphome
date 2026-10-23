@@ -7,7 +7,11 @@
 
 #include "emu_shim.h"
 #include "esp_cache.h"
+#include "esp_rom_crc.h"
 #include "esphome/core/log.h"
+#ifdef USE_STORAGE_TRANSFER_BUFFER
+#include "esphome/components/storage/transfer_buffer.h"
+#endif
 
 namespace esphome::simple_video_player {
 
@@ -172,6 +176,11 @@ bool GameEmulator::start(const std::string &path) {
   this->storage_ = nullptr;
   this->load_step_ = 0;
   this->file_pending_ = true;
+  this->job_ = Job::NONE;
+  this->job_wanted_ = Job::NONE;
+  this->sram_crc_ = 0;
+  this->sram_stored_ = false;
+  this->resume_pending_ = false;
   for (auto &entry : this->bios_)
     entry = {nullptr, nullptr, 0};
   this->task_stop_.store(false, std::memory_order_relaxed);
@@ -187,8 +196,16 @@ bool GameEmulator::start(const std::string &path) {
 }
 
 void GameEmulator::service() {
+  if (this->job_wanted_ != Job::NONE && this->job_ == Job::NONE)
+    this->job_begin_();
   switch (this->state_) {
     case State::LOADING:
+      if (this->task_stop_.load(std::memory_order_acquire) && !this->file_pending_ && !this->stream_open_ &&
+          this->job_ == Job::NONE) {
+        this->job_wanted_ = Job::NONE;
+        this->end_();
+        return;
+      }
       if (this->file_pending_ && !this->stream_open_) {
         if (this->task_stop_.load(std::memory_order_acquire)) {
           this->end_();
@@ -202,6 +219,8 @@ void GameEmulator::service() {
     case State::PAUSING:
       if (this->task_parked_.load(std::memory_order_acquire)) {
         this->state_ = State::PAUSED;
+        if (this->sram_changed_())
+          this->job_wanted_ = Job::SAV_STORE;
         this->set_wants_panel_(false);
         ESP_LOGI(TAG, "Paused");
         this->parent_->status_callbacks_.call();
@@ -213,6 +232,13 @@ void GameEmulator::service() {
         return;
       if (this->task_.is_created() && !this->task_.deallocate())
         return;
+      if (this->busy())
+        return;
+      if (!this->sram_stored_ && this->sram_changed_()) {
+        this->sram_stored_ = true;
+        this->job_wanted_ = Job::SAV_STORE;
+        return;
+      }
       this->end_();
       return;
     default:
@@ -400,6 +426,15 @@ void GameEmulator::loaded_() {
   ESP_LOGI(TAG, "Loaded: %zu bytes, %u x %u x%u, %u Hz %u ch, internal %zu bytes", this->rom_size_,
            this->core_->video().width, this->core_->video().height, static_cast<unsigned>(this->factor_),
            static_cast<unsigned>(this->core_->sample_rate()), this->core_->channels(), this->internal_used_);
+  size_t sram_size = 0;
+  if (this->core_->sram(&sram_size) != nullptr && sram_size != 0) {
+    this->job_wanted_ = Job::SAV_LOAD;
+    return;
+  }
+  this->go_panel_();
+}
+
+void GameEmulator::go_panel_() {
   this->state_ = State::WAIT_PANEL;
   this->set_wants_panel_(true);
 }
@@ -440,6 +475,11 @@ void GameEmulator::pause() {
 void GameEmulator::resume() {
   if (this->state_ != State::PAUSED)
     return;
+  if (this->busy()) {
+    this->resume_pending_ = true;
+    return;
+  }
+  this->resume_pending_ = false;
   this->black_ = 0;
   this->state_ = State::WAIT_PANEL;
   this->set_wants_panel_(true);
@@ -508,6 +548,10 @@ void GameEmulator::end_() {
     esp_timer_delete(this->pace_timer_);
     this->pace_timer_ = nullptr;
   }
+  this->job_release_();
+  this->job_ = Job::NONE;
+  this->job_wanted_ = Job::NONE;
+  this->resume_pending_ = false;
   this->release_output_();
   if (this->silence_ != nullptr)
     this->parent_->pool_.free(this->silence_);
@@ -534,6 +578,274 @@ void GameEmulator::end_() {
   ESP_LOGI(TAG, "Game %s", was_loading ? "not started" : "ended");
   this->parent_->status_callbacks_.call();
   this->ended_trigger_.trigger();
+}
+
+bool GameEmulator::save_state(uint8_t slot) {
+  if (this->state_ != State::PAUSED || this->busy() || slot < 1 || slot > SLOTS)
+    return false;
+  this->job_slot_ = slot;
+  this->job_wanted_ = Job::STATE_SAVE;
+  return true;
+}
+
+bool GameEmulator::load_state(uint8_t slot) {
+  if (this->state_ != State::PAUSED || this->busy() || slot < 1 || slot > SLOTS)
+    return false;
+  this->job_slot_ = slot;
+  this->job_wanted_ = Job::STATE_LOAD;
+  return true;
+}
+
+uint32_t GameEmulator::slot_time(uint8_t slot) {
+  if (this->state_ == State::IDLE || slot < 1 || slot > SLOTS || storage::global_storage_registry == nullptr)
+    return 0;
+  char suffix[8];
+  snprintf(suffix, sizeof(suffix), ".st%u", static_cast<unsigned>(slot));
+  char path[storage::STORAGE_VFS_PATH_MAX + 1];
+  if (!this->side_path_(path, sizeof(path), suffix))
+    return 0;
+  const char *rel = nullptr;
+  storage::PathStorage *ps = storage::global_storage_registry->resolve_path(path, &rel);
+  if (ps == nullptr || storage::global_storage_worker == nullptr ||
+      storage::global_storage_worker->has_active_task_io(ps))
+    return 0;
+  storage::FileStat st{};
+  if (ps->stat(rel, &st) != storage::StorageError::STORAGE_ERROR_OK || st.is_dir)
+    return 0;
+  return st.mtime != 0 ? st.mtime : 1;
+}
+
+bool GameEmulator::side_path_(char *out, size_t len, const char *suffix) const {
+  const size_t path_len = strlen(this->path_);
+  const char *slash = strrchr(this->path_, '/');
+  const char *dot = strrchr(this->path_, '.');
+  const size_t base =
+      dot != nullptr && (slash == nullptr || dot > slash) ? static_cast<size_t>(dot - this->path_) : path_len;
+  if (base + strlen(suffix) + 1 > len)
+    return false;
+  memcpy(out, this->path_, base);
+  strcpy(out + base, suffix);
+  return true;
+}
+
+bool GameEmulator::sram_changed_() {
+  if (this->core_ == nullptr)
+    return false;
+  size_t size = 0;
+  uint8_t *sram = this->core_->sram(&size);
+  if (sram == nullptr || size == 0)
+    return false;
+  return esp_rom_crc32_le(0, sram, static_cast<uint32_t>(size)) != this->sram_crc_;
+}
+
+void GameEmulator::job_begin_() {
+  storage::StorageWorker *worker = storage::global_storage_worker;
+  const Job job = this->job_wanted_;
+  char suffix[8];
+  if (job == Job::SAV_LOAD || job == Job::SAV_STORE) {
+    strcpy(suffix, ".sav");
+  } else {
+    snprintf(suffix, sizeof(suffix), ".st%u", static_cast<unsigned>(this->job_slot_));
+  }
+  const char *rel = nullptr;
+  storage::PathStorage *ps = nullptr;
+  if (worker != nullptr && storage::global_storage_registry != nullptr && this->core_ != nullptr &&
+      this->side_path_(this->job_path_, sizeof(this->job_path_), suffix))
+    ps = storage::global_storage_registry->resolve_path(this->job_path_, &rel);
+  if (ps == nullptr) {
+    this->job_wanted_ = Job::NONE;
+    this->job_ = job;
+    this->job_finished_(false);
+    return;
+  }
+  if (worker->has_active_task_io(ps))
+    return;
+  this->job_wanted_ = Job::NONE;
+  this->job_ = job;
+  this->job_done_ = 0;
+  this->job_len_ = 0;
+  this->job_err_ = storage::StorageError::STORAGE_ERROR_OK;
+  size_t sram_size = 0;
+  uint8_t *sram = this->core_->sram(&sram_size);
+  if (job == Job::SAV_LOAD || job == Job::STATE_LOAD) {
+    storage::FileStat st{};
+    if (ps->stat(rel, &st) != storage::StorageError::STORAGE_ERROR_OK || st.is_dir || st.size == 0) {
+      this->job_finished_(job == Job::SAV_LOAD);
+      return;
+    }
+    if (job == Job::SAV_LOAD) {
+      if (sram == nullptr || st.size > sram_size) {
+        this->job_finished_(false);
+        return;
+      }
+      this->job_data_ = sram;
+    } else {
+#ifdef USE_STORAGE_TRANSFER_BUFFER
+      if (storage::global_transfer_buffer != nullptr && st.size <= storage::global_transfer_buffer->capacity())
+        this->state_buf_ = storage::global_transfer_buffer->try_acquire(static_cast<size_t>(st.size));
+#endif
+      if (this->state_buf_ == nullptr) {
+        this->job_finished_(false);
+        return;
+      }
+      this->job_data_ = this->state_buf_;
+    }
+    this->job_len_ = static_cast<size_t>(st.size);
+    this->job_write_ = false;
+  } else {
+    if (job == Job::SAV_STORE) {
+      if (sram == nullptr) {
+        this->job_finished_(false);
+        return;
+      }
+      this->job_data_ = sram;
+      this->job_len_ = sram_size;
+      this->job_crc_ = esp_rom_crc32_le(0, sram, static_cast<uint32_t>(sram_size));
+    } else {
+#ifdef USE_STORAGE_TRANSFER_BUFFER
+      if (storage::global_transfer_buffer != nullptr) {
+        const size_t cap = std::min(STATE_MAX, storage::global_transfer_buffer->capacity());
+        this->state_buf_ = cap != 0 ? storage::global_transfer_buffer->try_acquire(cap) : nullptr;
+        if (this->state_buf_ != nullptr)
+          this->job_len_ = this->core_->save_state(this->state_buf_, cap);
+      }
+#endif
+      if (this->state_buf_ == nullptr || this->job_len_ == 0) {
+        this->job_finished_(false);
+        return;
+      }
+      this->job_data_ = this->state_buf_;
+    }
+    this->job_write_ = true;
+  }
+  auto opened = [this](storage::StorageError e) {
+    if (e != storage::StorageError::STORAGE_ERROR_OK) {
+      this->job_close_(e);
+      return;
+    }
+    if (this->job_write_) {
+      this->job_write_next_();
+    } else {
+      this->job_read_next_();
+    }
+  };
+  const storage::StorageError err = this->job_write_ ? worker->begin_write(ps, rel, &this->job_stream_, opened)
+                                                     : worker->begin_read(ps, rel, &this->job_stream_, opened);
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
+    this->job_finished_(false);
+    return;
+  }
+  this->job_open_ = true;
+}
+
+void GameEmulator::job_read_next_() {
+  const size_t want = std::min(READ_CHUNK, this->job_len_ - this->job_done_);
+  const storage::StorageError err = storage::global_storage_worker->read_chunk(
+      this->job_stream_, this->job_data_ + this->job_done_, want, &this->job_chunk_, [this](storage::StorageError e) {
+        if (e != storage::StorageError::STORAGE_ERROR_OK || this->job_chunk_ == 0) {
+          this->job_close_(e != storage::StorageError::STORAGE_ERROR_OK ? e
+                                                                       : storage::StorageError::STORAGE_ERROR_READ_ERROR);
+          return;
+        }
+        this->job_done_ += this->job_chunk_;
+        if (this->job_done_ >= this->job_len_) {
+          this->job_close_(storage::StorageError::STORAGE_ERROR_OK);
+          return;
+        }
+        this->job_read_next_();
+      });
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
+    this->job_close_(err);
+}
+
+void GameEmulator::job_write_next_() {
+  this->job_chunk_ = std::min(READ_CHUNK, this->job_len_ - this->job_done_);
+  const storage::StorageError err = storage::global_storage_worker->write_chunk(
+      this->job_stream_, this->job_data_ + this->job_done_, this->job_chunk_, [this](storage::StorageError e) {
+        if (e != storage::StorageError::STORAGE_ERROR_OK) {
+          this->job_close_(e);
+          return;
+        }
+        this->job_done_ += this->job_chunk_;
+        if (this->job_done_ >= this->job_len_) {
+          this->job_close_(storage::StorageError::STORAGE_ERROR_OK);
+          return;
+        }
+        this->job_write_next_();
+      });
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
+    this->job_close_(err);
+}
+
+void GameEmulator::job_close_(storage::StorageError err) {
+  this->job_err_ = err;
+  auto closed = [this](storage::StorageError e) {
+    this->job_open_ = false;
+    if (this->job_err_ == storage::StorageError::STORAGE_ERROR_OK)
+      this->job_err_ = e;
+    this->job_finished_(this->job_err_ == storage::StorageError::STORAGE_ERROR_OK && this->job_done_ >= this->job_len_);
+  };
+  storage::StorageWorker *worker = storage::global_storage_worker;
+  const storage::StorageError e =
+      this->job_write_ ? worker->end_write(this->job_stream_, closed) : worker->end_read(this->job_stream_, closed);
+  if (e != storage::StorageError::STORAGE_ERROR_OK) {
+    this->job_open_ = false;
+    this->job_finished_(false);
+  }
+}
+
+void GameEmulator::job_finished_(bool ok) {
+  const Job job = this->job_;
+  this->job_ = Job::NONE;
+  switch (job) {
+    case Job::SAV_LOAD: {
+      size_t size = 0;
+      uint8_t *sram = this->core_ != nullptr ? this->core_->sram(&size) : nullptr;
+      this->sram_crc_ = sram != nullptr ? esp_rom_crc32_le(0, sram, static_cast<uint32_t>(size)) : 0;
+      if (!ok)
+        ESP_LOGW(TAG, "%s not read", this->job_path_);
+      if (this->state_ == State::LOADING && !this->task_stop_.load(std::memory_order_acquire))
+        this->go_panel_();
+      break;
+    }
+    case Job::SAV_STORE:
+      if (ok) {
+        this->sram_crc_ = this->job_crc_;
+        ESP_LOGI(TAG, "Saved %s", this->job_path_);
+      } else {
+        ESP_LOGE(TAG, "%s not written", this->job_path_);
+      }
+      break;
+    case Job::STATE_SAVE:
+      if (ok) {
+        ESP_LOGI(TAG, "State saved: %s", this->job_path_);
+      } else {
+        ESP_LOGE(TAG, "State not saved: %s", this->job_path_);
+      }
+      break;
+    case Job::STATE_LOAD:
+      if (ok && this->core_ != nullptr && this->core_->load_state(this->job_data_, this->job_len_)) {
+        ESP_LOGI(TAG, "State loaded: %s", this->job_path_);
+      } else {
+        ESP_LOGE(TAG, "State not loaded: %s", this->job_path_);
+      }
+      break;
+    default:
+      break;
+  }
+  this->job_release_();
+  this->parent_->status_callbacks_.call();
+  if (this->resume_pending_ && this->state_ == State::PAUSED && !this->busy())
+    this->resume();
+}
+
+void GameEmulator::job_release_() {
+#ifdef USE_STORAGE_TRANSFER_BUFFER
+  if (this->state_buf_ != nullptr && storage::global_transfer_buffer != nullptr)
+    storage::global_transfer_buffer->release();
+#endif
+  this->state_buf_ = nullptr;
+  this->job_data_ = nullptr;
 }
 
 void *GameEmulator::alloc_cb_(void *ctx, size_t size, bool zero) {
@@ -896,6 +1208,8 @@ void SimpleVideoPlayer::on_svp_emu_start(std::string path) { this->emu_->start(p
 void SimpleVideoPlayer::on_svp_emu_stop() { this->emu_->stop(); }
 void SimpleVideoPlayer::on_svp_emu_pause() { this->emu_->pause(); }
 void SimpleVideoPlayer::on_svp_emu_resume() { this->emu_->resume(); }
+void SimpleVideoPlayer::on_svp_emu_save_state(int32_t slot) { this->emu_->save_state(static_cast<uint8_t>(slot)); }
+void SimpleVideoPlayer::on_svp_emu_load_state(int32_t slot) { this->emu_->load_state(static_cast<uint8_t>(slot)); }
 #endif
 
 #ifdef USE_LVGL_HID

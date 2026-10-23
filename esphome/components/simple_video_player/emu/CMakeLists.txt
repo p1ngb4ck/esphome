@@ -1,5 +1,7 @@
-set(srcs "shim/emu_shim.c")
+set(srcs "shim/emu_shim.c" "shim/emu_mem.c")
 set(priv_incs "")
+set(mem_io "fopen=emu_mem_fopen;fclose=emu_mem_fclose;fread=emu_mem_fread;fwrite=emu_mem_fwrite;fseek=emu_mem_fseek"
+    "ftell=emu_mem_ftell")
 
 if(CONFIG_SVP_EMU_NES)
     file(GLOB nes_srcs "${CMAKE_CURRENT_LIST_DIR}/nofrendo/*.c" "${CMAKE_CURRENT_LIST_DIR}/nofrendo/nes/*.c"
@@ -7,6 +9,7 @@ if(CONFIG_SVP_EMU_NES)
     list(APPEND srcs ${nes_srcs} "ports/nes_port.c")
     list(APPEND priv_incs "nofrendo")
     set_source_files_properties(${nes_srcs} PROPERTIES COMPILE_OPTIONS "-O3")
+    set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/nofrendo/nes/state.c" PROPERTIES COMPILE_DEFINITIONS "${mem_io}")
 endif()
 
 if(CONFIG_SVP_EMU_GB)
@@ -14,6 +17,7 @@ if(CONFIG_SVP_EMU_GB)
     list(APPEND srcs ${gb_srcs} "ports/gb_port.c")
     list(APPEND priv_incs "gnuboy")
     set_source_files_properties(${gb_srcs} PROPERTIES COMPILE_OPTIONS "-O3")
+    set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/gnuboy/gnuboy.c" PROPERTIES COMPILE_DEFINITIONS "${mem_io}")
 endif()
 
 if(CONFIG_SVP_EMU_SMS)
@@ -22,6 +26,8 @@ if(CONFIG_SVP_EMU_SMS)
     list(APPEND srcs ${sms_srcs} "ports/sms_port.c")
     list(APPEND priv_incs "smsplus" "smsplus/cpu" "smsplus/sound")
     set_source_files_properties(${sms_srcs} PROPERTIES COMPILE_OPTIONS "-O3")
+    set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/smsplus/state.c" "ports/sms_port.c" PROPERTIES
+                                COMPILE_DEFINITIONS "${mem_io}")
 endif()
 
 if(CONFIG_SVP_EMU_PCE)
@@ -29,13 +35,15 @@ if(CONFIG_SVP_EMU_PCE)
     list(APPEND srcs ${pce_srcs} "ports/pce_port.c")
     list(APPEND priv_incs "pce-go")
     set_source_files_properties(${pce_srcs} PROPERTIES COMPILE_OPTIONS "-O3")
+    set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/pce-go/pce-go.c" PROPERTIES COMPILE_DEFINITIONS "${mem_io}")
 endif()
 
 if(CONFIG_SVP_EMU_LYNX)
     file(GLOB lynx_srcs "${CMAKE_CURRENT_LIST_DIR}/handy/*.cpp")
     list(APPEND srcs ${lynx_srcs} "ports/lynx_port.cpp")
     list(APPEND priv_incs "handy")
-    set_source_files_properties(${lynx_srcs} "ports/lynx_port.cpp" PROPERTIES COMPILE_OPTIONS "-O2;-fno-rtti;-fno-exceptions")
+    set_source_files_properties(${lynx_srcs} "ports/lynx_port.cpp" PROPERTIES COMPILE_OPTIONS "-O2;-fno-rtti;-fno-exceptions"
+                                COMPILE_DEFINITIONS "${mem_io}")
 endif()
 
 if(CONFIG_SVP_EMU_SNES)
@@ -44,6 +52,8 @@ if(CONFIG_SVP_EMU_SNES)
     list(APPEND priv_incs "snes9x" "snes9x/src")
     set_source_files_properties(${snes_srcs} "ports/snes_port.c" PROPERTIES COMPILE_OPTIONS "-O2"
                                 COMPILE_DEFINITIONS "RIGHTSHIFT_IS_SAR;FAST_LSB_WORD_ACCESS;NO_ZERO_LUT")
+    set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/snes9x/src/snapshot.c" PROPERTIES
+                                COMPILE_DEFINITIONS "RIGHTSHIFT_IS_SAR;FAST_LSB_WORD_ACCESS;NO_ZERO_LUT;${mem_io}")
 endif()
 
 if(CONFIG_SVP_EMU_MD)
@@ -72,7 +82,8 @@ if(CONFIG_SVP_EMU_MSX)
     list(APPEND priv_incs "fmsx" "fmsx/src/EMULib" "fmsx/src/fMSX" "fmsx/src/Z80")
     set(msx_names "CPU=fmsx_CPU;LoadFile=fmsx_LoadFile;LoadROM=fmsx_LoadROM;ResetZ80=fmsx_ResetZ80;ExecZ80=fmsx_ExecZ80"
         "IntZ80=fmsx_IntZ80;RunZ80=fmsx_RunZ80;RdZ80=fmsx_RdZ80;WrZ80=fmsx_WrZ80;InZ80=fmsx_InZ80;OutZ80=fmsx_OutZ80"
-        "LoopZ80=fmsx_LoopZ80;PatchZ80=fmsx_PatchZ80;DebugZ80=fmsx_DebugZ80;OpZ80=fmsx_OpZ80")
+        "LoopZ80=fmsx_LoopZ80;PatchZ80=fmsx_PatchZ80;DebugZ80=fmsx_DebugZ80;OpZ80=fmsx_OpZ80"
+        "SaveState=fmsx_SaveState;LoadState=fmsx_LoadState")
     set_source_files_properties(${msx_srcs} PROPERTIES COMPILE_OPTIONS "-O2;-include;${CMAKE_CURRENT_LIST_DIR}/fmsx/msxfix.h"
                                 COMPILE_DEFINITIONS "BPS16;UNIX;LSB_FIRST;NARROW;${msx_names}")
     set_source_files_properties("ports/msx_port.c" PROPERTIES COMPILE_OPTIONS "-O2" COMPILE_DEFINITIONS "${msx_names}")

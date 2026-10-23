@@ -142,6 +142,7 @@ GameEmulator = simple_video_player_ns.class_("GameEmulator")
 EmuSystem = simple_video_player_ns.enum("EmuSystem", is_class=True)
 GameStartAction = simple_video_player_ns.class_("GameStartAction", automation.Action)
 GameCommandAction = simple_video_player_ns.class_("GameCommandAction", automation.Action)
+GameStateAction = simple_video_player_ns.class_("GameStateAction", automation.Action)
 ShowImageAction = simple_video_player_ns.class_("ShowImageAction", automation.Action)
 ScreenshotAction = simple_video_player_ns.class_("ScreenshotAction", automation.Action)
 ScreencastAction = simple_video_player_ns.class_("ScreencastAction", automation.Action)
@@ -2062,3 +2063,32 @@ def _register_emulator_command(name, command):
 
 for _name, _command in EMULATOR_COMMANDS.items():
     _register_emulator_command(_name, _command)
+
+
+CONF_SLOT = "slot"
+
+
+def _register_emulator_state(name, save):
+    @automation.register_action(
+        f"simple_video_player.emulator.{name}",
+        GameStateAction,
+        cv.Schema(
+            {
+                cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+                cv.Required(CONF_SLOT): cv.templatable(cv.int_range(min=1, max=4)),
+            }
+        ),
+        synchronous=True,
+    )
+    async def _to_code(config, action_id, template_arg, args):
+        paren = await cg.get_variable(config[CONF_ID])
+        var = cg.new_Pvariable(action_id, template_arg, paren)
+        cg.add(var.set_slot(await cg.templatable(config[CONF_SLOT], args, cg.uint8)))
+        cg.add(var.set_save(save))
+        return var
+
+    return _to_code
+
+
+_register_emulator_state("save_state", True)
+_register_emulator_state("load_state", False)

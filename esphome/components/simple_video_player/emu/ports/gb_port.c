@@ -2,7 +2,9 @@
 
 #include <time.h>
 
+#include "emu_mem.h"
 #include "gnuboy.h"
+#include "hw.h"
 
 static uint16_t *s_frame;
 static int16_t *s_sound;
@@ -94,4 +96,29 @@ const int16_t *gb_port_audio(size_t *frames)
 uint32_t gb_port_frame_us(void)
 {
     return 16742u;
+}
+
+uint8_t *gb_port_sram(size_t *size)
+{
+    if (!cart.has_battery || cart.rambanks == NULL || cart.ramsize <= 0)
+        return NULL;
+    *size = (size_t)cart.ramsize * 8192;
+    return (uint8_t *)cart.rambanks;
+}
+
+size_t gb_port_save_state(uint8_t *buf, size_t cap)
+{
+    emu_mem_arm(buf, cap, 0);
+    const bool ok = gnuboy_save_state("state") == 0 && !emu_mem_failed();
+    const size_t len = emu_mem_length();
+    emu_mem_arm(NULL, 0, 0);
+    return ok ? len : 0;
+}
+
+bool gb_port_load_state(const uint8_t *buf, size_t len)
+{
+    emu_mem_arm((uint8_t *)buf, len, len);
+    const bool ok = gnuboy_load_state("state") == 0;
+    emu_mem_arm(NULL, 0, 0);
+    return ok;
 }

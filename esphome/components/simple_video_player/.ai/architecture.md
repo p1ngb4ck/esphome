@@ -332,5 +332,13 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
 - Keys: `GameEmulator` is LVGL's `PausedInput` while it wants the panel (else svp's stream taker again,
   `paused_input_default_()`); `keys:` per button (hid key names, defaults positional pad buttons + keyboard),
   `menu_keys:` (default BUTTON_11) pauses; every key is taken, the configuration's own key_bindings actions still fire.
-- Actions: `simple_video_player.emulator.start` (path) / `.stop` / `.pause` / `.resume`; Home Assistant `svp_emu_start`
-  (path), `svp_emu_stop`, `svp_emu_pause`, `svp_emu_resume`; the status JSON's `game` ("", "running", "paused").
+- Saves (`<rom without extension>.sav` and `.st1`..`.st4` next to the ROM): the cartridge RAM (nes, gb, sms, snes:
+  `sram()`) is read from `.sav` before the panel is taken, and written while paused and at the end when its CRC32
+  differs from the last read / write (a worker write stream straight from the core's memory; the end waits for it).
+  States only while paused: the core serialises into the borrowed storage transfer buffer (at most 768 KiB; the cores'
+  stdio state code goes to `emu_mem` by compile definitions: nofrendo state.c, gnuboy.c, smsplus state.c, pce-go.c,
+  snes9x snapshot.c, handy; gwenesis, gw and fMSX are memory-based already), written / read by the worker; one job at a
+  time, a resume asked during a job runs after it. `slot_time(slot)` stats a slot for the page (mtime, 1 when unknown).
+- Actions: `simple_video_player.emulator.start` (path) / `.stop` / `.pause` / `.resume` / `.save_state` (slot) /
+  `.load_state` (slot); Home Assistant `svp_emu_start` (path), `svp_emu_stop`, `svp_emu_pause`, `svp_emu_resume`,
+  `svp_emu_save_state` (slot), `svp_emu_load_state` (slot); the status JSON's `game` ("", "running", "paused").

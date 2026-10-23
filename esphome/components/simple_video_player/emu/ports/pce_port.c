@@ -1,5 +1,6 @@
 #include "emu_ports.h"
 
+#include "emu_mem.h"
 #include "pce-go.h"
 #include "pce.h"
 #include "psg.h"
@@ -123,4 +124,21 @@ const int16_t *pce_port_audio(size_t *frames)
 uint32_t pce_port_frame_us(void)
 {
     return 16667u;
+}
+
+size_t pce_port_save_state(uint8_t *buf, size_t cap)
+{
+    emu_mem_arm(buf, cap, 0);
+    const bool ok = SaveState("state") == 0 && !emu_mem_failed();
+    const size_t len = emu_mem_length();
+    emu_mem_arm(NULL, 0, 0);
+    return ok ? len : 0;
+}
+
+bool pce_port_load_state(const uint8_t *buf, size_t len)
+{
+    emu_mem_arm((uint8_t *)buf, len, len);
+    const bool ok = LoadState("state") == 0;
+    emu_mem_arm(NULL, 0, 0);
+    return ok;
 }

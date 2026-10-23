@@ -1,5 +1,6 @@
 #include "emu_ports.h"
 
+#include "emu_mem.h"
 #include "shared.h"
 
 static uint8_t *s_bitmap;
@@ -150,4 +151,38 @@ const int16_t *sms_port_audio(size_t *frames)
 uint32_t sms_port_frame_us(void)
 {
     return sms.display == DISPLAY_NTSC ? 16667u : 20000u;
+}
+
+uint8_t *sms_port_sram(size_t *size)
+{
+    if (cart.sram == NULL)
+        return NULL;
+    *size = 0x8000;
+    return cart.sram;
+}
+
+size_t sms_port_save_state(uint8_t *buf, size_t cap)
+{
+    emu_mem_arm(buf, cap, 0);
+    FILE *fp = fopen("state", "wb");
+    if (fp == NULL)
+        return 0;
+    system_save_state(fp);
+    fclose(fp);
+    const bool ok = !emu_mem_failed();
+    const size_t len = emu_mem_length();
+    emu_mem_arm(NULL, 0, 0);
+    return ok ? len : 0;
+}
+
+bool sms_port_load_state(const uint8_t *buf, size_t len)
+{
+    emu_mem_arm((uint8_t *)buf, len, len);
+    FILE *fp = fopen("state", "rb");
+    if (fp == NULL)
+        return false;
+    system_load_state(fp);
+    fclose(fp);
+    emu_mem_arm(NULL, 0, 0);
+    return true;
 }

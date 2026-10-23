@@ -98,6 +98,8 @@ void SimpleVideoPlayer::setup_media_player_() {
     this->register_service(&SimpleVideoPlayer::on_svp_emu_stop, "svp_emu_stop");
     this->register_service(&SimpleVideoPlayer::on_svp_emu_pause, "svp_emu_pause");
     this->register_service(&SimpleVideoPlayer::on_svp_emu_resume, "svp_emu_resume");
+    this->register_service(&SimpleVideoPlayer::on_svp_emu_save_state, "svp_emu_save_state", {"slot"});
+    this->register_service(&SimpleVideoPlayer::on_svp_emu_load_state, "svp_emu_load_state", {"slot"});
   }
 #endif
   this->build_media_traits_();

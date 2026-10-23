@@ -907,6 +907,8 @@ class SimpleVideoPlayer : public Component
   void on_svp_emu_stop();
   void on_svp_emu_pause();
   void on_svp_emu_resume();
+  void on_svp_emu_save_state(int32_t slot);
+  void on_svp_emu_load_state(int32_t slot);
 #endif
 #endif
 

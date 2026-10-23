@@ -1,5 +1,6 @@
 #include "emu_ports.h"
 
+#include "emu_mem.h"
 #include "handy.h"
 
 static CSystem *s_lynx;
@@ -142,4 +143,29 @@ const int16_t *lynx_port_audio(size_t *frames)
 uint32_t lynx_port_frame_us(void)
 {
     return 13333u;
+}
+
+size_t lynx_port_save_state(uint8_t *buf, size_t cap)
+{
+    emu_mem_arm(buf, cap, 0);
+    FILE *fp = fopen("state", "wb");
+    if (fp == nullptr)
+        return 0;
+    const bool ok = s_lynx->ContextSave(fp) && !emu_mem_failed();
+    fclose(fp);
+    const size_t len = emu_mem_length();
+    emu_mem_arm(nullptr, 0, 0);
+    return ok ? len : 0;
+}
+
+bool lynx_port_load_state(const uint8_t *buf, size_t len)
+{
+    emu_mem_arm((uint8_t *)buf, len, len);
+    FILE *fp = fopen("state", "rb");
+    if (fp == nullptr)
+        return false;
+    const bool ok = s_lynx->ContextLoad(fp);
+    fclose(fp);
+    emu_mem_arm(nullptr, 0, 0);
+    return ok;
 }

@@ -395,3 +395,13 @@ uint32_t msx_port_frame_us(void)
 {
     return 16667u;
 }
+
+size_t msx_port_save_state(uint8_t *buf, size_t cap)
+{
+    return SaveState(buf, (unsigned int)cap);
+}
+
+bool msx_port_load_state(const uint8_t *buf, size_t len)
+{
+    return LoadState((unsigned char *)buf, (unsigned int)len) != 0;
+}
