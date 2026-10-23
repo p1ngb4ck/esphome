@@ -1,0 +1,53 @@
+esphome:
+  name: p4-test
+
+esp32:
+  board: esp32-p4-evboard
+  framework:
+    type: esp-idf
+
+psram:
+  speed: 200MHz
+
+esp_ldo:
+  - channel: 3
+    voltage: 2.5V
+
+display:
+  - platform: mipi_dsi
+    model: custom
+    id: link_defaults
+    dimensions:
+      width: 800
+      height: 480
+    hsync_back_porch: 44
+    hsync_pulse_width: 2
+    hsync_front_porch: 131
+    vsync_back_porch: 21
+    vsync_pulse_width: 2
+    vsync_front_porch: 7
+    pclk_frequency: 30MHz
+    lane_bit_rate: 720Mbps
+    init_sequence:
+      - [0xA0, 0x01]
+  - platform: mipi_dsi
+    model: custom
+    id: link_overrides
+    dimensions:
+      width: 800
+      height: 480
+    hsync_back_porch: 44
+    hsync_pulse_width: 2
+    hsync_front_porch: 131
+    vsync_back_porch: 21
+    vsync_pulse_width: 2
+    vsync_front_porch: 7
+    pclk_frequency: 30MHz
+    lane_bit_rate: 720Mbps
+    frame_ack: false
+    continuous_clock: true
+    eotp: false
+    lp_horizontal_blanking: false
+    lp_vertical_active: false
+    init_sequence:
+      - [0xA0, 0x01]
