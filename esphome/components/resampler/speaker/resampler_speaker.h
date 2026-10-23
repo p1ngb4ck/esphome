@@ -59,7 +59,8 @@ class ResamplerSpeaker final : public Component, public speaker::Speaker {
     this->groups_.push_back({sample_rate, bits_per_sample, channels, this->next_order_++});
     return this->groups_.size() - 1;
   }
-  void add_group_output(size_t group, speaker::Speaker *speaker, const char *name, uint32_t key);
+  void add_group_output(size_t group, speaker::Speaker *speaker, const char *name, uint32_t key, uint32_t sample_rate,
+                        uint8_t bits_per_sample, uint8_t channels);
   void remove_output(speaker::Speaker *speaker);
   void set_preference_key(uint32_t key) { this->preference_key_ = key; }
 

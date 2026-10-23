@@ -93,8 +93,10 @@ def _is_group(output) -> bool:
 
 def usb_audio_format(fconf, hub_id, domain) -> dict | None:
     for block in fconf.get(CONF_USB_AUDIO) or []:
-        if str(block.get(CONF_ID)) == str(hub_id) and domain in block:
-            return {key: int(block[domain][key]) for key in FORMAT_KEYS}
+        if str(block.get(CONF_ID)) == str(hub_id):
+            if domain in block:
+                return {key: int(block[domain][key]) for key in FORMAT_KEYS}
+            return {CONF_SAMPLE_RATE: 48000, CONF_BITS_PER_SAMPLE: 16, CONF_NUM_CHANNELS: 2}
     return None
 
 
@@ -133,7 +135,7 @@ def _validate_output_list(config: ConfigType) -> None:
             fmt = usb_audio_format(fconf, output[CONF_USB_AUDIO], CONF_SPEAKER)
             if fmt is None:
                 raise cv.Invalid(
-                    f"resampler output usb_audio '{output[CONF_USB_AUDIO]}': no usb_audio block with a 'speaker' format"
+                    f"resampler output usb_audio '{output[CONF_USB_AUDIO]}': no such usb_audio block"
                 )
             if fmt[CONF_BITS_PER_SAMPLE] not in (16, 24, 32):
                 raise cv.Invalid(
@@ -231,8 +233,9 @@ async def to_code(config: ConfigType) -> None:
                 cg.add(
                     hub.add_speaker_route(
                         cg.RawExpression(
-                            "[](esphome::speaker::Speaker *sink, const char *name, uint32_t key, bool added) { "
-                            f"if (added) {{ {var}->add_group_output({groups}, sink, name, key); }} "
+                            "[](esphome::speaker::Speaker *sink, const char *name, uint32_t key, uint32_t rate, "
+                            "uint8_t bits, uint8_t channels, bool added) { "
+                            f"if (added) {{ {var}->add_group_output({groups}, sink, name, key, rate, bits, channels); }} "
                             f"else {{ {var}->remove_output(sink); }} }}"
                         )
                     )

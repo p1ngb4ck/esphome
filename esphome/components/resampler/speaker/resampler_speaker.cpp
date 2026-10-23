@@ -122,7 +122,8 @@ size_t ResamplerSpeaker::index_of_(const speaker::Speaker *speaker) const {
   return this->outputs_.size();
 }
 
-void ResamplerSpeaker::add_group_output(size_t group, speaker::Speaker *speaker, const char *name, uint32_t key) {
+void ResamplerSpeaker::add_group_output(size_t group, speaker::Speaker *speaker, const char *name, uint32_t key,
+                                        uint32_t sample_rate, uint8_t bits_per_sample, uint8_t channels) {
   if (group >= this->groups_.size() || this->index_of_(speaker) != this->outputs_.size())
     return;
   const Group &g = this->groups_[group];
@@ -130,7 +131,7 @@ void ResamplerSpeaker::add_group_output(size_t group, speaker::Speaker *speaker,
   while (position < this->outputs_.size() && this->outputs_[position].order <= g.order)
     position++;
   this->outputs_.insert(this->outputs_.begin() + position,
-                        {speaker, name, key, g.sample_rate, g.bits_per_sample, g.channels, g.order});
+                        {speaker, name, key, sample_rate, bits_per_sample, channels, g.order});
   this->hook_(speaker);
   ESP_LOGI(TAG, "Output added: %s", name);
   if (this->output_speaker_ == nullptr) {
