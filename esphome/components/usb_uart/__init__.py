@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import esphome.codegen as cg
 from esphome.components.const import CONF_DATA_BITS, CONF_PARITY, CONF_STOP_BITS
 from esphome.components.esp32 import VARIANT_ESP32P4, get_esp32_variant
@@ -56,11 +58,9 @@ UART_PARITY_OPTIONS = {
 }
 
 UARTStopBitsOptions = usb_uart_ns.enum("UARTStopBitsOptions")
-UART_STOP_BITS_OPTIONS = {
-    "1": UARTStopBitsOptions.UART_CONFIG_STOP_BITS_1,
-    "1.5": UARTStopBitsOptions.UART_CONFIG_STOP_BITS_1_5,
-    "2": UARTStopBitsOptions.UART_CONFIG_STOP_BITS_2,
-}
+UART_STOP_BITS_OPTIONS = UARTStopBitsOptions.options(
+    "1", "1.5", "2", prefix="UART_CONFIG_STOP_BITS_"
+)
 
 DEFAULT_BAUD_RATE = 9600
 # CH934x TX packets carry a 3-byte header ([port, len_lo, len_hi]) inside every chunk, so the
@@ -176,6 +176,19 @@ FILTER_SOURCE_FILES = filter_source_files_from_defines(
 )
 
 
+def _channel_limit(type_: Type) -> Callable[[list], list]:
+    """Check the channel count against the type's limit, which depends on the target."""
+
+    def validator(value: list) -> list:
+        if len(value) > (limit := type_.max_channels):
+            raise cv.Invalid(
+                f"Device type {type_.name} supports a maximum of {limit} channels"
+            )
+        return value
+
+    return validator
+
+
 def channel_schema(type_: "Type") -> cv.Schema:
     max_channels = type_.max_channels
     schema = cv.Schema(
@@ -222,10 +235,7 @@ def channel_schema(type_: "Type") -> cv.Schema:
                         ),
                     )
                 ),
-                cv.Length(
-                    max=type_.max_channels,
-                    msg=f"{type_.name} supports a maximum of {max_channels} channels on this ESP32 variant",
-                ),
+                _channel_limit(type_),
             ),
         }
     )

@@ -42,6 +42,12 @@ class IDFOTABackend final {
   // through it too (its original guarded placement broke exactly those builds, since both
   // the call site and the definition in ota_backend_esp_idf.cpp are unguarded).
   OTAResponseTypes app_slot_begin_(size_t image_size);
+  UpdateLock lock_;
+  OTAResponseTypes hold_lock_if_ok_(OTAResponseTypes result) {
+    if (result == OTA_RESPONSE_OK)
+      this->lock_.hold_until_reboot();
+    return result;
+  }
 #ifdef USE_OTA_PARTITIONS
   // copy_dest_part non-null means the running app must be copied INTO this slot of the current
   // table before the new partition table is committed. The destination is in the current table

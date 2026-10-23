@@ -226,14 +226,14 @@ MultiplyFilter::MultiplyFilter(TemplatableFn<float> multiplier) : multiplier_(mu
 
 optional<float> MultiplyFilter::new_value(float value) { return value * this->multiplier_.value(); }
 
-// ValueListFilter helper (non-template, shared by all ValueListFilter<N> instantiations)
-bool value_list_matches_any(Sensor *parent, float sensor_value, const TemplatableFn<float> *values, size_t count) {
-  int8_t accuracy = parent->get_accuracy_decimals();
+// ValueListFilter
+bool ValueListFilter::value_matches_any_(float sensor_value) {
+  int8_t accuracy = this->parent_->get_accuracy_decimals();
   float accuracy_mult = pow10_int(accuracy);
   float rounded_sensor = roundf(accuracy_mult * sensor_value);
 
-  for (size_t i = 0; i < count; i++) {
-    float fv = values[i].value();
+  for (const TemplatableFn<float> *v = this->values_; v->has_value(); v++) {
+    float fv = v->value();
 
     // Handle NaN comparison
     if (std::isnan(fv)) {
@@ -261,13 +261,12 @@ optional<float> ThrottleFilter::new_value(float value) {
   return {};
 }
 
-// ThrottleWithPriorityFilter helper (non-template, keeps App access in .cpp)
-optional<float> throttle_with_priority_new_value(Sensor *parent, float value, const TemplatableFn<float> *values,
-                                                 size_t count, uint32_t &last_input, uint32_t min_time_between_inputs) {
+// ThrottleWithPriorityFilter
+optional<float> ThrottleWithPriorityFilter::new_value(float value) {
   const uint32_t now = App.get_loop_component_start_time();
-  if (last_input == 0 || now - last_input >= min_time_between_inputs ||
-      value_list_matches_any(parent, value, values, count)) {
-    last_input = now;
+  if (this->last_input_ == 0 || now - this->last_input_ >= this->min_time_between_inputs_ ||
+      this->value_matches_any_(value)) {
+    this->last_input_ = now;
     return value;
   }
   return {};
@@ -492,6 +491,48 @@ optional<float> ToNTCTemperatureFilter::new_value(float value) {
   double v = this->a_ + this->b_ * lr + this->c_ * lr * lr * lr;
   double temp = float(1.0 / v - 273.15);
   return temp;
+}
+
+// RHCorrectionFilter
+static constexpr float MAGNUS_B = 17.67f, MAGNUS_C = 243.5f;
+
+static bool rh_correction_temp_in_band(float t) { return t >= -40.0f && t <= 50.0f; }
+
+optional<float> RHCorrectionFilter::new_value(float value) {
+  if (!this->temperature_sensor_->has_state()) {
+    if (!this->warned_) {
+      ESP_LOGW(TAG, "RHCorrectionFilter(%p): no temperature yet, passing humidity through uncorrected", this);
+      this->warned_ = true;
+    }
+    return value;
+  }
+  float offset = this->temperature_offset_.value();
+  float tc = this->temperature_sensor_->get_state();
+  if (this->use_fahrenheit_) {
+    tc = fahrenheit_to_celsius(tc);
+    offset /= 1.8f;
+  }
+  const float tnc = tc - offset;
+  // A NaN temperature or offset is a faulted input: keep the last corrected value
+  if (std::isnan(tnc)) {
+    if (!this->warned_) {
+      ESP_LOGW(TAG, "RHCorrectionFilter(%p): temperature or offset is NaN, dropping humidity updates", this);
+      this->warned_ = true;
+    }
+    return {};
+  }
+  if (!rh_correction_temp_in_band(tc) || !rh_correction_temp_in_band(tnc)) {
+    if (!this->warned_) {
+      ESP_LOGW(TAG, "RHCorrectionFilter(%p): Temperature out of range -40..50 °C. Tc=%f Tnc=%f", this, tc, tnc);
+      this->warned_ = true;
+    }
+    return value;
+  }
+  this->warned_ = false;
+  const float rh =
+      clamp(value * std::exp(MAGNUS_B * MAGNUS_C * (tnc - tc) / ((tnc + MAGNUS_C) * (tc + MAGNUS_C))), 0.0f, 100.0f);
+  ESP_LOGVV(TAG, "RHCorrectionFilter(%p)::new_value(%f) -> %f", this, value, rh);
+  return rh;
 }
 
 // StreamingFilter (base class)

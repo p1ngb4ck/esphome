@@ -133,6 +133,8 @@ void IDFOTABackend::finish_data_partition_(bool success) {
 #endif  // USE_OTA_PARTITIONS
 
 OTAResponseTypes IDFOTABackend::begin(size_t image_size, ota::OTAType ota_type) {
+  if (!this->lock_.try_acquire())
+    return OTA_RESPONSE_ERROR_UPDATE_BUSY;
 #ifdef USE_OTA_PARTITIONS
   this->ota_type_ = ota_type;
   if (this->ota_type_ == ota::OTA_TYPE_UPDATE_PARTITION_TABLE) {
@@ -355,7 +357,7 @@ OTAResponseTypes IDFOTABackend::end() {
   // signature, and only re-points boot at an already-installed app -- so it is
   // intentionally not run through the signature verifier below.
   if (this->ota_type_ == ota::OTA_TYPE_UPDATE_PARTITION_TABLE) {
-    return this->update_partition_table();
+    return this->hold_lock_if_ok_(this->update_partition_table());
   }
   if (this->ota_type_ == ota::OTA_TYPE_UPDATE_APP && !this->head_decided_ && this->head_have_ > 0) {
     // A stream shorter than a pre-fill header cannot be one: begin the slot for the real
@@ -378,7 +380,7 @@ OTAResponseTypes IDFOTABackend::end() {
   }
 #ifdef USE_OTA_PARTITIONS
   if (this->ota_type_ == ota::OTA_TYPE_UPDATE_BOOTLOADER) {
-    return this->finalize_bootloader_update_(err);
+    return this->hold_lock_if_ok_(this->finalize_bootloader_update_(err));
   }
 #endif
   if (err == ESP_OK) {
@@ -416,7 +418,7 @@ OTAResponseTypes IDFOTABackend::end() {
       // failure the old app keeps booting and never meets the new data.
       this->finish_data_partition_(true);
 #endif
-      return OTA_RESPONSE_OK;
+      return this->hold_lock_if_ok_(OTA_RESPONSE_OK);
     }
   }
   if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
@@ -434,6 +436,8 @@ OTAResponseTypes IDFOTABackend::end() {
 }
 
 void IDFOTABackend::abort() {
+  if (!this->lock_.is_held())  // refused in begin()
+    return;
 #ifdef USE_OTA_PARTITIONS
   this->finish_data_partition_(false);
   if (this->partition_table_part_ != nullptr) {

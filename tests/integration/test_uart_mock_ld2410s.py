@@ -1,9 +1,13 @@
 """Integration tests for the LD2410S component with mock UART.
 
 test_uart_mock_ld2410s:
-  1. Init sequence - config-mode start, output-mode switch and config-mode end go
-     out in order, each after the previous one is acknowledged, then the
-     component logs "Setup done" and clears its warning
+  1. Init sequence - config-mode start, version read, parameter read, output-mode
+     switch and config-mode end go out in order, each after the previous one is
+     acknowledged, then the component logs "Setup done" and clears its warning;
+     the version and parameter answers are parsed and logged
+  1b. Setting the max distance number to 7 m writes all six parameters (gate 10
+     plus the values read at init) inside a configuration-mode session, and the
+     number reports 7 m
   2. Presence from short frames (states 0/1 off, 2/3 on) and from a standard
      data frame
   3. Resync - a noise byte or a partial header directly before a short frame
@@ -34,15 +38,41 @@ from __future__ import annotations
 import asyncio
 import re
 
-from aioesphomeapi import APIClient, ButtonInfo
+from aioesphomeapi import APIClient, ButtonInfo, EntityState, NumberInfo, NumberState
 import pytest
 
 from .state_utils import InitialStateHelper, SensorStateCollector, require_entity
 from .types import APIClientConnectedFactory, RunCompiledFunction
+from .wait_utils import wait_or_fail
 
 CONFIG_START_TX = "FD:FC:FB:FA:04:00:FF:00:01:00:04:03:02:01"
+VERSION_READ_TX = "FD:FC:FB:FA:02:00:00:00:04:03:02:01"
+PARAMETERS_READ_TX = (
+    "FD:FC:FB:FA:0E:00:71:00:05:00:0A:00:06:00:02:00:0C:00:0B:00:04:03:02:01"
+)
 OUTPUT_MODE_TX = "FD:FC:FB:FA:08:00:7A:00:00:00:00:00:00:00:04:03:02:01"
 CONFIG_END_TX = "FD:FC:FB:FA:02:00:FE:00:04:03:02:01"
+INIT_TX = [
+    CONFIG_START_TX,
+    VERSION_READ_TX,
+    # The fixture cuts the first answer short, so the read goes out again
+    PARAMETERS_READ_TX,
+    PARAMETERS_READ_TX,
+    OUTPUT_MODE_TX,
+    CONFIG_END_TX,
+]
+# All six parameters: max gate 10, min gate 0, no delay 10, both frequencies 80, speed 5
+PARAMETERS_WRITE_TX = (
+    "FD:FC:FB:FA:26:00:70:00:05:00:0A:00:00:00:0A:00:00:00:00:00:06:00:0A:00:00:00:02:00:50:00:00:00:"
+    "0C:00:50:00:00:00:0B:00:05:00:00:00:04:03:02:01"
+)
+WRITE_TX = [CONFIG_START_TX, PARAMETERS_WRITE_TX, CONFIG_END_TX]
+# Logged once the version and parameter answers are parsed
+PARSED_ANSWERS = [
+    "Firmware 1.2.3",
+    "Parameter answer too short (4 bytes)",
+    "Parameters: gates 0 to 16, no delay 10 s",
+]
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -87,10 +117,7 @@ async def _start_scenario(client: APIClient, collector: SensorStateCollector) ->
     collector.build_key_mapping(entities)
     initial_state_helper = InitialStateHelper(entities)
     client.subscribe_states(initial_state_helper.on_state_wrapper(collector.on_state))
-    try:
-        await initial_state_helper.wait_for_initial_states()
-    except TimeoutError:
-        pytest.fail("Timeout waiting for initial states")
+    await initial_state_helper.wait_for_initial_states()
     start_btn = require_entity(entities, "start_scenario", ButtonInfo)
     client.button_command(start_btn.key)
 
@@ -98,13 +125,12 @@ async def _start_scenario(client: APIClient, collector: SensorStateCollector) ->
 async def _wait_for_presence(
     collector: SensorStateCollector, waiter: asyncio.Future[bool]
 ) -> None:
-    try:
-        await asyncio.wait_for(waiter, timeout=5.0)
-    except TimeoutError:
-        pytest.fail(
-            f"Timeout waiting for presence updates. Received: "
-            f"{collector.binary_states['has_target']}"
-        )
+    await wait_or_fail(
+        waiter,
+        5.0,
+        "Timeout waiting for presence updates",
+        has_target=collector.binary_states["has_target"],
+    )
 
 
 @pytest.mark.asyncio
@@ -119,12 +145,17 @@ async def test_uart_mock_ld2410s(
     setup_done = loop.create_future()
     warning_cleared = loop.create_future()
     dropped_states: list[str] = []
+    parsed_answers: list[str] = []
+    write_done = loop.create_future()
 
     def line_callback(line: str) -> None:
         if (frame := _tx_frame(line)) is not None:
             tx_frames.append(frame)
+            if len(tx_frames) >= 9 and not write_done.done():
+                write_done.set_result(True)
         if "[ld2410s" in line and "Setup done" in line and not setup_done.done():
             setup_done.set_result(True)
+        parsed_answers.extend(answer for answer in PARSED_ANSWERS if answer in line)
         if "ld2410s cleared Warning flag" in line and not warning_cleared.done():
             warning_cleared.set_result(True)
         if "Dropping frame with impossible state " in line:
@@ -133,8 +164,15 @@ async def test_uart_mock_ld2410s(
             )
 
     collector = SensorStateCollector(
-        sensor_names=[], binary_sensor_names=["has_target"]
+        sensor_names=["distance"], binary_sensor_names=["has_target"]
     )
+    number_states: list[float] = []
+
+    def on_state(state: EntityState) -> None:
+        collector.on_state(state)
+        if isinstance(state, NumberState) and state.key == max_distance_key:
+            number_states.append(state.state)
+
     all_presence = collector.add_waiter(
         lambda: len(collector.binary_states["has_target"]) >= len(EXPECTED_PRESENCE)
     )
@@ -143,22 +181,47 @@ async def test_uart_mock_ld2410s(
         run_compiled(yaml_config, line_callback=line_callback),
         api_client_connected() as client,
     ):
-        try:
-            await asyncio.wait_for(asyncio.gather(setup_done, warning_cleared), 5.0)
-        except TimeoutError:
-            pytest.fail(f"Init sequence did not finish. TX frames: {tx_frames}")
+        await wait_or_fail(
+            asyncio.gather(setup_done, warning_cleared),
+            5.0,
+            "Init sequence did not finish",
+            tx_frames=tx_frames,
+        )
 
-        assert tx_frames[:3] == [CONFIG_START_TX, OUTPUT_MODE_TX, CONFIG_END_TX]
+        assert tx_frames[:6] == INIT_TX
+        assert parsed_answers == PARSED_ANSWERS
 
-        await _start_scenario(client, collector)
+        entities, _ = await client.list_entities_services()
+        collector.build_key_mapping(entities)
+        max_distance_key = require_entity(entities, "max_distance", NumberInfo).key
+        initial_state_helper = InitialStateHelper(entities)
+        client.subscribe_states(initial_state_helper.on_state_wrapper(on_state))
+        await initial_state_helper.wait_for_initial_states()
+        # The values read from the module: gate 16 and 10 s
+        no_delay_key = require_entity(entities, "no_delay", NumberInfo).key
+        initial = initial_state_helper.initial_states
+        assert initial[max_distance_key].state == pytest.approx(11.2)
+        assert initial[no_delay_key].state == pytest.approx(10)
+
+        client.number_command(max_distance_key, 7.0)
+        await wait_or_fail(
+            write_done, 5.0, "Parameter write not sent", tx_frames=tx_frames
+        )
+        assert tx_frames[6:9] == WRITE_TX, tx_frames
+        assert number_states == [pytest.approx(7.0)]
+
+        start_btn = require_entity(entities, "start_scenario", ButtonInfo)
+        client.button_command(start_btn.key)
         await _wait_for_presence(collector, all_presence)
         # Let any unexpected extra update arrive before comparing
         await asyncio.sleep(0.3)
 
         assert collector.binary_states["has_target"] == EXPECTED_PRESENCE
         assert dropped_states == EXPECTED_DROPPED_STATES
+        # A target 300 cm away, then none: the distance follows the presence
+        assert collector.sensor_states["distance"][:2] == [300, 0]
         # Data frames must not restart the init sequence
-        assert len(tx_frames) == 3, tx_frames
+        assert len(tx_frames) == 9, tx_frames
 
 
 @pytest.mark.asyncio
@@ -214,10 +277,12 @@ async def test_uart_mock_ld2410s_recovery(
     ):
         await _start_scenario(client, collector)
         await _wait_for_presence(collector, all_presence)
-        try:
-            await asyncio.wait_for(asyncio.gather(resent, gave_up), 5.0)
-        except TimeoutError:
-            pytest.fail(f"No resend or give-up warning. TX frames: {tx_frames}")
+        await wait_or_fail(
+            asyncio.gather(resent, gave_up),
+            5.0,
+            "No resend or give-up warning",
+            tx_frames=tx_frames,
+        )
         # Let any unexpected extra update arrive before comparing
         await asyncio.sleep(0.3)
 
@@ -293,30 +358,28 @@ async def test_uart_mock_ld2410s_link_lost(
         run_compiled(yaml_config, line_callback=line_callback),
         api_client_connected() as client,
     ):
-        try:
-            await asyncio.wait_for(setup_done, 5.0)
-        except TimeoutError:
-            pytest.fail(f"Init sequence did not finish. TX frames: {tx_frames}")
+        await wait_or_fail(
+            setup_done, 5.0, "Init sequence did not finish", tx_frames=tx_frames
+        )
 
         await _start_scenario(client, collector)
-        try:
-            await asyncio.wait_for(all_presence, timeout=10.0)
-        except TimeoutError:
-            pytest.fail(
-                f"Timeout waiting for presence updates. Received: "
-                f"{collector.binary_states['has_target']}"
-            )
+        await wait_or_fail(
+            all_presence,
+            10.0,
+            "Timeout waiting for presence updates",
+            has_target=collector.binary_states["has_target"],
+        )
         assert collector.binary_states["has_target"] == EXPECTED_LINK_PRESENCE
 
-        try:
-            lost_at = await asyncio.wait_for(link_lost, timeout=7.0)
-            await asyncio.wait_for(
-                asyncio.gather(warning_set_after_loss, restarted), timeout=1.0
-            )
-        except TimeoutError:
-            pytest.fail(
-                f"No link-lost warning, warning flag or restart. TX frames: {tx_frames}"
-            )
+        lost_at = await wait_or_fail(
+            link_lost, 7.0, "No link-lost warning", tx_frames=tx_frames
+        )
+        await wait_or_fail(
+            asyncio.gather(warning_set_after_loss, restarted),
+            1.0,
+            "No warning flag or restart after the link was lost",
+            tx_frames=tx_frames,
+        )
 
         # The stream ran past the link timeout, so only the silence after it counts
         silence = lost_at - rx_injected_at[-1]
