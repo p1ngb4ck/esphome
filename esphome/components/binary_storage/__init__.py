@@ -27,7 +27,9 @@ from esphome.const import (
     CONF_I2C_ID,
     CONF_ID,
     CONF_LENGTH,
+    CONF_MISO_PIN,
     CONF_MODEL,
+    CONF_MOSI_PIN,
     CONF_PIN,
     CONF_SOURCE,
     CONF_CS_PIN,
@@ -862,9 +864,21 @@ def _final_validate(config):
                 "a SPI flash on a 'type: quad' bus runs on the ESP-IDF flash driver: it needs "
                 f"esp32 with ESP-IDF and '{CONF_ASSUME_EXCLUSIVE_BUS}: true'"
             )
-        io_mode = config.get(
-            CONF_IO_MODE, IO_MODE_QUAD if bus_mode == spi.TYPE_QUAD else IO_MODE_SINGLE
+        two_lines = bus_mode == spi.TYPE_QUAD or (
+            CONF_MOSI_PIN in bus_conf and CONF_MISO_PIN in bus_conf
         )
+        if bus_mode == spi.TYPE_QUAD:
+            default_io_mode = IO_MODE_QUAD
+        elif two_lines and _esp_partition_active(config):
+            default_io_mode = IO_MODE_DUAL
+        else:
+            default_io_mode = IO_MODE_SINGLE
+        io_mode = config.get(CONF_IO_MODE, default_io_mode)
+        if io_mode == IO_MODE_DUAL and not two_lines:
+            raise cv.Invalid(
+                f"'{CONF_IO_MODE}: {IO_MODE_DUAL}' needs both '{CONF_MOSI_PIN}' and "
+                f"'{CONF_MISO_PIN}' on the bus"
+            )
         if io_mode == IO_MODE_QUAD and bus_mode != spi.TYPE_QUAD:
             raise cv.Invalid(
                 f"'{CONF_IO_MODE}: {IO_MODE_QUAD}' needs the flash on a 'type: quad' bus "
