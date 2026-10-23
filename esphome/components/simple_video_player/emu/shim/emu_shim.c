@@ -14,6 +14,8 @@ static emu_alloc_fn_t s_alloc;
 static emu_realloc_fn_t s_realloc;
 static emu_free_fn_t s_free;
 static void *s_ctx;
+static emu_host_frame_fn_t s_host_frame;
+static void *s_host_ctx;
 
 void emu_bss_clear(void)
 {
@@ -27,6 +29,17 @@ void emu_set_allocator(emu_alloc_fn_t alloc, emu_realloc_fn_t realloc_fn, emu_fr
     s_realloc = realloc_fn;
     s_free = free_fn;
     s_ctx = ctx;
+}
+
+void emu_set_host(emu_host_frame_fn_t frame, void *ctx)
+{
+    s_host_frame = frame;
+    s_host_ctx = ctx;
+}
+
+bool emu_host_frame(uint16_t *pad1, uint16_t *pad2)
+{
+    return s_host_frame != NULL && s_host_frame(s_host_ctx, pad1, pad2);
 }
 
 void *emu_malloc(size_t size)

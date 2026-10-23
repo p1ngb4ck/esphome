@@ -32,4 +32,8 @@ menu "svp emulator"
         bool "Game & Watch"
         default n
 
+    config SVP_EMU_MSX
+        bool "MSX"
+        default n
+
 endmenu

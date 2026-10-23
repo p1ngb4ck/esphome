@@ -44,6 +44,10 @@ class EmuCore {
   virtual uint32_t sample_rate() const = 0;
   virtual uint8_t channels() const = 0;
   virtual uint32_t frame_us() const = 0;
+  virtual bool owns_loop() const { return false; }
+  virtual bool keyboard() const { return false; }
+  virtual void key(uint16_t usage, bool pressed) {}
+  virtual void add_file(const char *name, const uint8_t *data, size_t size) {}
 };
 
 static constexpr size_t EMU_CORE_STORE = 768;
@@ -62,6 +66,7 @@ class GameEmulator
   void add_system(EmuSystem system, const char *dir);
   void add_key(uint16_t page, uint16_t usage, uint16_t buttons);
   void add_menu_key(uint16_t page, uint16_t usage);
+  void set_bios_dir(const char *dir) { this->bios_dir_ = dir; }
   Trigger<> *get_paused_trigger() { return &this->paused_trigger_; }
   Trigger<> *get_ended_trigger() { return &this->ended_trigger_; }
 
@@ -115,10 +120,17 @@ class GameEmulator
     size_t size;
     bool internal;
   };
+  struct BiosFile {
+    const char *name;
+    uint8_t *data;
+    size_t size;
+  };
+  static constexpr size_t MAX_BIOS = 12;
 
   bool system_for_(const char *path, EmuSystem *system) const;
   uint32_t internal_budget_(EmuSystem system) const;
   size_t rom_alloc_(EmuSystem system, size_t size) const;
+  void next_file_();
   void read_next_();
   void read_done_(storage::StorageError err);
   void read_closed_();
@@ -141,6 +153,9 @@ class GameEmulator
   void release_output_();
   static void task_entry_(void *arg);
   void task_loop_();
+  bool park_();
+  static bool host_frame_cb_(void *ctx, uint16_t *pad1, uint16_t *pad2);
+  bool host_frame_(uint16_t *pad1, uint16_t *pad2);
   void draw_frame_(const EmuVideo &video);
   bool draw_cpu_(const EmuVideo &video, uint8_t *fb);
   void play_audio_();
@@ -170,6 +185,13 @@ class GameEmulator
 
   uint8_t *rom_{nullptr};
   size_t rom_size_{0};
+  const char *bios_dir_{nullptr};
+  BiosFile bios_[MAX_BIOS]{};
+  size_t load_step_{0};
+  bool file_pending_{false};
+  char file_path_[storage::STORAGE_VFS_PATH_MAX + 1]{};
+  uint8_t *file_data_{nullptr};
+  size_t file_size_{0};
   alignas(8) uint8_t core_store_[EMU_CORE_STORE]{};
   EmuCore *core_{nullptr};
   Piece pieces_[MAX_PIECES]{};

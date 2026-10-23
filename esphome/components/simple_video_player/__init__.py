@@ -251,6 +251,7 @@ CONF_KEYS = "keys"
 CONF_MENU_KEYS = "menu_keys"
 CONF_ON_PAUSED = "on_paused"
 CONF_ON_ENDED = "on_ended"
+CONF_BIOS_DIR = "bios_dir"
 
 EMU_SYSTEMS = {
     "nes": EmuSystem.NES,
@@ -261,6 +262,7 @@ EMU_SYSTEMS = {
     "snes": EmuSystem.SNES,
     "md": EmuSystem.MD,
     "gw": EmuSystem.GW,
+    "msx": EmuSystem.MSX,
 }
 EMU_BUTTONS = {
     "up": 1 << 0,
@@ -305,10 +307,17 @@ def _emu_systems(value):
     return value
 
 
+def _emu_bios(config):
+    if "msx" in config[CONF_SYSTEMS] and CONF_BIOS_DIR not in config:
+        raise cv.Invalid(f"msx needs its BIOS files (MSX2.ROM, MSX2EXT.ROM, ...): set {CONF_BIOS_DIR}")
+    return config
+
+
 EMULATOR_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(GameEmulator),
         cv.Required(CONF_SYSTEMS): _emu_systems,
+        cv.Optional(CONF_BIOS_DIR): _storage_dir,
         cv.Optional(CONF_KEYS, default={}): cv.Schema(
             {cv.Optional(button): cv.ensure_list(_emu_key) for button in EMU_BUTTONS}
         ),
@@ -316,7 +325,7 @@ EMULATOR_SCHEMA = cv.Schema(
         cv.Optional(CONF_ON_PAUSED): automation.validate_automation(single=True),
         cv.Optional(CONF_ON_ENDED): automation.validate_automation(single=True),
     }
-)
+).add_extra(_emu_bios)
 
 
 def _spice(value):
@@ -1222,6 +1231,8 @@ async def _emulator_to_code(var, config):
     add_idf_sdkconfig_option("CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY", True)
     add_idf_component(name="emu", override_path=str(Path(__file__).parent / "emu"))
     emu = cg.Pvariable(config[CONF_ID], var.make_emulator())
+    if CONF_BIOS_DIR in config:
+        cg.add(emu.set_bios_dir(config[CONF_BIOS_DIR]))
     for name, directory in config[CONF_SYSTEMS].items():
         cg.add_define(f"SVP_EMU_{name.upper()}")
         add_idf_sdkconfig_option(f"CONFIG_SVP_EMU_{name.upper()}", True)

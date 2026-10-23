@@ -31,6 +31,8 @@ typedef struct {
     uint16_t height;
 } emu_port_video_t;
 
+bool emu_host_frame(uint16_t *pad1, uint16_t *pad2);
+
 bool nes_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels);
 void nes_port_frame(uint16_t pad1, uint16_t pad2);
 void nes_port_video(emu_port_video_t *video);
@@ -82,6 +84,14 @@ const int16_t *gw_port_audio(size_t *frames);
 uint32_t gw_port_frame_us(void);
 size_t gw_port_save_state(uint8_t *buf, size_t cap);
 bool gw_port_load_state(const uint8_t *buf, size_t len);
+
+bool msx_port_load(uint8_t *rom, size_t size, const char *path, uint32_t rate, uint8_t channels);
+void msx_port_add_file(const char *name, const uint8_t *data, size_t size);
+void msx_port_frame(uint16_t pad1, uint16_t pad2);
+void msx_port_key(uint16_t usage, bool pressed);
+void msx_port_video(emu_port_video_t *video);
+const int16_t *msx_port_audio(size_t *frames);
+uint32_t msx_port_frame_us(void);
 
 #ifdef __cplusplus
 }

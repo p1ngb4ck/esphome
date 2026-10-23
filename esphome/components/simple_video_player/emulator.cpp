@@ -15,6 +15,11 @@ static const char *const TAG = "simple_video_player.emulator";
 
 static constexpr TickType_t EMU_AUDIO_WAIT = pdMS_TO_TICKS(20);
 
+static const char *const MSX_BIOS[] = {"MSX.ROM",     "MSX2.ROM",  "MSX2EXT.ROM", "MSX2P.ROM",
+                                       "MSX2PEXT.ROM", "DISK.ROM",  "MSXDOS2.ROM", "FMPAC.ROM",
+                                       "KANJI.ROM",   "PAINTER.ROM", "RS232.ROM",  "CMOS.ROM"};
+static constexpr size_t MSX_BIOS_COUNT = sizeof(MSX_BIOS) / sizeof(MSX_BIOS[0]);
+
 static const char *const SYSTEM_NAMES[] = {"NES", "Game Boy",     "Master System", "PC Engine",          "Lynx",
                                            "MSX", "Game & Watch", "Super Nintendo", "Mega Drive / Genesis"};
 
@@ -165,6 +170,10 @@ bool GameEmulator::start(const std::string &path) {
   this->rom_size_ = 0;
   this->read_bytes_ = 0;
   this->storage_ = nullptr;
+  this->load_step_ = 0;
+  this->file_pending_ = true;
+  for (auto &entry : this->bios_)
+    entry = {nullptr, nullptr, 0};
   this->task_stop_.store(false, std::memory_order_relaxed);
   this->task_pause_.store(true, std::memory_order_relaxed);
   this->task_parked_.store(false, std::memory_order_relaxed);
@@ -180,14 +189,14 @@ bool GameEmulator::start(const std::string &path) {
 void GameEmulator::service() {
   switch (this->state_) {
     case State::LOADING:
-      if (this->storage_ == nullptr && !this->stream_open_) {
+      if (this->file_pending_ && !this->stream_open_) {
         if (this->task_stop_.load(std::memory_order_acquire)) {
           this->end_();
           return;
         }
         if (this->parent_->video_session_() || this->parent_->playback_busy_.load(std::memory_order_acquire))
           return;
-        this->read_next_();
+        this->next_file_();
       }
       return;
     case State::PAUSING:
@@ -211,33 +220,72 @@ void GameEmulator::service() {
   }
 }
 
-void GameEmulator::read_next_() {
+void GameEmulator::next_file_() {
   storage::StorageWorker *worker = storage::global_storage_worker;
-  if (this->storage_ == nullptr) {
+  if (worker == nullptr || storage::global_storage_registry == nullptr) {
+    this->fail_("no storage");
+    return;
+  }
+  while (true) {
+    const char *path = this->path_;
+    const char *bios = nullptr;
+    if (this->load_step_ > 0) {
+      const size_t index = this->load_step_ - 1;
+      if (this->system_ != EmuSystem::MSX || this->bios_dir_ == nullptr || index >= MSX_BIOS_COUNT) {
+        this->file_pending_ = false;
+        this->loaded_();
+        return;
+      }
+      bios = MSX_BIOS[index];
+      if (snprintf(this->file_path_, sizeof(this->file_path_), "%s/%s", this->bios_dir_, bios) >=
+          static_cast<int>(sizeof(this->file_path_))) {
+        this->load_step_++;
+        continue;
+      }
+      path = this->file_path_;
+    }
     const char *rel = nullptr;
-    storage::PathStorage *ps =
-        storage::global_storage_registry != nullptr ? storage::global_storage_registry->resolve_path(this->path_, &rel)
-                                                    : nullptr;
-    if (ps == nullptr || worker == nullptr) {
-      this->fail_("no storage for the path");
-      return;
+    storage::PathStorage *ps = storage::global_storage_registry->resolve_path(path, &rel);
+    if (ps == nullptr) {
+      if (bios == nullptr) {
+        this->fail_("no storage for the path");
+        return;
+      }
+      this->load_step_++;
+      continue;
     }
     if (worker->has_active_task_io(ps))
       return;
     storage::FileStat st{};
     if (ps->stat(rel, &st) != storage::StorageError::STORAGE_ERROR_OK || st.is_dir || st.size == 0) {
-      this->fail_("not readable");
+      if (bios == nullptr) {
+        this->fail_("not readable");
+        return;
+      }
+      this->load_step_++;
+      continue;
+    }
+    this->file_size_ = static_cast<size_t>(st.size);
+    const size_t alloc = bios == nullptr ? this->rom_alloc_(this->system_, this->file_size_) : this->file_size_;
+    this->file_data_ = this->parent_->pool_take_(alloc, SimpleVideoPlayer::POOL_USER_GAME);
+    if (this->file_data_ == nullptr) {
+      this->fail_("no PSRAM for the file");
       return;
     }
-    this->rom_size_ = static_cast<size_t>(st.size);
-    const size_t alloc = this->rom_alloc_(this->system_, this->rom_size_);
-    this->rom_ = this->parent_->pool_take_(alloc, SimpleVideoPlayer::POOL_USER_GAME);
-    if (this->rom_ == nullptr) {
-      this->fail_("no PSRAM for the ROM");
-      return;
+    if (alloc > this->file_size_)
+      memset(this->file_data_ + this->file_size_, 0, alloc - this->file_size_);
+    if (bios == nullptr) {
+      this->rom_ = this->file_data_;
+      this->rom_size_ = this->file_size_;
+    } else {
+      for (auto &entry : this->bios_) {
+        if (entry.data == nullptr) {
+          entry = {bios, this->file_data_, this->file_size_};
+          break;
+        }
+      }
     }
-    if (alloc > this->rom_size_)
-      memset(this->rom_ + this->rom_size_, 0, alloc - this->rom_size_);
+    this->read_bytes_ = 0;
     this->storage_ = ps;
     const storage::StorageError err = worker->begin_read(ps, rel, &this->stream_, [this](storage::StorageError e) {
       if (e != storage::StorageError::STORAGE_ERROR_OK) {
@@ -251,22 +299,26 @@ void GameEmulator::read_next_() {
       return;
     }
     this->stream_open_ = true;
+    this->file_pending_ = false;
     return;
   }
+}
+
+void GameEmulator::read_next_() {
   if (this->task_stop_.load(std::memory_order_acquire)) {
     this->read_done_(storage::StorageError::STORAGE_ERROR_OK);
     return;
   }
-  const size_t want = std::min(READ_CHUNK, this->rom_size_ - this->read_bytes_);
-  const storage::StorageError err = worker->read_chunk(
-      this->stream_, this->rom_ + this->read_bytes_, want, &this->chunk_bytes_, [this](storage::StorageError e) {
+  const size_t want = std::min(READ_CHUNK, this->file_size_ - this->read_bytes_);
+  const storage::StorageError err = storage::global_storage_worker->read_chunk(
+      this->stream_, this->file_data_ + this->read_bytes_, want, &this->chunk_bytes_, [this](storage::StorageError e) {
         if (e != storage::StorageError::STORAGE_ERROR_OK || this->chunk_bytes_ == 0) {
           this->read_done_(e != storage::StorageError::STORAGE_ERROR_OK ? e
                                                                         : storage::StorageError::STORAGE_ERROR_READ_ERROR);
           return;
         }
         this->read_bytes_ += this->chunk_bytes_;
-        if (this->read_bytes_ >= this->rom_size_) {
+        if (this->read_bytes_ >= this->file_size_) {
           this->read_done_(storage::StorageError::STORAGE_ERROR_OK);
           return;
         }
@@ -289,17 +341,19 @@ void GameEmulator::read_closed_() {
     this->end_();
     return;
   }
-  if (this->read_err_ != storage::StorageError::STORAGE_ERROR_OK || this->read_bytes_ < this->rom_size_) {
+  if (this->read_err_ != storage::StorageError::STORAGE_ERROR_OK || this->read_bytes_ < this->file_size_) {
     this->fail_("read failed");
     return;
   }
-  this->loaded_();
+  this->load_step_++;
+  this->file_pending_ = true;
 }
 
 void GameEmulator::loaded_() {
   SimpleVideoPlayer *p = this->parent_;
   emu_bss_clear();
   emu_set_allocator(&GameEmulator::alloc_cb_, &GameEmulator::realloc_cb_, &GameEmulator::free_cb_, this);
+  emu_set_host(&GameEmulator::host_frame_cb_, this);
   this->internal_used_ = 0;
   this->internal_budget_now_ = this->internal_budget_(this->system_);
   this->core_ = emu_make_core(this->system_, this->core_store_);
@@ -315,6 +369,10 @@ void GameEmulator::loaded_() {
     rate = wanted;
   channels = std::max<uint8_t>(1, std::min<uint8_t>(2, p->wanted_audio_channels_.load(std::memory_order_acquire)));
 #endif
+  for (const auto &entry : this->bios_) {
+    if (entry.data != nullptr)
+      this->core_->add_file(entry.name, entry.data, entry.size);
+  }
   this->on_main_loop_ = true;
   const bool ok = this->core_->load(this->rom_, this->rom_size_, this->path_, rate, channels);
   this->on_main_loop_ = false;
@@ -457,6 +515,12 @@ void GameEmulator::end_() {
   this->core_ = nullptr;
   this->release_all_();
   emu_set_allocator(nullptr, nullptr, nullptr, nullptr);
+  emu_set_host(nullptr, nullptr);
+  for (auto &entry : this->bios_) {
+    if (entry.data != nullptr)
+      this->parent_->pool_.free(entry.data);
+    entry = {nullptr, nullptr, 0};
+  }
   if (this->rom_ != nullptr)
     this->parent_->pool_.free(this->rom_);
   this->rom_ = nullptr;
@@ -650,24 +714,45 @@ void GameEmulator::task_entry_(void *arg) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 }
 
+bool GameEmulator::park_() {
+  if (this->task_pause_.load(std::memory_order_acquire)) {
+    this->task_parked_.store(true, std::memory_order_release);
+    App.wake_loop_threadsafe();
+    while (this->task_pause_.load(std::memory_order_acquire) && !this->task_stop_.load(std::memory_order_acquire))
+      ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    this->task_parked_.store(false, std::memory_order_release);
+  }
+  return !this->task_stop_.load(std::memory_order_acquire);
+}
+
 void GameEmulator::task_loop_() {
-  while (!this->task_stop_.load(std::memory_order_acquire)) {
-    if (this->task_pause_.load(std::memory_order_acquire)) {
-      this->task_parked_.store(true, std::memory_order_release);
-      App.wake_loop_threadsafe();
-      while (this->task_pause_.load(std::memory_order_acquire) && !this->task_stop_.load(std::memory_order_acquire))
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-      this->task_parked_.store(false, std::memory_order_release);
-      continue;
-    }
+  while (this->park_()) {
     const uint16_t pads[2] = {this->pads_[0].load(std::memory_order_relaxed),
                               this->pads_[1].load(std::memory_order_relaxed)};
     this->core_->run_frame(pads);
+    if (this->core_->owns_loop())
+      return;
     this->draw_frame_(this->core_->video());
     this->play_audio_();
     if (this->pace_timer_ != nullptr)
       ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   }
+}
+
+bool GameEmulator::host_frame_cb_(void *ctx, uint16_t *pad1, uint16_t *pad2) {
+  return static_cast<GameEmulator *>(ctx)->host_frame_(pad1, pad2);
+}
+
+bool GameEmulator::host_frame_(uint16_t *pad1, uint16_t *pad2) {
+  this->draw_frame_(this->core_->video());
+  this->play_audio_();
+  if (this->pace_timer_ != nullptr)
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+  if (!this->park_())
+    return false;
+  *pad1 = this->pads_[0].load(std::memory_order_relaxed);
+  *pad2 = this->pads_[1].load(std::memory_order_relaxed);
+  return true;
 }
 
 void GameEmulator::draw_frame_(const EmuVideo &video) {
@@ -822,6 +907,10 @@ bool GameEmulator::paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool 
         this->pause();
       return true;
     }
+  }
+  if (page == 0x07 && this->core_ != nullptr && this->core_->keyboard()) {
+    this->core_->key(usage, pressed);
+    return true;
   }
   uint16_t buttons = 0;
   for (size_t i = 0; i < this->key_count_; i++) {

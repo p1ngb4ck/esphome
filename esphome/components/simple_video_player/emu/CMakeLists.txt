@@ -65,6 +65,19 @@ if(CONFIG_SVP_EMU_GW)
     set_source_files_properties(${gw_srcs} PROPERTIES COMPILE_OPTIONS "-O2")
 endif()
 
+if(CONFIG_SVP_EMU_MSX)
+    file(GLOB msx_srcs "${CMAKE_CURRENT_LIST_DIR}/fmsx/src/EMULib/*.c" "${CMAKE_CURRENT_LIST_DIR}/fmsx/src/fMSX/*.c"
+         "${CMAKE_CURRENT_LIST_DIR}/fmsx/src/Z80/*.c")
+    list(APPEND srcs ${msx_srcs} "ports/msx_port.c")
+    list(APPEND priv_incs "fmsx" "fmsx/src/EMULib" "fmsx/src/fMSX" "fmsx/src/Z80")
+    set(msx_names "CPU=fmsx_CPU;LoadFile=fmsx_LoadFile;LoadROM=fmsx_LoadROM;ResetZ80=fmsx_ResetZ80;ExecZ80=fmsx_ExecZ80"
+        "IntZ80=fmsx_IntZ80;RunZ80=fmsx_RunZ80;RdZ80=fmsx_RdZ80;WrZ80=fmsx_WrZ80;InZ80=fmsx_InZ80;OutZ80=fmsx_OutZ80"
+        "LoopZ80=fmsx_LoopZ80;PatchZ80=fmsx_PatchZ80;DebugZ80=fmsx_DebugZ80;OpZ80=fmsx_OpZ80")
+    set_source_files_properties(${msx_srcs} PROPERTIES COMPILE_OPTIONS "-O2;-include;${CMAKE_CURRENT_LIST_DIR}/fmsx/msxfix.h"
+                                COMPILE_DEFINITIONS "BPS16;UNIX;LSB_FIRST;NARROW;${msx_names}")
+    set_source_files_properties("ports/msx_port.c" PROPERTIES COMPILE_OPTIONS "-O2" COMPILE_DEFINITIONS "${msx_names}")
+endif()
+
 idf_component_register(SRCS ${srcs} INCLUDE_DIRS "shim" "ports" PRIV_INCLUDE_DIRS ${priv_incs} PRIV_REQUIRES esp_rom
                        LDFRAGMENTS linker.lf)
 

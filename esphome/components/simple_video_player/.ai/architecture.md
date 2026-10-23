@@ -316,7 +316,13 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
   per frame in chunks of 64), lynx (handy, 32 kHz, the cartridge's rotation), snes (snes9x 2005, all PSRAM, the ROM
   piece 64.5 KiB larger for its mapping), md (gwenesis, YM2612 at 26,633 Hz, PSG off as in retro-go, the ROM piece in
   whole 64 KiB), gw (gw-emulator, LCD-Game-Shrinker `.gw` files, two 128 Hz steps per frame, 32,768 Hz, watch mode
-  started and the clock set from the system time as in retro-go). A frame without sound plays one frame of silence, so the speaker paces every frame.
+  started and the clock set from the system time as in retro-go), msx (fMSX, MSX2 with 2 RAM / 2 VRAM pages: the
+  core runs its own loop on svp_game and calls `emu_host_frame()` from `Keyboard()` once per frame, where the picture,
+  the frame's sound, pause and stop are handled; `bios_dir:` files MSX.ROM, MSX2.ROM, MSX2EXT.ROM, MSX2P.ROM,
+  MSX2PEXT.ROM, DISK.ROM, MSXDOS2.ROM, FMPAC.ROM, KANJI.ROM, PAINTER.ROM, RS232.ROM, CMOS.ROM are read after the ROM where
+  present and served with CARTS.SHA from memory (`fmemopen`), writes are refused; keyboard keys go to the MSX
+  keyboard matrix, the pad to joystick 1 and to cursor / space / enter / escape; `.dsk` as drive A). A frame without
+  sound plays one frame of silence, so the speaker paces every frame.
 - Picture: the largest whole factor that fits LVGL's screen, centred, black around (each scanout buffer cleared once
   per game and after a pause); turned only when LVGL's rotation is not 0 (PPA SRM: LVGL 90 -> PPA 270, 180 -> 180,
   270 -> 90); factor 1 at rotation 0 draws without the PPA; PPA errors fall back to the CPU. Own PPA client (registered

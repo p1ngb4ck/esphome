@@ -22,6 +22,8 @@ struct PortApi {
   const int16_t *(*audio)(size_t *frames);
   uint32_t (*frame_us)();
   uint32_t fixed_rate;
+  void (*key)(uint16_t usage, bool pressed);
+  void (*add_file)(const char *name, const uint8_t *data, size_t size);
 };
 
 class PortCore final : public EmuCore {
@@ -42,6 +44,16 @@ class PortCore final : public EmuCore {
   uint32_t sample_rate() const override { return this->rate_; }
   uint8_t channels() const override { return this->channels_; }
   uint32_t frame_us() const override { return this->api_->frame_us(); }
+  bool owns_loop() const override { return this->api_->key != nullptr; }
+  bool keyboard() const override { return this->api_->key != nullptr; }
+  void key(uint16_t usage, bool pressed) override {
+    if (this->api_->key != nullptr)
+      this->api_->key(usage, pressed);
+  }
+  void add_file(const char *name, const uint8_t *data, size_t size) override {
+    if (this->api_->add_file != nullptr)
+      this->api_->add_file(name, data, size);
+  }
 
  protected:
   const PortApi *api_;
@@ -117,6 +129,11 @@ static bool gw_load(uint8_t *rom, size_t size, const char *path, uint32_t rate, 
 static const PortApi GW_API = {gw_load, gw_port_frame, gw_port_video, gw_port_audio, gw_port_frame_us, 32768};
 #endif
 
+#ifdef SVP_EMU_MSX
+static const PortApi MSX_API = {msx_port_load,      msx_port_frame, msx_port_video, msx_port_audio,
+                                msx_port_frame_us, 0,              msx_port_key,   msx_port_add_file};
+#endif
+
 EmuCore *emu_make_core(EmuSystem system, void *store) {
   const PortApi *api = nullptr;
   switch (system) {
@@ -158,6 +175,11 @@ EmuCore *emu_make_core(EmuSystem system, void *store) {
 #ifdef SVP_EMU_GW
     case EmuSystem::GW:
       api = &GW_API;
+      break;
+#endif
+#ifdef SVP_EMU_MSX
+    case EmuSystem::MSX:
+      api = &MSX_API;
       break;
 #endif
     default:
