@@ -364,8 +364,8 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
   `SB` (polled every 1824 cycles and once per frame); smsplus sends `txdata` with TON and queues 16 received bytes,
   delivered while RON is set (RXRD, NMI with 0x08); handy's ComLynx TX callback sends, received bytes go to
   `ComLynxRxData` once per frame. Link loss (error, close, bye, timeout) ends the link, the game goes on alone (no
-  reconnect); status `link` ("off", "waiting", "connected", "lost"). The sockets and the eventfd exist only while the
-  linked game runs.
+  reconnect); status `link` ("off", "waiting", "connected", "lost"). The sockets (claimed: 1 TCP, 1 TCP listen) and the eventfd exist only
+  while the linked game runs.
 - Actions: `simple_video_player.emulator.start` (path) / `.stop` / `.pause` / `.resume` / `.save_state` (slot) /
   `.load_state` (slot) / `.link_host` / `.link_join` (host) / `.link_off`; Home Assistant `svp_emu_start` (path),
   `svp_emu_stop`, `svp_emu_pause`, `svp_emu_resume`, `svp_emu_save_state` (slot), `svp_emu_load_state` (slot),

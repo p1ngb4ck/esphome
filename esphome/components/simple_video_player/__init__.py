@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components import display, media_player, speaker, touchscreen
+from esphome.components import display, media_player, socket, speaker, touchscreen
 # Aliased: this package's own select/ (and any text_sensor/) platform would shadow the names.
 from esphome.components import select as select_domain, text_sensor as text_sensor_domain
 from esphome.components.audio import CONF_CODECS, CONF_FLAC, CONF_MP3
@@ -338,11 +338,15 @@ EMULATOR_SCHEMA = cv.Schema(
         cv.Optional(CONF_ON_ENDED): automation.validate_automation(single=True),
         cv.Optional(CONF_ON_PLAYERS_CHANGED): automation.validate_automation(single=True),
         cv.Optional(CONF_ON_PLAYERS_CLOSED): automation.validate_automation(single=True),
-        cv.Optional(CONF_LINK): cv.Schema(
-            {
-                cv.Optional(CONF_PORT, default=6666): cv.port,
-                cv.Optional(CONF_PEERS, default=[]): cv.ensure_list(cv.string_strict),
-            }
+        cv.Optional(CONF_LINK): cv.All(
+            cv.Schema(
+                {
+                    cv.Optional(CONF_PORT, default=6666): cv.port,
+                    cv.Optional(CONF_PEERS, default=[]): cv.ensure_list(cv.string_strict),
+                }
+            ),
+            socket.consume_sockets(1, "simple_video_player.emulator"),
+            socket.consume_sockets(1, "simple_video_player.emulator", socket.SocketType.TCP_LISTEN),
         ),
     }
 ).add_extra(_emu_bios)
