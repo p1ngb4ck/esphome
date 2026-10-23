@@ -110,6 +110,13 @@ static bool md_load(uint8_t *rom, size_t size, const char *path, uint32_t rate, 
 static const PortApi MD_API = {md_load, md_port_frame, md_port_video, md_port_audio, md_port_frame_us, 26633};
 #endif
 
+#ifdef SVP_EMU_GW
+static bool gw_load(uint8_t *rom, size_t size, const char *path, uint32_t rate, uint8_t channels) {
+  return gw_port_load(rom, size, channels);
+}
+static const PortApi GW_API = {gw_load, gw_port_frame, gw_port_video, gw_port_audio, gw_port_frame_us, 32768};
+#endif
+
 EmuCore *emu_make_core(EmuSystem system, void *store) {
   const PortApi *api = nullptr;
   switch (system) {
@@ -146,6 +153,11 @@ EmuCore *emu_make_core(EmuSystem system, void *store) {
 #ifdef SVP_EMU_MD
     case EmuSystem::MD:
       api = &MD_API;
+      break;
+#endif
+#ifdef SVP_EMU_GW
+    case EmuSystem::GW:
+      api = &GW_API;
       break;
 #endif
     default:

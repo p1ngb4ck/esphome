@@ -57,6 +57,14 @@ if(CONFIG_SVP_EMU_MD)
     set_source_files_properties(${md_srcs} PROPERTIES COMPILE_OPTIONS "-O2")
 endif()
 
+if(CONFIG_SVP_EMU_GW)
+    file(GLOB gw_srcs "${CMAKE_CURRENT_LIST_DIR}/gw-emulator/src/*.c" "${CMAKE_CURRENT_LIST_DIR}/gw-emulator/src/cpus/*.c"
+         "${CMAKE_CURRENT_LIST_DIR}/gw-emulator/src/gw_sys/*.c")
+    list(APPEND srcs ${gw_srcs} "ports/gw_port.c")
+    list(APPEND priv_incs "gw-emulator/src" "gw-emulator/src/cpus" "gw-emulator/src/gw_sys")
+    set_source_files_properties(${gw_srcs} PROPERTIES COMPILE_OPTIONS "-O2")
+endif()
+
 idf_component_register(SRCS ${srcs} INCLUDE_DIRS "shim" "ports" PRIV_INCLUDE_DIRS ${priv_incs} PRIV_REQUIRES esp_rom
                        LDFRAGMENTS linker.lf)
 

@@ -260,6 +260,7 @@ EMU_SYSTEMS = {
     "lynx": EmuSystem.LYNX,
     "snes": EmuSystem.SNES,
     "md": EmuSystem.MD,
+    "gw": EmuSystem.GW,
 }
 EMU_BUTTONS = {
     "up": 1 << 0,

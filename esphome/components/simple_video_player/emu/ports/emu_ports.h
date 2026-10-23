@@ -75,6 +75,14 @@ uint32_t md_port_frame_us(void);
 size_t md_port_save_state(uint8_t *buf, size_t cap);
 bool md_port_load_state(const uint8_t *buf, size_t len);
 
+bool gw_port_load(uint8_t *rom, size_t size, uint8_t channels);
+void gw_port_frame(uint16_t pad1, uint16_t pad2);
+void gw_port_video(emu_port_video_t *video);
+const int16_t *gw_port_audio(size_t *frames);
+uint32_t gw_port_frame_us(void);
+size_t gw_port_save_state(uint8_t *buf, size_t cap);
+bool gw_port_load_state(const uint8_t *buf, size_t len);
+
 #ifdef __cplusplus
 }
 #endif
