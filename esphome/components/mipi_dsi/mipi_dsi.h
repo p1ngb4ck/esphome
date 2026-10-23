@@ -65,6 +65,11 @@ class MipiDsi final : public display::Display {
   void set_model(const char *model) { this->model_ = model; }
   void set_lane_bit_rate(float lane_bit_rate) { this->lane_bit_rate_ = lane_bit_rate; }
   void set_lanes(uint8_t lanes) { this->lanes_ = lanes; }
+  void set_frame_ack(bool frame_ack) { this->frame_ack_ = frame_ack; }
+  void set_continuous_clock(bool continuous) { this->continuous_clock_ = continuous; }
+  void set_eotp(bool eotp) { this->eotp_ = eotp; }
+  void set_lp_horizontal_blanking(bool lp) { this->lp_horizontal_blanking_ = lp; }
+  void set_lp_vertical_active(bool lp) { this->lp_vertical_active_ = lp; }
 
   void smark_failed(const LogString *message, esp_err_t err);
 
@@ -130,6 +135,11 @@ class MipiDsi final : public display::Display {
   float pclk_frequency_ = 16;  // in MHz
   float lane_bit_rate_{1500};  // in Mbps
   uint8_t lanes_{2};           // 1, 2, 3 or 4 lanes
+  bool frame_ack_{true};
+  bool continuous_clock_{false};
+  bool eotp_{true};
+  bool lp_horizontal_blanking_{true};
+  bool lp_vertical_active_{true};
 
   bool invert_colors_{};
   display::ColorBitness color_depth_;

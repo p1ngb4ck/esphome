@@ -1,16 +1,26 @@
-# ESPHome [![Discord Chat](https://img.shields.io/discord/429907082951524364.svg)](https://discord.gg/KhAMKrd) [![GitHub release](https://img.shields.io/github/release/esphome/esphome.svg)](https://GitHub.com/esphome/esphome/releases/) [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/esphome/esphome)
+# mipi_dsi: DSI link options
 
-<a href="https://esphome.io/">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://media.esphome.io/logo/logo-text-on-dark.svg">
-    <img src="https://media.esphome.io/logo/logo-text-on-light.svg" alt="ESPHome Logo">
-  </picture>
-</a>
+New display options, all optional; the defaults are IDF's current behaviour, so existing configs and models are
+unchanged.
 
----
+| Option | Default | Effect |
+|---|---|---|
+| `frame_ack` | `true` | Bus turnaround (acknowledge) at the end of every frame. Off for peripherals that never answer a turnaround. |
+| `continuous_clock` | `false` | Keeps the clock lane in high speed, for bridges that take their pixel clock from it. |
+| `eotp` | `true` | End of Transmission packet after each high-speed transmission. |
+| `lp_horizontal_blanking` | `true` | Low power allowed in the horizontal back and front porch. |
+| `lp_vertical_active` | `true` | Low power allowed inside the active lines. |
 
-[Documentation](https://esphome.io) -- [Issues](https://github.com/esphome/esphome/issues) -- [Feature requests](https://github.com/orgs/esphome/discussions)
+Models can set these as defaults.
 
----
+```yaml
+display:
+  - platform: mipi_dsi
+    frame_ack: false
+    continuous_clock: true
+    eotp: false
+    lp_horizontal_blanking: false
+    lp_vertical_active: false
+```
 
-[![ESPHome - A project from the Open Home Foundation](https://www.openhomefoundation.org/badges/esphome.png)](https://www.openhomefoundation.org/)
+Part of [rpi7-v1-upstream](https://github.com/p1ngb4ck/esphome/tree/rpi7-v1-upstream).
