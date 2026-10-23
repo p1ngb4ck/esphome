@@ -485,10 +485,10 @@ void MipiDsi::dump_config() {
                 this->model_, this->width_, this->height_, this->rotation_, this->lanes_, this->lane_bit_rate_,
                 this->hsync_pulse_width_, this->hsync_back_porch_, this->hsync_front_porch_, this->vsync_pulse_width_,
                 this->vsync_back_porch_, this->vsync_front_porch_, (3 - this->color_depth_) * 8, this->pixel_mode_,
-                YESNO(this->invert_colors_), this->pclk_frequency_,
-                YESNO(this->frame_ack_), YESNO(this->continuous_clock_), YESNO(this->eotp_),
-                YESNO(this->lp_horizontal_blanking_), YESNO(this->lp_vertical_active_),
-                this->generic_commands_ ? "generic" : "DCS");
+                YESNO(this->invert_colors_), this->pclk_frequency_, YESNO(this->frame_ack_),
+                YESNO(this->continuous_clock_), YESNO(this->eotp_), YESNO(this->lp_horizontal_blanking_),
+                YESNO(this->lp_vertical_active_),
+                this->generic_commands_ ? LOG_STR_LITERAL("generic") : LOG_STR_LITERAL("DCS"));
   LOG_PIN("  Reset Pin ", this->reset_pin_);
 }
 }  // namespace esphome::mipi_dsi
