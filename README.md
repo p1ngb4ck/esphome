@@ -19,6 +19,7 @@ reset and an OTA restart alike. Each change as its own pull request branch:
 - Init: complete, after a cold start, a restart and a flash (OTA) alike
 - Touch: complete
 - Backlight: complete (ATTINY88 register 0x86, 0-255)
+- Checks: upstream's CI jobs run locally (not on GitHub) and an own review; no open findings
 
 ## Use
 
