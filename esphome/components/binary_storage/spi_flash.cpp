@@ -107,7 +107,7 @@ void SPIFlash::dump_config() {
   ESP_LOGCONFIG(TAG, "  Sector Size: %" PRIu32 " bytes", this->sector_size_);
   ESP_LOGCONFIG(TAG, "  JEDEC ID: 0x%06" PRIX32, this->jedec_id_);
   ESP_LOGCONFIG(TAG, "  Manufacturer: 0x%02X", this->get_manufacturer_id());
-  ESP_LOGCONFIG(TAG, "  Quad Mode: %s", this->quad_mode_ ? "Enabled (4x faster)" : "Disabled");
+  ESP_LOGCONFIG(TAG, "  Data Lines: %u", (unsigned) this->data_lines_);
   ESP_LOGCONFIG(TAG, "  4-Byte Addressing: %s", this->four_byte_mode_ ? "Enabled (>16MB)" : "Disabled");
 
   if (this->is_failed()) {
@@ -316,7 +316,9 @@ bool SPIFlash::esp_partition_setup_() {
   esp_flash_spi_device_config_t cfg = {};
   cfg.host_id = static_cast<spi_host_device_t>(this->spi_host_);
   cfg.cs_io_num = this->cs_pin_num_;
-  cfg.io_mode = this->quad_mode_ ? SPI_FLASH_QOUT : SPI_FLASH_FASTRD;
+  cfg.io_mode = this->data_lines_ == 4   ? SPI_FLASH_QOUT
+                : this->data_lines_ == 2 ? SPI_FLASH_DOUT
+                                         : SPI_FLASH_FASTRD;
   cfg.freq_mhz = this->flash_freq_mhz_;
 
   esp_err_t err = spi_bus_add_flash_device(&this->ext_chip_, &cfg);
