@@ -462,7 +462,7 @@ void MipiDsi::dump_config() {
                 this->hsync_pulse_width_, this->hsync_back_porch_, this->hsync_front_porch_, this->vsync_pulse_width_,
                 this->vsync_back_porch_, this->vsync_front_porch_, (3 - this->color_depth_) * 8, this->pixel_mode_,
                 YESNO(this->invert_colors_), this->pclk_frequency_,
-                this->generic_commands_ ? "generic" : "DCS");
+                this->generic_commands_ ? LOG_STR_LITERAL("generic") : LOG_STR_LITERAL("DCS"));
   LOG_PIN("  Reset Pin ", this->reset_pin_);
 }
 }  // namespace esphome::mipi_dsi

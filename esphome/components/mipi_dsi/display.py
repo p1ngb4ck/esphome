@@ -220,9 +220,7 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_vsync_front_porch(config[CONF_VSYNC_FRONT_PORCH]))
     cg.add(var.set_pclk_frequency(config[CONF_PCLK_FREQUENCY] / 1.0e6))
     cg.add(var.set_lanes(int(config[CONF_LANES])))
-    cg.add(
-        var.set_generic_commands(config[CONF_COMMAND_MODE] == COMMAND_MODE_GENERIC)
-    )
+    cg.add(var.set_generic_commands(config[CONF_COMMAND_MODE] == COMMAND_MODE_GENERIC))
     cg.add(var.set_lane_bit_rate(config[CONF_LANE_BIT_RATE] / 1.0e6))
     await cg.add_pin(var.set_reset_pin, config.get(CONF_RESET_PIN))
     if enable_pin := config.get(CONF_ENABLE_PIN):
