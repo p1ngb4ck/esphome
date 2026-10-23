@@ -7,9 +7,33 @@
 #include "esphome/core/hal.h"
 #include <algorithm>
 
+#ifdef USE_ESP_IDF
+#include "esphome/core/helpers.h"
+extern "C" {
+#if __has_include(<esp_flash_chips/spi_flash_chip_driver.h>)
+#include <esp_flash_chips/spi_flash_chip_driver.h>
+#else
+#include <spi_flash_chip_driver.h>
+#endif
+}
+#endif
+
 namespace esphome::binary_storage {
 
 static const char *const TAG = "spi_flash";
+
+#ifdef USE_ESP_IDF
+struct FourByteChipDriver {
+  spi_flash_chip_t drv;
+  const spi_flash_chip_t *base;
+};
+
+static spi_flash_caps_t four_byte_chip_caps(esp_flash_t *chip) {
+  const auto *driver = reinterpret_cast<const FourByteChipDriver *>(chip->chip_drv);
+  uint32_t caps = driver->base->get_chip_caps != nullptr ? driver->base->get_chip_caps(chip) : 0;
+  return static_cast<spi_flash_caps_t>(caps | SPI_FLASH_CHIP_CAP_32MB_SUPPORT);
+}
+#endif
 
 void SPIFlash::setup() {
   ESP_LOGCONFIG(TAG, "Setting up SPI Flash...");
@@ -403,6 +427,8 @@ bool SPIFlash::esp_partition_setup_() {
     ESP_LOGE(TAG, "spi_bus_add_flash_device failed: %s", esp_err_to_name(err));
     return false;
   }
+  if (!this->install_four_byte_driver_())
+    return false;
   err = esp_flash_init(this->ext_chip_);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_flash_init failed: %s -- flash not reachable on the exclusive bus?",
@@ -413,6 +439,7 @@ bool SPIFlash::esp_partition_setup_() {
   if (esp_flash_get_size(this->ext_chip_, &chip_size) == ESP_OK) {
     if (this->capacity_ == 0)
       this->capacity_ = chip_size;
+    this->four_byte_mode_ = chip_size > (1UL << 24);
     ESP_LOGCONFIG(TAG, "  esp_flash chip size: %" PRIu32 " bytes", chip_size);
   }
   for (auto &region : this->partition_regions_) {
@@ -428,6 +455,34 @@ bool SPIFlash::esp_partition_setup_() {
     ESP_LOGCONFIG(TAG, "  Registered partition '%s' at 0x%08" PRIx32 " (%" PRIu32 " bytes)", region.label,
                   static_cast<uint32_t>(region.offset), static_cast<uint32_t>(region.size));
   }
+  return true;
+}
+
+bool SPIFlash::install_four_byte_driver_() {
+  uint32_t id = 0;
+  if (esp_flash_read_id(this->ext_chip_, &id) != ESP_OK)
+    return true;
+  const spi_flash_chip_t *base = nullptr;
+  for (const spi_flash_chip_t **drv = esp_flash_registered_chips; *drv != nullptr; drv++) {
+    if ((*drv)->probe(this->ext_chip_, id) == ESP_OK) {
+      base = *drv;
+      break;
+    }
+  }
+  if (base == nullptr)
+    return true;
+  RAMAllocator<FourByteChipDriver> allocator(RAMAllocator<FourByteChipDriver>::ALLOC_EXTERNAL);
+  FourByteChipDriver *driver = allocator.allocate(1);
+  if (driver == nullptr) {
+    ESP_LOGE(TAG, "No PSRAM for the 4-byte chip driver (%u bytes)", (unsigned) sizeof(FourByteChipDriver));
+    return false;
+  }
+  driver->drv = *base;
+  driver->drv.get_chip_caps = four_byte_chip_caps;
+  driver->base = base;
+  this->ext_chip_->chip_id = id;
+  this->ext_chip_->chip_drv = &driver->drv;
+  ESP_LOGCONFIG(TAG, "  esp_flash chip driver: %s, 4-byte addressing", base->name);
   return true;
 }
 #endif  // USE_ESP_IDF

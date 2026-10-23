@@ -291,6 +291,7 @@ class SPIFlash : public BinaryStorage,
   esp_flash_t *ext_chip_{nullptr};
   std::vector<PartitionRegion> partition_regions_;
   bool esp_partition_setup_();  // esp_flash init + register the region partitions; false on failure
+  bool install_four_byte_driver_();
 #endif
 
   //========================================================================
