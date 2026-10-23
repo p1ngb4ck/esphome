@@ -75,6 +75,7 @@ from .const import (
     KEY_EXTRA_BUILD_FILES,
     KEY_FLASH_SIZE,
     KEY_FULL_CERT_BUNDLE,
+    KEY_IDF_EXTRA_TARGETS,
     KEY_IDF_VERSION,
     KEY_MBEDTLS_SDKCONFIG,
     KEY_NETWORK_SDKCONFIG,
@@ -706,7 +707,18 @@ def set_core_data(config):
     CORE.data[KEY_ESP32][KEY_FLASH_SIZE] = config[CONF_FLASH_SIZE]
     CORE.data[KEY_ESP32][KEY_VARIANT] = variant
     CORE.data[KEY_ESP32][KEY_EXTRA_BUILD_FILES] = {}
+    CORE.data[KEY_ESP32][KEY_SRC_CMAKE] = []
+    CORE.data[KEY_ESP32][KEY_IDF_EXTRA_TARGETS] = set()
 
+    return config
+
+
+def _require_ipv4_on_arduino(config: ConfigType) -> ConfigType:
+    """The Arduino core's IPAddress.cpp does not compile with IPv4 disabled."""
+    if CORE.using_arduino:
+        from esphome.components import network
+
+        network.require_ipv4(PLATFORM_ESP32)(config)
     return config
 
 
@@ -1132,6 +1144,26 @@ def add_extra_script(stage: str, filename: str, path: Path):
         cg.add_platformio_option("extra_scripts", [key])
 
 
+def add_idf_install_target(target: str) -> None:
+    """Install the ESP-IDF tools for another chip alongside the variant's own.
+
+    The native ESP-IDF toolchain install is limited to the variant being
+    built. A component that needs another architecture's compiler names that
+    chip here; ``target`` is an IDF chip name such as ``esp32c3``.
+    """
+    CORE.data[KEY_ESP32][KEY_IDF_EXTRA_TARGETS].add(target)
+
+
+def add_src_cmake(block: str) -> None:
+    """Append CMake to the generated src/CMakeLists.txt.
+
+    The block is emitted after ``idf_component_register`` so it can use
+    ``COMPONENT_LIB`` and friends; IDF's requirements pass stops at
+    ``idf_component_register`` so the block never runs in script mode.
+    """
+    CORE.data[KEY_ESP32][KEY_SRC_CMAKE].append(block)
+
+
 def add_extra_build_file(filename: str, path: Path) -> bool:
     """Add an extra build file to the project."""
     if filename not in CORE.data[KEY_ESP32][KEY_EXTRA_BUILD_FILES]:
@@ -1312,8 +1344,8 @@ def _resolve_framework_version(value: ConfigType) -> cv.Version:
             raise cv.Invalid("Only Arduino 3.0+ is supported.")
         recommended = ARDUINO_FRAMEWORK_VERSION_LOOKUP["recommended"]
     else:
-        if version < cv.Version(5, 0, 0):
-            raise cv.Invalid("Only ESP-IDF 5.0+ is supported.")
+        if version < cv.Version(5, 1, 0):
+            raise cv.Invalid("Only ESP-IDF 5.1+ is supported.")
         recommended = ESP_IDF_FRAMEWORK_VERSION_LOOKUP["recommended"]
 
     if version != recommended:
@@ -2267,6 +2299,8 @@ def idf_version() -> cv.Version:
 def require_idf_version(
     minimum: cv.Version, feature: str = "This feature"
 ) -> Callable[[Any], Any]:
+    """Validator for an option that needs the underlying ESP-IDF at ``minimum`` or newer."""
+
     def validator(value: Any) -> Any:
         cv.only_on_esp32(value)
         if (version := idf_version()) < minimum:
@@ -2580,6 +2614,7 @@ CONFIG_SCHEMA = cv.All(
     _set_default_framework,
     _check_versions,
     set_core_data,
+    _require_ipv4_on_arduino,
     cv.has_at_least_one_key(CONF_BOARD, CONF_VARIANT),
 )
 
@@ -3227,10 +3262,9 @@ async def to_code(config):
     # assert(), HAL_ASSERT and ESP_ERROR_CHECK bake __FILE__ into rodata, and
     # IDF's noflash placement puts the flash driver's copies in DRAM. The
     # basename keeps the panic output useful at a fraction of the size.
-    # __FILE_NAME__ is a GCC 12 builtin; IDF 5.0 still ships GCC 11.2.
-    if idf_version() >= cv.Version(5, 1, 0):
-        cg.add_build_flag("-D__FILE__=__FILE_NAME__")
-        cg.add_build_flag("-Wno-builtin-macro-redefined")
+    # __FILE_NAME__ is a GCC 12 builtin, which every supported IDF ships.
+    cg.add_build_flag("-D__FILE__=__FILE_NAME__")
+    cg.add_build_flag("-Wno-builtin-macro-redefined")
     # Deferred so KEY_COMPONENTS is fully populated -- see the coroutine.
     CORE.add_job(_finalize_arduino_aware_flags)
     cg.add_define("ESPHOME_BOARD", config[CONF_BOARD])
@@ -4479,6 +4513,10 @@ async def _init_hw_jpeg() -> None:
         _LOGGER.info("Enabled esp_new_jpeg codec (ESP32-%s)", variant)
 
     else:
-        cg.add_library("JPEGDEC", "1.8.4", "https://github.com/bitbank2/JPEGDEC#1.8.4")
+        cg.add_library(
+            "JPEGDEC",
+            "1.8.4",
+            "https://github.com/esphome-libs/JPEGDEC#1.8.4-esphome.3",
+        )
         cg.add_define("USE_JPEGDEC")
         _LOGGER.info("Using JPEGDec library (software, ESP32-%s)", variant)

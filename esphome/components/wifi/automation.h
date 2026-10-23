@@ -6,31 +6,6 @@
 
 namespace esphome::wifi {
 
-template<typename... Ts> class WiFiConnectedCondition final : public Condition<Ts...> {
- public:
-  bool check(const Ts &...x) override { return global_wifi_component->is_connected(); }
-};
-
-template<typename... Ts> class WiFiEnabledCondition final : public Condition<Ts...> {
- public:
-  bool check(const Ts &...x) override { return !global_wifi_component->is_disabled(); }
-};
-
-template<typename... Ts> class WiFiAPActiveCondition final : public Condition<Ts...> {
- public:
-  bool check(const Ts &...x) override { return global_wifi_component->is_ap_active(); }
-};
-
-template<typename... Ts> class WiFiEnableAction final : public Action<Ts...> {
- public:
-  void play(const Ts &...x) override { global_wifi_component->enable(); }
-};
-
-template<typename... Ts> class WiFiDisableAction final : public Action<Ts...> {
- public:
-  void play(const Ts &...x) override { global_wifi_component->disable(); }
-};
-
 #ifdef USE_WIFI_SCAN_RESULTS_TRIGGER
 /// on_scan_results: a scan finished; get_scan_result() holds what it found. The listener is called from
 /// inside the scan's event handling, whose frame is large (ESP-Hosted reads every record into a stack
@@ -51,11 +26,6 @@ class ScanResultsTrigger final : public Trigger<>, public Component, public WiFi
   bool pending_{false};
 };
 #endif
-
-template<typename... Ts> class WiFiRoamAction final : public Action<Ts...> {
- public:
-  void play(const Ts &...x) override { global_wifi_component->force_roam_check(); }
-};
 
 template<typename... Ts> class WiFiConfigureAction final : public Action<Ts...>, public Component {
  public:

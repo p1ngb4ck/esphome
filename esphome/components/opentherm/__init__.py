@@ -3,6 +3,7 @@ from typing import Any
 from esphome import automation, pins
 import esphome.codegen as cg
 from esphome.components import sensor
+from esphome.components.const import CONF_OUT_PIN
 from esphome.components.esp32 import include_builtin_idf_component
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, PLATFORM_ESP32, PLATFORM_ESP8266
@@ -15,7 +16,6 @@ DOMAIN = "opentherm"
 MULTI_CONF = True
 
 CONF_IN_PIN = "in_pin"
-CONF_OUT_PIN = "out_pin"
 CONF_CH_ENABLE = "ch_enable"
 CONF_DHW_ENABLE = "dhw_enable"
 CONF_COOLING_ENABLE = "cooling_enable"
@@ -103,8 +103,9 @@ async def to_code(config: dict[str, Any]) -> None:
         if key in non_sensors:
             continue
         if key in schema.INPUTS:
-            input_sensor = await cg.get_variable(value)
-            cg.add(getattr(var, f"set_{key}_{const.INPUT_SENSOR}")(input_sensor))
+            await cg.add_variable(
+                getattr(var, f"set_{key}_{const.INPUT_SENSOR}"), value
+            )
             input_sensors.append(key)
         elif key in schema.SETTINGS:
             if value == schema.SETTINGS[key].default_value:

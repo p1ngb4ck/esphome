@@ -100,7 +100,11 @@ class JPEGFormat(Format):
             # source of truth also used by simple_video_player.
             require_hw_jpeg()
         else:
-            cg.add_library("JPEGDEC", "1.8.4", "https://github.com/bitbank2/JPEGDEC#1.8.4")
+            cg.add_library(
+                "JPEGDEC",
+                "1.8.4",
+                "https://github.com/esphome-libs/JPEGDEC#1.8.4-esphome.3",
+            )
             cg.add_define("USE_JPEGDEC")
             if CORE.is_host:
                 # JPEGDEC's host detection checks __MACH__/__LINUX__, but gcc only
