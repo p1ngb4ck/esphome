@@ -35,6 +35,6 @@ void SourceSelect::dump_config() { LOG_SELECT("", "Source", this); }
 
 void SourceSelect::control(size_t index) { this->parent_->set_source(static_cast<int>(index)); }
 
-}  // namespace esphome::resampler
+}
 
 #endif

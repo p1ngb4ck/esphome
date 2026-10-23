@@ -24,6 +24,6 @@ class SourceSelect : public select::Select, public Component, public Parented<Re
   void publish_source_(int index);
 };
 
-}  // namespace esphome::resampler
+}
 
 #endif
