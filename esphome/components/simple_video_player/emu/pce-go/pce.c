@@ -67,7 +67,7 @@ pce_reset(bool hard)
 int
 pce_init(void)
 {
-	PCE.RAM = malloc(0x2000);
+	PCE.RAM = emu_calloc_hot(1, 0x2000);
 	PCE.VRAM = malloc(0x10000);
 	PCE.NULLRAM = malloc(0x2000);
 	PCE.IOAREA = PCE.NULLRAM + 4;

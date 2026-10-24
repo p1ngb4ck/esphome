@@ -307,7 +307,8 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
   (`on_ended`).
 - Memory: the cores' `malloc` / `calloc` / `realloc` / `free` (forced `emu_force.h`) go to `GameEmulator`: a piece of at
   most 16 KiB internal while the system's internal budget lasts (NES 24 KiB, Game Boy 24 KiB, SMS 25 KiB, SNES 20 KiB,
-  Mega Drive 14 KiB, others 0; SNES and Mega Drive only for the pieces their cores ask for with `emu_calloc_hot`: SNES
+  Mega Drive 14 KiB, PC Engine 8 KiB, others 0; SNES, Mega Drive and PC Engine only for the pieces their cores ask for
+  with `emu_calloc_hot`: PC Engine its work RAM `PCE.RAM` (zero page and stack), SNES
   the memory map `Map` and `MapInfo`, Mega Drive the Z80 RAM `ZRAM`, the YM2612's `sin_tab`, the VDP's `SAT_CACHE`
   and `CRAM565`, allocated by its port before the core starts),
   else the pool (`POOL_USER_GAME`, owner row: outputs, video, desktop); every piece in a table of 96, all given back at
