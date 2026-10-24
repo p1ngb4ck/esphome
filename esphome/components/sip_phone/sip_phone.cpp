@@ -1644,6 +1644,7 @@ void SipPhone::handle_invite_response_(ClientTx &tx, const SipMessage &msg) {
     if (!tx.active)
       return;
     tx.provisional = true;
+    tx.deadline = 0;
     if (d.cancel_pending && msg.header("Call-ID").equals(d.call_id)) {
       d.cancel_pending = false;
       this->send_cancel_();
