@@ -221,7 +221,7 @@ class GameEmulator
   bool create_task_();
   void start_pacing_();
   void pace_reset_();
-  void pace_(size_t frames);
+  void pace_();
   bool frame_pads_(uint16_t *pads);
   void link_begin_();
   void link_connect_();
@@ -266,7 +266,7 @@ class GameEmulator
   bool draw_cpu_(const EmuVideo &video, uint8_t *fb);
   void finish_ppa_();
   static bool ppa_done_cb_(ppa_client_handle_t client, ppa_event_data_t *event, void *arg);
-  size_t play_audio_();
+  void play_audio_();
 
   SimpleVideoPlayer *parent_;
   bool usable_{true};
@@ -371,7 +371,7 @@ class GameEmulator
   std::atomic<uint16_t> pads_[2]{};
   esp_timer_handle_t pace_timer_{nullptr};
   int64_t pace_anchor_us_{0};
-  uint64_t pace_ns_{0};
+  int64_t pace_us_{0};
   bool pace_anchored_{false};
 
   const char *peers_[MAX_PEERS]{};

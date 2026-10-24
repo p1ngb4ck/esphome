@@ -666,21 +666,17 @@ void GameEmulator::start_pacing_() {
 }
 
 void GameEmulator::pace_reset_() {
-  this->pace_ns_ = 0;
+  this->pace_us_ = 0;
   this->pace_anchored_ = false;
 }
 
-void GameEmulator::pace_(size_t frames) {
+void GameEmulator::pace_() {
   const int64_t frame_us = this->core_->frame_us();
   if (this->pace_timer_ == nullptr || frame_us == 0)
     return;
-  const uint64_t frame_ns = static_cast<uint64_t>(frame_us) * 1000ULL;
-  const uint32_t rate = this->core_->sample_rate();
-  const uint64_t sound_ns = rate != 0 ? static_cast<uint64_t>(frames) * 1000000000ULL / rate : 0;
-  const uint64_t diff = sound_ns > frame_ns ? sound_ns - frame_ns : frame_ns - sound_ns;
-  this->pace_ns_ += diff * 100 <= frame_ns ? sound_ns : frame_ns;
+  this->pace_us_ += frame_us;
   const int64_t now = esp_timer_get_time();
-  const int64_t produced = static_cast<int64_t>(this->pace_ns_ / 1000ULL);
+  const int64_t produced = this->pace_us_;
   if (!this->pace_anchored_) {
     this->pace_anchor_us_ = now - produced;
     this->pace_anchored_ = true;
@@ -1399,9 +1395,9 @@ void GameEmulator::task_loop_() {
     if (this->core_->owns_loop())
       return;
     this->draw_frame_(this->core_->video());
-    const size_t frames = this->play_audio_();
+    this->play_audio_();
     this->finish_ppa_();
-    this->pace_(frames);
+    this->pace_();
   }
 }
 
@@ -1411,9 +1407,9 @@ bool GameEmulator::host_frame_cb_(void *ctx, uint16_t *pad1, uint16_t *pad2) {
 
 bool GameEmulator::host_frame_(uint16_t *pad1, uint16_t *pad2) {
   this->draw_frame_(this->core_->video());
-  const size_t frames = this->play_audio_();
+  this->play_audio_();
   this->finish_ppa_();
-  this->pace_(frames);
+  this->pace_();
   if (!this->park_())
     return false;
   uint16_t pads[2];
@@ -1543,11 +1539,11 @@ bool GameEmulator::draw_cpu_(const EmuVideo &video, uint8_t *fb) {
   return true;
 }
 
-size_t GameEmulator::play_audio_() {
+void GameEmulator::play_audio_() {
 #ifdef USE_SPEAKER
   speaker::Speaker *spk = this->parent_->speaker_;
   if (spk == nullptr)
-    return 0;
+    return;
   size_t frames = 0;
   const int16_t *pcm = this->core_->audio(&frames);
   if (pcm == nullptr || frames == 0) {
@@ -1562,9 +1558,6 @@ size_t GameEmulator::play_audio_() {
     data += written;
     left -= written;
   }
-  return frames;
-#else
-  return 0;
 #endif
 }
 
