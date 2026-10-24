@@ -6,6 +6,7 @@
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
+#include <esp_netif.h>
 #include <esp_random.h>
 #include <esp_vfs_eventfd.h>
 #include <freertos/idf_additions.h>
@@ -915,22 +916,13 @@ bool SipPhone::resolve_(const char *host, uint16_t port, struct sockaddr_in &out
   return true;
 }
 
-bool SipPhone::local_ip_for_(const struct sockaddr_in &dest) {
-  const int probe = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-  if (probe < 0)
+bool SipPhone::local_ip_for_(const struct sockaddr_in &) {
+  esp_netif_t *netif = esp_netif_get_default_netif();
+  esp_netif_ip_info_t info{};
+  if (netif == nullptr || esp_netif_get_ip_info(netif, &info) != ESP_OK || info.ip.addr == 0)
     return false;
-  bool ok = false;
-  if (::connect(probe, reinterpret_cast<const struct sockaddr *>(&dest), sizeof(dest)) == 0) {
-    struct sockaddr_in local {};
-    socklen_t len = sizeof(local);
-    if (::getsockname(probe, reinterpret_cast<struct sockaddr *>(&local), &len) == 0 &&
-        local.sin_addr.s_addr != 0) {
-      inet_ntoa_r(local.sin_addr, this->local_ip_, sizeof(this->local_ip_));
-      ok = true;
-    }
-  }
-  ::close(probe);
-  return ok;
+  esp_ip4addr_ntoa(&info.ip, this->local_ip_, sizeof(this->local_ip_));
+  return true;
 }
 
 void SipPhone::new_branch_(char *out, size_t len) {
