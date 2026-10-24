@@ -143,6 +143,23 @@ uint8_t USBHIDClient::get_device_kinds() const {
   return kinds;
 }
 
+uint8_t USBHIDClient::input_device_kinds() const {
+  uint8_t kinds = 0;
+  for (const auto *device : this->hid_devices_) {
+    if (!device->radio_)
+      kinds |= device->get_device_kinds();
+  }
+  return kinds;
+}
+
+bool USBHIDClient::is_radio(const std::string &key) const {
+  for (const auto *device : this->hid_devices_) {
+    if (device->device_key_ == key)
+      return device->radio_;
+  }
+  return false;
+}
+
 void USBHIDClient::list_devices(std::vector<hid::InputDevice> &out) const {
   for (const auto *device : this->hid_devices_) {
     if (!device->device_key_.empty())
@@ -338,6 +355,7 @@ bool USBHIDDevice::find_interfaces_() {
   if (cfg == nullptr || dev == nullptr)
     return false;
   const uint8_t mce = MCEReceiverDriver::model(dev->idVendor, dev->idProduct);
+  this->radio_ = dev->bDeviceClass == USB_CLASS_WIRELESS_CONTROLLER;
   Interface *current = nullptr;
   uint32_t skipped = 0;  // the current interface's endpoints its claim opens no pipe for
   int offset = 0;
@@ -346,6 +364,8 @@ bool USBHIDDevice::find_interfaces_() {
     if (desc->bDescriptorType == USB_W_VALUE_DT_INTERFACE) {
       const auto *intf = reinterpret_cast<const usb_intf_desc_t *>(desc);
       current = nullptr;
+      if (intf->bInterfaceClass == USB_CLASS_WIRELESS_CONTROLLER)
+        this->radio_ = true;
       if (intf->bAlternateSetting != 0 || !this->dev_->interface_routed(intf->bInterfaceNumber) ||
           this->interfaces_.size() >= MAX_INTERFACES)
         continue;

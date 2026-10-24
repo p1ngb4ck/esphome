@@ -87,6 +87,7 @@ class USBHIDDevice final : public hid::HIDInput {
   usb_host::UsbDevice *dev_;
   uint32_t serial_;  // unique per connection: a report queued for a device that is gone finds none
   std::vector<Interface> interfaces_{};
+  bool radio_{false};
   std::string device_key_;  // "usb:vvvv:pppp[:serial]"
   std::string device_name_;
   const char *device_label_() const override { return this->device_name_.c_str(); }
@@ -116,6 +117,8 @@ class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
   uint8_t get_device_kinds() const override;
   /// The devices connected.
   void list_devices(std::vector<hid::InputDevice> &out) const override;
+  uint8_t input_device_kinds() const;
+  bool is_radio(const std::string &key) const;
   void set_device_layout(const std::string &key, const hid::KeyboardLayout *layout) override;
   hid::HIDInput *device_input(const std::string &key) override;
 #ifdef USE_TEXT_SENSOR
