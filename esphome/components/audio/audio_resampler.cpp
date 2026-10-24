@@ -9,55 +9,6 @@
 namespace esphome::audio {
 
 static const uint32_t READ_WRITE_TIMEOUT_MS = 20;
-static const uint8_t MAX_MIXED_CHANNELS = 8;
-
-static inline int32_t read_sample(const uint8_t *p, size_t bytes) {
-  switch (bytes) {
-    case 2:
-      return static_cast<int32_t>(static_cast<uint32_t>(p[0]) << 16 | static_cast<uint32_t>(p[1]) << 24);
-    case 3:
-      return static_cast<int32_t>(static_cast<uint32_t>(p[0]) << 8 | static_cast<uint32_t>(p[1]) << 16 |
-                                  static_cast<uint32_t>(p[2]) << 24);
-    default:
-      return static_cast<int32_t>(static_cast<uint32_t>(p[0]) | static_cast<uint32_t>(p[1]) << 8 |
-                                  static_cast<uint32_t>(p[2]) << 16 | static_cast<uint32_t>(p[3]) << 24);
-  }
-}
-
-static inline void write_sample(uint8_t *p, int32_t value, size_t bytes) {
-  const uint32_t v = static_cast<uint32_t>(value);
-  for (size_t i = 0; i < bytes; i++)
-    p[i] = static_cast<uint8_t>(v >> (32 - 8 * (bytes - i)));
-}
-
-static void convert_frame(const uint8_t *src, uint8_t *dst, uint8_t in_ch, uint8_t out_ch, size_t bytes) {
-  int32_t in[MAX_MIXED_CHANNELS];
-  for (uint8_t c = 0; c < in_ch; c++)
-    in[c] = read_sample(src + c * bytes, bytes);
-  if (out_ch == 1) {
-    int64_t sum = 0;
-    for (uint8_t c = 0; c < in_ch; c++)
-      sum += in[c];
-    write_sample(dst, static_cast<int32_t>(sum / in_ch), bytes);
-    return;
-  }
-  for (uint8_t c = 0; c < out_ch; c++)
-    write_sample(dst + c * bytes, in[c % in_ch], bytes);
-}
-
-static void convert_channels(const uint8_t *src, uint8_t *dst, uint32_t frames, uint8_t in_ch, uint8_t out_ch,
-                             size_t bytes) {
-  const size_t in_frame = in_ch * bytes;
-  const size_t out_frame = out_ch * bytes;
-  if (out_frame <= in_frame) {
-    for (uint32_t f = 0; f < frames; f++)
-      convert_frame(src + f * in_frame, dst + f * out_frame, in_ch, out_ch, bytes);
-  } else {
-    for (uint32_t f = frames; f-- > 0;)
-      convert_frame(src + f * in_frame, dst + f * out_frame, in_ch, out_ch, bytes);
-  }
-}
-
 AudioResampler::AudioResampler(size_t input_buffer_size, size_t output_buffer_size)
     : input_buffer_size_(input_buffer_size), output_buffer_size_(output_buffer_size) {
   this->output_transfer_buffer_ = AudioSinkTransferBuffer::create(output_buffer_size);

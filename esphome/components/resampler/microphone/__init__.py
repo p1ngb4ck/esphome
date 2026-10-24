@@ -9,6 +9,7 @@ from esphome.const import (
     CONF_ID,
     CONF_MICROPHONE,
     CONF_NAME,
+    CONF_NUM_CHANNELS,
     CONF_SAMPLE_RATE,
     PLATFORM_ESP32,
 )
@@ -64,12 +65,14 @@ def _source_entry(value):
 def _same_format(config: ConfigType) -> ConfigType:
     # The users set up for one format: every source gives the same bits per sample and channel count
     sources = config[CONF_MICROPHONE]
+    converts_channels = CONF_NUM_CHANNELS in config
     for source in sources[1:]:
-        if source[CONF_BITS_PER_SAMPLE] != sources[0][CONF_BITS_PER_SAMPLE] or len(source[CONF_CHANNELS]) != len(
-            sources[0][CONF_CHANNELS]
+        if source[CONF_BITS_PER_SAMPLE] != sources[0][CONF_BITS_PER_SAMPLE] or (
+            not converts_channels and len(source[CONF_CHANNELS]) != len(sources[0][CONF_CHANNELS])
         ):
             raise cv.Invalid(
-                "every source of a resampler microphone needs the same bits_per_sample and number of channels",
+                "every source of a resampler microphone needs the same bits_per_sample and, without num_channels, "
+                "the same number of channels",
                 [CONF_MICROPHONE],
             )
     return config
@@ -81,8 +84,8 @@ def _set_stream_limits(config: ConfigType) -> ConfigType:
     audio.set_stream_limits(
         min_bits_per_sample=source[CONF_BITS_PER_SAMPLE],
         max_bits_per_sample=source[CONF_BITS_PER_SAMPLE],
-        min_channels=len(source[CONF_CHANNELS]),
-        max_channels=len(source[CONF_CHANNELS]),
+        min_channels=config.get(CONF_NUM_CHANNELS, len(source[CONF_CHANNELS])),
+        max_channels=config.get(CONF_NUM_CHANNELS, len(source[CONF_CHANNELS])),
         min_sample_rate=config[CONF_SAMPLE_RATE],
         max_sample_rate=config[CONF_SAMPLE_RATE],
     )(config)
@@ -99,6 +102,7 @@ CONFIG_SCHEMA = cv.All(
                 cv.Length(min=1),
             ),
             cv.Optional(CONF_SAMPLE_RATE, default=16000): cv.int_range(8000, 48000),
+            cv.Optional(CONF_NUM_CHANNELS): cv.int_range(1, 2),
             cv.Optional(CONF_FILTERS, default=16): cv.int_range(min=2, max=1024),
             cv.Optional(CONF_TAPS, default=16): validate_taps,
         }
@@ -149,5 +153,7 @@ async def to_code(config: ConfigType) -> None:
     await microphone.register_microphone(var, config)
 
     cg.add(var.set_target_sample_rate(config[CONF_SAMPLE_RATE]))
+    if CONF_NUM_CHANNELS in config:
+        cg.add(var.set_num_channels(config[CONF_NUM_CHANNELS]))
     cg.add(var.set_filters(config[CONF_FILTERS]))
     cg.add(var.set_taps(config[CONF_TAPS]))

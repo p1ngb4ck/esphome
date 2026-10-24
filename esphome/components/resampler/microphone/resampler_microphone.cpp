@@ -19,7 +19,8 @@ void ResamplerMicrophone::setup() {
   if (!this->sources_.empty()) {
     const audio::AudioStreamInfo input_stream_info = this->sources_[0].source->get_audio_stream_info();
     this->audio_stream_info_ = audio::AudioStreamInfo(input_stream_info.get_bits_per_sample(),
-                                                      input_stream_info.get_channels(), this->target_sample_rate_);
+                                                      this->output_channels_(input_stream_info.get_channels()),
+                                                      this->target_sample_rate_);
 
     // Allocate now for the expected source format; process_audio_ only sets up again if that format changes
     if (!this->init_resampler_(input_stream_info)) {
@@ -28,7 +29,8 @@ void ResamplerMicrophone::setup() {
     }
   } else if (!this->groups_.empty()) {
     this->audio_stream_info_ =
-        audio::AudioStreamInfo(this->groups_[0].bits_per_sample, __builtin_popcount(this->groups_[0].channels),
+        audio::AudioStreamInfo(this->groups_[0].bits_per_sample,
+                               this->output_channels_(__builtin_popcount(this->groups_[0].channels)),
                                this->target_sample_rate_);
   }
 
@@ -165,6 +167,15 @@ void ResamplerMicrophone::switch_source_(microphone::MicrophoneSource *next) {
   this->enable_loop();
 }
 
+void ResamplerMicrophone::set_target_format(uint32_t sample_rate, uint8_t num_channels) {
+  this->pending_sample_rate_ = sample_rate;
+  this->pending_num_channels_ = num_channels;
+  this->audio_stream_info_ =
+      audio::AudioStreamInfo(this->audio_stream_info_.get_bits_per_sample(),
+                             num_channels != 0 ? num_channels : this->audio_stream_info_.get_channels(), sample_rate);
+  this->format_pending_.store(true);
+}
+
 void ResamplerMicrophone::start() {
   if (this->is_failed() || this->active_listeners_ == UINT8_MAX)
     return;
@@ -249,7 +260,11 @@ bool ResamplerMicrophone::init_resampler_(const audio::AudioStreamInfo &input_st
     return false;
   }
 
-  this->output_buffer_.reserve(output_stream_info.ms_to_bytes(BUFFER_DURATION_MS));
+  const audio::AudioStreamInfo widest_stream_info(
+      input_stream_info.get_bits_per_sample(),
+      std::max(input_stream_info.get_channels(), this->output_channels_(input_stream_info.get_channels())),
+      this->target_sample_rate_);
+  this->output_buffer_.reserve(widest_stream_info.ms_to_bytes(BUFFER_DURATION_MS));
   this->resampler_ = std::move(resampler);
   // Only set on success, so a failed set up is retried with the next chunk
   this->input_stream_info_ = input_stream_info;
@@ -266,28 +281,50 @@ void ResamplerMicrophone::process_audio_(microphone::MicrophoneSource *source, c
 
 void ResamplerMicrophone::process_chunk_(microphone::MicrophoneSource *source, const std::vector<uint8_t> &data) {
   const audio::AudioStreamInfo input_stream_info = source->get_audio_stream_info();
-  if (input_stream_info != this->input_stream_info_) {
+  bool reinit = false;
+  if (this->format_pending_.exchange(false)) {
+    this->target_sample_rate_ = this->pending_sample_rate_;
+    this->num_channels_ = this->pending_num_channels_;
+    reinit = true;
+  }
+  if (reinit || input_stream_info != this->input_stream_info_) {
     this->init_resampler_(input_stream_info);
   }
   if (!this->resampler_ready_) {
     return;
   }
 
+  const uint8_t in_channels = input_stream_info.get_channels();
+  const uint8_t out_channels = this->output_channels_(in_channels);
+  const audio::AudioStreamInfo resampled_stream_info(input_stream_info.get_bits_per_sample(), in_channels,
+                                                     this->target_sample_rate_);
+  const audio::AudioStreamInfo output_stream_info(input_stream_info.get_bits_per_sample(), out_channels,
+                                                  this->target_sample_rate_);
+  const size_t sample_bytes = input_stream_info.samples_to_bytes(1);
+
   if (this->resampler_ == nullptr) {
-    this->data_callbacks_.call(data);
+    if (in_channels == out_channels) {
+      this->data_callbacks_.call(data);
+      return;
+    }
+    const uint32_t frames = input_stream_info.bytes_to_frames(data.size());
+    this->output_buffer_.resize(output_stream_info.frames_to_bytes(frames));
+    audio::convert_channels(data.data(), this->output_buffer_.data(), frames, in_channels, out_channels, sample_bytes);
+    this->data_callbacks_.call(this->output_buffer_);
     return;
   }
 
   const size_t input_bytes_per_frame = input_stream_info.frames_to_bytes(1);
   const uint32_t max_input_frames = input_stream_info.ms_to_frames(BUFFER_DURATION_MS);
   // Both limits match the sizes the resampler's internal buffers were allocated with in init_resampler_
-  const uint32_t max_output_frames = this->audio_stream_info_.ms_to_frames(BUFFER_DURATION_MS);
+  const uint32_t max_output_frames = resampled_stream_info.ms_to_frames(BUFFER_DURATION_MS);
+  const size_t widest_frame_bytes = sample_bytes * std::max(in_channels, out_channels);
 
   const uint8_t *input = data.data();
   uint32_t input_frames = input_stream_info.bytes_to_frames(data.size());
   while (input_frames > 0) {
     // Stays within the reserved capacity, so this never reallocates
-    this->output_buffer_.resize(this->audio_stream_info_.frames_to_bytes(max_output_frames));
+    this->output_buffer_.resize(max_output_frames * widest_frame_bytes);
 
     // The resampler's internal buffers hold at most BUFFER_DURATION_MS of audio, so feed it in steps of that size.
     // 0 dB keeps the microphone level that downstream detectors are tuned for; overshoot saturates instead of wrapping.
@@ -298,7 +335,11 @@ void ResamplerMicrophone::process_chunk_(microphone::MicrophoneSource *source, c
     input_frames -= results.frames_used;
 
     if (results.frames_generated > 0) {
-      this->output_buffer_.resize(this->audio_stream_info_.frames_to_bytes(results.frames_generated));
+      if (in_channels != out_channels) {
+        audio::convert_channels(this->output_buffer_.data(), this->output_buffer_.data(), results.frames_generated,
+                                in_channels, out_channels, sample_bytes);
+      }
+      this->output_buffer_.resize(output_stream_info.frames_to_bytes(results.frames_generated));
       this->data_callbacks_.call(this->output_buffer_);
     } else if (results.frames_used == 0) {
       break;  // No progress; drop the rest of the chunk instead of spinning

@@ -51,6 +51,8 @@ class ResamplerMicrophone final : public Component, public microphone::Microphon
   void stop() override;
 
   void set_target_sample_rate(uint32_t target_sample_rate) { this->target_sample_rate_ = target_sample_rate; }
+  void set_num_channels(uint8_t num_channels) { this->num_channels_ = num_channels; }
+  void set_target_format(uint32_t sample_rate, uint8_t num_channels);
   void set_filters(uint16_t filters) { this->filters_ = filters; }
   void set_taps(uint16_t taps) { this->taps_ = taps; }
 
@@ -75,6 +77,9 @@ class ResamplerMicrophone final : public Component, public microphone::Microphon
   /// @brief Sets up the resampler for the given input format. No resampler is needed if the sample rates match.
   /// @return false if the resampler failed to allocate; the audio is then dropped
   bool init_resampler_(const audio::AudioStreamInfo &input_stream_info);
+  uint8_t output_channels_(uint8_t input_channels) const {
+    return this->num_channels_ != 0 ? this->num_channels_ : input_channels;
+  }
 
   /// @brief Resamples a chunk of source audio and passes it to the data callbacks. Source microphone task only.
   void process_audio_(microphone::MicrophoneSource *source, const std::vector<uint8_t> &data);
@@ -119,10 +124,14 @@ class ResamplerMicrophone final : public Component, public microphone::Microphon
   audio::AudioStreamInfo input_stream_info_;
 
   uint32_t target_sample_rate_;
+  uint32_t pending_sample_rate_{0};
+  std::atomic<bool> format_pending_{false};
   uint16_t taps_;
   uint16_t filters_;
 
   uint8_t active_listeners_{0};
+  uint8_t num_channels_{0};
+  uint8_t pending_num_channels_{0};
   bool resampler_ready_{false};
 };
 

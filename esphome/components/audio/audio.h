@@ -202,4 +202,9 @@ inline void pack_q31_as_audio_sample(int32_t sample, uint8_t *data, size_t bytes
   }
 }
 
+static constexpr uint8_t MAX_MIXED_CHANNELS = 8;
+
+void convert_channels(const uint8_t *src, uint8_t *dst, uint32_t frames, uint8_t in_ch, uint8_t out_ch,
+                      size_t bytes);
+
 }  // namespace esphome::audio
