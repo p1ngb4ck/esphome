@@ -1,8 +1,11 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "emu_mem.h"
 
 #ifdef __cplusplus
 extern "C" {
