@@ -75,12 +75,22 @@ static const char *button_text(uint8_t button) {
 }
 
 void ControlsTouchListener::update(const touchscreen::TouchPoints_t &points) {
+#ifdef SVP_EMULATOR
+  if (this->parent_->game_touch(static_cast<uint8_t>(points.size())))
+    return;
+#endif
   if (points.empty())
     return;
   this->parent_->controls_touch(true, points[0].x, points[0].y);
 }
 
-void ControlsTouchListener::release() { this->parent_->controls_touch(false, 0, 0); }
+void ControlsTouchListener::release() {
+#ifdef SVP_EMULATOR
+  if (this->parent_->game_touch(0))
+    return;
+#endif
+  this->parent_->controls_touch(false, 0, 0);
+}
 
 //========================================================================
 // Building the bar (setup, LVGL thread)
@@ -134,9 +144,18 @@ void SimpleVideoPlayer::controls_setup_() {
   lv_style_set_bg_opa(&this->ctl_indicator_style_, LV_OPA_COVER);
 
 #ifdef SVP_DSI_OUTPUT
+  bool listening = false;
   if (this->ctl_video_.enabled && this->dsi_ != nullptr && this->build_controls_bar_(this->ctl_video_) &&
-      this->ctl_touchscreen_ != nullptr)
+      this->ctl_touchscreen_ != nullptr) {
     this->ctl_touchscreen_->register_listener(&this->ctl_listener_);
+    listening = true;
+  }
+#ifdef SVP_EMULATOR
+  if (!listening && this->emu_ != nullptr && this->ctl_touchscreen_ != nullptr)
+    this->ctl_touchscreen_->register_listener(&this->ctl_listener_);
+#else
+  (void) listening;
+#endif
 #endif
 #ifdef SVP_PICTURES
   if (this->ctl_picture_.enabled && this->pic_canvas_ != nullptr)

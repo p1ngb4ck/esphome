@@ -105,6 +105,8 @@ class GameEmulator
 
   bool start(const std::string &path);
   void stop();
+  void touch(uint8_t fingers);
+  bool closed_home() const { return this->closed_home_; }
   void pause();
   void resume();
   bool save_state(uint8_t slot);
@@ -127,6 +129,8 @@ class GameEmulator
 #ifdef USE_LVGL_HID
   bool paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action, uint32_t codepoint,
                   bool level3, uint32_t source) override;
+  bool game_key_(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action, uint32_t codepoint,
+                 bool level3, uint32_t source);
   bool key_tap(uint32_t source, const char *label, uint16_t page, uint16_t usage, bool pressed) override;
   bool paused_text(uint32_t codepoint) override { return true; }
   bool paused_pointer(int16_t dx, int16_t dy, int16_t wheel, uint8_t buttons) override { return true; }
@@ -324,6 +328,11 @@ class GameEmulator
   ppa_srm_rotation_angle_t ppa_rotation_{PPA_SRM_ROTATION_ANGLE_0};
   display::DisplayRotation rotation_{display::DISPLAY_ROTATION_0_DEGREES};
   uint8_t black_{0};
+  bool closed_home_{false};
+#ifdef SVP_SPICE
+  void close_check_();
+  SimpleVideoPlayer::DesktopClose closing_;
+#endif
   uint16_t lay_w_{0};
   uint16_t lay_h_{0};
   uint8_t *silence_{nullptr};

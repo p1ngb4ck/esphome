@@ -188,6 +188,7 @@ bool GameEmulator::start_(const std::string &path, bool assign) {
     ESP_LOGE(TAG, "No configured system for %s", path.c_str());
     return false;
   }
+  this->closed_home_ = false;
   SimpleVideoPlayer *p = this->parent_;
   if (p->dsi_ == nullptr || !p->direct_flips_()) {
     ESP_LOGE(TAG, "Games need the display's direct output with two scanout buffers");
@@ -515,6 +516,45 @@ void GameEmulator::fail_(const char *why) {
   }
   this->end_();
 }
+
+bool SimpleVideoPlayer::game_touch(uint8_t fingers) {
+  if (this->emu_ == nullptr || this->emu_->state() != GameEmulator::State::RUNNING)
+    return false;
+  this->emu_->touch(fingers);
+  return true;
+}
+
+void GameEmulator::touch(uint8_t fingers) {
+#ifdef SVP_SPICE
+  if (fingers >= 2) {
+    if (this->closing_.two_fingers(true))
+      this->close_check_();
+  } else if (this->closing_.fingers) {
+    this->closing_.two_fingers(false);
+    this->close_check_();
+  }
+#endif
+}
+
+#ifdef SVP_SPICE
+void GameEmulator::close_check_() {
+  const uint32_t due = this->closing_.due(this->parent_);
+  if (due == UINT32_MAX) {
+    App.scheduler.cancel_timeout(this->parent_, "emu_close");
+    return;
+  }
+  if (due != 0) {
+    App.scheduler.set_timeout(this->parent_, "emu_close", due, [this]() { this->close_check_(); });
+    return;
+  }
+  this->closing_ = SimpleVideoPlayer::DesktopClose{};
+  if (this->state_ != State::RUNNING && this->state_ != State::PAUSED)
+    return;
+  ESP_LOGI(TAG, "Closed by holding");
+  this->closed_home_ = true;
+  this->stop();
+}
+#endif
 
 void GameEmulator::stop() {
   switch (this->state_) {
@@ -1495,6 +1535,25 @@ void SimpleVideoPlayer::on_svp_emu_join(std::string host) { this->emu_->link_joi
 #ifdef USE_LVGL_HID
 bool GameEmulator::paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action,
                               uint32_t codepoint, bool level3, uint32_t source) {
+#ifdef SVP_SPICE
+  if (this->state_ == State::RUNNING || this->closing_.key_held) {
+    const auto took = this->closing_.key(this->parent_, static_cast<uint8_t>(action), page, usage, pressed);
+    if (took == SimpleVideoPlayer::DesktopClose::TAKEN) {
+      this->close_check_();
+      return true;
+    }
+    if (took == SimpleVideoPlayer::DesktopClose::TAPPED) {
+      this->close_check_();
+      this->game_key_(page, usage, mods, true, action, codepoint, level3, source);
+      return this->game_key_(page, usage, mods, false, action, codepoint, level3, source);
+    }
+  }
+#endif
+  return this->game_key_(page, usage, mods, pressed, action, codepoint, level3, source);
+}
+
+bool GameEmulator::game_key_(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action,
+                             uint32_t codepoint, bool level3, uint32_t source) {
   for (size_t i = 0; i < this->menu_key_count_; i++) {
     if (this->menu_keys_[i].page == page && this->menu_keys_[i].usage == usage) {
       if (pressed && this->state_ == State::RUNNING)

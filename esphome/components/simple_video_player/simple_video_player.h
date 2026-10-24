@@ -913,6 +913,7 @@ class SimpleVideoPlayer : public Component
 #ifdef SVP_EMULATOR
   GameEmulator *make_emulator();
   GameEmulator *get_emulator() const { return this->emu_; }
+  bool game_touch(uint8_t fingers);
 #ifdef SVP_MEDIA_PLAYER
   void on_svp_emu_start(std::string path);
   void on_svp_emu_stop();
