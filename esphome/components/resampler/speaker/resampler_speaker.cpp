@@ -138,6 +138,8 @@ void ResamplerSpeaker::add_group_output(size_t group, speaker::Speaker *speaker,
   if (this->output_speaker_ == nullptr) {
     this->apply_output_(speaker);
     this->pending_speaker_ = speaker;
+    speaker->set_volume(this->volume_);
+    speaker->set_mute_state(this->mute_state_);
     this->output_callback_.call(this->active_);
   } else {
     this->active_ = this->index_of_(this->output_speaker_);
