@@ -5,6 +5,7 @@
 #include "esphome/components/web_server_idf/web_server_idf.h"
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
+#include "esphome/core/static_task.h"
 
 #include <esp_http_server.h>
 
@@ -28,7 +29,8 @@ void WebServerFileApi::setup() {
   // Async downloads (tier 1): bounded pipeline of one transfer task + small pointer queue.
   this->dl_queue_ = xQueueCreate(DL_QUEUE_DEPTH, sizeof(DownloadJob *));
   if (this->dl_queue_ != nullptr) {
-    xTaskCreate(WebServerFileApi::download_task_trampoline_, "fileapi_dl", 6144, this, 3, &this->dl_task_);
+    xTaskCreatePinnedToCore(WebServerFileApi::download_task_trampoline_, "fileapi_dl", 6144, this, 3, &this->dl_task_,
+                            LOOP_TASK_CORE);
   }
   this->op_done_ = xSemaphoreCreateBinary();
   this->base_->add_handler(this);

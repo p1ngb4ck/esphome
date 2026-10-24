@@ -7,6 +7,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/application.h"
+#include "esphome/core/static_task.h"
 #include "esphome/components/bytebuffer/bytebuffer.h"
 
 #include <cinttypes>
@@ -330,7 +331,8 @@ void USBClient::setup() {
   // bulk packets where one on the full-speed controller sees 64, and both run at the same
   // time from this same code. The pool is allocated in handle_open_state_() once the
   // descriptors say what this device needs, and released again in disconnect().
-  xTaskCreate(usb_task_fn, "usb_task", USB_TASK_STACK_SIZE, this, USB_TASK_PRIORITY, &this->usb_task_handle_);
+  xTaskCreatePinnedToCore(usb_task_fn, "usb_task", USB_TASK_STACK_SIZE, this, USB_TASK_PRIORITY,
+                          &this->usb_task_handle_, LOOP_TASK_CORE);
   if (this->usb_task_handle_ == nullptr) {
     ESP_LOGE(TAG, "Failed to create USB task");
     this->mark_failed();

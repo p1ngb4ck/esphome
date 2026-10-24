@@ -482,7 +482,7 @@ esp_err_t ResamplerSpeaker::start_() {
   if (this->resampling_) {
     // Start the resampler task to handle converting sample rates
     if (!this->task_.create(resample_task, "resampler", TASK_STACK_SIZE, (void *) this, RESAMPLER_TASK_PRIORITY,
-                            this->task_stack_in_psram_)) {
+                            this->task_stack_in_psram_, LOOP_TASK_CORE)) {
       return ESP_ERR_NO_MEM;
     }
   }

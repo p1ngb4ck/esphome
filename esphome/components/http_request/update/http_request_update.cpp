@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "esphome/core/application.h"
+#include "esphome/core/static_task.h"
 #include "esphome/core/version.h"
 
 #include "esphome/components/json/json_util.h"
@@ -110,7 +111,8 @@ void HttpRequestUpdate::update() {
   this->begin_check_(result);
 #ifdef USE_ESP32
   this->task_result_ = result;
-  if (xTaskCreate(HttpRequestUpdate::update_task, "update_task", 8192, result, 1, nullptr) != pdPASS) {
+  if (xTaskCreatePinnedToCore(HttpRequestUpdate::update_task, "update_task", 8192, result, 1, nullptr,
+                              LOOP_TASK_CORE) != pdPASS) {
     this->task_result_ = nullptr;
     this->end_check_(result);
     delete result;

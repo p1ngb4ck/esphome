@@ -7,6 +7,7 @@
 
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
+#include "esphome/core/static_task.h"
 
 #include "esphome/components/audio/audio.h"
 
@@ -437,8 +438,8 @@ void I2SAudioMicrophone::loop() {
       }
 
       if (this->task_handle_ == nullptr) {
-        xTaskCreate(I2SAudioMicrophone::mic_task, "mic_task", TASK_STACK_SIZE, (void *) this, TASK_PRIORITY,
-                    &this->task_handle_);
+        xTaskCreatePinnedToCore(I2SAudioMicrophone::mic_task, "mic_task", TASK_STACK_SIZE, (void *) this,
+                                TASK_PRIORITY, &this->task_handle_, LOOP_TASK_CORE);
 
         if (this->task_handle_ == nullptr) {
           ESP_LOGE(TAG, "Task failed to start, retrying in 1 second");

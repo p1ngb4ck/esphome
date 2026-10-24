@@ -374,7 +374,7 @@ void MixerSpeaker::loop() {
     // Only start the task if it's fully stopped and cleaned up
     if (!this->status_has_error() && !this->task_.is_created()) {
       if (this->task_.create(audio_mixer_task, "mixer", TASK_STACK_SIZE, (void *) this, MIXER_TASK_PRIORITY,
-                             this->task_stack_in_psram_)) {
+                             this->task_stack_in_psram_, LOOP_TASK_CORE)) {
         xEventGroupClearBits(this->event_group_, MIXER_TASK_COMMAND_START);
       } else {
         ESP_LOGE(TAG, "Failed to start; retrying in 1 second");

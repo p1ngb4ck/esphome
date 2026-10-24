@@ -161,7 +161,7 @@ void USBAudioClient::setup() {
                                          &this->ctrl_queue_struct_);
   if (this->ctrl_queue_ == nullptr ||
       !this->ctrl_task_.create(&USBAudioClient::ctrl_task, "usb_audio_ctl", CTRL_TASK_STACK_SIZE, this,
-                               CTRL_TASK_PRIORITY, true)) {
+                               CTRL_TASK_PRIORITY, true, LOOP_TASK_CORE)) {
     this->mark_failed(LOG_STR("Failed to create control task"));
     return;
   }
@@ -175,7 +175,7 @@ void USBAudioClient::setup() {
     this->capture_buffer_.reserve(this->mic_buf_size_);
     if (this->capture_lock_ == nullptr ||
         !this->capture_task_.create(&USBAudioClient::capture_task, "usb_mic", CAPTURE_TASK_STACK_SIZE, this,
-                                    CAPTURE_TASK_PRIORITY, true)) {
+                                    CAPTURE_TASK_PRIORITY, true, LOOP_TASK_CORE)) {
       this->mark_failed(LOG_STR("Failed to create microphone task"));
       return;
     }

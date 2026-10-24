@@ -1,5 +1,6 @@
 #include "storage_worker.h"
 #include "esphome/core/log.h"
+#include "esphome/core/static_task.h"
 #include "esphome/core/wake.h"
 
 #include <cstring>
@@ -114,8 +115,8 @@ void StorageWorker::ensure_started_() {
   // ESP-IDF's xTaskCreate takes the stack size in bytes (unlike vanilla FreeRTOS, which uses
   // words) -- task_stack_size_ is passed through unconverted, same as other components' task
   // creation (see e.g. zigbee_esp32.cpp, usb_cdc_acm_esp32.cpp).
-  BaseType_t ok = xTaskCreate(&StorageWorker::task_fn, "storage_worker", this->task_stack_size_, this,
-                              this->task_priority_, &this->task_handle_);
+  BaseType_t ok = xTaskCreatePinnedToCore(&StorageWorker::task_fn, "storage_worker", this->task_stack_size_, this,
+                                          this->task_priority_, &this->task_handle_, LOOP_TASK_CORE);
   if (ok != pdPASS) {
     ESP_LOGE(TAG, "Failed to create worker task -- falling back to loop-sliced mode only");
     this->task_handle_ = nullptr;

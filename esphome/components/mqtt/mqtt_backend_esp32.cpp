@@ -7,6 +7,7 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
+#include "esphome/core/static_task.h"
 
 #ifdef USE_MQTT_CERT_BUNDLE
 #include "esp_crt_bundle.h"
@@ -86,7 +87,8 @@ bool MQTTBackendESP32::initialize_() {
 #else
     constexpr size_t stack_size = TASK_STACK_SIZE;
 #endif
-    xTaskCreate(esphome_mqtt_task, "esphome_mqtt", stack_size, (void *) this, TASK_PRIORITY, &this->task_handle_);
+    xTaskCreatePinnedToCore(esphome_mqtt_task, "esphome_mqtt", stack_size, (void *) this, TASK_PRIORITY,
+                            &this->task_handle_, LOOP_TASK_CORE);
     if (this->task_handle_ == nullptr) {
       ESP_LOGE(TAG, "Failed to create MQTT task");
       // Clean up MQTT client since we can't start the async task

@@ -11,6 +11,12 @@
 
 namespace esphome {
 
+#if CONFIG_FREERTOS_UNICORE
+static constexpr BaseType_t LOOP_TASK_CORE = tskNO_AFFINITY;
+#else
+static constexpr BaseType_t LOOP_TASK_CORE = 1;
+#endif
+
 /** Helper for FreeRTOS static task management.
  * Stores the TCB in internal RAM and manages the stack buffer with create/destroy methods.
  * Call destroy() and deallocate() from another task: a task cannot free the stack it is still running on.

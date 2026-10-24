@@ -2,6 +2,7 @@
 
 #include "usb_bluetooth.h"
 #include "esphome/core/log.h"
+#include "esphome/core/static_task.h"
 #include "usb/usb_helpers.h"
 
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
@@ -361,7 +362,8 @@ void USBBluetooth::start_bluedroid_() {
   }
   this->stack_attached_.store(true, std::memory_order_release);
   g_stack_started = true;
-  if (xTaskCreate(bluedroid_start_task, "usb_bt_start", 4096, nullptr, 5, nullptr) != pdPASS)
+  if (xTaskCreatePinnedToCore(bluedroid_start_task, "usb_bt_start", 4096, nullptr, 5, nullptr, LOOP_TASK_CORE) !=
+      pdPASS)
     ESP_LOGE(TAG, "Starting Bluedroid failed: no task");
 }
 #endif

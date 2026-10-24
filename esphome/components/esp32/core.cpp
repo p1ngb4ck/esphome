@@ -3,6 +3,7 @@
 #include "esphome/core/application.h"
 #include "esphome/core/defines.h"
 #include "esphome/core/helpers.h"
+#include "esphome/core/static_task.h"
 #include "preferences.h"
 #include <cstring>
 #include <freertos/FreeRTOS.h>
@@ -128,7 +129,7 @@ extern "C" void app_main() {
   xTaskCreateStatic(loop_task, "loopTask", ESPHOME_LOOP_TASK_STACK_SIZE, nullptr, 1, loop_task_stack, &loop_task_tcb);
 #else
   xTaskCreateStaticPinnedToCore(loop_task, "loopTask", ESPHOME_LOOP_TASK_STACK_SIZE, nullptr, 1, loop_task_stack,
-                                &loop_task_tcb, 1);
+                                &loop_task_tcb, LOOP_TASK_CORE);
 #endif
 }
 

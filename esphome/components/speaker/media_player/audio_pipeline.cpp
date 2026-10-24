@@ -265,7 +265,8 @@ esp_err_t AudioPipeline::start_tasks_() {
     // Reader task uses the AudioReader class which uses esp_http_client. This crashes on IDF 5.4 if the task stack is
     // in PSRAM. As a workaround, always allocate the read task in internal memory.
     snprintf(task_name, sizeof(task_name), "%s_read", this->base_name_);
-    if (!this->read_task_.create(read_task, task_name, READ_TASK_STACK_SIZE, (void *) this, this->priority_, false)) {
+    if (!this->read_task_.create(read_task, task_name, READ_TASK_STACK_SIZE, (void *) this, this->priority_, false,
+                                 LOOP_TASK_CORE)) {
       return ESP_ERR_NO_MEM;
     }
   }
@@ -275,7 +276,7 @@ esp_err_t AudioPipeline::start_tasks_() {
     // and the sound does not wait for them. The reader fills its ring as fast as the source gives.
     snprintf(task_name, sizeof(task_name), "%s_decode", this->base_name_);
     if (!this->decode_task_.create(decode_task, task_name, DECODE_TASK_STACK_SIZE, (void *) this, this->priority_ + 1,
-                                   this->task_stack_in_psram_)) {
+                                   this->task_stack_in_psram_, LOOP_TASK_CORE)) {
       return ESP_ERR_NO_MEM;
     }
   }
