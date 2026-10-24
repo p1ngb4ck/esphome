@@ -158,16 +158,16 @@ void CSystem::Init(const UBYTE* filedata, ULONG filesize, long displayformat, lo
    // Now try and determine the filetype we have opened
    if (!filedata || filesize < 16) {
       mFileType = HANDY_FILETYPE_ILLEGAL;
-      mCart = emu_new<CCart>(0, 0);
-      mRam = emu_new<CRam>(0, 0);
+      mCart = emu_new<CCart>(nullptr, 0);
+      mRam = emu_new<CRam>(nullptr, 0);
    } else if (!memcmp(filedata + 6, "BS93", 4)) {
       mFileType = HANDY_FILETYPE_HOMEBREW;
-      mCart = emu_new<CCart>(0, 0);
+      mCart = emu_new<CCart>(nullptr, 0);
       mRam = emu_new<CRam>(filedata, filesize);
    } else {
       mFileType = memcmp(filedata, "LYNX", 4) ? HANDY_FILETYPE_RAW : HANDY_FILETYPE_LNX;
       mCart = emu_new<CCart>(filedata, filesize);
-      mRam = emu_new<CRam>(0, 0);
+      mRam = emu_new<CRam>(nullptr, 0);
 
       // Setup BIOS
       memset(mBiosRom, 0x88, sizeof(mBiosRom));
