@@ -41,6 +41,7 @@ static const char *const R_FULL = "The screencast reached its longest length";
 static const char *const R_CAPTURE = "The screen capture stopped";
 static const char *const R_BUSY = "A screenshot is still being written";
 static const char *const R_TARGET = "Nowhere to write the screencast";
+static const char *const R_CAMERA = "The camera stopped";
 
 void SimpleVideoPlayer::capture_setup_() {
   if (this->cast_dir_.empty())
@@ -273,6 +274,8 @@ void SimpleVideoPlayer::capture_task_loop_() {
     xTaskNotifyWait(0, UINT32_MAX, &bits, portMAX_DELAY);
     if (bits & CAPN_SYNC)
       this->capture_sync_();
+    if (bits & CAPN_CAM)
+      this->capture_camera_();
     if (bits & CAPN_SHOT) {
       // A screenshot of its own (no screencast): its picture into its JPEG buffer.
       uint32_t len = 0;
@@ -362,6 +365,53 @@ bool SimpleVideoPlayer::capture_encode_(const uint8_t *picture, uint8_t *out, ui
     return false;
   }
   return true;
+}
+
+void SimpleVideoPlayer::capture_camera_() {
+  if (!this->cam_cap_busy_.load(std::memory_order_acquire))
+    return;
+  uint8_t *out = nullptr;
+  if (this->cam_cap_shot_) {
+    out = this->cap_jpeg_[0] + CAP_PREFIX;
+  } else if (this->cap_casting_.load(std::memory_order_acquire)) {
+    const uint8_t target = this->cap_wjpeg_ ^ 1;
+    if (this->cap_jpeg_users_[target].load(std::memory_order_acquire) == 0)
+      out = this->cap_jpeg_[target] + CAP_PREFIX;
+  }
+  uint32_t len = 0;
+  bool ok = false;
+  if (out != nullptr) {
+    if (this->cam_cap_format_ == CameraFrameFormat::MJPEG) {
+      ok = this->cam_cap_len_ <= CAP_JPEG_ROOM;
+      if (ok) {
+        std::memcpy(out, this->cam_cap_data_, this->cam_cap_len_);
+        len = static_cast<uint32_t>(this->cam_cap_len_);
+      }
+    } else {
+      jpeg_encode_cfg_t cfg{};
+      cfg.width = this->cam_cap_w_;
+      cfg.height = this->cam_cap_h_;
+      cfg.src_type = this->cam_cap_format_ == CameraFrameFormat::RGB565 ? JPEG_ENCODE_IN_FORMAT_RGB565
+                                                                         : JPEG_ENCODE_IN_FORMAT_YUV422;
+      cfg.sub_sample = JPEG_DOWN_SAMPLING_YUV422;
+      cfg.image_quality = this->cap_quality_.load(std::memory_order_relaxed);
+      const uint32_t in_size = static_cast<uint32_t>(this->cam_cap_w_) * this->cam_cap_h_ * 2;
+      ok = jpeg_encoder_process(this->cap_encoder_, &cfg, this->cam_cap_data_, in_size, out, CAP_JPEG_ROOM, &len) ==
+           ESP_OK;
+      if (!ok)
+        this->cap_enc_errors_++;
+    }
+  }
+  if (this->cam_cap_shot_) {
+    this->shot_data_ = out;
+    this->shot_len_ = ok ? len : 0;
+    this->shot_ready_.store(true, std::memory_order_release);
+  } else if (ok) {
+    this->cap_elen_ = len;
+    this->cap_ejpeg_ready_ = true;
+  }
+  this->cam_cap_finished_.store(true, std::memory_order_release);
+  App.wake_loop_threadsafe();
 }
 
 // A tick: the front picture into the JPEG buffer not written out, when it changed since.
@@ -637,6 +687,134 @@ bool SimpleVideoPlayer::screencast_start() {
     this->cap_swaps_.store(0, std::memory_order_relaxed);
     lv_obj_invalidate(lv_screen_active());
   }
+  this->cap_camera_ = false;
+  this->cast_prefix_ = "screencast_";
+  return this->capture_cast_begin_(target);
+}
+
+bool SimpleVideoPlayer::camera_screenshot() {
+  auto refuse = [this](const char *why) {
+    ESP_LOGW(TAG, "No camera screenshot: %s", why);
+    this->shot_trigger_.trigger(std::string());
+    return false;
+  };
+  if (this->shot_busy_ || this->cam_cap_ != 0)
+    return refuse(R_BUSY);
+  if (this->shot_dir_.empty())
+    return refuse("no screenshot folder");
+  this->shot_path_ = this->capture_name_(this->shot_dir_, "camera_", ".jpg");
+  if (this->cap_camera_ && this->cast_state_ == CAST_RUNNING) {
+    this->shot_busy_ = true;
+    this->cap_shot_cast_.store(true, std::memory_order_release);
+    this->capture_notify_(CAPN_CAST_SHOT);
+    return true;
+  }
+  if (this->cast_state_ != CAST_IDLE)
+    return refuse("a screencast runs");
+  if (!this->capture_ready_())
+    return refuse(R_CAPTURE);
+  this->cap_jpeg_[0] = this->pool_take_(CAP_JPEG_BYTES, POOL_USER_CAPTURE);
+  if (this->cap_jpeg_[0] == nullptr)
+    return refuse("no memory for it");
+  this->shot_busy_ = true;
+  this->shot_jpeg_ = -1;
+  this->cam_cap_ = 1;
+  return true;
+}
+
+bool SimpleVideoPlayer::camera_record_start(uint16_t width, uint16_t height) {
+  auto refuse = [this](const char *why) {
+    ESP_LOGW(TAG, "No camera recording: %s", why);
+    this->cast_stopped_trigger_.trigger(std::string(why));
+    return false;
+  };
+  if (this->cast_state_ != CAST_IDLE)
+    return false;
+  if (this->shot_busy_)
+    return refuse(R_BUSY);
+  if (width == 0 || height == 0)
+    return refuse(R_CAMERA);
+  if (this->cast_dir_.empty())
+    return refuse(R_TARGET);
+  if (!this->capture_ready_())
+    return refuse(R_CAPTURE);
+  auto take = [this](size_t size) { return this->pool_take_(size, POOL_USER_CAPTURE); };
+  bool ok = (this->cap_jpeg_[0] = take(CAP_JPEG_BYTES)) != nullptr &&
+            (this->cap_jpeg_[1] = take(CAP_JPEG_BYTES)) != nullptr &&
+            (this->cap_index_ = take(CAP_INDEX_BYTES)) != nullptr;
+#ifdef SVP_CAPTURE_MIC
+  if (ok && this->cast_sound_ && this->cap_mic_ != nullptr)
+    ok = (this->cap_pcm_ = take(CAP_PCM_BYTES)) != nullptr;
+#endif
+  if (!ok) {
+    this->capture_free_frames_();
+    this->capture_free_rest_();
+    return refuse(R_MEMORY);
+  }
+  this->cap_w_ = width;
+  this->cap_h_ = height;
+  this->cap_rects_n_ = 0;
+  this->cap_need_take_ = false;
+  this->cap_single_ = false;
+  this->cap_broken_.store(false, std::memory_order_relaxed);
+  this->cap_sync_busy_.store(false, std::memory_order_relaxed);
+  this->cap_owner_.store(CAP_OWNER_FREE, std::memory_order_relaxed);
+  this->cap_front_.store(0, std::memory_order_relaxed);
+  this->cap_back_ = 1;
+  this->cap_swaps_.store(0, std::memory_order_relaxed);
+  this->cam_cap_last_ = 0;
+  this->cap_camera_ = true;
+  this->cast_prefix_ = "camera_";
+  return this->capture_cast_begin_(CAST_LOCAL);
+}
+
+void SimpleVideoPlayer::camera_record_stop() {
+  if (this->cap_camera_)
+    this->capture_end_("");
+}
+
+void SimpleVideoPlayer::camera_capture_end() {
+  if (this->cam_cap_ == 1 && !this->cam_cap_busy_.load(std::memory_order_acquire)) {
+    this->cam_cap_ = 0;
+    this->shot_done_(false);
+  }
+  if (this->cap_camera_)
+    this->capture_end_(R_CAMERA);
+}
+
+bool SimpleVideoPlayer::camera_capture_frame(const uint8_t *data, size_t length, CameraFrameFormat format,
+                                             uint16_t width, uint16_t height, std::function<void()> &&done) {
+  const bool recording = this->cap_camera_ && this->cast_state_ == CAST_RUNNING;
+  if (data == nullptr || (this->cam_cap_ == 0 && !recording) || format == CameraFrameFormat::YUYV ||
+      this->cam_cap_busy_.load(std::memory_order_acquire))
+    return false;
+  if (this->cam_cap_ == 0) {
+    if (width != this->cap_w_ || height != this->cap_h_)
+      return false;
+    const uint32_t now = millis();
+    if (this->cam_cap_last_ != 0 && now - this->cam_cap_last_ < 1000u / this->cast_fps_)
+      return false;
+    this->cam_cap_last_ = now;
+  }
+  this->cam_cap_shot_ = this->cam_cap_ == 1;
+  this->cam_cap_ = 0;
+  this->cam_cap_data_ = data;
+  this->cam_cap_len_ = length;
+  this->cam_cap_format_ = format;
+  this->cam_cap_w_ = width;
+  this->cam_cap_h_ = height;
+  this->cam_cap_done_ = std::move(done);
+  this->cam_cap_busy_.store(true, std::memory_order_release);
+  this->capture_notify_(CAPN_CAM);
+  return true;
+}
+
+bool SimpleVideoPlayer::capture_cast_begin_(uint8_t target) {
+  auto refuse = [this](const char *why) {
+    ESP_LOGW(TAG, "No screencast: %s", why);
+    this->cast_stopped_trigger_.trigger(std::string(why));
+    return false;
+  };
   this->cap_encoded_swaps_ = 0;
   this->cap_wjpeg_ = 0;
   this->cap_wlen_ = 0;
@@ -672,6 +850,7 @@ bool SimpleVideoPlayer::screencast_start() {
                             CAP_JPEG_ROOM, this->cap_index_, CAP_INDEX_BYTES)) {
     this->capture_free_frames_();
     this->capture_free_rest_();
+    this->cap_camera_ = false;
     return refuse(R_CAPTURE);
   }
   // The header first, for both: the file's and the stream's (the sizes come with the file's end).
@@ -728,6 +907,13 @@ bool SimpleVideoPlayer::capture_give_back_(uint8_t user) {
 }
 
 void SimpleVideoPlayer::capture_loop_() {
+  if (this->cam_cap_finished_.exchange(false, std::memory_order_acq_rel)) {
+    auto done = std::move(this->cam_cap_done_);
+    this->cam_cap_done_ = nullptr;
+    this->cam_cap_busy_.store(false, std::memory_order_release);
+    if (done)
+      done();
+  }
   // A screenshot's JPEG is there: into its file.
   if (this->shot_ready_.load(std::memory_order_acquire)) {
     this->shot_ready_.store(false, std::memory_order_relaxed);
@@ -779,7 +965,8 @@ void SimpleVideoPlayer::capture_loop_() {
       // Running: LVGL's drawing, the sound and the tick.
       this->cast_state_ = CAST_RUNNING;
       this->cap_casting_.store(true, std::memory_order_release);
-      this->lvgl_component_->set_frame_capture(&this->cap_sink_);
+      if (!this->cap_camera_)
+        this->lvgl_component_->set_frame_capture(&this->cap_sink_);
 #ifdef SVP_CAPTURE_MIC
       if (this->cap_ring_ != nullptr) {
         this->cap_ring_->reset();
@@ -824,7 +1011,8 @@ void SimpleVideoPlayer::capture_loop_() {
       !this->cap_sync_busy_.load(std::memory_order_acquire)) {
     if (this->cap_casting_.load(std::memory_order_relaxed)) {
       this->cap_casting_.store(false, std::memory_order_release);
-      this->lvgl_component_->set_frame_capture(nullptr);
+      if (!this->cap_camera_)
+        this->lvgl_component_->set_frame_capture(nullptr);
 #ifdef SVP_CAPTURE_MIC
       this->cap_ring_raw_.store(nullptr, std::memory_order_release);
       if (this->cap_mic_on_) {
@@ -834,8 +1022,10 @@ void SimpleVideoPlayer::capture_loop_() {
 #endif
     }
     // A screenshot of the screencast still writing a JPEG keeps them.
-    if (this->cap_frame_[0] != nullptr && this->cap_jpeg_users_[0].load(std::memory_order_acquire) == 0 &&
-        this->cap_jpeg_users_[1].load(std::memory_order_acquire) == 0) {
+    if ((this->cap_frame_[0] != nullptr || this->cap_jpeg_[0] != nullptr) &&
+        this->cap_jpeg_users_[0].load(std::memory_order_acquire) == 0 &&
+        this->cap_jpeg_users_[1].load(std::memory_order_acquire) == 0 &&
+        !this->cam_cap_busy_.load(std::memory_order_acquire)) {
       this->capture_free_frames_();
     }
     // The file's end: its indexes and header; svp_relay's connection closed.
@@ -859,7 +1049,8 @@ void SimpleVideoPlayer::capture_loop_() {
       this->cap_relay_.store(CAP_RELAY_NONE, std::memory_order_release);
     }
     const bool file_done = this->cast_file_ == CF_NONE || this->cast_file_ == CF_DONE || this->cast_file_ == CF_FAILED;
-    if (file_done && this->cap_frame_[0] == nullptr && this->cap_relay_.load(std::memory_order_acquire) == CAP_RELAY_NONE)
+    if (file_done && this->cap_frame_[0] == nullptr && this->cap_jpeg_[0] == nullptr &&
+        this->cap_relay_.load(std::memory_order_acquire) == CAP_RELAY_NONE)
       this->capture_finished_();
   }
 }
@@ -877,6 +1068,7 @@ void SimpleVideoPlayer::capture_finished_() {
     this->shot_trigger_.trigger(std::string());
   }
   const bool written = this->cast_file_ == CF_DONE;
+  this->cap_camera_ = false;
   this->cast_file_ = CF_NONE;
   this->cast_file_final_ = false;
   this->cast_file_pending_ = false;
@@ -906,7 +1098,7 @@ bool SimpleVideoPlayer::cast_file_open_() {
     return false;
   if (dir_rel != nullptr && dir_rel[0] != '\0' && !worker->has_active_task_io(dir))
     dir->mkdir(dir_rel);  // already there: an error, and nothing to do
-  this->cast_path_ = this->capture_name_(this->cast_dir_, "screencast_", ".avi");
+  this->cast_path_ = this->capture_name_(this->cast_dir_, this->cast_prefix_, ".avi");
   const char *rel = nullptr;
   storage::PathStorage *ps = storage::global_storage_registry->resolve_path(this->cast_path_.c_str(), &rel);
   if (ps == nullptr)

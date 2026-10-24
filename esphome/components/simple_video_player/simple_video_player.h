@@ -1123,6 +1123,15 @@ class SimpleVideoPlayer : public Component
       this->screencast_stop();
     }
   }
+  bool camera_screenshot();
+  bool camera_record_start(uint16_t width, uint16_t height);
+  void camera_record_stop();
+  bool is_camera_recording() const {
+    return this->cap_camera_ && (this->cast_state_ == CAST_STARTING || this->cast_state_ == CAST_RUNNING);
+  }
+  void camera_capture_end();
+  bool camera_capture_frame(const uint8_t *data, size_t length, CameraFrameFormat format, uint16_t width,
+                            uint16_t height, std::function<void()> &&done);
   CastState screencast_state() const { return this->cast_state_; }
   bool screencast_running() const { return this->cast_state_ != CAST_IDLE; }
   /// The HW JPEG encoder engine (the screen capture's; created on first use, kept): for other components' encodes.
@@ -3059,6 +3068,7 @@ class SimpleVideoPlayer : public Component
     CAPN_SINK = 1 << 3,   // a batch or a screenshot was written out
     CAPN_STOP = 1 << 4,   // no batches any more
     CAPN_CAST_SHOT = 1 << 5,  // casting: a screenshot of the newest JPEG
+    CAPN_CAM = 1 << 6,
   };
   enum : uint8_t { CAP_OWNER_FREE, CAP_OWNER_ENCODING, CAP_OWNER_SWAPPING };
   enum : uint8_t { CAP_SINK_FILE = 1, CAP_SINK_RELAY = 2 };
@@ -3112,6 +3122,8 @@ class SimpleVideoPlayer : public Component
   static void capture_tick_cb_(void *arg);
   void capture_sync_();
   bool capture_encode_(const uint8_t *picture, uint8_t *out, uint32_t *len);
+  void capture_camera_();
+  bool capture_cast_begin_(uint8_t target);
   void capture_cast_encode_();
   void capture_compose_();
   void capture_shot_from_cast_();
@@ -3213,6 +3225,19 @@ class SimpleVideoPlayer : public Component
   uint32_t shot_len_{0};
   int8_t shot_jpeg_{-1};  // the screencast's JPEG buffer it writes, -1 its own buffers
   bool shot_busy_{false};
+  uint8_t cam_cap_{0};
+  bool cap_camera_{false};
+  bool cam_cap_shot_{false};
+  std::atomic<bool> cam_cap_busy_{false};
+  std::atomic<bool> cam_cap_finished_{false};
+  const uint8_t *cam_cap_data_{nullptr};
+  size_t cam_cap_len_{0};
+  CameraFrameFormat cam_cap_format_{CameraFrameFormat::RGB565};
+  uint16_t cam_cap_w_{0};
+  uint16_t cam_cap_h_{0};
+  uint32_t cam_cap_last_{0};
+  std::function<void()> cam_cap_done_;
+  const char *cast_prefix_{"screencast_"};
   uint8_t shot_step_{0};
   bool shot_ok_{false};
   std::string shot_path_;
