@@ -2090,7 +2090,7 @@ void BLEClientHID::enqueue_input_report_(const esp_ble_gattc_cb_param_t::gattc_n
 
 bool BLEClientHID::events_wanted_() const {
 #ifdef USE_API_HOMEASSISTANT_SERVICES
-  if (this->publish_to_ha_)
+  if (this->publish_to_ha_ && api::global_api_server->has_homeassistant_action_subscriber())
     return true;
 #endif
 #ifdef USE_TEXT_SENSOR
@@ -2280,7 +2280,7 @@ HIDEvent BLEClientHID::make_hid_event_(const PendingHIDReport &report, const HID
 
 void BLEClientHID::emit_hid_event_(HIDEvent event) {
 #ifdef USE_API_HOMEASSISTANT_SERVICES
-  if (this->publish_to_ha_)
+  if (this->publish_to_ha_ && api::global_api_server->has_homeassistant_action_subscriber())
     this->fire_homeassistant_event("esphome.hid_events", event.data);
 #endif
   auto usage = event.data.find("usage");

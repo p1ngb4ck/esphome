@@ -157,6 +157,7 @@ class APIServer final : public Component
 #endif
 #ifdef USE_API_HOMEASSISTANT_SERVICES
   void send_homeassistant_action(const HomeassistantActionRequest &call);
+  bool has_homeassistant_action_subscriber() const;
 
 #ifdef USE_API_HOMEASSISTANT_ACTION_RESPONSES
   // Action response handling

@@ -556,6 +556,14 @@ void APIServer::send_homeassistant_action(const HomeassistantActionRequest &call
                                   : LOG_STR_LITERAL("no client connected"));
   }
 }
+
+bool APIServer::has_homeassistant_action_subscriber() const {
+  for (uint8_t i = 0; i < this->api_connection_count_; i++) {
+    if (this->clients_[i]->flags_.service_call_subscription)
+      return true;
+  }
+  return false;
+}
 #ifdef USE_API_HOMEASSISTANT_ACTION_RESPONSES
 void APIServer::register_action_response_callback(uint32_t call_id, ActionResponseCallback callback) {
   this->action_response_callbacks_.push_back({call_id, std::move(callback)});
