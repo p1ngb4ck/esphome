@@ -1312,6 +1312,7 @@ void GameEmulator::task_loop_() {
       return;
     this->draw_frame_(this->core_->video());
     this->play_audio_();
+    this->finish_ppa_();
     if (this->pace_timer_ != nullptr)
       ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   }
