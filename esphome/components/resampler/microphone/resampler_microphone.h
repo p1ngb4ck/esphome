@@ -9,6 +9,10 @@
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/preferences.h"
+#ifdef USE_RESAMPLER_MICROPHONE_AEC
+#include "esphome/components/ring_buffer/ring_buffer.h"
+#include "esphome/core/static_task.h"
+#endif
 
 #include <resampler.h>  // esp-audio-libs
 
@@ -97,6 +101,9 @@ class ResamplerMicrophone final : public Component, public microphone::Microphon
   bool aec_wanted_() const;
   bool aec_update_();
   void aec_input_(const audio::AudioStreamInfo &input_stream_info, const std::vector<uint8_t> &data);
+  void aec_release_();
+  static void aec_task_entry_(void *param);
+  void aec_run_();
 #endif
   microphone::MicrophoneSource *active_source_() const { return this->active_.load(); }
   void hook_(microphone::MicrophoneSource *source);
@@ -133,6 +140,7 @@ class ResamplerMicrophone final : public Component, public microphone::Microphon
   uint8_t next_order_{0};
   // A switch can let the old source's task and the new one's overlap for one chunk: the second is dropped
   std::atomic<bool> processing_{false};
+  std::atomic<bool> emitting_{false};
   std::unique_ptr<esp_audio_libs::resampler::Resampler> resampler_;
   // Reused for every chunk so resampling does not allocate
   std::vector<uint8_t> output_buffer_;
@@ -152,14 +160,19 @@ class ResamplerMicrophone final : public Component, public microphone::Microphon
   bool resampler_ready_{false};
 #ifdef USE_RESAMPLER_MICROPHONE_AEC
   void *aec_{nullptr};
-  microphone::MicrophoneSource *aec_source_{nullptr};
+  std::atomic<microphone::MicrophoneSource *> aec_source_{nullptr};
+  StaticTask aec_task_;
+  std::unique_ptr<ring_buffer::RingBuffer> aec_ring_;
+  int16_t *aec_in_{nullptr};
   int16_t *aec_mic_{nullptr};
   int16_t *aec_ref_{nullptr};
   int16_t *aec_out_{nullptr};
   size_t aec_frame_{0};
-  size_t aec_fill_{0};
   uint8_t aec_reference_{1};
   bool aec_failed_{false};
+  bool aec_stopping_{false};
+  std::atomic<bool> aec_stop_{false};
+  std::atomic<bool> aec_parked_{false};
 #endif
 };
 

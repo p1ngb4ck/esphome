@@ -9,6 +9,8 @@
 #include <new>
 
 #ifdef USE_RESAMPLER_MICROPHONE_AEC
+#include "esphome/core/hal.h"
+
 #include <esp_aec.h>
 #include <esp_heap_caps.h>
 #endif
@@ -19,6 +21,10 @@ ESPHOME_LOG_TAG(TAG, "resampler.microphone");
 
 // Duration of audio the resampler converts per step; longer source chunks are processed in several steps
 static constexpr uint32_t BUFFER_DURATION_MS = 16;
+#ifdef USE_RESAMPLER_MICROPHONE_AEC
+static constexpr uint32_t AEC_TASK_STACK_SIZE = 8192;
+static constexpr UBaseType_t AEC_TASK_PRIORITY = 18;
+#endif
 
 void ResamplerMicrophone::setup() {
   if (!this->sources_.empty()) {
@@ -294,12 +300,15 @@ void ResamplerMicrophone::process_audio_(microphone::MicrophoneSource *source, c
 void ResamplerMicrophone::process_chunk_(microphone::MicrophoneSource *source, const std::vector<uint8_t> &data) {
   const audio::AudioStreamInfo input_stream_info = source->get_audio_stream_info();
 #ifdef USE_RESAMPLER_MICROPHONE_AEC
-  if (this->aec_ != nullptr && source == this->aec_source_) {
+  if (source == this->aec_source_.load()) {
     this->aec_input_(input_stream_info, data);
     return;
   }
 #endif
+  if (this->emitting_.exchange(true))
+    return;
   this->emit_(input_stream_info, data.data(), data.size(), &data);
+  this->emitting_.store(false);
 }
 
 void ResamplerMicrophone::emit_(const audio::AudioStreamInfo &input_stream_info, const uint8_t *data, size_t len,
@@ -378,65 +387,72 @@ bool ResamplerMicrophone::aec_wanted_() const {
   return index < this->sources_.size() && this->sources_[index].aec_mode >= 0;
 }
 
+void ResamplerMicrophone::aec_release_() {
+  aec_destroy(static_cast<aec_handle_t *>(this->aec_));
+  this->aec_ = nullptr;
+  this->aec_ring_.reset();
+  heap_caps_free(this->aec_in_);
+  heap_caps_free(this->aec_mic_);
+  heap_caps_free(this->aec_ref_);
+  heap_caps_free(this->aec_out_);
+  this->aec_in_ = this->aec_mic_ = this->aec_ref_ = this->aec_out_ = nullptr;
+  this->aec_stopping_ = false;
+  this->aec_stop_.store(false);
+  this->aec_parked_.store(false);
+}
+
 bool ResamplerMicrophone::aec_update_() {
   microphone::MicrophoneSource *active = this->active_.load();
   if (this->active_listeners_ == 0)
     this->aec_failed_ = false;
   const bool wanted = this->aec_wanted_();
-  if (this->aec_ != nullptr && (!wanted || this->aec_source_ != active)) {
-    if (this->processing_.exchange(true))
+  if (this->aec_ != nullptr && (this->aec_stopping_ || !wanted || this->aec_source_.load() != active)) {
+    if (!this->aec_stopping_) {
+      if (this->processing_.exchange(true))
+        return false;
+      this->aec_source_.store(nullptr);
+      this->processing_.store(false);
+      this->aec_stopping_ = true;
+      this->aec_stop_.store(true);
+      xTaskNotifyGive(this->aec_task_.get_handle());
+    }
+    if (!this->aec_parked_.load() || !this->aec_task_.deallocate())
       return false;
-    aec_destroy(static_cast<aec_handle_t *>(this->aec_));
-    this->aec_ = nullptr;
-    this->aec_source_ = nullptr;
-    heap_caps_free(this->aec_mic_);
-    heap_caps_free(this->aec_ref_);
-    heap_caps_free(this->aec_out_);
-    this->aec_mic_ = this->aec_ref_ = this->aec_out_ = nullptr;
-    this->processing_.store(false);
+    this->aec_release_();
     ESP_LOGD(TAG, "Echo cancellation unloaded");
   }
-  if (wanted && this->aec_ == nullptr) {
-    const Source &source = this->sources_[this->index_of_(active)];
-    aec_handle_t *handle =
-        aec_create(16000, source.aec_filter, 1, static_cast<aec_mode_t>(source.aec_mode));
-    if (handle == nullptr) {
-      ESP_LOGE(TAG, "No memory for echo cancellation");
-      this->aec_failed_ = true;
-      return true;
-    }
-    const size_t frame = static_cast<size_t>(aec_get_chunksize(handle));
-    const size_t bytes = frame * sizeof(int16_t);
-    int16_t *mic = static_cast<int16_t *>(heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    int16_t *ref = static_cast<int16_t *>(heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    int16_t *out = static_cast<int16_t *>(heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    if (mic == nullptr || ref == nullptr || out == nullptr) {
-      heap_caps_free(mic);
-      heap_caps_free(ref);
-      heap_caps_free(out);
-      aec_destroy(handle);
-      ESP_LOGE(TAG, "No memory for echo cancellation");
-      this->aec_failed_ = true;
-      return true;
-    }
-    if (this->processing_.exchange(true)) {
-      heap_caps_free(mic);
-      heap_caps_free(ref);
-      heap_caps_free(out);
-      aec_destroy(handle);
-      return false;
-    }
-    this->aec_mic_ = mic;
-    this->aec_ref_ = ref;
-    this->aec_out_ = out;
-    this->aec_frame_ = frame;
-    this->aec_fill_ = 0;
-    this->aec_reference_ = source.aec_reference;
-    this->aec_source_ = active;
-    this->aec_ = handle;
-    this->processing_.store(false);
-    ESP_LOGD(TAG, "Echo cancellation loaded (%u samples per frame)", static_cast<unsigned>(frame));
+  if (!wanted || this->aec_ != nullptr)
+    return true;
+  const Source &source = this->sources_[this->index_of_(active)];
+  aec_handle_t *handle = aec_create(16000, source.aec_filter, 1, static_cast<aec_mode_t>(source.aec_mode));
+  if (handle == nullptr) {
+    ESP_LOGE(TAG, "No memory for echo cancellation");
+    this->aec_failed_ = true;
+    return true;
   }
+  this->aec_ = handle;
+  this->aec_frame_ = static_cast<size_t>(aec_get_chunksize(handle));
+  const size_t bytes = this->aec_frame_ * sizeof(int16_t);
+  const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  this->aec_in_ = static_cast<int16_t *>(heap_caps_aligned_alloc(16, 2 * bytes, caps));
+  this->aec_mic_ = static_cast<int16_t *>(heap_caps_aligned_alloc(16, bytes, caps));
+  this->aec_ref_ = static_cast<int16_t *>(heap_caps_aligned_alloc(16, bytes, caps));
+  this->aec_out_ = static_cast<int16_t *>(heap_caps_aligned_alloc(16, bytes, caps));
+  this->aec_ring_ = ring_buffer::RingBuffer::create(16000 * 2 * sizeof(int16_t) / 10);
+  this->aec_reference_ = source.aec_reference;
+  this->aec_stop_.store(false);
+  this->aec_parked_.store(false);
+  if (this->aec_in_ == nullptr || this->aec_mic_ == nullptr || this->aec_ref_ == nullptr ||
+      this->aec_out_ == nullptr || this->aec_ring_ == nullptr ||
+      !this->aec_task_.create(aec_task_entry_, "mic_aec", AEC_TASK_STACK_SIZE, this, AEC_TASK_PRIORITY, false,
+                              LOOP_TASK_CORE)) {
+    ESP_LOGE(TAG, "No memory for echo cancellation");
+    this->aec_release_();
+    this->aec_failed_ = true;
+    return true;
+  }
+  this->aec_source_.store(active);
+  ESP_LOGD(TAG, "Echo cancellation loaded (%u samples per frame)", static_cast<unsigned>(this->aec_frame_));
   return true;
 }
 
@@ -444,23 +460,41 @@ void ResamplerMicrophone::aec_input_(const audio::AudioStreamInfo &input_stream_
                                      const std::vector<uint8_t> &data) {
   if (input_stream_info.get_sample_rate() != 16000 || input_stream_info.get_bits_per_sample() != 16 ||
       input_stream_info.get_channels() != 2) {
+    if (this->emitting_.exchange(true))
+      return;
     this->emit_(input_stream_info, data.data(), data.size(), &data);
+    this->emitting_.store(false);
     return;
   }
+  this->aec_ring_->write(data.data(), data.size());
+  xTaskNotifyGive(this->aec_task_.get_handle());
+}
+
+void ResamplerMicrophone::aec_task_entry_(void *param) { static_cast<ResamplerMicrophone *>(param)->aec_run_(); }
+
+void ResamplerMicrophone::aec_run_() {
   const audio::AudioStreamInfo mono_stream_info(16, 1, 16000);
-  const int16_t *samples = reinterpret_cast<const int16_t *>(data.data());
-  const size_t frames = data.size() / (2 * sizeof(int16_t));
+  const size_t frame_bytes = this->aec_frame_ * 2 * sizeof(int16_t);
   const uint8_t ref = this->aec_reference_ & 1;
-  for (size_t i = 0; i < frames; i++) {
-    this->aec_mic_[this->aec_fill_] = samples[2 * i + (1 - ref)];
-    this->aec_ref_[this->aec_fill_] = samples[2 * i + ref];
-    if (++this->aec_fill_ < this->aec_frame_)
-      continue;
-    this->aec_fill_ = 0;
-    aec_process(static_cast<const aec_handle_t *>(this->aec_), this->aec_mic_, this->aec_ref_, this->aec_out_);
-    this->emit_(mono_stream_info, reinterpret_cast<const uint8_t *>(this->aec_out_),
-                this->aec_frame_ * sizeof(int16_t), nullptr);
+  while (!this->aec_stop_.load()) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    while (!this->aec_stop_.load() && this->aec_ring_->available() >= frame_bytes) {
+      this->aec_ring_->read(this->aec_in_, frame_bytes, 0);
+      for (size_t i = 0; i < this->aec_frame_; i++) {
+        this->aec_mic_[i] = this->aec_in_[2 * i + (1 - ref)];
+        this->aec_ref_[i] = this->aec_in_[2 * i + ref];
+      }
+      aec_process(static_cast<const aec_handle_t *>(this->aec_), this->aec_mic_, this->aec_ref_, this->aec_out_);
+      if (this->emitting_.exchange(true))
+        continue;
+      this->emit_(mono_stream_info, reinterpret_cast<const uint8_t *>(this->aec_out_),
+                  this->aec_frame_ * sizeof(int16_t), nullptr);
+      this->emitting_.store(false);
+    }
   }
+  this->aec_parked_.store(true);
+  this->enable_loop_soon_any_context();
+  vTaskSuspend(nullptr);
 }
 #endif
 
