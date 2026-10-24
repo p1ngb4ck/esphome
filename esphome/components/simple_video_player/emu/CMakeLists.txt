@@ -84,9 +84,11 @@ if(CONFIG_SVP_EMU_MSX)
         "IntZ80=fmsx_IntZ80;RunZ80=fmsx_RunZ80;RdZ80=fmsx_RdZ80;WrZ80=fmsx_WrZ80;InZ80=fmsx_InZ80;OutZ80=fmsx_OutZ80"
         "LoopZ80=fmsx_LoopZ80;PatchZ80=fmsx_PatchZ80;DebugZ80=fmsx_DebugZ80;OpZ80=fmsx_OpZ80"
         "SaveState=fmsx_SaveState;LoadState=fmsx_LoadState")
-    set_source_files_properties(${msx_srcs} PROPERTIES COMPILE_OPTIONS "-O2;-include;${CMAKE_CURRENT_LIST_DIR}/fmsx/msxfix.h"
+    set(msx_quote "-iquote;${CMAKE_CURRENT_LIST_DIR}/fmsx/src/Z80;-iquote;${CMAKE_CURRENT_LIST_DIR}/fmsx/src/fMSX"
+        "-iquote;${CMAKE_CURRENT_LIST_DIR}/fmsx/src/EMULib")
+    set_source_files_properties(${msx_srcs} PROPERTIES COMPILE_OPTIONS "-O2;-include;${CMAKE_CURRENT_LIST_DIR}/fmsx/msxfix.h;${msx_quote}"
                                 COMPILE_DEFINITIONS "BPS16;UNIX;LSB_FIRST;NARROW;${msx_names}")
-    set_source_files_properties("ports/msx_port.c" PROPERTIES COMPILE_OPTIONS "-O2" COMPILE_DEFINITIONS "${msx_names}")
+    set_source_files_properties("ports/msx_port.c" PROPERTIES COMPILE_OPTIONS "-O2;${msx_quote}" COMPILE_DEFINITIONS "${msx_names}")
 endif()
 
 idf_component_register(SRCS ${srcs} INCLUDE_DIRS "shim" "ports" PRIV_INCLUDE_DIRS ${priv_incs} PRIV_REQUIRES esp_rom
