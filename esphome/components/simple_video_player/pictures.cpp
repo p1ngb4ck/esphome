@@ -1308,10 +1308,16 @@ bool SimpleVideoPlayer::camera_direct_draw_() {
     this->cam_direct_black_ |= static_cast<uint8_t>(1u << index);
   }
   // 1:1 in the panel's orientation, centred, cut when larger; even (YUV pixel pairs, decoder rows on cache lines)
-  const uint32_t ow = std::min<uint32_t>(job.width, W) & ~1u;
-  const uint32_t oh = std::min<uint32_t>(job.height, H);
-  const uint32_t sx = ((job.width - ow) / 2) & ~1u;
-  const uint32_t sy = (job.height - oh) / 2;
+  const uint32_t step = std::max<uint32_t>(
+      1, std::min<uint32_t>(16, std::min<uint32_t>(W * 16 / job.width, H * 16 / job.height)));
+  const bool scaled = step < 16;
+  const float scale = static_cast<float>(step) / 16.0f;
+  const uint32_t ow = (scaled ? job.width * step / 16 : std::min<uint32_t>(job.width, W)) & ~1u;
+  const uint32_t oh = scaled ? job.height * step / 16 : std::min<uint32_t>(job.height, H);
+  const uint32_t sx = scaled ? 0 : ((job.width - ow) / 2) & ~1u;
+  const uint32_t sy = scaled ? 0 : (job.height - oh) / 2;
+  const uint32_t in_w = scaled ? job.width & ~1u : ow;
+  const uint32_t in_h = scaled ? job.height : oh;
   const uint32_t dx = ((W - ow) / 2) & ~1u;
   const uint32_t dy = ((H - oh) / 2) & ~1u;
   bool ok = false;
@@ -1327,7 +1333,7 @@ bool SimpleVideoPlayer::camera_direct_draw_() {
     cfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
     const uint32_t stream = static_cast<uint32_t>(align_up(job.length, 16));
     uint32_t out = 0;
-    if (pw == W && bpp == 2 && bytes == static_cast<size_t>(pw) * info.height * 2 && info.height <= H) {
+    if (!scaled && pw == W && bpp == 2 && bytes == static_cast<size_t>(pw) * info.height * 2 && info.height <= H) {
       // The rows are the panel's: straight in at the picture's first row (on whole cache lines: dy even)
       uint8_t *dest = fb + static_cast<size_t>(dy) * stride;
       const size_t room = dma_usable(fb_size - static_cast<size_t>(dy) * stride);
@@ -1344,11 +1350,11 @@ bool SimpleVideoPlayer::camera_direct_draw_() {
         return false;
 #ifdef SVP_CAPTURE
       ok = this->camera_ppa_copy_(scratch, bpp == 3 ? PPA_SRM_COLOR_MODE_RGB888 : PPA_SRM_COLOR_MODE_RGB565, pw,
-                                  static_cast<uint32_t>(bytes / (static_cast<size_t>(pw) * bpp)), sx, sy, ow, oh, fb,
-                                  bpp == 3 ? PPA_SRM_COLOR_MODE_RGB888 : PPA_SRM_COLOR_MODE_RGB565, W, H, fb_size, dx,
-                                  dy);
+                                  static_cast<uint32_t>(bytes / (static_cast<size_t>(pw) * bpp)), sx, sy, in_w, in_h,
+                                  fb, bpp == 3 ? PPA_SRM_COLOR_MODE_RGB888 : PPA_SRM_COLOR_MODE_RGB565, W, H, fb_size,
+                                  dx, dy, scale);
 #endif
-      if (!ok) {
+      if (!ok && !scaled) {
         // No PPA: the rows by the CPU
         for (uint32_t r = 0; r < oh; r++)
           memcpy(fb + (static_cast<size_t>(dy + r) * W + dx) * bpp,
@@ -1363,9 +1369,9 @@ bool SimpleVideoPlayer::camera_direct_draw_() {
     const uint32_t in_cm = job.format == CameraFrameFormat::YUYV   ? PPA_SRM_COLOR_MODE_YUV422_YUYV
                            : job.format == CameraFrameFormat::UYVY ? PPA_SRM_COLOR_MODE_YUV422_UYVY
                                                                    : PPA_SRM_COLOR_MODE_RGB565;
-    ok = this->camera_ppa_copy_(job.data, in_cm, job.width, job.height, sx, sy, ow, oh, fb,
+    ok = this->camera_ppa_copy_(job.data, in_cm, job.width, job.height, sx, sy, in_w, in_h, fb,
                                 bpp == 3 ? PPA_SRM_COLOR_MODE_RGB888 : PPA_SRM_COLOR_MODE_RGB565, W, H, fb_size, dx,
-                                dy);
+                                dy, scale);
 #endif
   }
   if (ok)
@@ -1407,7 +1413,8 @@ void SimpleVideoPlayer::camera_service_() {
 #ifdef SVP_CAPTURE
 bool SimpleVideoPlayer::camera_ppa_copy_(const void *in, uint32_t in_cm, uint32_t pic_w, uint32_t pic_h, uint32_t sx,
                                          uint32_t sy, uint32_t bw, uint32_t bh, uint8_t *out, uint32_t out_cm,
-                                         uint32_t out_w, uint32_t out_h, size_t out_size, uint32_t dx, uint32_t dy) {
+                                         uint32_t out_w, uint32_t out_h, size_t out_size, uint32_t dx, uint32_t dy,
+                                         float scale) {
   if (this->cap_ppa_ == nullptr) {
     ppa_client_config_t pcfg{};
     pcfg.oper_type = PPA_OPERATION_SRM;
@@ -1436,8 +1443,8 @@ bool SimpleVideoPlayer::camera_ppa_copy_(const void *in, uint32_t in_cm, uint32_
   cfg.out.block_offset_y = dy;
   cfg.out.srm_cm = static_cast<ppa_srm_color_mode_t>(out_cm);
   cfg.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
-  cfg.scale_x = 1.0f;
-  cfg.scale_y = 1.0f;
+  cfg.scale_x = scale;
+  cfg.scale_y = scale;
   cfg.mode = PPA_TRANS_MODE_BLOCKING;
   return ppa_do_scale_rotate_mirror(this->cap_ppa_, &cfg) == ESP_OK;
 }

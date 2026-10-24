@@ -985,10 +985,13 @@ void LvglComponent::cam_layer_draw_() {
   // turned (the device does not resize at runtime). Centred in the box's panel rectangle, cut to it when larger.
   int32_t bx, by, bw, bh;
   this->scanout_rect_(&box, bx, by, bw, bh);
-  const int32_t ow = std::min<int32_t>(f.w, bw) & ~1;  // even: a YUV422 frame is cut between pixel pairs
-  const int32_t oh = std::min<int32_t>(f.h, bh);
-  const int32_t sx = ((f.w - ow) / 2) & ~1;
-  const int32_t sy = (f.h - oh) / 2;
+  const int32_t step = std::max<int32_t>(1, std::min<int32_t>(16, std::min<int32_t>(bw * 16 / f.w, bh * 16 / f.h)));
+  const bool scaled = step < 16;
+  const int32_t ow =
+      (scaled ? f.w * step / 16 : std::min<int32_t>(f.w, bw)) & ~1;  // even: a YUV422 frame is cut between pixel pairs
+  const int32_t oh = scaled ? f.h * step / 16 : std::min<int32_t>(f.h, bh);
+  const int32_t sx = scaled ? 0 : ((f.w - ow) / 2) & ~1;
+  const int32_t sy = scaled ? 0 : (f.h - oh) / 2;
   const int32_t x = bx + (bw - ow) / 2;
   const int32_t y = by + (bh - oh) / 2;
   lv_area_t pic;
@@ -1011,8 +1014,8 @@ void LvglComponent::cam_layer_draw_() {
   cfg.in.buffer = f.data;
   cfg.in.pic_w = f.pic_w;
   cfg.in.pic_h = f.pic_h;
-  cfg.in.block_w = ow;
-  cfg.in.block_h = oh;
+  cfg.in.block_w = scaled ? f.w & ~1 : ow;
+  cfg.in.block_h = scaled ? f.h : oh;
   cfg.in.block_offset_x = sx;
   cfg.in.block_offset_y = sy;
   cfg.in.srm_cm = f.cm;
@@ -1031,8 +1034,8 @@ void LvglComponent::cam_layer_draw_() {
 #endif
   // A copy (and a YUV conversion): no scaling, no rotation
   cfg.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
-  cfg.scale_x = 1.0f;
-  cfg.scale_y = 1.0f;
+  cfg.scale_x = static_cast<float>(step) / 16.0f;
+  cfg.scale_y = static_cast<float>(step) / 16.0f;
   cfg.mode = PPA_TRANS_MODE_BLOCKING;
   const bool ok = ppa_do_scale_rotate_mirror(this->ppa_client_, &cfg) == ESP_OK;
   this->camera_layer_drop();  // read: the camera's buffer goes back

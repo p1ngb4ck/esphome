@@ -2386,7 +2386,7 @@ class SimpleVideoPlayer : public Component
   // Picture task: a 1:1 PPA copy (YUV converted) of a block of a picture into a picture of out_w x out_h
   bool camera_ppa_copy_(const void *in, uint32_t in_cm, uint32_t pic_w, uint32_t pic_h, uint32_t sx, uint32_t sy,
                         uint32_t bw, uint32_t bh, uint8_t *out, uint32_t out_cm, uint32_t out_w, uint32_t out_h,
-                        size_t out_size, uint32_t dx, uint32_t dy);
+                        size_t out_size, uint32_t dx, uint32_t dy, float scale);
   // Picture task: a picture (RGB565 or YUV422 block of pic_w x pic_h) fit into the job's target by the PPA, black
   // around it (drawn once per size). False: no PPA client or the PPA refused it.
   bool camera_ppa_fit_(const void *in, uint32_t in_cm, uint32_t pic_w, uint32_t pic_h, uint32_t block_w,
