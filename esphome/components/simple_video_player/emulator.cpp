@@ -674,9 +674,11 @@ void GameEmulator::pace_(size_t frames) {
   const int64_t frame_us = this->core_->frame_us();
   if (this->pace_timer_ == nullptr || frame_us == 0)
     return;
+  const uint64_t frame_ns = static_cast<uint64_t>(frame_us) * 1000ULL;
   const uint32_t rate = this->core_->sample_rate();
-  this->pace_ns_ += frames != 0 && rate != 0 ? static_cast<uint64_t>(frames) * 1000000000ULL / rate
-                                              : static_cast<uint64_t>(frame_us) * 1000ULL;
+  const uint64_t sound_ns = rate != 0 ? static_cast<uint64_t>(frames) * 1000000000ULL / rate : 0;
+  const uint64_t diff = sound_ns > frame_ns ? sound_ns - frame_ns : frame_ns - sound_ns;
+  this->pace_ns_ += diff * 100 <= frame_ns ? sound_ns : frame_ns;
   const int64_t now = esp_timer_get_time();
   const int64_t produced = static_cast<int64_t>(this->pace_ns_ / 1000ULL);
   if (!this->pace_anchored_) {
