@@ -32,15 +32,23 @@ class LabelType(WidgetType):
 
     async def to_code(self, w: Widget, config):
         """For a text object, create and set text"""
+        await self._text_to_code(w, config, True)
+
+    async def update_to_code(self, w: Widget, config):
+        await self._text_to_code(w, config, False)
+
+    async def _text_to_code(self, w: Widget, config, create: bool):
         if (value := config.get(CONF_TEXT)) is not None:
             from esphome.components import i18n
 
             key = i18n.register_text(value) if isinstance(value, str) else None
             if key is None:
                 await w.set_property(CONF_TEXT, await lv_text.process(value))
-            else:
+            elif create:
                 lv.label_set_text_static(w.obj, i18n.key_expression(key))
                 lv_add(i18n.bind_expression(w.obj, key))
+            else:
+                lv.label_set_text(w.obj, i18n.text_expression(key))
         await w.set_property(CONF_LONG_MODE, config)
         await w.set_property(CONF_RECOLOR, config, processor=lv_bool)
 

@@ -63,6 +63,10 @@ def bind_expression(label, key: int):
     return i18n_ns.bind_label(label, key)
 
 
+def text_expression(key: int):
+    return cg.MockObj(str(i18n_ns.global_i18n), "->").text(key)
+
+
 def _unescape(literal: str) -> str | None:
     out = []
     i = 0
