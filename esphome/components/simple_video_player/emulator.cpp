@@ -652,10 +652,6 @@ bool GameEmulator::create_task_() {
 void GameEmulator::start_pacing_() {
   if (this->core_->frame_us() == 0 || this->pace_timer_ != nullptr)
     return;
-#ifdef USE_SPEAKER
-  if (this->parent_->speaker_ != nullptr)
-    return;
-#endif
   esp_timer_create_args_t args{};
   args.callback = [](void *arg) {
     auto *emu = static_cast<GameEmulator *>(arg);
@@ -665,8 +661,42 @@ void GameEmulator::start_pacing_() {
   args.arg = this;
   args.dispatch_method = ESP_TIMER_TASK;
   args.name = "svp_game_pace";
-  if (esp_timer_create(&args, &this->pace_timer_) == ESP_OK)
-    esp_timer_start_periodic(this->pace_timer_, this->core_->frame_us());
+  if (esp_timer_create(&args, &this->pace_timer_) != ESP_OK)
+    this->pace_timer_ = nullptr;
+}
+
+void GameEmulator::pace_reset_() {
+  this->pace_ns_ = 0;
+  this->pace_anchored_ = false;
+}
+
+void GameEmulator::pace_(size_t frames) {
+  const int64_t frame_us = this->core_->frame_us();
+  if (this->pace_timer_ == nullptr || frame_us == 0)
+    return;
+  const uint32_t rate = this->core_->sample_rate();
+  this->pace_ns_ += frames != 0 && rate != 0 ? static_cast<uint64_t>(frames) * 1000000000ULL / rate
+                                              : static_cast<uint64_t>(frame_us) * 1000ULL;
+  const int64_t now = esp_timer_get_time();
+  const int64_t produced = static_cast<int64_t>(this->pace_ns_ / 1000ULL);
+  if (!this->pace_anchored_) {
+    this->pace_anchor_us_ = now - produced;
+    this->pace_anchored_ = true;
+  }
+  const int64_t ahead = this->pace_anchor_us_ + produced - now;
+  if (ahead < -PACE_BEHIND_FRAMES * frame_us) {
+    this->pace_anchor_us_ = now - produced;
+    return;
+  }
+  const int64_t wait = ahead - PACE_LEAD_FRAMES * frame_us;
+  if (wait <= 0)
+    return;
+  ulTaskNotifyTake(pdTRUE, 0);
+  if (this->task_stop_.load(std::memory_order_acquire) || this->task_pause_.load(std::memory_order_acquire))
+    return;
+  esp_timer_stop(this->pace_timer_);
+  if (esp_timer_start_once(this->pace_timer_, static_cast<uint64_t>(wait)) == ESP_OK)
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 }
 
 void GameEmulator::end_() {
@@ -1323,6 +1353,7 @@ void GameEmulator::task_entry_(void *arg) {
 
 bool GameEmulator::park_() {
   if (this->task_pause_.load(std::memory_order_acquire)) {
+    this->pace_reset_();
     this->link_note_(LINK_PAUSE);
     this->task_parked_.store(true, std::memory_order_release);
     App.wake_loop_threadsafe();
@@ -1351,6 +1382,7 @@ bool GameEmulator::frame_pads_(uint16_t *pads) {
 }
 
 void GameEmulator::task_loop_() {
+  this->pace_reset_();
 #ifdef SVP_EMU_LINK
   if (this->link_mode_ != LinkMode::OFF) {
     this->link_connect_();
@@ -1365,10 +1397,9 @@ void GameEmulator::task_loop_() {
     if (this->core_->owns_loop())
       return;
     this->draw_frame_(this->core_->video());
-    this->play_audio_();
+    const size_t frames = this->play_audio_();
     this->finish_ppa_();
-    if (this->pace_timer_ != nullptr)
-      ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    this->pace_(frames);
   }
 }
 
@@ -1378,10 +1409,9 @@ bool GameEmulator::host_frame_cb_(void *ctx, uint16_t *pad1, uint16_t *pad2) {
 
 bool GameEmulator::host_frame_(uint16_t *pad1, uint16_t *pad2) {
   this->draw_frame_(this->core_->video());
-  this->play_audio_();
+  const size_t frames = this->play_audio_();
   this->finish_ppa_();
-  if (this->pace_timer_ != nullptr)
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+  this->pace_(frames);
   if (!this->park_())
     return false;
   uint16_t pads[2];
@@ -1511,11 +1541,11 @@ bool GameEmulator::draw_cpu_(const EmuVideo &video, uint8_t *fb) {
   return true;
 }
 
-void GameEmulator::play_audio_() {
+size_t GameEmulator::play_audio_() {
 #ifdef USE_SPEAKER
   speaker::Speaker *spk = this->parent_->speaker_;
   if (spk == nullptr)
-    return;
+    return 0;
   size_t frames = 0;
   const int16_t *pcm = this->core_->audio(&frames);
   if (pcm == nullptr || frames == 0) {
@@ -1530,6 +1560,9 @@ void GameEmulator::play_audio_() {
     data += written;
     left -= written;
   }
+  return frames;
+#else
+  return 0;
 #endif
 }
 

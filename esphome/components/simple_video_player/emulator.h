@@ -147,6 +147,8 @@ class GameEmulator
   static constexpr uint32_t TASK_STACK = 8192;
   static constexpr uint32_t INTERNAL_PIECE_MAX = 16 * 1024;
   static constexpr size_t FRAME_MIN_BYTES = 256 * 240 * 2;
+  static constexpr int64_t PACE_LEAD_FRAMES = 2;
+  static constexpr int64_t PACE_BEHIND_FRAMES = 4;
 
   struct SystemEntry {
     EmuSystem system;
@@ -218,6 +220,8 @@ class GameEmulator
   void ready_();
   bool create_task_();
   void start_pacing_();
+  void pace_reset_();
+  void pace_(size_t frames);
   bool frame_pads_(uint16_t *pads);
   void link_begin_();
   void link_connect_();
@@ -262,7 +266,7 @@ class GameEmulator
   bool draw_cpu_(const EmuVideo &video, uint8_t *fb);
   void finish_ppa_();
   static bool ppa_done_cb_(ppa_client_handle_t client, ppa_event_data_t *event, void *arg);
-  void play_audio_();
+  size_t play_audio_();
 
   SimpleVideoPlayer *parent_;
   bool usable_{true};
@@ -366,6 +370,9 @@ class GameEmulator
   std::atomic<bool> task_done_{false};
   std::atomic<uint16_t> pads_[2]{};
   esp_timer_handle_t pace_timer_{nullptr};
+  int64_t pace_anchor_us_{0};
+  uint64_t pace_ns_{0};
+  bool pace_anchored_{false};
 
   const char *peers_[MAX_PEERS]{};
   size_t peer_count_{0};
