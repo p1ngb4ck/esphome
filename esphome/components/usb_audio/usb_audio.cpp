@@ -3118,22 +3118,16 @@ void USBAudioDevice::finish_speaker_open_() {
   this->spk_stream_open_ = true;
   this->note_open_result_(true, this->spk_reopen_at_ms_, this->spk_open_fails_);
   ESP_LOGI(TAG, "Speaker stream open");
-  // Streams that open and close while connected: some devices reset volume and mute when the
-  // alt-setting changes, so they are told again.
-  if (this->client_->stream_idle_timeout_ms_ != 0) {
-    this->ctrl_pending_.fetch_or(PENDING_SPK_VOLUME | PENDING_SPK_MUTE);
-    this->post_controls_();
-  }
+  this->ctrl_pending_.fetch_or(PENDING_SPK_VOLUME | PENDING_SPK_MUTE | PENDING_MIC_VOLUME | PENDING_MIC_MUTE);
+  this->post_controls_();
 }
 
 void USBAudioDevice::finish_microphone_open_() {
   this->mic_stream_open_ = true;
   this->note_open_result_(true, this->mic_reopen_at_ms_, this->mic_open_fails_);
   ESP_LOGI(TAG, "Microphone stream open");
-  if (this->client_->stream_idle_timeout_ms_ != 0) {
-    this->ctrl_pending_.fetch_or(PENDING_MIC_VOLUME | PENDING_MIC_MUTE);
-    this->post_controls_();
-  }
+  this->ctrl_pending_.fetch_or(PENDING_SPK_VOLUME | PENDING_SPK_MUTE | PENDING_MIC_VOLUME | PENDING_MIC_MUTE);
+  this->post_controls_();
   if (this->capture_ != nullptr)
     this->capture_->on_stream_event(MicStreamEvent::OPEN);
 }
