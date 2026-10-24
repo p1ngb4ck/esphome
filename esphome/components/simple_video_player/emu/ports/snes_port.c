@@ -120,7 +120,12 @@ void snes_port_frame(uint16_t pad1, uint16_t pad2)
     s_acc += s_rate;
     const size_t frames = s_acc / fps;
     s_acc %= fps;
-    S9xMixSamples(s_stereo, (int32_t)(frames * 2));
+    for (size_t done = 0; done < frames;)
+    {
+        const size_t n = frames - done < SOUND_BUFFER_SIZE / 2 ? frames - done : SOUND_BUFFER_SIZE / 2;
+        S9xMixSamples(s_stereo + done * 2, (int32_t)(n * 2));
+        done += n;
+    }
     if (s_channels == 2)
     {
         memcpy(s_mix, s_stereo, frames * 2 * sizeof(int16_t));

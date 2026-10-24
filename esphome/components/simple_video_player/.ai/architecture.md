@@ -314,8 +314,8 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
   the pool.
 - Cores (`systems:` -> `CONFIG_SVP_EMU_<SYSTEM>`): nes (nofrendo), gb (gnuboy, GB / GBC), sms (smsplus: SMS, Game Gear,
   SG-1000 `.sg`, ColecoVision `.col`: keypad 1 / 2 / * / # on X / Y / L / R, SELECT resets), pce (pce-go, PSG rendered
-  per frame in chunks of 64), lynx (handy, 32 kHz, the cartridge's rotation), snes (snes9x 2005, all PSRAM, the ROM
-  piece 64.5 KiB larger for its mapping), md (gwenesis, YM2612 at 26,633 Hz, PSG off as in retro-go, the ROM piece in
+  per frame in chunks of 64), lynx (handy, 32 kHz, the cartridge's rotation), snes (snes9x 2005, all PSRAM, mixed per
+  frame in chunks of 660 (its mix buffer), the ROM piece 64.5 KiB larger for its mapping), md (gwenesis, YM2612 at 26,633 Hz, PSG off as in retro-go, the ROM piece in
   whole 64 KiB), gw (gw-emulator, LCD-Game-Shrinker `.gw` files, two 128 Hz steps per frame, 32,768 Hz, watch mode
   started and the clock set from the system time as in retro-go), msx (fMSX, MSX2 with 2 RAM / 2 VRAM pages: the
   core runs its own loop on svp_game and calls `emu_host_frame()` from `Keyboard()` once per frame, where the picture,
