@@ -138,8 +138,10 @@ void ResamplerSpeaker::add_group_output(size_t group, speaker::Speaker *speaker,
   if (this->output_speaker_ == nullptr) {
     this->apply_output_(speaker);
     this->pending_speaker_ = speaker;
-    speaker->set_volume(this->volume_);
-    speaker->set_mute_state(this->mute_state_);
+    if (this->volume_set_)
+      speaker->set_volume(this->volume_);
+    if (this->mute_set_)
+      speaker->set_mute_state(this->mute_state_);
     this->output_callback_.call(this->active_);
   } else {
     this->active_ = this->index_of_(this->output_speaker_);
@@ -435,8 +437,10 @@ void ResamplerSpeaker::take_pending_output_() {
     ESP_LOGI(TAG, "Output: none");
     return;
   }
-  this->output_speaker_->set_volume(this->volume_);
-  this->output_speaker_->set_mute_state(this->mute_state_);
+  if (this->volume_set_)
+    this->output_speaker_->set_volume(this->volume_);
+  if (this->mute_set_)
+    this->output_speaker_->set_mute_state(this->mute_state_);
   this->output_speaker_->set_pause_state(pause);
   ESP_LOGI(TAG, "Output: %s", this->output_name(this->active_));
   this->output_callback_.call(this->active_);
@@ -522,12 +526,14 @@ bool ResamplerSpeaker::has_buffered_data() const {
 
 void ResamplerSpeaker::set_mute_state(bool mute_state) {
   this->mute_state_ = mute_state;
+  this->mute_set_ = true;
   if (this->output_speaker_ != nullptr)
     this->output_speaker_->set_mute_state(mute_state);
 }
 
 void ResamplerSpeaker::set_volume(float volume) {
   this->volume_ = volume;
+  this->volume_set_ = true;
   if (this->output_speaker_ != nullptr)
     this->output_speaker_->set_volume(volume);
 }

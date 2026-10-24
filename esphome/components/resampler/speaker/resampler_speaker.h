@@ -150,6 +150,8 @@ class ResamplerSpeaker final : public Component, public speaker::Speaker {
   uint8_t next_order_{0};
   uint8_t output_channels_{0};
   bool switch_pending_{false};
+  bool volume_set_{false};
+  bool mute_set_{false};
   bool restart_after_format_{false};
   std::atomic<bool> format_changed_{false};
   audio::AudioStreamInfo started_info_;
