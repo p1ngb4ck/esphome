@@ -76,9 +76,20 @@ def _unescape(literal: str) -> str | None:
             out.append(c)
             i += 1
             continue
-        if i + 1 >= len(literal) or literal[i + 1] not in _ESCAPES:
+        if i + 1 >= len(literal):
             return None
-        out.append(_ESCAPES[literal[i + 1]])
+        c = literal[i + 1]
+        width = {"u": 4, "U": 8, "x": 2}.get(c)
+        if width is not None:
+            digits = literal[i + 2 : i + 2 + width]
+            if len(digits) != width or any(d not in "0123456789abcdefABCDEF" for d in digits):
+                return None
+            out.append(chr(int(digits, 16)))
+            i += 2 + width
+            continue
+        if c not in _ESCAPES:
+            return None
+        out.append(_ESCAPES[c])
         i += 2
     return "".join(out)
 
