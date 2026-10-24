@@ -148,7 +148,6 @@ class GameEmulator
   static constexpr uint32_t INTERNAL_PIECE_MAX = 16 * 1024;
   static constexpr size_t FRAME_MIN_BYTES = 256 * 240 * 2;
   static constexpr int64_t PACE_LEAD_FRAMES = 2;
-  static constexpr int64_t PACE_BEHIND_FRAMES = 4;
 
   struct SystemEntry {
     EmuSystem system;

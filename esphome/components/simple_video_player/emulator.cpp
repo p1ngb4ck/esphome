@@ -680,7 +680,7 @@ void GameEmulator::pace_() {
     this->pace_anchored_ = true;
   }
   const int64_t ahead = this->pace_anchor_us_ + produced - now;
-  if (ahead < -PACE_BEHIND_FRAMES * frame_us) {
+  if (ahead < 0) {
     this->pace_anchor_us_ = now - produced;
     return;
   }
