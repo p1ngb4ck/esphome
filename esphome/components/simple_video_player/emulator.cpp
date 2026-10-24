@@ -17,8 +17,6 @@ namespace esphome::simple_video_player {
 
 static const char *const TAG = "simple_video_player.emulator";
 
-static constexpr TickType_t EMU_AUDIO_WAIT = pdMS_TO_TICKS(20);
-
 static const char *const MSX_BIOS[] = {"MSX.ROM",     "MSX2.ROM",  "MSX2EXT.ROM", "MSX2P.ROM",
                                        "MSX2PEXT.ROM", "DISK.ROM",  "MSXDOS2.ROM", "FMPAC.ROM",
                                        "KANJI.ROM",   "PAINTER.ROM", "RS232.ROM",  "CMOS.ROM"};
@@ -1422,6 +1420,8 @@ bool GameEmulator::host_frame_(uint16_t *pad1, uint16_t *pad2) {
 
 void GameEmulator::draw_frame_(const EmuVideo &video) {
   SimpleVideoPlayer *p = this->parent_;
+  if (p->direct_flips_() && !p->dsi_->scanout_flipped())
+    return;
   size_t len = 0;
   uint8_t *fb = p->direct_target_(true, &len);
   void *fbs[2]{};
@@ -1550,14 +1550,7 @@ void GameEmulator::play_audio_() {
     pcm = reinterpret_cast<const int16_t *>(this->silence_);
     frames = this->silence_frames_;
   }
-  const auto *data = reinterpret_cast<const uint8_t *>(pcm);
-  size_t left = frames * this->core_->channels() * sizeof(int16_t);
-  while (left > 0 && !this->task_stop_.load(std::memory_order_acquire) &&
-         !this->task_pause_.load(std::memory_order_acquire)) {
-    const size_t written = spk->play(data, left, EMU_AUDIO_WAIT);
-    data += written;
-    left -= written;
-  }
+  spk->play(reinterpret_cast<const uint8_t *>(pcm), frames * this->core_->channels() * sizeof(int16_t), 0);
 #endif
 }
 
