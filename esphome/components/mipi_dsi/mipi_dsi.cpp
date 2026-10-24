@@ -208,7 +208,7 @@ void MipiDsi::present_scanout_buffer(void *buffer) {
   esp_lcd_panel_draw_bitmap(this->handle_, 0, 0, 1, 1, buffer);
   xSemaphoreTake(this->io_lock_, 0);
   this->draw_fb_ = buffer;
-  this->flip_frame_.store(this->scan_frames_.load(std::memory_order_acquire) + 2, std::memory_order_release);
+  this->flip_frame_.store(this->scan_frames_.load(std::memory_order_acquire) + 1, std::memory_order_release);
 }
 
 uint8_t *MipiDsi::get_draw_buffer(display::ColorBitness *bitness) {
