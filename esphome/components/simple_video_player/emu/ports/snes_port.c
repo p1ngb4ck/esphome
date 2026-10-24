@@ -3,6 +3,8 @@
 #include "emu_mem.h"
 #include "snes9x.h"
 
+#define SNES_MAX_RUN 4
+
 static uint16_t *s_frame;
 static int16_t *s_stereo;
 static int16_t *s_mix;
@@ -10,6 +12,7 @@ static size_t s_mix_frames;
 static uint8_t s_channels;
 static uint32_t s_rate;
 static uint32_t s_acc;
+static uint32_t s_frames_run = 1;
 static uint16_t s_pad;
 
 bool S9xInitDisplay(void)
@@ -85,8 +88,9 @@ bool snes_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels)
     s_channels = channels > 1 ? 2 : 1;
     s_rate = rate;
     s_frame = calloc(SNES_WIDTH * SNES_HEIGHT_EXTENDED, sizeof(uint16_t));
-    s_stereo = calloc((rate / 50 + 1) * 2, sizeof(int16_t));
-    s_mix = calloc((rate / 50 + 1) * s_channels, sizeof(int16_t));
+    s_frames_run = 1;
+    s_stereo = calloc((rate / 50 + 1) * SNES_MAX_RUN * 2, sizeof(int16_t));
+    s_mix = calloc((rate / 50 + 1) * SNES_MAX_RUN * s_channels, sizeof(int16_t));
     if (s_frame == NULL || s_stereo == NULL || s_mix == NULL)
         return false;
     Settings.CyclesPercentage = 100;
@@ -115,9 +119,16 @@ void snes_port_frame(uint16_t pad1, uint16_t pad2)
     s_pad = pad1;
     IPPU.RenderThisFrame = true;
     GFX.Screen = (uint8_t *)s_frame;
+    const uint32_t first = ICPU.Frame;
     S9xMainLoop();
+    uint32_t run = ICPU.Frame - first;
+    if (run == 0)
+        run = 1;
+    if (run > SNES_MAX_RUN)
+        run = SNES_MAX_RUN;
+    s_frames_run = run;
     const uint32_t fps = Memory.ROMFramesPerSecond > 0 ? (uint32_t)Memory.ROMFramesPerSecond : 60;
-    s_acc += s_rate;
+    s_acc += s_rate * run;
     const size_t frames = s_acc / fps;
     s_acc %= fps;
     for (size_t done = 0; done < frames;)
@@ -157,7 +168,7 @@ const int16_t *snes_port_audio(size_t *frames)
 
 uint32_t snes_port_frame_us(void)
 {
-    return Memory.ROMFramesPerSecond == 50 ? 20000u : 16667u;
+    return (Memory.ROMFramesPerSecond == 50 ? 20000u : 16667u) * s_frames_run;
 }
 
 uint8_t *snes_port_sram(size_t *size)
