@@ -189,6 +189,7 @@ async def to_code(config: ConfigType) -> None:
             cg.add_define("USE_RESAMPLER_MICROPHONE_AEC")
             esp32.add_idf_component(name="espressif/esp-dsp", ref="^1.8.0")
             esp32.add_idf_component(name="espressif/esp-sr", ref="^2.5.3")
+            cg.add_cxx_build_flag("-includecstdint")
             cg.add(
                 var.set_source_echo_cancellation(
                     index, aec[CONF_MODE], aec[CONF_REFERENCE_CHANNEL], aec[CONF_FILTER_LENGTH]
