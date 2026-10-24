@@ -25,7 +25,7 @@ WriteTemplateAction = i18n_ns.class_("WriteTemplateAction", automation.Action)
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(I18nComponent),
-        cv.Optional(CONF_MAX_FILE_SIZE, default="512KB"): cv.All(
+        cv.Optional(CONF_MAX_FILE_SIZE, default="524288"): cv.All(
             cv.validate_bytes, cv.int_range(min=1024, max=4 * 1024 * 1024)
         ),
     }
