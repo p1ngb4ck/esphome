@@ -1154,14 +1154,44 @@ bool GameEmulator::setup_output_() {
     this->ppa_ = nullptr;
     return true;
   }
+  this->ppa_done_ = xSemaphoreCreateBinary();
+  ppa_event_callbacks_t cbs{};
+  cbs.on_trans_done = &GameEmulator::ppa_done_cb_;
+  if (this->ppa_done_ == nullptr || ppa_client_register_event_callbacks(this->ppa_, &cbs) != ESP_OK) {
+    if (this->ppa_done_ != nullptr)
+      vSemaphoreDelete(this->ppa_done_);
+    this->ppa_done_ = nullptr;
+    ppa_unregister_client(this->ppa_);
+    this->ppa_ = nullptr;
+    return true;
+  }
+  if (video.palette == nullptr)
+    return true;
   this->frame_size_ = std::max<size_t>(static_cast<size_t>(video.width) * video.height * 2, FRAME_MIN_BYTES);
   this->frame_ = p->pool_take_(this->frame_size_, SimpleVideoPlayer::POOL_USER_GAME);
   if (this->frame_ == nullptr) {
     ppa_unregister_client(this->ppa_);
     this->ppa_ = nullptr;
+    vSemaphoreDelete(this->ppa_done_);
+    this->ppa_done_ = nullptr;
     return false;
   }
   return true;
+}
+
+bool GameEmulator::ppa_done_cb_(ppa_client_handle_t client, ppa_event_data_t *event, void *arg) {
+  BaseType_t woken = pdFALSE;
+  xSemaphoreGiveFromISR(static_cast<SemaphoreHandle_t>(arg), &woken);
+  return woken == pdTRUE;
+}
+
+void GameEmulator::finish_ppa_() {
+  if (!this->ppa_busy_)
+    return;
+  this->ppa_busy_ = false;
+  xSemaphoreTake(this->ppa_done_, portMAX_DELAY);
+  SimpleVideoPlayer *p = this->parent_;
+  p->direct_show_(this->ppa_fb_, 0, 0, static_cast<int>(p->dsi_out_w_), static_cast<int>(p->dsi_out_h_), 0);
 }
 
 void GameEmulator::layout_(uint16_t width, uint16_t height) {
@@ -1217,6 +1247,10 @@ void GameEmulator::release_output_() {
   if (this->ppa_ != nullptr)
     ppa_unregister_client(this->ppa_);
   this->ppa_ = nullptr;
+  if (this->ppa_done_ != nullptr)
+    vSemaphoreDelete(this->ppa_done_);
+  this->ppa_done_ = nullptr;
+  this->ppa_busy_ = false;
   if (this->frame_ != nullptr)
     this->parent_->pool_.free(this->frame_);
   this->frame_ = nullptr;
@@ -1290,6 +1324,7 @@ bool GameEmulator::host_frame_cb_(void *ctx, uint16_t *pad1, uint16_t *pad2) {
 bool GameEmulator::host_frame_(uint16_t *pad1, uint16_t *pad2) {
   this->draw_frame_(this->core_->video());
   this->play_audio_();
+  this->finish_ppa_();
   if (this->pace_timer_ != nullptr)
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   if (!this->park_())
@@ -1319,24 +1354,24 @@ void GameEmulator::draw_frame_(const EmuVideo &video) {
     this->black_ |= static_cast<uint8_t>(1u << index);
   }
   bool drawn = false;
-  if (this->ppa_ != nullptr && this->frame_ != nullptr &&
-      static_cast<size_t>(video.width) * video.height * 2 <= this->frame_size_) {
-    auto *out = reinterpret_cast<uint16_t *>(this->frame_);
-    for (uint16_t y = 0; y < video.height; y++) {
-      const uint8_t *row = video.pixels + static_cast<size_t>(y) * video.stride;
-      if (video.palette != nullptr) {
+  const bool straight = video.palette == nullptr && video.stride % 2 == 0 && video.stride / 2 >= video.width;
+  if (this->ppa_ != nullptr && (straight || (this->frame_ != nullptr &&
+                                             static_cast<size_t>(video.width) * video.height * 2 <= this->frame_size_))) {
+    const void *in = video.pixels;
+    uint32_t in_w = video.stride / 2;
+    if (!straight) {
+      auto *out = reinterpret_cast<uint16_t *>(this->frame_);
+      for (uint16_t y = 0; y < video.height; y++) {
+        const uint8_t *row = video.pixels + static_cast<size_t>(y) * video.stride;
         for (uint16_t x = 0; x < video.width; x++)
           *out++ = video.palette[row[x]];
-      } else {
-        memcpy(out, row, static_cast<size_t>(video.width) * 2);
-        out += video.width;
       }
+      in = this->frame_;
+      in_w = video.width;
     }
-    esp_cache_msync(this->frame_, this->frame_size_,
-                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
     ppa_srm_oper_config_t cfg{};
-    cfg.in.buffer = this->frame_;
-    cfg.in.pic_w = video.width;
+    cfg.in.buffer = in;
+    cfg.in.pic_w = in_w;
     cfg.in.pic_h = video.height;
     cfg.in.block_w = video.width;
     cfg.in.block_h = video.height;
@@ -1353,8 +1388,13 @@ void GameEmulator::draw_frame_(const EmuVideo &video) {
     cfg.rotation_angle = this->ppa_rotation_;
     cfg.scale_x = static_cast<float>(this->factor_);
     cfg.scale_y = static_cast<float>(this->factor_);
-    cfg.mode = PPA_TRANS_MODE_BLOCKING;
-    drawn = ppa_do_scale_rotate_mirror(this->ppa_, &cfg) == ESP_OK;
+    cfg.mode = PPA_TRANS_MODE_NON_BLOCKING;
+    cfg.user_data = this->ppa_done_;
+    if (ppa_do_scale_rotate_mirror(this->ppa_, &cfg) == ESP_OK) {
+      this->ppa_fb_ = fb;
+      this->ppa_busy_ = true;
+      return;
+    }
   }
   if (!drawn)
     drawn = this->draw_cpu_(video, fb);
