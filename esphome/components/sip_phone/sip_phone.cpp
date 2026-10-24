@@ -1066,7 +1066,7 @@ void SipPhone::start_register_(bool unregister) {
   }
   this->reg_removing_ = unregister;
   this->reg_cseq_++;
-  char aor[128];
+  char aor[136];
   this->our_aor_(aor, sizeof(aor));
   char ruri[96];
   snprintf(ruri, sizeof(ruri), "sip:%s", a.domain[0] != '\0' ? a.domain : a.server);
@@ -1298,7 +1298,7 @@ bool SipPhone::start_call_(const char *target) {
     return false;
   }
   Dialog &d = this->dialog_;
-  memset(&d, 0, offsetof(Dialog, ok_buf));
+  memset(static_cast<void *>(&d), 0, offsetof(Dialog, ok_buf));
   d.rtp_fd = -1;
   if (!this->open_rtp_()) {
     copy_str(failed.text, sizeof(failed.text), "no_rtp_port");
@@ -1309,7 +1309,7 @@ bool SipPhone::start_call_(const char *target) {
   d.outgoing = true;
   snprintf(d.call_id, sizeof(d.call_id), "%08" PRIx32 "%08" PRIx32 "@%s", esp_random(), esp_random(),
            this->local_ip_);
-  char aor[128];
+  char aor[136];
   this->our_aor_(aor, sizeof(aor));
   char tag[16];
   this->new_tag_(tag, sizeof(tag));
@@ -1443,7 +1443,7 @@ void SipPhone::send_cancel_() {
   tx.auth_tried = true;
   SipWriter w(tx.buf, sizeof(tx.buf));
   this->begin_request_(w, "CANCEL", invite.ruri, invite.branch);
-  char to[192];
+  char to[sizeof(Dialog::remote_hdr)];
   copy_str(to, sizeof(to), d.remote_hdr);
   char *tag = strstr(to, ";tag=");
   if (tag != nullptr)
@@ -1542,7 +1542,7 @@ void SipPhone::send_message_(const char *target, const char *text) {
   } else {
     tx.cseq++;
   }
-  char aor[128];
+  char aor[136];
   this->our_aor_(aor, sizeof(aor));
   char tag[16];
   this->new_tag_(tag, sizeof(tag));
@@ -1948,7 +1948,7 @@ void SipPhone::handle_invite_(const SipMessage &msg, const struct sockaddr_in &f
       return;
     }
   }
-  memset(&d, 0, offsetof(Dialog, ok_buf));
+  memset(static_cast<void *>(&d), 0, offsetof(Dialog, ok_buf));
   d.rtp_fd = -1;
   d.active = true;
   msg.header("Call-ID").copy_to(d.call_id, sizeof(d.call_id));

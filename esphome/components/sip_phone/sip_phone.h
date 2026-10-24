@@ -257,8 +257,8 @@ class SipPhone final : public Component,
     bool ack_pending;
     bool late_offer;
     char call_id[64];
-    char local_hdr[192];
-    char remote_hdr[192];
+    char local_hdr[224];
+    char remote_hdr[224];
     char remote_target[128];
     char routes[MAX_ROUTES][128];
     uint8_t route_count;
