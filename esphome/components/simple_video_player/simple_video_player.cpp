@@ -1096,7 +1096,7 @@ void SimpleVideoPlayer::seek(float seconds) {
 // loopTask: the tick round-robins the two. The reader (Core 0) never drives DMA2D; the sound (Core 0)
 // neither.
 bool SimpleVideoPlayer::create_tasks_() {
-  if (!create_psram_task(playback_task_entry_, "video_player", 8192, this, 1, &this->task_handle_, 1) ||
+  if (!create_psram_task(playback_task_entry_, "video_player", 8192, this, 1, &this->task_handle_, 0) ||
       !create_psram_task(reader_task_entry_, "svp_reader", 4096, this, 2, &this->reader_task_handle_, 0))
     return false;
   this->playback_wait_.task = this->task_handle_;

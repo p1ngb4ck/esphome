@@ -123,7 +123,7 @@ void SimpleVideoPlayer::pictures_setup_() {
 
   // Decoding (and scaling a large photo) off the main loop: on Core 1 at the loop task's priority
   // like the video's decode (DMA2D with LVGL's PPA, esp-idf#18999, see play()).
-  if (!create_psram_task(picture_task_entry_, "svp_pictures", 8192, this, 1, &this->pic_task_, 1)) {
+  if (!create_psram_task(picture_task_entry_, "svp_pictures", 8192, this, 1, &this->pic_task_, 0)) {
     ESP_LOGE(TAG, "Could not create the picture task -- pictures disabled");
     return;
   }

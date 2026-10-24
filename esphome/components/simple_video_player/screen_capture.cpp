@@ -1319,7 +1319,7 @@ void SimpleVideoPlayer::cast_relay_task_(bool start) {
   this->cap_relay_port_.store(port, std::memory_order_relaxed);
   if (this->cap_tx_task_ == nullptr &&
       !create_psram_task(&SimpleVideoPlayer::cast_tx_entry_, "svp_cast_tx", CAP_TASK_STACK, this, 3,
-                         &this->cap_tx_task_, tskNO_AFFINITY)) {
+                         &this->cap_tx_task_, 0)) {
     this->cap_tx_task_ = nullptr;
     this->cap_relay_.store(CAP_RELAY_FAILED, std::memory_order_release);
     App.wake_loop_threadsafe();

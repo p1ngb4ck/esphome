@@ -196,7 +196,7 @@ bool SimpleVideoPlayer::setup_stream_() {
   if (this->spice_ == nullptr || this->spice_scratch_ == nullptr || this->spice_saved_ == nullptr ||
       this->spice_saved_prefs_ == nullptr || !file_ok || this->spice_lock_ == nullptr ||
       this->spice_cursor_lock_ == nullptr || this->desktop_lock_ == nullptr || this->spice_wake_fd_ < 0 ||
-      !create_psram_task(spice_task_entry_, "svp_spice", 8192, this, 4, &this->spice_task_, tskNO_AFFINITY)) {
+      !create_psram_task(spice_task_entry_, "svp_spice", 8192, this, 4, &this->spice_task_, 0)) {
     ESP_LOGE(TAG, "SPICE client disabled: no room for it");
     this->spice_task_ = nullptr;
   } else {
@@ -204,11 +204,11 @@ bool SimpleVideoPlayer::setup_stream_() {
     this->spice_saved_setup_();
   }
 #endif
-  if (!create_psram_task(stream_draw_task_entry_, "svp_stream_draw", 4096, this, 2, &this->stream_draw_task_, 1)) {
+  if (!create_psram_task(stream_draw_task_entry_, "svp_stream_draw", 4096, this, 2, &this->stream_draw_task_, 0)) {
     ESP_LOGE(TAG, "Failed to create the stream draw task");
     return false;
   }
-  if (!create_psram_task(stream_net_task_entry_, "svp_stream_net", 4096, this, 4, nullptr, tskNO_AFFINITY)) {
+  if (!create_psram_task(stream_net_task_entry_, "svp_stream_net", 4096, this, 4, nullptr, 0)) {
     ESP_LOGE(TAG, "Failed to create the stream network task");
     return false;
   }

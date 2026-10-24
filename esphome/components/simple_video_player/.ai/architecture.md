@@ -39,17 +39,17 @@ Main loop: `loopTask`, prio 1, core 1 (`CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1`, `Ap
 
 | Task | Entry | Core | Prio | Stack | Job / blocks on |
 |---|---|---|---|---|---|
-| video_player | `playback_task_entry_` S:856 | 1 | 1 | 8192 | playback session; notify, `playback_wait_` (Waiter), `output_lock_` for the whole session (S:1186), `media_lock_`, `wait_alloc_answer_` (<=2 s), JPEG `codec_mutex` |
+| video_player | `playback_task_entry_` S:856 | 0 | 1 | 8192 | playback session; notify, `playback_wait_` (Waiter), `output_lock_` for the whole session (S:1186), `media_lock_`, `wait_alloc_answer_` (<=2 s), JPEG `codec_mutex` |
 | svp_reader | `reader_task_entry_` S:871 | 0 | 2 | 4096 | video file / audio file read; `reader_wait_`, BFR reads in 20 ms slices |
 | svp_audio | `audio_task_entry_` S:2741 (only with a speaker) | 0 | 1 | 4096 | audio decode/feed; `audio_wait_`, ring reads 20 ms, `speaker->play` 20 ms |
-| svp_pictures | `picture_task_entry_` P:917 | 1 | 1 | 8192 | picture decode and cover decode (cover job first) |
+| svp_pictures | `picture_task_entry_` P:917 | 0 | 1 | 8192 | picture decode and cover decode (cover job first) |
 | svp_channels | `channel_task_entry_` CL:251 | 0 | 1 | 8192 | HTTP to relay through the `http_request` component (its timeout; `/desktop`, `/image` 15 s), queue `channel_q_` (8) |
-| svp_spice | `spice_task_entry_` SP:2585 | any | 4 | 8192 | SPICE/VNC session, select loops, USB service |
-| svp_stream_draw | `stream_draw_task_entry_` R:1010 | 1 | 2 | 4096 | decode/draw udisp stills, desktop cursor |
-| svp_stream_net | `stream_net_task_entry_` R:271 | any | 4 | 4096 | accept/serve one sender at a time, push AVI into ring |
+| svp_spice | `spice_task_entry_` SP:2585 | 0 | 4 | 8192 | SPICE/VNC session, select loops, USB service |
+| svp_stream_draw | `stream_draw_task_entry_` R:1010 | 0 | 2 | 4096 | decode/draw udisp stills, desktop cursor |
+| svp_stream_net | `stream_net_task_entry_` R:271 | 0 | 4 | 4096 | accept/serve one sender at a time, push AVI into ring |
 | svp_pace (esp_timer) | `pace_timer_cb_` H:2089 | – | – | – | wakes `playback_wait_` at the frame instant |
 | svp_capture | `capture_task_entry_` (screen_capture.cpp; made at the first capture, kept) | 0 | 3 | 4096 | copies the changed areas into the back picture after a swap, HW JPEG encodes, composes the screencast's batches; task notification bits |
-| svp_cast_tx | `cast_tx_entry_` (made at the first screencast to svp_relay, kept) | any | 3 | 4096 | connects to svp_relay's cast port, sends the header and each batch (SO_SNDTIMEO 5 s) |
+| svp_cast_tx | `cast_tx_entry_` (made at the first screencast to svp_relay, kept) | 0 | 3 | 4096 | connects to svp_relay's cast port, sends the header and each batch (SO_SNDTIMEO 5 s) |
 | svp_cast (esp_timer) | `capture_tick_cb_` | – | – | – | the screencast's tick (1/fps) to svp_capture |
 | svp_game | `GameEmulator::task_entry_` (`esphome::StaticTask`, TCB and stack internal; made when a game's panel is ready, with a link before it to connect; deallocated after it ended) | 0 | 2 | 8192 | one emulated frame, PPA into the scanout buffer not shown, flip, the frame's sound into `speaker_` (`play` 20 ms waits, the speaker's ring paces); parked on its notification while paused; netplay: waits per frame for the other panel's input (select on the socket and the link eventfd) |
 | svp_game_pace (esp_timer) | only without a speaker | – | – | – | wakes svp_game at the core's frame rate |
