@@ -153,6 +153,7 @@ class SipPhone final : public Component,
   const char *get_codec() const { return this->current_.codec; }
   uint32_t get_call_seconds() const;
   const char *get_registrar() const { return this->account_.server; }
+  const Account &get_account() const { return this->account_; }
   const char *get_last_error() const { return this->last_error_; }
   const char *get_last_message() const { return this->last_message_; }
   const char *get_last_message_from() const { return this->last_message_from_; }
