@@ -381,7 +381,7 @@ void S9xDoDMA(uint8_t Channel)
    IAPU.APUExecuting = Settings.APUEnabled;
    APU_EXECUTE();
 #endif
-   while (CPU.Cycles > CPU.NextEvent)
+   while (CPU.Cycles > CPU.NextEvent && !(CPU.Flags & SCAN_KEYS_FLAG))
       S9xDoHBlankProcessing();
 
 update_address:
