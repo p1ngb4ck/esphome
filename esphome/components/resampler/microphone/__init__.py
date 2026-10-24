@@ -1,5 +1,5 @@
 import esphome.codegen as cg
-from esphome.components import audio, microphone
+from esphome.components import audio, esp32, microphone
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_BITS_PER_SAMPLE,
@@ -8,6 +8,7 @@ from esphome.const import (
     CONF_GAIN_FACTOR,
     CONF_ID,
     CONF_MICROPHONE,
+    CONF_MODE,
     CONF_NAME,
     CONF_NUM_CHANNELS,
     CONF_SAMPLE_RATE,
@@ -25,6 +26,32 @@ ResamplerMicrophone = resampler_ns.class_(
 )
 
 CONF_USB_AUDIO = "usb_audio"
+CONF_ECHO_CANCELLATION = "echo_cancellation"
+CONF_REFERENCE_CHANNEL = "reference_channel"
+CONF_FILTER_LENGTH = "filter_length"
+
+AEC_MODES = {
+    "sr_low_cost": 0,
+    "sr_high_perf": 1,
+    "voip_low_cost": 3,
+    "voip_high_perf": 4,
+    "fd_low_cost": 5,
+    "fd_high_perf": 6,
+}
+
+AEC_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_MODE, default="voip_low_cost"): cv.enum(AEC_MODES, lower=True),
+        cv.Optional(CONF_REFERENCE_CHANNEL, default=1): cv.int_range(0, 1),
+        cv.Optional(CONF_FILTER_LENGTH, default=4): cv.int_range(1, 8),
+    }
+)
+
+
+def _validate_aec_variant(value):
+    if esp32.get_esp32_variant() not in (esp32.VARIANT_ESP32S3, esp32.VARIANT_ESP32P4):
+        raise cv.Invalid("echo_cancellation needs an ESP32-S3 or ESP32-P4 (esp-sr)")
+    return value
 
 SOURCE_SCHEMA = microphone.microphone_source_schema(
     min_bits_per_sample=16,
@@ -53,12 +80,22 @@ def _source_entry(value):
     if isinstance(value, dict) and CONF_USB_AUDIO in value:
         return GROUP_SCHEMA(value)
     name = None
+    aec = None
     if isinstance(value, dict) and CONF_NAME in value:
         value = dict(value)
         name = cv.All(cv.string_strict, cv.Length(min=1, max=32))(value.pop(CONF_NAME))
+    if isinstance(value, dict) and CONF_ECHO_CANCELLATION in value:
+        value = dict(value)
+        aec = cv.All(AEC_SCHEMA, _validate_aec_variant)(value.pop(CONF_ECHO_CANCELLATION) or {})
     conf = SOURCE_SCHEMA(value)
     if name is not None:
         conf[CONF_NAME] = name
+    if aec is not None:
+        if len(conf[CONF_CHANNELS]) != 2 or conf[CONF_BITS_PER_SAMPLE] != 16:
+            raise cv.Invalid(
+                "echo_cancellation needs a 16 bit source with 2 channels: the microphone and the reference"
+            )
+        conf[CONF_ECHO_CANCELLATION] = aec
     return conf
 
 
@@ -148,6 +185,15 @@ async def to_code(config: ConfigType) -> None:
             continue
         cg.add(var.add_source(await microphone.microphone_source_to_code(source)))
         cg.add(var.set_source_name(index, source.get(CONF_NAME, str(source[CONF_MICROPHONE]))))
+        if aec := source.get(CONF_ECHO_CANCELLATION):
+            cg.add_define("USE_RESAMPLER_MICROPHONE_AEC")
+            esp32.add_idf_component(name="espressif/esp-dsp", ref="^1.8.0")
+            esp32.add_idf_component(name="espressif/esp-sr", ref="^2.5.3")
+            cg.add(
+                var.set_source_echo_cancellation(
+                    index, aec[CONF_MODE], aec[CONF_REFERENCE_CHANNEL], aec[CONF_FILTER_LENGTH]
+                )
+            )
         index += 1
     await cg.register_component(var, config)
     await microphone.register_microphone(var, config)

@@ -42,6 +42,13 @@ class ResamplerMicrophone final : public Component, public microphone::Microphon
   void add_group_source(size_t group, microphone::Microphone *mic, const char *name, uint32_t key);
   void remove_source(microphone::Microphone *mic);
   void set_preference_key(uint32_t key) { this->preference_key_ = key; }
+#ifdef USE_RESAMPLER_MICROPHONE_AEC
+  void set_source_echo_cancellation(size_t index, uint8_t mode, uint8_t reference_channel, uint8_t filter_length) {
+    this->sources_[index].aec_mode = static_cast<int8_t>(mode);
+    this->sources_[index].aec_reference = reference_channel;
+    this->sources_[index].aec_filter = filter_length;
+  }
+#endif
 
   void setup() override;
   void loop() override;
@@ -84,6 +91,13 @@ class ResamplerMicrophone final : public Component, public microphone::Microphon
   /// @brief Resamples a chunk of source audio and passes it to the data callbacks. Source microphone task only.
   void process_audio_(microphone::MicrophoneSource *source, const std::vector<uint8_t> &data);
   void process_chunk_(microphone::MicrophoneSource *source, const std::vector<uint8_t> &data);
+  void emit_(const audio::AudioStreamInfo &input_stream_info, const uint8_t *data, size_t len,
+             const std::vector<uint8_t> *original);
+#ifdef USE_RESAMPLER_MICROPHONE_AEC
+  bool aec_wanted_() const;
+  bool aec_update_();
+  void aec_input_(const audio::AudioStreamInfo &input_stream_info, const std::vector<uint8_t> &data);
+#endif
   microphone::MicrophoneSource *active_source_() const { return this->active_.load(); }
   void hook_(microphone::MicrophoneSource *source);
   void switch_source_(microphone::MicrophoneSource *source);
@@ -95,6 +109,9 @@ class ResamplerMicrophone final : public Component, public microphone::Microphon
     const char *name;
     uint32_t key;
     uint8_t order;
+    int8_t aec_mode{-1};
+    uint8_t aec_reference{1};
+    uint8_t aec_filter{4};
   };
   struct Group {
     uint8_t bits_per_sample;
@@ -133,6 +150,17 @@ class ResamplerMicrophone final : public Component, public microphone::Microphon
   uint8_t num_channels_{0};
   uint8_t pending_num_channels_{0};
   bool resampler_ready_{false};
+#ifdef USE_RESAMPLER_MICROPHONE_AEC
+  void *aec_{nullptr};
+  microphone::MicrophoneSource *aec_source_{nullptr};
+  int16_t *aec_mic_{nullptr};
+  int16_t *aec_ref_{nullptr};
+  int16_t *aec_out_{nullptr};
+  size_t aec_frame_{0};
+  size_t aec_fill_{0};
+  uint8_t aec_reference_{1};
+  bool aec_failed_{false};
+#endif
 };
 
 }  // namespace esphome::resampler
