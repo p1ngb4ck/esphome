@@ -641,7 +641,7 @@ void GameEmulator::panel_ready(bool ready) {
 }
 
 bool GameEmulator::create_task_() {
-  if (this->task_.create(&GameEmulator::task_entry_, "svp_game", TASK_STACK, this, 1, false, 1))
+  if (this->task_.create(&GameEmulator::task_entry_, "svp_game", TASK_STACK, this, 2, false, 0))
     return true;
   ESP_LOGE(TAG, "No task for the game");
   this->task_stop_.store(true, std::memory_order_release);
