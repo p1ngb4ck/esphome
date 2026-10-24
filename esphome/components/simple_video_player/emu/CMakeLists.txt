@@ -94,3 +94,4 @@ idf_component_register(SRCS ${srcs} INCLUDE_DIRS "shim" "ports" PRIV_INCLUDE_DIR
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE RETRO_GO)
 target_compile_options(${COMPONENT_LIB} PRIVATE -include "${CMAKE_CURRENT_LIST_DIR}/shim/emu_force.h" -w -Wno-error)
+target_compile_options(${COMPONENT_LIB} PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wno-error=incompatible-pointer-types>)

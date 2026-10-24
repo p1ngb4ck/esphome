@@ -128,8 +128,8 @@ void gwenesis_vdp_set_buffers(unsigned char *screen_buffer, unsigned char *scale
 //embedded
 void gwenesis_vdp_set_buffer(unsigned short *ptr_screen_buffer)
 {
-    screen_buffer_line = ptr_screen_buffer;
-    screen_buffer = ptr_screen_buffer;
+    screen_buffer_line = (uint8_t *)ptr_screen_buffer;
+    screen_buffer = (uint8_t *)ptr_screen_buffer;
 }
 
 /******************************************************************************
