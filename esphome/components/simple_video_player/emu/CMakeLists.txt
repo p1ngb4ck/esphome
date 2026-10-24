@@ -50,7 +50,7 @@ if(CONFIG_SVP_EMU_SNES)
     file(GLOB snes_srcs "${CMAKE_CURRENT_LIST_DIR}/snes9x/src/*.c")
     list(APPEND srcs ${snes_srcs} "ports/snes_port.c")
     list(APPEND priv_incs "snes9x" "snes9x/src")
-    set_source_files_properties(${snes_srcs} "ports/snes_port.c" PROPERTIES COMPILE_OPTIONS "-O2"
+    set_source_files_properties(${snes_srcs} "ports/snes_port.c" PROPERTIES COMPILE_OPTIONS "-Os"
                                 COMPILE_DEFINITIONS "RIGHTSHIFT_IS_SAR;FAST_LSB_WORD_ACCESS;NO_ZERO_LUT")
     set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/snes9x/src/snapshot.c" PROPERTIES
                                 COMPILE_DEFINITIONS "RIGHTSHIFT_IS_SAR;FAST_LSB_WORD_ACCESS;NO_ZERO_LUT;${mem_io}")
