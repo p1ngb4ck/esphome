@@ -1,7 +1,6 @@
 [sections:emu_bss]
 entries:
     .bss+
-    .sbss+
 
 [sections:emu_common]
 entries:
