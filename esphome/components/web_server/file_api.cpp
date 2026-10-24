@@ -5,7 +5,7 @@
 #include "esphome/components/web_server_idf/web_server_idf.h"
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
-#include "esphome/core/static_task.h"
+#include "esphome/core/hal.h"
 
 #include <esp_http_server.h>
 

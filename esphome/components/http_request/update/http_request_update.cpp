@@ -3,7 +3,7 @@
 #include <cstring>
 
 #include "esphome/core/application.h"
-#include "esphome/core/static_task.h"
+#include "esphome/core/hal.h"
 #include "esphome/core/version.h"
 
 #include "esphome/components/json/json_util.h"

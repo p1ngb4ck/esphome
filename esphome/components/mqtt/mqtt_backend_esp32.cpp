@@ -7,7 +7,7 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
-#include "esphome/core/static_task.h"
+#include "esphome/core/hal.h"
 
 #ifdef USE_MQTT_CERT_BUNDLE
 #include "esp_crt_bundle.h"

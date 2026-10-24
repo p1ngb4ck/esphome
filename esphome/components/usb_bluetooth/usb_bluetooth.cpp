@@ -2,7 +2,7 @@
 
 #include "usb_bluetooth.h"
 #include "esphome/core/log.h"
-#include "esphome/core/static_task.h"
+#include "esphome/core/hal.h"
 #include "usb/usb_helpers.h"
 
 #ifdef USE_USB_BLUETOOTH_BLUEDROID

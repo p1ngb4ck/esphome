@@ -3,7 +3,7 @@
 #include "esphome/core/application.h"
 #include "esphome/core/defines.h"
 #include "esphome/core/helpers.h"
-#include "esphome/core/static_task.h"
+#include "esphome/core/hal.h"
 #include "preferences.h"
 #include <cstring>
 #include <freertos/FreeRTOS.h>

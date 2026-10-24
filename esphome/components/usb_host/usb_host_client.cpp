@@ -7,7 +7,6 @@
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/application.h"
-#include "esphome/core/static_task.h"
 #include "esphome/components/bytebuffer/bytebuffer.h"
 
 #include <cinttypes>

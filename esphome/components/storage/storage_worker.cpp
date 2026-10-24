@@ -1,6 +1,6 @@
 #include "storage_worker.h"
 #include "esphome/core/log.h"
-#include "esphome/core/static_task.h"
+#include "esphome/core/hal.h"
 #include "esphome/core/wake.h"
 
 #include <cstring>
