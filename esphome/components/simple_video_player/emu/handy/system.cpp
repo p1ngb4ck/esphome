@@ -201,9 +201,9 @@ void CSystem::Init(const UBYTE* filedata, ULONG filesize, long displayformat, lo
    mpDebugCallback = NULL;
    mDebugCallbackObject = 0;
 
-   mMikie = emu_new<CMikie>(*this, displayformat, samplerate);
-   mSusie = emu_new<CSusie>(*this);
-   mCpu = emu_new<C65C02>(*this);
+   mMikie = emu_new_hot<CMikie>(*this, displayformat, samplerate);
+   mSusie = emu_new_hot<CSusie>(*this);
+   mCpu = emu_new_hot<C65C02>(*this);
    mEEPROM = emu_new<CEEPROM>(mCart->CartGetEEPROMType());
 
    // Now init is complete do a reset, this will cause many things to be reset twice

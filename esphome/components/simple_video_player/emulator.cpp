@@ -159,13 +159,15 @@ uint32_t GameEmulator::internal_budget_(EmuSystem system) const {
       return 14 * 1024;
     case EmuSystem::PCE:
       return 8 * 1024;
+    case EmuSystem::LYNX:
+      return 12 * 1024;
     default:
       return 0;
   }
 }
 
 bool GameEmulator::hot_only_(EmuSystem system) const {
-  return system == EmuSystem::SNES || system == EmuSystem::MD || system == EmuSystem::PCE;
+  return system == EmuSystem::SNES || system == EmuSystem::MD || system == EmuSystem::PCE || system == EmuSystem::LYNX;
 }
 
 size_t GameEmulator::rom_alloc_(EmuSystem system, size_t size) const {

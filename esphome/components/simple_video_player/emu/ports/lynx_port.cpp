@@ -80,7 +80,7 @@ static void lynx_rotation(void)
 bool lynx_port_load(uint8_t *rom, size_t size, uint8_t channels)
 {
     s_channels = channels > 1 ? 2 : 1;
-    s_lynx = emu_new<CSystem>((const UBYTE *)rom, (ULONG)size, (long)MIKIE_PIXEL_FORMAT_16BPP_565,
+    s_lynx = emu_new_hot<CSystem>((const UBYTE *)rom, (ULONG)size, (long)MIKIE_PIXEL_FORMAT_16BPP_565,
                               (long)HANDY_AUDIO_SAMPLE_FREQ);
     if (s_lynx == nullptr || s_lynx->mFileType == HANDY_FILETYPE_ILLEGAL)
         return false;

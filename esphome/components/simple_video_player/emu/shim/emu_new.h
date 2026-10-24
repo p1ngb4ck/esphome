@@ -10,6 +10,12 @@ template<class T, class... Args> T *emu_new(Args &&...args)
     return mem != nullptr ? new (mem) T(static_cast<Args &&>(args)...) : nullptr;
 }
 
+template<class T, class... Args> T *emu_new_hot(Args &&...args)
+{
+    void *mem = emu_calloc_hot(1, sizeof(T));
+    return mem != nullptr ? new (mem) T(static_cast<Args &&>(args)...) : nullptr;
+}
+
 template<class T> void emu_delete(T *ptr)
 {
     if (ptr != nullptr)
