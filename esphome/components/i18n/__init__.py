@@ -3,7 +3,7 @@ import re
 from esphome import automation
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_PATH
+from esphome.const import CONF_ID, CONF_NAME, CONF_PATH, CONF_PLATFORM
 from esphome.core import CORE, CoroPriority, Lambda, coroutine_with_priority
 from esphome.cpp_generator import StaticConstAssignmentExpression
 
@@ -86,6 +86,8 @@ def _scan(value):
             if text is not None:
                 register_text(text)
     elif isinstance(value, dict):
+        if isinstance(value.get(CONF_NAME), str) and CONF_PLATFORM in value:
+            register_text(value[CONF_NAME])
         for item in value.values():
             _scan(item)
     elif isinstance(value, (list, tuple)):

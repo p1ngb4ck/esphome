@@ -18,6 +18,9 @@
 
 #include <cstdlib>
 
+#ifdef USE_I18N
+#include "esphome/components/i18n/i18n.h"
+#endif
 #ifdef USE_LIGHT
 #include "esphome/components/light/light_json_schema.h"
 #endif
@@ -657,7 +660,12 @@ static void set_json_id(JsonObject root, EntityBase *obj, const char *prefix, Js
     root[ESPHOME_F("name")] = name;  // in id_buf on the stack, so copied
 #else
     const StringRef &ram_name = obj->get_name_progmem().ram_ref();
+#ifdef USE_I18N
+    const char *shown = i18n::tr(ram_name.c_str());
+    root[ESPHOME_F("name")] = linked(shown, strlen(shown));
+#else
     root[ESPHOME_F("name")] = linked(ram_name.c_str(), ram_name.size());
+#endif
 #endif
 #ifdef USE_DEVICES
     if (device_name) {
