@@ -5,8 +5,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_PATH
 from esphome.core import CORE, CoroPriority, Lambda, coroutine_with_priority
-from esphome.cpp_generator import RawStatement
-from esphome.helpers import cpp_string_escape
+from esphome.cpp_generator import StaticConstAssignmentExpression
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["storage"]
@@ -17,6 +16,7 @@ KEYS_SYMBOL = "esphome_i18n_keys"
 SORTED_SYMBOL = "esphome_i18n_sorted"
 
 i18n_ns = cg.esphome_ns.namespace("i18n")
+char_ptr = cg.global_ns.namespace("char *")
 I18nComponent = i18n_ns.class_("I18nComponent", cg.Component)
 LoadAction = i18n_ns.class_("LoadAction", automation.Action)
 UnloadAction = i18n_ns.class_("UnloadAction", automation.Action)
@@ -55,8 +55,12 @@ def register_text(text: str) -> int | None:
     return key
 
 
-def key_expression(key: int) -> str:
-    return f"{KEYS_SYMBOL}[{key}]"
+def key_expression(key: int):
+    return cg.MockObj(KEYS_SYMBOL)[key]
+
+
+def bind_expression(label, key: int):
+    return i18n_ns.bind_label(label, key)
 
 
 def _unescape(literal: str) -> str | None:
@@ -106,24 +110,18 @@ async def to_code(config):
         keys = found or [""]
         order = sorted(range(len(keys)), key=lambda k: keys[k].encode("utf-8"))
         cg.add_global(
-            RawStatement(
-                f"const char *const {KEYS_SYMBOL}[] = {{"
-                + ", ".join(cpp_string_escape(k) for k in keys)
-                + "};"
+            StaticConstAssignmentExpression(
+                char_ptr, KEYS_SYMBOL, cg.ArrayInitializer(*keys)
             )
         )
         cg.add_global(
-            RawStatement(
-                f"const uint16_t {SORTED_SYMBOL}[] = {{"
-                + ", ".join(str(k) for k in order)
-                + "};"
+            StaticConstAssignmentExpression(
+                cg.uint16, SORTED_SYMBOL, cg.ArrayInitializer(*order)
             )
         )
         cg.add(
             var.set_keys(
-                cg.RawExpression(KEYS_SYMBOL),
-                cg.RawExpression(SORTED_SYMBOL),
-                len(found),
+                cg.MockObj(KEYS_SYMBOL), cg.MockObj(SORTED_SYMBOL), len(found)
             )
         )
 

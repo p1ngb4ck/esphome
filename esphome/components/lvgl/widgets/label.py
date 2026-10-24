@@ -1,5 +1,4 @@
 from esphome.components.const import CONF_LABEL
-import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.const import CONF_TEXT
 
@@ -40,8 +39,8 @@ class LabelType(WidgetType):
             if key is None:
                 await w.set_property(CONF_TEXT, await lv_text.process(value))
             else:
-                lv.label_set_text_static(w.obj, cg.RawExpression(i18n.key_expression(key)))
-                lv_add(cg.RawExpression(f"esphome::i18n::bind_label({w.obj}, {key})"))
+                lv.label_set_text_static(w.obj, i18n.key_expression(key))
+                lv_add(i18n.bind_expression(w.obj, key))
         await w.set_property(CONF_LONG_MODE, config)
         await w.set_property(CONF_RECOLOR, config, processor=lv_bool)
 
