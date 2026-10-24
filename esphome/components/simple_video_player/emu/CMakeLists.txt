@@ -72,7 +72,8 @@ if(CONFIG_SVP_EMU_GW)
          "${CMAKE_CURRENT_LIST_DIR}/gw-emulator/src/gw_sys/*.c")
     list(APPEND srcs ${gw_srcs} "ports/gw_port.c")
     list(APPEND priv_incs "gw-emulator/src" "gw-emulator/src/cpus" "gw-emulator/src/gw_sys")
-    set_source_files_properties(${gw_srcs} PROPERTIES COMPILE_OPTIONS "-O2")
+    set_source_files_properties(${gw_srcs} PROPERTIES COMPILE_OPTIONS "-O2" COMPILE_DEFINITIONS "ROM_DATA=gw_ROM_DATA")
+    set_source_files_properties("ports/gw_port.c" PROPERTIES COMPILE_DEFINITIONS "ROM_DATA=gw_ROM_DATA")
 endif()
 
 if(CONFIG_SVP_EMU_MSX)
@@ -83,7 +84,7 @@ if(CONFIG_SVP_EMU_MSX)
     set(msx_names "CPU=fmsx_CPU;LoadFile=fmsx_LoadFile;LoadROM=fmsx_LoadROM;ResetZ80=fmsx_ResetZ80;ExecZ80=fmsx_ExecZ80"
         "IntZ80=fmsx_IntZ80;RunZ80=fmsx_RunZ80;RdZ80=fmsx_RdZ80;WrZ80=fmsx_WrZ80;InZ80=fmsx_InZ80;OutZ80=fmsx_OutZ80"
         "LoopZ80=fmsx_LoopZ80;PatchZ80=fmsx_PatchZ80;DebugZ80=fmsx_DebugZ80;OpZ80=fmsx_OpZ80"
-        "SaveState=fmsx_SaveState;LoadState=fmsx_LoadState")
+        "SaveState=fmsx_SaveState;LoadState=fmsx_LoadState;VRAM=fmsx_VRAM")
     set(msx_quote "-iquote;${CMAKE_CURRENT_LIST_DIR}/fmsx/src/Z80;-iquote;${CMAKE_CURRENT_LIST_DIR}/fmsx/src/fMSX"
         "-iquote;${CMAKE_CURRENT_LIST_DIR}/fmsx/src/EMULib")
     set_source_files_properties(${msx_srcs} PROPERTIES COMPILE_OPTIONS "-O2;-include;${CMAKE_CURRENT_LIST_DIR}/fmsx/msxfix.h;${msx_quote}"
