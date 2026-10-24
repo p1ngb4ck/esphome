@@ -70,7 +70,7 @@ unsigned char M68K_RAM[MAX_RAM_SIZE];    // 68K RAM
 
 
 // Setup Z80 Memory
-unsigned char ZRAM[MAX_Z80_RAM_SIZE]; // Z80 RAM
+unsigned char *ZRAM; // Z80 RAM
 unsigned char TMSS[0x4];
 extern unsigned short gwenesis_vdp_status;
 

@@ -155,12 +155,16 @@ uint32_t GameEmulator::internal_budget_(EmuSystem system) const {
       return 25 * 1024;
     case EmuSystem::SNES:
       return 20 * 1024;
+    case EmuSystem::MD:
+      return 14 * 1024;
     default:
       return 0;
   }
 }
 
-bool GameEmulator::hot_only_(EmuSystem system) const { return system == EmuSystem::SNES; }
+bool GameEmulator::hot_only_(EmuSystem system) const {
+  return system == EmuSystem::SNES || system == EmuSystem::MD;
+}
 
 size_t GameEmulator::rom_alloc_(EmuSystem system, size_t size) const {
   switch (system) {

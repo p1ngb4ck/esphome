@@ -9,7 +9,10 @@ extern unsigned char *VRAM;
 extern int zclk;
 extern unsigned char gwenesis_vdp_regs[];
 extern unsigned short gwenesis_vdp_status;
-extern unsigned short CRAM565[];
+extern unsigned short *CRAM565;
+extern unsigned char *ZRAM;
+extern unsigned char *SAT_CACHE;
+extern unsigned int *sin_tab;
 extern int screen_width, screen_height;
 extern int hint_pending;
 
@@ -121,6 +124,12 @@ void gwenesis_io_get_buttons()
 bool md_port_load(uint8_t *rom, size_t size, uint8_t channels)
 {
     s_channels = channels > 1 ? 2 : 1;
+    ZRAM = emu_calloc_hot(1, MAX_Z80_RAM_SIZE);
+    sin_tab = emu_calloc_hot(1024, sizeof(unsigned int));
+    SAT_CACHE = emu_calloc_hot(1, SAT_CACHE_MAX_SIZE);
+    CRAM565 = emu_calloc_hot(CRAM_MAX_SIZE * 4, sizeof(unsigned short));
+    if (ZRAM == NULL || sin_tab == NULL || SAT_CACHE == NULL || CRAM565 == NULL)
+        return false;
     s_buffer = calloc(1, 320 * 241);
     VRAM = calloc(1, VRAM_MAX_SIZE);
     s_mix = calloc(MD_AUDIO_BUFFER_LENGTH, sizeof(int16_t));

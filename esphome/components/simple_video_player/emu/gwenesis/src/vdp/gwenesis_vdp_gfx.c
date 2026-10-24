@@ -46,10 +46,10 @@ extern unsigned char *VRAM;
 #endif
 
 extern unsigned short CRAM[];            // CRAM - Palettes
-extern unsigned char SAT_CACHE[]__attribute__((aligned(4)));        // Sprite cache
+extern unsigned char *SAT_CACHE;        // Sprite cache
 extern unsigned char gwenesis_vdp_regs[]; // Registers
 
-extern unsigned short CRAM565[];    // CRAM - Palettes
+extern unsigned short *CRAM565;    // CRAM - Palettes
 
 extern unsigned short VSRAM[];        // VSRAM - Scrolling
 

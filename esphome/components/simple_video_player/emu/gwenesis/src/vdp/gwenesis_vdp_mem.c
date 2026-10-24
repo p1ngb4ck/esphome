@@ -69,10 +69,10 @@ void vdpm_log(const char *subs, const char *fmt, ...) {
 #endif
 
 unsigned short CRAM[CRAM_MAX_SIZE];           // CRAM - Palettes
-unsigned char SAT_CACHE[SAT_CACHE_MAX_SIZE];  // Sprite cache
+unsigned char *SAT_CACHE;  // Sprite cache
 unsigned char gwenesis_vdp_regs[REG_SIZE];    // Registers
 unsigned short fifo[FIFO_SIZE];               // Fifo
-unsigned short CRAM565[CRAM_MAX_SIZE * 4];    // CRAM - Palettes
+unsigned short *CRAM565;    // CRAM - Palettes
 unsigned short VSRAM[VSRAM_MAX_SIZE];         // VSRAM - Scrolling
 
 // Define VDP control code and set initial code
@@ -151,9 +151,9 @@ int m68k_irq_acked(int irq) {
 
 void gwenesis_vdp_reset() {
   memset(VRAM, 0, VRAM_MAX_SIZE);
-  memset(SAT_CACHE, 0, sizeof(SAT_CACHE));
+  memset(SAT_CACHE, 0, SAT_CACHE_MAX_SIZE);
   memset(CRAM, 0, sizeof(CRAM));
-  memset(CRAM565, 0, sizeof(CRAM565));
+  memset(CRAM565, 0, (CRAM_MAX_SIZE * 4 * sizeof(unsigned short)));
   memset(VSRAM, 0, sizeof(VSRAM));
   memset(gwenesis_vdp_regs, 0, sizeof(gwenesis_vdp_regs));
   command_word_pending = 0;
@@ -997,10 +997,10 @@ void gwenesis_vdp_mem_save_state() {
 
   saveGwenesisStateSetBuffer(state, "VRAM", VRAM, VRAM_MAX_SIZE);
   saveGwenesisStateSetBuffer(state, "CRAM", CRAM, sizeof(CRAM));
-  saveGwenesisStateSetBuffer(state, "SAT_CACHE", SAT_CACHE, sizeof(SAT_CACHE));
+  saveGwenesisStateSetBuffer(state, "SAT_CACHE", SAT_CACHE, SAT_CACHE_MAX_SIZE);
   saveGwenesisStateSetBuffer(state, "gwenesis_vdp_regs", gwenesis_vdp_regs, sizeof(gwenesis_vdp_regs));
   saveGwenesisStateSetBuffer(state, "fifo", fifo, sizeof(fifo));
-  saveGwenesisStateSetBuffer(state, "CRAM565", CRAM565, sizeof(CRAM565));
+  saveGwenesisStateSetBuffer(state, "CRAM565", CRAM565, (CRAM_MAX_SIZE * 4 * sizeof(unsigned short)));
   saveGwenesisStateSetBuffer(state, "VSRAM", VSRAM, sizeof(VSRAM));
   saveGwenesisStateSet(state, "code_reg", code_reg);
   saveGwenesisStateSet(state, "address_reg", address_reg);
@@ -1017,10 +1017,10 @@ void gwenesis_vdp_mem_load_state() {
 
   saveGwenesisStateGetBuffer(state, "VRAM", VRAM, VRAM_MAX_SIZE);
   saveGwenesisStateGetBuffer(state, "CRAM", CRAM, sizeof(CRAM));
-  saveGwenesisStateGetBuffer(state, "SAT_CACHE", SAT_CACHE, sizeof(SAT_CACHE));
+  saveGwenesisStateGetBuffer(state, "SAT_CACHE", SAT_CACHE, SAT_CACHE_MAX_SIZE);
   saveGwenesisStateGetBuffer(state, "gwenesis_vdp_regs", gwenesis_vdp_regs, sizeof(gwenesis_vdp_regs));
   saveGwenesisStateGetBuffer(state, "fifo", fifo, sizeof(fifo));
-  saveGwenesisStateGetBuffer(state, "CRAM565", CRAM565, sizeof(CRAM565));
+  saveGwenesisStateGetBuffer(state, "CRAM565", CRAM565, (CRAM_MAX_SIZE * 4 * sizeof(unsigned short)));
   saveGwenesisStateGetBuffer(state, "VSRAM", VSRAM, sizeof(VSRAM));
   code_reg = saveGwenesisStateGet(state, "code_reg");
   address_reg = saveGwenesisStateGet(state, "address_reg");
