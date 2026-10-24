@@ -226,6 +226,8 @@ bool ES8311::configure_mic_() {
 
   ES8311_ERROR_CHECK(this->write_byte(ES8311_REG16_ADC, this->mic_gain_));  // ADC gain scale up
   ES8311_ERROR_CHECK(this->write_byte(ES8311_REG17_ADC, 0xC8));             // Set ADC gain
+  if (this->dac_reference_)
+    ES8311_ERROR_CHECK(this->write_byte(ES8311_REG44_GPIO, 0x58));
 
   // Successfully configured the microphones
   return true;
