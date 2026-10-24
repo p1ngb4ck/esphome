@@ -1092,8 +1092,18 @@ void LvglComponent::flush_cb_(lv_display_t *disp_drv, const lv_area_t *area, uin
       // Drawn over the picture: this buffer's is gone; before the present the newest one comes back
       if (this->cam_shown_ && lv_area_is_on(area, &this->cam_pic_))
         this->cam_seq_[this->scanout_back_] = 0;
-      if (this->cam_shown_ && lv_display_flush_is_last(disp_drv))
-        this->cam_layer_restore_();
+      if (this->cam_shown_ && lv_display_flush_is_last(disp_drv)) {
+        lv_area_t box;
+        lv_obj_get_coords(this->cam_marker_, &box);
+        if (this->scanout_clip_(&box, &box) && lv_area_is_equal(&box, &this->cam_box_)) {
+          this->cam_layer_restore_();
+        } else {
+          this->cam_seq_[0] = 0;
+          this->cam_seq_[1] = 0;
+          this->cam_latest_ = 0;
+          this->cam_pic_ = lv_area_t{0, 0, -1, -1};
+        }
+      }
 #endif
       if (lv_display_flush_is_last(disp_drv)) {
         this->displays_[0]->present_scanout_buffer(this->scanout_[this->scanout_back_]);
