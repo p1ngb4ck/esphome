@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-typedef void *(*emu_alloc_fn_t)(void *ctx, size_t size, bool zero);
+typedef void *(*emu_alloc_fn_t)(void *ctx, size_t size, bool zero, bool hot);
 typedef void *(*emu_realloc_fn_t)(void *ctx, void *ptr, size_t size);
 typedef void (*emu_free_fn_t)(void *ctx, void *ptr);
 typedef bool (*emu_host_frame_fn_t)(void *ctx, uint16_t *pad1, uint16_t *pad2);
@@ -26,6 +26,7 @@ bool emu_link_recv(uint8_t *type, uint8_t *a, uint16_t *b, uint32_t wait_ms);
 
 void *emu_malloc(size_t size);
 void *emu_calloc(size_t count, size_t size);
+void *emu_calloc_hot(size_t count, size_t size);
 void *emu_realloc(void *ptr, size_t size);
 void emu_free(void *ptr);
 

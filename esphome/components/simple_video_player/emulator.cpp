@@ -153,10 +153,14 @@ uint32_t GameEmulator::internal_budget_(EmuSystem system) const {
       return 24 * 1024;
     case EmuSystem::SMS:
       return 25 * 1024;
+    case EmuSystem::SNES:
+      return 20 * 1024;
     default:
       return 0;
   }
 }
+
+bool GameEmulator::hot_only_(EmuSystem system) const { return system == EmuSystem::SNES; }
 
 size_t GameEmulator::rom_alloc_(EmuSystem system, size_t size) const {
   switch (system) {
@@ -441,6 +445,7 @@ void GameEmulator::loaded_() {
   emu_set_host(&GameEmulator::host_frame_cb_, this);
   this->internal_used_ = 0;
   this->internal_budget_now_ = this->internal_budget_(this->system_);
+  this->hot_only_now_ = this->hot_only_(this->system_);
   this->core_ = emu_make_core(this->system_, this->core_store_);
   if (this->core_ == nullptr) {
     this->fail_("system not built in");
@@ -1094,8 +1099,8 @@ void GameEmulator::job_release_() {
   this->job_data_ = nullptr;
 }
 
-void *GameEmulator::alloc_cb_(void *ctx, size_t size, bool zero) {
-  return static_cast<GameEmulator *>(ctx)->alloc_(size, zero);
+void *GameEmulator::alloc_cb_(void *ctx, size_t size, bool zero, bool hot) {
+  return static_cast<GameEmulator *>(ctx)->alloc_(size, zero, hot);
 }
 
 void *GameEmulator::realloc_cb_(void *ctx, void *ptr, size_t size) {
@@ -1112,7 +1117,7 @@ GameEmulator::Piece *GameEmulator::piece_(void *ptr) {
   return nullptr;
 }
 
-void *GameEmulator::alloc_(size_t size, bool zero) {
+void *GameEmulator::alloc_(size_t size, bool zero, bool hot) {
   if (size == 0)
     size = 1;
   Piece *slot = this->piece_(nullptr);
@@ -1120,7 +1125,8 @@ void *GameEmulator::alloc_(size_t size, bool zero) {
     return nullptr;
   void *ptr = nullptr;
   bool internal = false;
-  if (size <= INTERNAL_PIECE_MAX && this->internal_used_ + size <= this->internal_budget_now_) {
+  if ((hot || !this->hot_only_now_) && size <= INTERNAL_PIECE_MAX &&
+      this->internal_used_ + size <= this->internal_budget_now_) {
     ptr = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     internal = ptr != nullptr;
   }
@@ -1144,7 +1150,7 @@ void *GameEmulator::realloc_(void *ptr, size_t size) {
     return nullptr;
   if (size <= piece->size)
     return ptr;
-  void *grown = this->alloc_(size, false);
+  void *grown = this->alloc_(size, false, piece->internal);
   if (grown == nullptr)
     return nullptr;
   piece = this->piece_(ptr);

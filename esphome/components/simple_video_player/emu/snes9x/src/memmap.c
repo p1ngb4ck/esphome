@@ -142,8 +142,8 @@ bool S9xInitMemory(void)
    Memory.VRAM  = (uint8_t*)malloc(VRAM_SIZE);
    Memory.FillRAM = (uint8_t*)malloc(0x8000);
 
-   Memory.Map = (uint8_t**)calloc(MEMMAP_NUM_BLOCKS, sizeof(uint8_t*));
-   Memory.MapInfo = (SMapInfo*)calloc(MEMMAP_NUM_BLOCKS, sizeof(SMapInfo));
+   Memory.Map = (uint8_t**)emu_calloc_hot(MEMMAP_NUM_BLOCKS, sizeof(uint8_t*));
+   Memory.MapInfo = (SMapInfo*)emu_calloc_hot(MEMMAP_NUM_BLOCKS, sizeof(SMapInfo));
 
    IPPU.ScreenColors = (uint16_t *)calloc(256 * 9, sizeof(uint16_t));
    IPPU.DirectColors = IPPU.ScreenColors + 256;

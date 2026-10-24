@@ -200,6 +200,7 @@ class GameEmulator
   bool start_(const std::string &path, bool assign);
   bool system_for_(const char *path, EmuSystem *system) const;
   uint32_t internal_budget_(EmuSystem system) const;
+  bool hot_only_(EmuSystem system) const;
   size_t rom_alloc_(EmuSystem system, size_t size) const;
   void next_file_();
   void read_next_();
@@ -241,10 +242,10 @@ class GameEmulator
   void job_finished_(bool ok);
   void job_release_();
 
-  static void *alloc_cb_(void *ctx, size_t size, bool zero);
+  static void *alloc_cb_(void *ctx, size_t size, bool zero, bool hot);
   static void *realloc_cb_(void *ctx, void *ptr, size_t size);
   static void free_cb_(void *ctx, void *ptr);
-  void *alloc_(size_t size, bool zero);
+  void *alloc_(size_t size, bool zero, bool hot);
   void *realloc_(void *ptr, size_t size);
   void free_(void *ptr);
   Piece *piece_(void *ptr);
@@ -312,6 +313,7 @@ class GameEmulator
   Piece pieces_[MAX_PIECES]{};
   size_t internal_used_{0};
   size_t internal_budget_now_{0};
+  bool hot_only_now_{false};
   bool on_main_loop_{false};
 
   uint8_t *frame_{nullptr};

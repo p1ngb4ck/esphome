@@ -69,14 +69,21 @@ bool emu_link_recv(uint8_t *type, uint8_t *a, uint16_t *b, uint32_t wait_ms)
 
 void *emu_malloc(size_t size)
 {
-    return s_alloc != NULL ? s_alloc(s_ctx, size, false) : NULL;
+    return s_alloc != NULL ? s_alloc(s_ctx, size, false, false) : NULL;
 }
 
 void *emu_calloc(size_t count, size_t size)
 {
     if (size != 0 && count > SIZE_MAX / size)
         return NULL;
-    return s_alloc != NULL ? s_alloc(s_ctx, count * size, true) : NULL;
+    return s_alloc != NULL ? s_alloc(s_ctx, count * size, true, false) : NULL;
+}
+
+void *emu_calloc_hot(size_t count, size_t size)
+{
+    if (size != 0 && count > SIZE_MAX / size)
+        return NULL;
+    return s_alloc != NULL ? s_alloc(s_ctx, count * size, true, true) : NULL;
 }
 
 void *emu_realloc(void *ptr, size_t size)

@@ -306,7 +306,8 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
   back to LVGL, `on_paused`), STOPPING (the task ends, `StaticTask::deallocate()`), then everything is given back
   (`on_ended`).
 - Memory: the cores' `malloc` / `calloc` / `realloc` / `free` (forced `emu_force.h`) go to `GameEmulator`: a piece of at
-  most 16 KiB internal while the system's internal budget lasts (NES 24 KiB, Game Boy 24 KiB, SMS 25 KiB, others 0),
+  most 16 KiB internal while the system's internal budget lasts (NES 24 KiB, Game Boy 24 KiB, SMS 25 KiB, SNES 20 KiB,
+  others 0; SNES only for the pieces its core asks for with `emu_calloc_hot`: the memory map `Map` and `MapInfo`),
   else the pool (`POOL_USER_GAME`, owner row: outputs, video, desktop); every piece in a table of 96, all given back at
   the end. The cores' hot structs (nofrendo: nes, cpu, mem with its RAM as a pointer, ppu, apu) are allocated in their
   init functions through it (gnuboy: GB, cpu, snd, WRAM / VRAM per bank in the order VRAM 0, WRAM 0, WRAM 1, VRAM 1;
