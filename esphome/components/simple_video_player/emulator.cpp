@@ -505,6 +505,7 @@ void GameEmulator::loaded_() {
 }
 
 void GameEmulator::ready_() {
+  this->started_trigger_.trigger();
 #ifdef SVP_EMU_LINK
   if (this->link_mode_ != LinkMode::OFF) {
     this->link_begin_();

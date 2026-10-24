@@ -255,6 +255,7 @@ CONF_EMULATOR = "emulator"
 CONF_SYSTEMS = "systems"
 CONF_KEYS = "keys"
 CONF_MENU_KEYS = "menu_keys"
+CONF_ON_STARTED = "on_started"
 CONF_ON_PAUSED = "on_paused"
 CONF_ON_ENDED = "on_ended"
 CONF_BIOS_DIR = "bios_dir"
@@ -334,6 +335,7 @@ EMULATOR_SCHEMA = cv.Schema(
             {cv.Optional(button): cv.ensure_list(_emu_key) for button in EMU_BUTTONS}
         ),
         cv.Optional(CONF_MENU_KEYS, default=["BUTTON_11"]): cv.ensure_list(_emu_key),
+        cv.Optional(CONF_ON_STARTED): automation.validate_automation(single=True),
         cv.Optional(CONF_ON_PAUSED): automation.validate_automation(single=True),
         cv.Optional(CONF_ON_ENDED): automation.validate_automation(single=True),
         cv.Optional(CONF_ON_PLAYERS_CHANGED): automation.validate_automation(single=True),
@@ -1269,6 +1271,8 @@ async def _emulator_to_code(var, config):
             cg.add(emu.add_key(page, usage, bit))
     for page, usage in config[CONF_MENU_KEYS]:
         cg.add(emu.add_menu_key(page, usage))
+    if on_started := config.get(CONF_ON_STARTED):
+        await automation.build_automation(emu.get_started_trigger(), [], on_started)
     if on_paused := config.get(CONF_ON_PAUSED):
         await automation.build_automation(emu.get_paused_trigger(), [], on_paused)
     if on_ended := config.get(CONF_ON_ENDED):

@@ -100,6 +100,7 @@ class GameEmulator
   void link_off();
   LinkMode link_wanted() const { return this->link_wanted_; }
   const char *link_state_name() const;
+  Trigger<> *get_started_trigger() { return &this->started_trigger_; }
   Trigger<> *get_paused_trigger() { return &this->paused_trigger_; }
   Trigger<> *get_ended_trigger() { return &this->ended_trigger_; }
 
@@ -275,6 +276,7 @@ class GameEmulator
   size_t key_count_{0};
   KeyEntry menu_keys_[MAX_MENU_KEYS]{};
   size_t menu_key_count_{0};
+  Trigger<> started_trigger_;
   Trigger<> paused_trigger_;
   Trigger<> ended_trigger_;
   Trigger<> players_changed_trigger_;

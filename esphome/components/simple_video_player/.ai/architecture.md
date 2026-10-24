@@ -301,7 +301,7 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
   (`emu_refuses_()`: `play()`, `play_index_()`, `audio_start_()`, `app_take()` of another app, SPICE / VNC connects,
   stream senders, `svp_play_audio` without announce).
 - States (main loop): LOADING (waits until no video session runs, stat, the ROM's pool piece, worker read stream
-  straight into it), core load (main loop), WAIT_PANEL (`wants_panel()`: `loop()` pauses LVGL as for the camera;
+  straight into it), core load (main loop; `on_started` once loaded, before the panel), WAIT_PANEL (`wants_panel()`: `loop()` pauses LVGL as for the camera;
   `panel_ready()` once LVGL let go), RUNNING (svp_game), PAUSING / PAUSED (the menu key; the task parks, the panel goes
   back to LVGL, `on_paused`), STOPPING (the task ends, `StaticTask::deallocate()`), then everything is given back
   (`on_ended`).
