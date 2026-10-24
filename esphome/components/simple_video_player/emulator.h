@@ -148,7 +148,6 @@ class GameEmulator
   static constexpr uint32_t TASK_STACK = 8192;
   static constexpr uint32_t INTERNAL_PIECE_MAX = 16 * 1024;
   static constexpr size_t FRAME_MIN_BYTES = 256 * 240 * 2;
-  static constexpr int64_t PACE_LEAD_FRAMES = 2;
 
   struct SystemEntry {
     EmuSystem system;
@@ -371,8 +370,7 @@ class GameEmulator
   std::atomic<bool> task_done_{false};
   std::atomic<uint16_t> pads_[2]{};
   esp_timer_handle_t pace_timer_{nullptr};
-  int64_t pace_anchor_us_{0};
-  int64_t pace_us_{0};
+  int64_t pace_next_us_{0};
   bool pace_anchored_{false};
 
   const char *peers_[MAX_PEERS]{};

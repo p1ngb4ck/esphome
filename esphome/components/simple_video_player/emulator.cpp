@@ -664,28 +664,18 @@ void GameEmulator::start_pacing_() {
     this->pace_timer_ = nullptr;
 }
 
-void GameEmulator::pace_reset_() {
-  this->pace_us_ = 0;
-  this->pace_anchored_ = false;
-}
+void GameEmulator::pace_reset_() { this->pace_anchored_ = false; }
 
 void GameEmulator::pace_() {
   const int64_t frame_us = this->core_->frame_us();
   if (this->pace_timer_ == nullptr || frame_us == 0)
     return;
-  this->pace_us_ += frame_us;
   const int64_t now = esp_timer_get_time();
-  const int64_t produced = this->pace_us_;
-  if (!this->pace_anchored_) {
-    this->pace_anchor_us_ = now - produced;
-    this->pace_anchored_ = true;
-  }
-  const int64_t ahead = this->pace_anchor_us_ + produced - now;
-  if (ahead < 0) {
-    this->pace_anchor_us_ = now - produced;
-    return;
-  }
-  const int64_t wait = ahead - PACE_LEAD_FRAMES * frame_us;
+  this->pace_next_us_ = this->pace_anchored_ ? this->pace_next_us_ + frame_us : now;
+  this->pace_anchored_ = true;
+  if (this->pace_next_us_ < now)
+    this->pace_next_us_ = now;
+  const int64_t wait = this->pace_next_us_ - now;
   if (wait <= 0)
     return;
   ulTaskNotifyTake(pdTRUE, 0);
