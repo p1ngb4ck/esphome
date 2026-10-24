@@ -107,6 +107,7 @@ extern I18nComponent *global_i18n;
 
 #ifdef USE_LVGL
 void bind_label(lv_obj_t *label, uint16_t key);
+void bind_label_copy(lv_obj_t *label, uint16_t key);
 #endif
 
 inline const char *tr(const char *english) {

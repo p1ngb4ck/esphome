@@ -28,6 +28,7 @@ struct SavedPath {
 struct Binding {
   lv_obj_t *label;
   uint16_t key;
+  bool copy;
 };
 
 static std::vector<Binding, RAMAllocator<Binding>> &bindings() {
@@ -35,7 +36,16 @@ static std::vector<Binding, RAMAllocator<Binding>> &bindings() {
   return list;
 }
 
-void bind_label(lv_obj_t *label, uint16_t key) { bindings().push_back(Binding{label, key}); }
+void bind_label(lv_obj_t *label, uint16_t key) { bindings().push_back(Binding{label, key, false}); }
+
+void bind_label_copy(lv_obj_t *label, uint16_t key) { bindings().push_back(Binding{label, key, true}); }
+
+static bool shows(const char *now, const char *text) {
+  const size_t n = strlen(now);
+  if (n >= 3 && strcmp(now + n - 3, "...") == 0 && strncmp(now, text, n - 3) == 0)
+    return true;
+  return strcmp(now, text) == 0;
+}
 #endif
 
 I18nComponent::I18nComponent() { global_i18n = this; }
@@ -393,8 +403,14 @@ void I18nComponent::apply() {
   if (this->lvgl_ != nullptr && this->lvgl_->is_paused())
     return;
   for (const Binding &b : bindings()) {
-    if (lv_label_get_text(b.label) == this->text_in_(this->shown_, b.key))
-      lv_label_set_text_static(b.label, this->text_in_(this->next_, b.key));
+    const char *now = lv_label_get_text(b.label);
+    const char *old = this->text_in_(this->shown_, b.key);
+    if (!b.copy) {
+      if (now == old)
+        lv_label_set_text_static(b.label, this->text_in_(this->next_, b.key));
+    } else if (now != nullptr && shows(now, old)) {
+      lv_label_set_text(b.label, this->text_in_(this->next_, b.key));
+    }
   }
 #endif
   this->free_(this->shown_);

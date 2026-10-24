@@ -44,6 +44,9 @@ class LabelType(WidgetType):
             key = i18n.register_text(value) if isinstance(value, str) else None
             if key is None:
                 await w.set_property(CONF_TEXT, await lv_text.process(value))
+            elif create and str(config.get(CONF_LONG_MODE, "")).upper().endswith("DOT"):
+                lv.label_set_text(w.obj, i18n.key_expression(key))
+                lv_add(i18n.bind_expression(w.obj, key, True))
             elif create:
                 lv.label_set_text_static(w.obj, i18n.key_expression(key))
                 lv_add(i18n.bind_expression(w.obj, key))

@@ -59,7 +59,9 @@ def key_expression(key: int):
     return cg.MockObj(KEYS_SYMBOL)[key]
 
 
-def bind_expression(label, key: int):
+def bind_expression(label, key: int, copy: bool = False):
+    if copy:
+        return i18n_ns.bind_label_copy(label, key)
     return i18n_ns.bind_label(label, key)
 
 
