@@ -20,10 +20,15 @@ from esphome.const import (
 )
 from esphome.core import CORE, ID, coroutine_with_priority
 from esphome.coroutine import CoroPriority
-from esphome.cpp_generator import MockObj
+from esphome.cpp_generator import MockObj, MockObjClass
 from esphome.types import ConfigType
 
-from .ota_system import CONF_KEEP_COMPONENTS, CONF_MIGRATE_VIA_OTA, CONF_OTA_SYSTEM
+from .ota_system import (
+    CONF_KEEP_COMPONENTS,
+    CONF_MIGRATE_VIA_OTA,
+    CONF_OTA_SYSTEM,
+    CONF_SYSTEM_BUILD,
+)
 from .ota_system import write as write_ota_system
 
 OTA_STATE_LISTENER_KEY = "ota_state_listener"
@@ -62,6 +67,7 @@ OTAStateChangeTrigger = ota_ns.class_(
 )
 RebootToSystemAction = ota_ns.class_("RebootToSystemAction", automation.Action)
 RebootToSystemService = ota_ns.class_("RebootToSystemService")
+SystemRunningService = ota_ns.class_("SystemRunningService")
 
 OTA_SYSTEM_METHODS = ["factory_image", "serial_then_ota"]
 
@@ -92,6 +98,7 @@ OTA_SYSTEM_SCHEMA = cv.All(
 BASE_OTA_SCHEMA = cv.Schema(
     {
         cv.Optional(CONF_OTA_SYSTEM): OTA_SYSTEM_SCHEMA,
+        cv.Optional(CONF_SYSTEM_BUILD, default=False): cv.boolean,
         cv.Optional(CONF_ON_STATE_CHANGE): automation.validate_automation(
             {
                 cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OTAStateChangeTrigger),
@@ -190,14 +197,20 @@ async def final_step() -> None:
                 system[CONF_MIGRATE_VIA_OTA],
             )
             cg.add_define("USE_OTA_REBOOT_TO_SYSTEM")
-            if CONF_API in CORE.config:
-                cg.add_define("USE_API_USER_DEFINED_ACTIONS")
-                cg.add_define("USE_API_CUSTOM_SERVICES")
-                api = await cg.get_variable(CORE.config[CONF_API][CONF_ID])
-                service = cg.new_Pvariable(
-                    ID("ota_reboot_to_system_service", True, RebootToSystemService)
-                )
-                cg.add(api.register_user_service(service))
+            await _register_api_service("ota_reboot_to_system_service", RebootToSystemService)
+        if platform.get(CONF_SYSTEM_BUILD):
+            cg.add_define("USE_OTA_SYSTEM_BUILD")
+            await _register_api_service("ota_system_running_service", SystemRunningService)
+
+
+async def _register_api_service(name: str, service_class: MockObjClass) -> None:
+    if CONF_API not in CORE.config:
+        return
+    cg.add_define("USE_API_USER_DEFINED_ACTIONS")
+    cg.add_define("USE_API_CUSTOM_SERVICES")
+    api = await cg.get_variable(CORE.config[CONF_API][CONF_ID])
+    service = cg.new_Pvariable(ID(name, True, service_class))
+    cg.add(api.register_user_service(service))
 
 
 @automation.register_action(

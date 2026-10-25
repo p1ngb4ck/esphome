@@ -2,7 +2,7 @@
 
 #include "esphome/core/defines.h"
 
-#if defined(USE_ESP32) && defined(USE_OTA_REBOOT_TO_SYSTEM)
+#ifdef USE_ESP32
 #include "esphome/core/automation.h"
 #ifdef USE_API_CUSTOM_SERVICES
 #include "esphome/components/api/user_services.h"
@@ -10,6 +10,7 @@
 
 namespace esphome::ota {
 
+#ifdef USE_OTA_REBOOT_TO_SYSTEM
 bool reboot_to_system();
 
 template<typename... Ts> class RebootToSystemAction : public Action<Ts...> {
@@ -24,6 +25,17 @@ class RebootToSystemService : public api::UserServiceDynamic<> {
 
  protected:
   void execute(uint32_t call_id, bool return_response) override { reboot_to_system(); }
+};
+#endif
+#endif
+
+#if defined(USE_OTA_SYSTEM_BUILD) && defined(USE_API_CUSTOM_SERVICES)
+class SystemRunningService : public api::UserServiceDynamic<> {
+ public:
+  SystemRunningService() : api::UserServiceDynamic<>("ota_system_running", {}) {}
+
+ protected:
+  void execute(uint32_t call_id, bool return_response) override {}
 };
 #endif
 

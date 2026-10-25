@@ -14,6 +14,7 @@ CONF_OTA_SYSTEM = "ota_system"
 CONF_KEEP_COMPONENTS = "keep_components"
 CONF_MIGRATE_VIA_OTA = "migrate_via_ota"
 CONF_ALLOW_PARTITION_ACCESS = "allow_partition_access"
+CONF_SYSTEM_BUILD = "system_build"
 
 BASE_COMPONENTS = {
     "esphome",
@@ -169,9 +170,10 @@ def derive(
         else:
             derived.setdefault(domain, []).append(value)
 
-    if migrate_via_ota:
-        for platform in derived.get(CONF_OTA, []):
-            if isinstance(platform, dict) and platform.get(CONF_PLATFORM) == CONF_ESPHOME:
+    for platform in derived.get(CONF_OTA, []):
+        if isinstance(platform, dict) and platform.get(CONF_PLATFORM) == CONF_ESPHOME:
+            platform[CONF_SYSTEM_BUILD] = True
+            if migrate_via_ota:
                 platform[CONF_ALLOW_PARTITION_ACCESS] = True
 
     for include in includes:
