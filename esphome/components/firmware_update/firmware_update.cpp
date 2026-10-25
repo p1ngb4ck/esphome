@@ -92,99 +92,118 @@ bool FirmwareUpdateComponent::check_head_(const uint8_t *data, size_t len) {
   return true;
 }
 
-bool FirmwareUpdateComponent::load_manifest(const std::string &path) {
-  static constexpr size_t MANIFEST_MAX = 16384;
+void FirmwareUpdateComponent::load_manifest(const std::string &path, std::function<void(bool)> &&on_done) {
   this->last_error_ = "";
   this->manifest_version_.clear();
   this->manifest_name_.clear();
   this->manifest_summary_.clear();
-#ifdef USE_STORAGE
-  const char *rel_raw = nullptr;
-  storage::PathStorage *ps = storage::global_storage_registry == nullptr
-                                 ? nullptr
-                                 : storage::global_storage_registry->resolve_path(path.c_str(), &rel_raw);
-  if (ps == nullptr || rel_raw == nullptr) {
-    this->fail_("Manifest not on a mounted storage");
-    return false;
-  }
 #ifdef USE_FIRMWARE_UPDATE_ASYNC
-  if (storage::global_storage_worker->has_active_task_io(ps)) {
-    this->fail_("Storage busy");
-    return false;
+  static constexpr uint64_t MANIFEST_MAX = 16384;
+  if (this->running_ || this->manifest_open_) {
+    this->fail_("Busy");
+    on_done(false);
+    return;
   }
-#endif
-  const std::string rel(rel_raw);
+  const char *rel = nullptr;
+  storage::PathStorage *ps = storage::global_storage_registry->resolve_path(path.c_str(), &rel);
   storage::FileStat st{};
-  if (ps->stat(rel.c_str(), &st) != storage::StorageError::STORAGE_ERROR_OK || st.is_dir || st.size == 0 ||
+  if (ps == nullptr || rel == nullptr || storage::global_storage_worker->has_active_task_io(ps) ||
+      ps->stat(rel, &st) != storage::StorageError::STORAGE_ERROR_OK || st.is_dir || st.size == 0 ||
       st.size > MANIFEST_MAX) {
-    this->fail_("Manifest missing or too large");
-    return false;
-  }
-  std::string json_str;
-  json_str.resize(static_cast<size_t>(st.size));
-  size_t got = 0;
-  storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
-  if (ps->get_storage_type() == storage::StorageType::STORAGE_TYPE_FILESYSTEM) {
-    auto *fs = static_cast<storage::FilesystemStorage *>(ps);
-    storage::FileHandle *handle = nullptr;
-    err = fs->open(rel.c_str(), handle, storage::OpenMode::OPEN_MODE_READ);
-    if (err == storage::StorageError::STORAGE_ERROR_OK) {
-      while (got < json_str.size() && err == storage::StorageError::STORAGE_ERROR_OK) {
-        size_t n = 0;
-        err = fs->read(handle, reinterpret_cast<uint8_t *>(&json_str[got]), json_str.size() - got, &n);
-        if (n == 0)
-          break;
-        got += n;
-      }
-      fs->close(handle);
-    }
-  } else if (ps->get_storage_type() == storage::StorageType::STORAGE_TYPE_NETWORK) {
-    err = static_cast<storage::NetworkStorage *>(ps)->read_chunk(
-        rel.c_str(), reinterpret_cast<uint8_t *>(&json_str[0]), 0, json_str.size(), &got);
-  } else {
-    err = storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED;
-  }
-  if (err != storage::StorageError::STORAGE_ERROR_OK || got != json_str.size()) {
     this->fail_("Manifest not readable");
-    return false;
+    on_done(false);
+    return;
+  }
+  this->manifest_path_ = path;
+  this->manifest_done_ = std::move(on_done);
+  this->manifest_json_.assign(static_cast<size_t>(st.size), '\0');
+  const storage::StorageError err =
+      storage::global_storage_worker->begin_read(ps, rel, &this->manifest_stream_, [this](storage::StorageError e) {
+        if (e != storage::StorageError::STORAGE_ERROR_OK) {
+          this->manifest_finish_(false);
+          return;
+        }
+        this->manifest_read_(0);
+      });
+  this->manifest_open_ = err == storage::StorageError::STORAGE_ERROR_OK;
+  if (!this->manifest_open_)
+    this->manifest_finish_(false);
+#else
+  this->fail_("No storage worker in this build");
+  on_done(false);
+#endif
+}
+
+#ifdef USE_FIRMWARE_UPDATE_ASYNC
+void FirmwareUpdateComponent::manifest_read_(size_t at) {
+  if (at >= this->manifest_json_.size()) {
+    this->manifest_finish_(true);
+    return;
+  }
+  this->got_ = 0;
+  const storage::StorageError err = storage::global_storage_worker->read_chunk(
+      this->manifest_stream_, reinterpret_cast<uint8_t *>(&this->manifest_json_[at]), this->manifest_json_.size() - at,
+      &this->got_, [this, at](storage::StorageError e) {
+        if (e != storage::StorageError::STORAGE_ERROR_OK || this->got_ == 0) {
+          this->manifest_finish_(false);
+          return;
+        }
+        this->manifest_read_(at + this->got_);
+      });
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
+    this->manifest_finish_(false);
+}
+
+void FirmwareUpdateComponent::manifest_finish_(bool read_ok) {
+  if (this->manifest_open_) {
+    storage::global_storage_worker->end_read(this->manifest_stream_, [](storage::StorageError) {});
+    this->manifest_open_ = false;
   }
   std::string firmware;
   std::string md5;
-  const bool valid = json::parse_json(json_str, [this, &firmware, &md5](JsonObject root) -> bool {
-    if (!root["name"].is<const char *>() || !root["version"].is<const char *>() || !root["builds"].is<JsonArray>())
-      return false;
-    this->manifest_name_ = root["name"].as<std::string>();
-    this->manifest_version_ = root["version"].as<std::string>();
-    for (JsonObject build : root["builds"].as<JsonArray>()) {
-      if (build["chipFamily"] != ESPHOME_VARIANT || !build["ota"].is<JsonObject>())
-        continue;
-      JsonObject ota = build["ota"].as<JsonObject>();
-      if (!ota["path"].is<const char *>() || !ota["md5"].is<const char *>())
+  bool ok = false;
+  if (!read_ok) {
+    this->fail_("Manifest not readable");
+  } else {
+    const bool valid = json::parse_json(this->manifest_json_, [this, &firmware, &md5](JsonObject root) -> bool {
+      if (!root["name"].is<const char *>() || !root["version"].is<const char *>() || !root["builds"].is<JsonArray>())
         return false;
-      firmware = ota["path"].as<std::string>();
-      md5 = ota["md5"].as<std::string>();
-      if (ota["summary"].is<const char *>())
-        this->manifest_summary_ = ota["summary"].as<std::string>();
-      return true;
+      this->manifest_name_ = root["name"].as<std::string>();
+      this->manifest_version_ = root["version"].as<std::string>();
+      for (JsonObject build : root["builds"].as<JsonArray>()) {
+        if (build["chipFamily"] != ESPHOME_VARIANT || !build["ota"].is<JsonObject>())
+          continue;
+        JsonObject ota = build["ota"].as<JsonObject>();
+        if (!ota["path"].is<const char *>() || !ota["md5"].is<const char *>())
+          return false;
+        firmware = ota["path"].as<std::string>();
+        md5 = ota["md5"].as<std::string>();
+        if (ota["summary"].is<const char *>())
+          this->manifest_summary_ = ota["summary"].as<std::string>();
+        return true;
+      }
+      return false;
+    });
+    if (!valid || firmware.empty() || md5.size() != 32) {
+      this->fail_("Manifest without a build for this chip or without its MD5");
+    } else {
+      if (firmware[0] != '/') {
+        const size_t slash = this->manifest_path_.rfind('/');
+        firmware = this->manifest_path_.substr(0, slash + 1) + firmware;
+      }
+      this->path_ = firmware;
+      this->md5_expected_ = md5;
+      ok = true;
     }
-    return false;
-  });
-  if (!valid || firmware.empty() || md5.size() != 32) {
-    this->fail_("Manifest without a build for this chip or without its MD5");
-    return false;
   }
-  if (firmware[0] != '/') {
-    const size_t slash = path.rfind('/');
-    firmware = path.substr(0, slash + 1) + firmware;
-  }
-  this->path_ = firmware;
-  this->md5_expected_ = md5;
-  return true;
-#else
-  this->fail_("No storage in this build");
-  return false;
-#endif
+  this->manifest_json_.clear();
+  this->manifest_json_.shrink_to_fit();
+  auto done = std::move(this->manifest_done_);
+  this->manifest_done_ = nullptr;
+  if (done)
+    done(ok);
 }
+#endif
 
 void FirmwareUpdateComponent::flash() {
   this->last_error_ = "";
