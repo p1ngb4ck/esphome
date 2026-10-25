@@ -49,6 +49,7 @@ BASE_COMPONENTS = {
     "http_request",
     "preferences",
     "storage",
+    "store_yaml",
     "external_components",
     "display",
     "touchscreen",

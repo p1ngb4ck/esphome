@@ -20,6 +20,7 @@ from esphome.const import (
     CONF_ON_ERROR,
     CONF_OTA,
     CONF_PLATFORM,
+    CONF_RAW_DATA_ID,
     CONF_TRIGGER_ID,
     PLATFORM_ESP32,
     PlatformFramework,
@@ -82,6 +83,10 @@ RebootToAppService = ota_ns.class_("RebootToAppService")
 OTA_SYSTEM_IMAGE_MARKER = "ota-system"
 OtaSystemElfAction = ota_ns.class_("OtaSystemElfAction")
 OTA_SYSTEM_ELF_ACTION = "ota_system_elf"
+MainYamlRecord = ota_ns.struct("MainYamlRecord")
+MAIN_YAML_RECORD = "ota_main_yaml_record"
+MAIN_YAML_RECORD_SECTION = ".rodata_custom_desc"
+STORE_YAML = "store_yaml"
 
 
 
@@ -213,12 +218,16 @@ async def final_step() -> None:
         if CONF_OTA_SYSTEM in platform:
             cg.add_define("USE_OTA_REBOOT_TO_SYSTEM")
             await _register_api_service("ota_reboot_to_system_service", RebootToSystemService)
+            if STORE_YAML in CORE.config:
+                await _embed_main_yaml_record()
         if platform.get(CONF_SYSTEM_BUILD):
             cg.add_define("USE_OTA_SYSTEM_BUILD")
             cg.add_define("USE_OTA_REBOOT_TO_APP")
             await _register_api_service("ota_system_running_service", SystemRunningService)
             await _register_api_service("ota_reboot_to_app_service", RebootToAppService)
             _mark_system_image()
+            if STORE_YAML in CORE.config:
+                await _adopt_main_yaml()
         if (CONF_OTA_SYSTEM in platform or platform.get(CONF_SYSTEM_BUILD)) and CONF_API in CORE.config:
             cg.add_define("USE_OTA_SYSTEM_ELF_ACTION")
             cg.add_define("USE_API_USER_DEFINED_ACTION_RESPONSES")
@@ -226,6 +235,24 @@ async def final_step() -> None:
             await _register_api_service(
                 "ota_system_elf_action", OtaSystemElfAction, fnv1_hash(OTA_SYSTEM_ELF_ACTION)
             )
+
+
+async def _embed_main_yaml_record() -> None:
+    raw = await cg.get_variable(CORE.config[STORE_YAML][CONF_RAW_DATA_ID])
+    cg.add(
+        cg.RawStatement(
+            f"static const {MainYamlRecord} {MAIN_YAML_RECORD} "
+            f'__attribute__((section("{MAIN_YAML_RECORD_SECTION}"), used)) = '
+            f"{{{ota_ns.MAIN_YAML_RECORD_MAGIC}, {raw}, sizeof({raw})}};"
+        )
+    )
+    cg.add(ota_ns.keep_main_yaml_record(cg.RawExpression(f"&{MAIN_YAML_RECORD}")))
+
+
+async def _adopt_main_yaml() -> None:
+    cg.add_define("USE_OTA_MAIN_YAML")
+    store = await cg.get_variable(CORE.config[STORE_YAML][CONF_ID])
+    cg.add(ota_ns.adopt_main_yaml(store))
 
 
 def _mark_system_image() -> None:
@@ -314,6 +341,7 @@ _filter_define_source_files = filter_source_files_from_defines(
         "ota_partitions_esp_idf.cpp": "USE_OTA_PARTITIONS",
         "ota_system_esp_idf.cpp": ("USE_OTA_REBOOT_TO_SYSTEM", "USE_OTA_REBOOT_TO_APP"),
         "ota_system_update_esp_idf.cpp": "USE_OTA_SYSTEM_SELF_UPDATE",
+        "main_yaml_esp_idf.cpp": "USE_OTA_MAIN_YAML",
     }
 )
 
