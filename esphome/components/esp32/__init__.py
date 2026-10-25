@@ -117,6 +117,10 @@ NVS_ACTIONS = {
     "nvs_list": esp32_ns.class_("NvsListAction"),
     "nvs_erase": esp32_ns.class_("NvsEraseAction"),
 }
+FLASH_ACTIONS = {
+    "flash_info": esp32_ns.class_("FlashInfoAction"),
+    "flash_verify": esp32_ns.class_("FlashVerifyAction"),
+}
 COREDUMP_ACTIONS = {
     "coredump_info": esp32_ns.class_("CoredumpInfoAction"),
     "coredump_read": esp32_ns.class_("CoredumpReadAction"),
@@ -542,6 +546,18 @@ ESP32_FLASH_CHIPS = {
 }
 FLASH_CHIP_GENERIC = "generic"
 FLASH_CHIP_OPI = "mxic_opi"  # the octal driver, ESP32-S3 only
+FLASH_ID_ENV = "ESPHOME_FLASH_ID"
+FLASH_MAX_FREQUENCY_ENV = "ESPHOME_FLASH_MAX_FREQUENCY"
+FLASH_VENDOR_IDS = {
+    0xC8: "gd",
+    0x9D: "issi",
+    0xC2: "mxic",
+    0xEF: "winbond",
+    0x68: "boya",
+    0xCD: "th",
+}
+FLASH_AUTO_FREQUENCY = "80MHZ"
+FLASH_SAFE_FREQUENCY = "40MHZ"
 
 # Socket limit configuration for ESP-IDF
 # ESP-IDF CONFIG_LWIP_MAX_SOCKETS has range 1-253, default 10
@@ -1576,6 +1592,60 @@ def _apply_detected_chip_revision(value: ConfigType) -> ConfigType:
             explicit,
             _revision_text(detected),
             auto,
+        )
+    return value
+
+
+def detected_flash_id() -> int | None:
+    try:
+        flash_id = int(os.environ.get(FLASH_ID_ENV, ""), 16)
+    except ValueError:
+        return None
+    return flash_id if 0 < flash_id <= 0xFFFFFF else None
+
+
+def _apply_detected_flash(value: ConfigType) -> ConfigType:
+    if (flash_id := detected_flash_id()) is None:
+        return value
+    vendor = FLASH_VENDOR_IDS.get(flash_id >> 16)
+    auto_chip = vendor or FLASH_CHIP_GENERIC
+    framework = value.get(CONF_FRAMEWORK, {})
+    advanced = framework.get(CONF_ADVANCED, {})
+    value = value.copy()
+    if (explicit_chip := advanced.get(CONF_FLASH_CHIP)) is None:
+        advanced = {**advanced, CONF_FLASH_CHIP: auto_chip}
+        value[CONF_FRAMEWORK] = {**framework, CONF_ADVANCED: advanced}
+    elif explicit_chip != auto_chip:
+        _LOGGER.warning(
+            "'%s: %s' does not match the detected flash %06X (auto: %s); the configured value is used",
+            CONF_FLASH_CHIP,
+            explicit_chip,
+            flash_id,
+            auto_chip,
+        )
+    if value[CONF_VARIANT] != VARIANT_ESP32P4:
+        return value
+    limited = os.environ.get(FLASH_MAX_FREQUENCY_ENV, "").upper() == FLASH_SAFE_FREQUENCY
+    fast = (
+        vendor is not None
+        and advanced.get(CONF_MINIMUM_CHIP_REVISION) not in (None, "0.0")
+        and not limited
+    )
+    auto_frequency = FLASH_AUTO_FREQUENCY if fast else FLASH_SAFE_FREQUENCY
+    if limited:
+        _LOGGER.warning(
+            "The flash check of this device failed at a higher speed; auto is %s",
+            FLASH_SAFE_FREQUENCY,
+        )
+    if (explicit_frequency := value.get(CONF_FLASH_FREQUENCY)) is None:
+        value[CONF_FLASH_FREQUENCY] = auto_frequency
+    elif explicit_frequency != auto_frequency:
+        _LOGGER.warning(
+            "'%s: %s' does not match the detected flash %06X (auto: %s); the configured value is used",
+            CONF_FLASH_FREQUENCY,
+            explicit_frequency,
+            flash_id,
+            auto_frequency,
         )
     return value
 
@@ -2742,6 +2812,7 @@ CONFIG_SCHEMA = cv.All(
     _detect_variant,
     _set_default_framework,
     _apply_detected_chip_revision,
+    _apply_detected_flash,
     _check_versions,
     set_core_data,
     _require_ipv4_on_arduino,
@@ -2857,6 +2928,10 @@ async def _add_api_actions() -> None:
         fnv1_hash(CHIP_REVISION_ACTION),
     )
     cg.add(api.register_user_service(action))
+    cg.add_define("USE_ESP32_FLASH_ACTIONS")
+    for name, action_class in FLASH_ACTIONS.items():
+        action = cg.new_Pvariable(ID(f"esp32_{name}_action", True, action_class), fnv1_hash(name))
+        cg.add(api.register_user_service(action))
     cg.add_define("USE_ESP32_NVS_ACTIONS")
     for name, action_class in NVS_ACTIONS.items():
         action = cg.new_Pvariable(ID(f"esp32_{name}_action", True, action_class), fnv1_hash(name))

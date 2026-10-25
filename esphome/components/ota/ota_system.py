@@ -32,6 +32,7 @@ BUILD_PATH_SUFFIX = "-ota-system"
 FINGERPRINT_FILENAME = "ota_system.fingerprint"
 MAIN_FINGERPRINT_FILENAME = "main.fingerprint"
 CHIP_REVISION_ENV = "ESPHOME_CHIP_REVISION"
+FLASH_ENVS = ("ESPHOME_FLASH_ID", "ESPHOME_FLASH_MAX_FREQUENCY")
 FINGERPRINT_SKIP_DOMAINS = {CONF_ESPHOME, CONF_PACKAGES, CONF_SUBSTITUTIONS, "external_components"}
 API_DROP_KEYS = ("actions", "services")
 
@@ -288,6 +289,8 @@ def _fingerprint(text: str, derived: dict[str, Any], secrets: Path) -> str:
     digest = hashlib.sha256()
     digest.update(const.__version__.encode())
     digest.update(os.environ.get(CHIP_REVISION_ENV, "").encode())
+    for name in FLASH_ENVS:
+        digest.update(os.environ.get(name, "").encode())
     digest.update(_host_independent(text).encode("utf-8"))
     for directory in sorted({Path(esphome_core.__file__).parent, *_component_dirs(derived)}):
         _hash_tree(digest, directory)
