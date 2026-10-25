@@ -118,18 +118,18 @@ def _declared_dependencies(domain: str, value: Any) -> list[str]:
     return [d.split(".")[0] for d in deps]
 
 
-def _relocate(value: Any, target_dir: Path) -> Any:
+def _relocate(value: Any) -> Any:
     if isinstance(value, dict):
-        return {k: _relocate(v, target_dir) for k, v in value.items()}
+        return {k: _relocate(v) for k, v in value.items()}
     if isinstance(value, list):
-        return [_relocate(v, target_dir) for v in value]
+        return [_relocate(v) for v in value]
     if not isinstance(value, str) or os.path.isabs(value):
         return value
     try:
         path = cv.file_(value)
     except cv.Invalid:
         return value
-    return Path(os.path.relpath(path.absolute(), target_dir)).as_posix()
+    return path.absolute().as_posix()
 
 
 def _target() -> Path:
@@ -174,7 +174,7 @@ def derive(
         if unit not in kept:
             continue
         domain, index = unit
-        value = _relocate(_reduce_value(domain, _unit_value(raw, unit)), _target().parent)
+        value = _relocate(_reduce_value(domain, _unit_value(raw, unit)))
         if index is None:
             derived[domain] = value
         else:
