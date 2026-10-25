@@ -7,20 +7,23 @@ from esphome.config_helpers import (
 )
 import esphome.config_validation as cv
 from esphome.const import (
+    CONF_API,
     CONF_ESPHOME,
+    CONF_ID,
     CONF_INCLUDES,
+    CONF_METHOD,
     CONF_ON_ERROR,
     CONF_OTA,
     CONF_PLATFORM,
     CONF_TRIGGER_ID,
     PlatformFramework,
 )
-from esphome.core import CORE, coroutine_with_priority
+from esphome.core import CORE, ID, coroutine_with_priority
 from esphome.coroutine import CoroPriority
 from esphome.cpp_generator import MockObj
 from esphome.types import ConfigType
 
-from .ota_system import CONF_KEEP_COMPONENTS, CONF_OTA_SYSTEM
+from .ota_system import CONF_KEEP_COMPONENTS, CONF_MIGRATE_VIA_OTA, CONF_OTA_SYSTEM
 from .ota_system import write as write_ota_system
 
 OTA_STATE_LISTENER_KEY = "ota_state_listener"
@@ -57,6 +60,10 @@ OTAStartTrigger = ota_ns.class_("OTAStartTrigger", automation.Trigger.template()
 OTAStateChangeTrigger = ota_ns.class_(
     "OTAStateChangeTrigger", automation.Trigger.template()
 )
+RebootToSystemAction = ota_ns.class_("RebootToSystemAction", automation.Action)
+RebootToSystemService = ota_ns.class_("RebootToSystemService")
+
+OTA_SYSTEM_METHODS = ["factory_image", "serial_then_ota"]
 
 
 def _ota_final_validate(config: ConfigType) -> None:
@@ -70,11 +77,16 @@ def _ota_final_validate(config: ConfigType) -> None:
 
 FINAL_VALIDATE_SCHEMA = _ota_final_validate
 
-OTA_SYSTEM_SCHEMA = cv.Schema(
-    {
-        cv.Optional(CONF_KEEP_COMPONENTS, default=[]): cv.ensure_list(cv.string_strict),
-        cv.Optional(CONF_INCLUDES, default=[]): cv.ensure_list(cv.file_),
-    }
+OTA_SYSTEM_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(CONF_METHOD): cv.one_of(*OTA_SYSTEM_METHODS, lower=True),
+            cv.Optional(CONF_MIGRATE_VIA_OTA, default=False): cv.boolean,
+            cv.Optional(CONF_KEEP_COMPONENTS, default=[]): cv.ensure_list(cv.string_strict),
+            cv.Optional(CONF_INCLUDES, default=[]): cv.ensure_list(cv.file_),
+        }
+    ),
+    cv.only_on_esp32,
 )
 
 BASE_OTA_SCHEMA = cv.Schema(
@@ -172,7 +184,36 @@ async def final_step() -> None:
     for platform in CORE.config.get(CONF_OTA, []):
         if CONF_OTA_SYSTEM in platform:
             system = platform[CONF_OTA_SYSTEM]
-            write_ota_system(system[CONF_KEEP_COMPONENTS], system[CONF_INCLUDES])
+            write_ota_system(
+                system[CONF_KEEP_COMPONENTS],
+                system[CONF_INCLUDES],
+                system[CONF_MIGRATE_VIA_OTA],
+            )
+            cg.add_define("USE_OTA_REBOOT_TO_SYSTEM")
+            if CONF_API in CORE.config:
+                cg.add_define("USE_API_USER_DEFINED_ACTIONS")
+                cg.add_define("USE_API_CUSTOM_SERVICES")
+                api = await cg.get_variable(CORE.config[CONF_API][CONF_ID])
+                service = cg.new_Pvariable(
+                    ID("ota_reboot_to_system_service", True, RebootToSystemService)
+                )
+                cg.add(api.register_user_service(service))
+
+
+@automation.register_action(
+    "ota.reboot_to_system",
+    RebootToSystemAction,
+    cv.All(cv.Schema({}), cv.only_on_esp32),
+    synchronous=True,
+)
+async def reboot_to_system_to_code(
+    config: ConfigType,
+    action_id: ID,
+    template_arg: cg.TemplateArguments,
+    args: list,
+) -> MockObj:
+    cg.add_define("USE_OTA_REBOOT_TO_SYSTEM")
+    return cg.new_Pvariable(action_id, template_arg)
 
 
 _filter_backend_source_files = filter_source_files_from_platform(
@@ -201,6 +242,7 @@ _filter_define_source_files = filter_source_files_from_defines(
         "ota_signature_esp_idf.cpp": "USE_OTA_SIGNED_VERIFICATION_MULTI_KEY",
         "ota_bootloader_esp_idf.cpp": "USE_OTA_PARTITIONS",
         "ota_partitions_esp_idf.cpp": "USE_OTA_PARTITIONS",
+        "ota_system_esp_idf.cpp": "USE_OTA_REBOOT_TO_SYSTEM",
     }
 )
 

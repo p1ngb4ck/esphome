@@ -7,11 +7,13 @@ from typing import Any
 from esphome import loader, yaml_util
 import esphome.config_validation as cv
 from esphome.config_helpers import merge_config
-from esphome.const import CONF_ID, CONF_INCLUDES, CONF_PLATFORM
+from esphome.const import CONF_ESPHOME, CONF_ID, CONF_INCLUDES, CONF_OTA, CONF_PLATFORM
 from esphome.core import CORE, ID, Lambda
 
 CONF_OTA_SYSTEM = "ota_system"
 CONF_KEEP_COMPONENTS = "keep_components"
+CONF_MIGRATE_VIA_OTA = "migrate_via_ota"
+CONF_ALLOW_PARTITION_ACCESS = "allow_partition_access"
 
 BASE_COMPONENTS = {
     "esphome",
@@ -125,7 +127,9 @@ def _target() -> Path:
     return CORE.relative_config_path(CORE.config_path.stem, "ota", "ota_system.yaml")
 
 
-def derive(keep_components: list[str], includes: list[Path]) -> dict[str, Any]:
+def derive(
+    keep_components: list[str], includes: list[Path], migrate_via_ota: bool
+) -> dict[str, Any]:
     raw = CORE.raw_config
     validated = CORE.config
     units = _units(raw)
@@ -165,13 +169,18 @@ def derive(keep_components: list[str], includes: list[Path]) -> dict[str, Any]:
         else:
             derived.setdefault(domain, []).append(value)
 
+    if migrate_via_ota:
+        for platform in derived.get(CONF_OTA, []):
+            if isinstance(platform, dict) and platform.get(CONF_PLATFORM) == CONF_ESPHOME:
+                platform[CONF_ALLOW_PARTITION_ACCESS] = True
+
     for include in includes:
         derived = merge_config(derived, yaml_util.load_yaml(include))
     return derived
 
 
-def write(keep_components: list[str], includes: list[Path]) -> Path:
-    derived = derive(keep_components, includes)
+def write(keep_components: list[str], includes: list[Path], migrate_via_ota: bool) -> Path:
+    derived = derive(keep_components, includes, migrate_via_ota)
     target = _target()
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(yaml_util.dump(derived, show_secrets=False), encoding="utf-8", newline="\n")

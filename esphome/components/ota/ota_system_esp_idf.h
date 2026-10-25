@@ -1,0 +1,32 @@
+#pragma once
+
+#include "esphome/core/defines.h"
+
+#if defined(USE_ESP32) && defined(USE_OTA_REBOOT_TO_SYSTEM)
+#include "esphome/core/automation.h"
+#ifdef USE_API_CUSTOM_SERVICES
+#include "esphome/components/api/user_services.h"
+#endif
+
+namespace esphome::ota {
+
+bool reboot_to_system();
+
+template<typename... Ts> class RebootToSystemAction : public Action<Ts...> {
+ public:
+  void play(const Ts &...x) override { reboot_to_system(); }
+};
+
+#ifdef USE_API_CUSTOM_SERVICES
+class RebootToSystemService : public api::UserServiceDynamic<> {
+ public:
+  RebootToSystemService() : api::UserServiceDynamic<>("reboot_to_ota_system", {}) {}
+
+ protected:
+  void execute(uint32_t call_id, bool return_response) override { reboot_to_system(); }
+};
+#endif
+
+}
+
+#endif
