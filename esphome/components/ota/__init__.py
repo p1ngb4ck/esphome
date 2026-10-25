@@ -8,6 +8,7 @@ from esphome.config_helpers import (
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ESPHOME,
+    CONF_INCLUDES,
     CONF_ON_ERROR,
     CONF_OTA,
     CONF_PLATFORM,
@@ -18,6 +19,9 @@ from esphome.core import CORE, coroutine_with_priority
 from esphome.coroutine import CoroPriority
 from esphome.cpp_generator import MockObj
 from esphome.types import ConfigType
+
+from .ota_system import CONF_KEEP_COMPONENTS, CONF_OTA_SYSTEM
+from .ota_system import write as write_ota_system
 
 OTA_STATE_LISTENER_KEY = "ota_state_listener"
 
@@ -60,12 +64,22 @@ def _ota_final_validate(config: ConfigType) -> None:
         raise cv.Invalid(
             f"At least one platform must be specified for '{CONF_OTA}'; add '{CONF_PLATFORM}: {CONF_ESPHOME}' for original OTA functionality"
         )
+    if sum(1 for platform in config if CONF_OTA_SYSTEM in platform) > 1:
+        raise cv.Invalid(f"'{CONF_OTA_SYSTEM}' may be set on one '{CONF_OTA}' platform only")
 
 
 FINAL_VALIDATE_SCHEMA = _ota_final_validate
 
+OTA_SYSTEM_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_KEEP_COMPONENTS, default=[]): cv.ensure_list(cv.string_strict),
+        cv.Optional(CONF_INCLUDES, default=[]): cv.ensure_list(cv.file_),
+    }
+)
+
 BASE_OTA_SCHEMA = cv.Schema(
     {
+        cv.Optional(CONF_OTA_SYSTEM): OTA_SYSTEM_SCHEMA,
         cv.Optional(CONF_ON_STATE_CHANGE): automation.validate_automation(
             {
                 cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OTAStateChangeTrigger),
@@ -155,6 +169,10 @@ async def final_step() -> None:
     """Final code generation step to configure optional OTA features."""
     if CORE.data.get(OTA_STATE_LISTENER_KEY, False):
         cg.add_define("USE_OTA_STATE_LISTENER")
+    for platform in CORE.config.get(CONF_OTA, []):
+        if CONF_OTA_SYSTEM in platform:
+            system = platform[CONF_OTA_SYSTEM]
+            write_ota_system(system[CONF_KEEP_COMPONENTS], system[CONF_INCLUDES])
 
 
 _filter_backend_source_files = filter_source_files_from_platform(
