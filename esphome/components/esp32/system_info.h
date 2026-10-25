@@ -153,17 +153,43 @@ inline void build_time(const esp_partition_t *p, char *out, size_t len) {
     snprintf(out, len, "%s %s", desc.date, desc.time);
 }
 
-inline uint64_t used_bytes() {
-  uint64_t used = 0;
-  const esp_partition_t *first = nullptr;
-  for (esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, nullptr);
-       it != nullptr; it = esp_partition_next(it)) {
-    const esp_partition_t *p = esp_partition_get(it);
-    if (first == nullptr || p->address < first->address)
-      first = p;
-    used += p->type == ESP_PARTITION_TYPE_APP ? image_length(p) : p->size;
+struct Usage {
+  uint32_t used;
+  uint32_t size;
+};
+
+inline Usage bootloader_usage() {
+  const esp_partition_pos_t position = {.offset = CONFIG_BOOTLOADER_OFFSET_IN_FLASH,
+                                        .size = CONFIG_PARTITION_TABLE_OFFSET - CONFIG_BOOTLOADER_OFFSET_IN_FLASH};
+  esp_image_metadata_t metadata{};
+  const uint32_t used = esp_image_get_metadata(&position, &metadata) == ESP_OK ? metadata.image_len : 0;
+  return {used, position.size};
+}
+
+inline Usage app_usage(esp_partition_subtype_t subtype) {
+  const esp_partition_t *p = esp_partition_find_first(ESP_PARTITION_TYPE_APP, subtype, nullptr);
+  if (p == nullptr)
+    return {0, 0};
+  return {image_length(p), p->size};
+}
+
+inline void usage_text(char *out, size_t len, Usage usage) {
+  if (usage.size == 0) {
+    snprintf(out, len, "-");
+    return;
   }
-  return used + (first != nullptr ? first->address : 0);
+  char used[16];
+  char size[16];
+  char left[16];
+  size_text(used, sizeof(used), usage.used);
+  size_text(size, sizeof(size), usage.size);
+  size_text(left, sizeof(left), usage.size > usage.used ? usage.size - usage.used : 0);
+  snprintf(out, len, "%s of %s used (%u%%), %s free", used, size,
+           static_cast<unsigned>(static_cast<uint64_t>(usage.used) * 100 / usage.size), left);
+}
+
+inline int usage_percent(Usage usage) {
+  return usage.size == 0 ? 0 : static_cast<int>(static_cast<uint64_t>(usage.used) * 100 / usage.size);
 }
 
 template<typename F> void for_each_partition(F &&row) {
