@@ -12,8 +12,7 @@ namespace esphome::ota {
 ESPHOME_LOG_TAG(TAG, "ota.system");
 
 bool reboot_to_system() {
-  const esp_partition_t *system =
-      esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, nullptr);
+  const esp_partition_t *system = esp_ota_get_next_update_partition(nullptr);
   if (system == nullptr) {
     ESP_LOGE(TAG, "No OTA system partition");
     return false;
