@@ -1,5 +1,6 @@
 #ifdef USE_ESP32
 #include "ota_backend_esp_idf.h"
+#include "ota_system_esp_idf.h"
 
 #include "esphome/components/md5/md5.h"
 #include "esphome/components/watchdog/watchdog.h"
@@ -174,6 +175,13 @@ OTAResponseTypes IDFOTABackend::begin(size_t image_size, ota::OTAType ota_type) 
   if (this->partition_ == nullptr) {
     return OTA_RESPONSE_ERROR_NO_UPDATE_PARTITION;
   }
+#ifdef USE_OTA_REBOOT_TO_SYSTEM
+  if (ota_type == ota::OTA_TYPE_UPDATE_APP && this->partition_ == esp_ota_get_running_partition()) {
+    ESP_LOGI(TAG, "App update requested: restarting into the OTA system");
+    reboot_to_system();
+    return OTA_RESPONSE_ERROR_NO_UPDATE_PARTITION;
+  }
+#endif
 
 #ifdef USE_OTA_PARTITIONS
   if (this->ota_type_ == ota::OTA_TYPE_UPDATE_APP) {
