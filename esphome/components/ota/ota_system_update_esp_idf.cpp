@@ -10,6 +10,7 @@
 #include <esp_image_format.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
+#include <esp_private/esp_flash_internal.h>
 #include <spi_flash_mmap.h>
 
 #include <cinttypes>
