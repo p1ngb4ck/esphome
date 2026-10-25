@@ -7,6 +7,7 @@ from esphome.components.const import CONF_IGNORE_NOT_FOUND
 from esphome.components.esp32 import (
     CONF_CPU_FREQUENCY,
     CONF_ENABLE_IDF_EXPERIMENTAL_FEATURES,
+    CONF_ENGINEERING_SAMPLE,
     VARIANT_ESP32,
     VARIANT_ESP32C5,
     VARIANT_ESP32C61,
@@ -75,7 +76,7 @@ SPIRAM_SPEEDS = {
     VARIANT_ESP32S2: (40, 80, 120),
     VARIANT_ESP32S3: (40, 80, 120),
     VARIANT_ESP32S31: (40, 100, 200, 250),
-    VARIANT_ESP32P4: (20, 100, 200),
+    VARIANT_ESP32P4: (20, 100, 200, 250),
 }
 
 SPIRAM_SPEEDS_MHZ = {
@@ -154,6 +155,12 @@ def validate_psram_mode(config: ConfigType) -> ConfigType:
                 raise cv.Invalid("PSRAM 120MHz is not supported in octal mode")
     if config[CONF_MODE] != TYPE_OCTAL and config[CONF_ENABLE_ECC]:
         raise cv.Invalid("ECC is only available in octal mode.")
+    if (
+        get_esp32_variant() == VARIANT_ESP32P4
+        and config[CONF_SPEED] == "250MHZ"
+        and esp32_config.get(CONF_ENGINEERING_SAMPLE)
+    ):
+        raise cv.Invalid("PSRAM 250MHz needs ESP32-P4 rev 3 or newer (engineering_sample: false)")
     if config[CONF_MODE] == TYPE_OCTAL:
         variant = get_esp32_variant()
         if TYPE_OCTAL not in SPIRAM_MODES.get(variant, ()):

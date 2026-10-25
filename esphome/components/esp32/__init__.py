@@ -509,6 +509,16 @@ ESP32_CHIP_REVISIONS = {
     "3.0": "CONFIG_ESP32_REV_MIN_3",
     "3.1": "CONFIG_ESP32_REV_MIN_3_1",
 }
+ESP32P4_CHIP_REVISIONS = {
+    "0.0": "CONFIG_ESP32P4_REV_MIN_0",
+    "0.1": "CONFIG_ESP32P4_REV_MIN_1",
+    "1.0": "CONFIG_ESP32P4_REV_MIN_100",
+    "3.0": "CONFIG_ESP32P4_REV_MIN_300",
+    "3.1": "CONFIG_ESP32P4_REV_MIN_301",
+}
+ESP32P4_LESS_V3_REVISIONS = ("0.0", "0.1", "1.0")
+CHIP_REVISION_ENV = "ESPHOME_CHIP_REVISION"
+P4_MIN_REVISION_FAST_FLASH = ("80MHZ", "120MHZ")
 
 # Flash vendor drivers ESP-IDF can link; each costs IRAM plus a 124 B table in DRAM
 # and only the one matching the flash ID is ever used
@@ -1474,9 +1484,39 @@ def _parse_pio_platform_version(value):
         return value
 
 
+def detected_chip_revision() -> int | None:
+    try:
+        revision = int(os.environ.get(CHIP_REVISION_ENV, ""))
+    except ValueError:
+        return None
+    return revision if 0 <= revision <= 9999 else None
+
+
+def _revision_text(revision: int) -> str:
+    return f"{revision // 100}.{revision % 100}"
+
+
+def _revision_key(text: str) -> int:
+    major, minor = text.split(".")
+    return int(major) * 100 + int(minor)
+
+
 def _normalize_p4_engineering_sample(value: ConfigType) -> bool:
     """Fill in CONF_ENGINEERING_SAMPLE when unset, warning that production
     silicon (rev3) is assumed. Returns the normalized flag."""
+    if (detected := detected_chip_revision()) is not None:
+        engineering_sample = detected < 300
+        if (explicit := value.get(CONF_ENGINEERING_SAMPLE)) is None:
+            value[CONF_ENGINEERING_SAMPLE] = engineering_sample
+            return engineering_sample
+        if explicit != engineering_sample:
+            _LOGGER.warning(
+                "'%s: %s' does not match the detected chip revision v%s; the configured value is used",
+                CONF_ENGINEERING_SAMPLE,
+                explicit,
+                _revision_text(detected),
+            )
+        return explicit
     if (engineering_sample := value.get(CONF_ENGINEERING_SAMPLE)) is None:
         _LOGGER.warning(
             "Defaulting to ESP32-P4 production silicon (rev3).\n"
@@ -1492,6 +1532,43 @@ def _normalize_p4_engineering_sample(value: ConfigType) -> bool:
         engineering_sample = False
         value[CONF_ENGINEERING_SAMPLE] = engineering_sample
     return engineering_sample
+
+
+def _apply_detected_chip_revision(value: ConfigType) -> ConfigType:
+    if (detected := detected_chip_revision()) is None:
+        return value
+    variant = value[CONF_VARIANT]
+    if variant == VARIANT_ESP32:
+        choices = list(ESP32_CHIP_REVISIONS)
+    elif variant == VARIANT_ESP32P4:
+        choices = [
+            rev
+            for rev in ESP32P4_CHIP_REVISIONS
+            if (rev in ESP32P4_LESS_V3_REVISIONS) == bool(value.get(CONF_ENGINEERING_SAMPLE))
+        ]
+    else:
+        return value
+    fitting = [rev for rev in choices if _revision_key(rev) <= detected]
+    if not fitting:
+        return value
+    auto = max(fitting, key=_revision_key)
+    framework = value.get(CONF_FRAMEWORK, {})
+    advanced = framework.get(CONF_ADVANCED, {})
+    if (explicit := advanced.get(CONF_MINIMUM_CHIP_REVISION)) is None:
+        value = value.copy()
+        value[CONF_FRAMEWORK] = {
+            **framework,
+            CONF_ADVANCED: {**advanced, CONF_MINIMUM_CHIP_REVISION: auto},
+        }
+    elif explicit != auto:
+        _LOGGER.warning(
+            "'%s: %s' does not match the detected chip revision v%s (auto: %s); the configured value is used",
+            CONF_MINIMUM_CHIP_REVISION,
+            explicit,
+            _revision_text(detected),
+            auto,
+        )
+    return value
 
 
 def _detect_variant(value):
@@ -1827,15 +1904,51 @@ def final_validate(config) -> None:
                 path=[CONF_FRAMEWORK, CONF_ADVANCED, CONF_IGNORE_EFUSE_MAC_CRC],
             )
         )
-    if (
-        config[CONF_VARIANT] != VARIANT_ESP32
-        and advanced.get(CONF_MINIMUM_CHIP_REVISION) is not None
-    ):
+    min_rev = advanced.get(CONF_MINIMUM_CHIP_REVISION)
+    if min_rev is not None and config[CONF_VARIANT] == VARIANT_ESP32P4:
+        if min_rev not in ESP32P4_CHIP_REVISIONS:
+            errs.append(
+                cv.Invalid(
+                    f"'{CONF_MINIMUM_CHIP_REVISION}' on {VARIANT_ESP32P4} is one of "
+                    f"{', '.join(ESP32P4_CHIP_REVISIONS)}",
+                    path=[CONF_FRAMEWORK, CONF_ADVANCED, CONF_MINIMUM_CHIP_REVISION],
+                )
+            )
+        elif (min_rev in ESP32P4_LESS_V3_REVISIONS) != bool(config.get(CONF_ENGINEERING_SAMPLE)):
+            errs.append(
+                cv.Invalid(
+                    f"'{CONF_MINIMUM_CHIP_REVISION}: {min_rev}' does not match "
+                    f"'{CONF_ENGINEERING_SAMPLE}: {bool(config.get(CONF_ENGINEERING_SAMPLE))}'",
+                    path=[CONF_FRAMEWORK, CONF_ADVANCED, CONF_MINIMUM_CHIP_REVISION],
+                )
+            )
+    elif min_rev is not None and config[CONF_VARIANT] == VARIANT_ESP32:
+        if min_rev not in ESP32_CHIP_REVISIONS:
+            errs.append(
+                cv.Invalid(
+                    f"'{CONF_MINIMUM_CHIP_REVISION}' on {VARIANT_ESP32} is one of "
+                    f"{', '.join(ESP32_CHIP_REVISIONS)}",
+                    path=[CONF_FRAMEWORK, CONF_ADVANCED, CONF_MINIMUM_CHIP_REVISION],
+                )
+            )
+    elif min_rev is not None:
         errs.append(
             cv.Invalid(
-                f"'{CONF_MINIMUM_CHIP_REVISION}' is only supported on {VARIANT_ESP32}",
+                f"'{CONF_MINIMUM_CHIP_REVISION}' is only supported on {VARIANT_ESP32} and {VARIANT_ESP32P4}",
                 path=[CONF_FRAMEWORK, CONF_ADVANCED, CONF_MINIMUM_CHIP_REVISION],
             )
+        )
+    if (
+        config[CONF_VARIANT] == VARIANT_ESP32P4
+        and config.get(CONF_FLASH_FREQUENCY) in P4_MIN_REVISION_FAST_FLASH
+        and min_rev in (None, "0.0")
+    ):
+        _LOGGER.warning(
+            "'%s: %s' needs '%s' 0.1 or higher on %s; ESP-IDF builds with 40MHz otherwise",
+            CONF_FLASH_FREQUENCY,
+            config[CONF_FLASH_FREQUENCY],
+            CONF_MINIMUM_CHIP_REVISION,
+            VARIANT_ESP32P4,
         )
     if config[CONF_VARIANT] != VARIANT_ESP32S3 and config.get(CONF_FLASH_MODE) == "opi":
         errs.append(
@@ -2400,7 +2513,7 @@ FRAMEWORK_SCHEMA = cv.Schema(
                 cv.Optional(CONF_IGNORE_EFUSE_CUSTOM_MAC, default=False): cv.boolean,
                 cv.Optional(CONF_IGNORE_EFUSE_MAC_CRC, default=False): cv.boolean,
                 cv.Optional(CONF_MINIMUM_CHIP_REVISION): cv.one_of(
-                    *ESP32_CHIP_REVISIONS, string=True
+                    *dict.fromkeys([*ESP32_CHIP_REVISIONS, *ESP32P4_CHIP_REVISIONS]), string=True
                 ),
                 cv.Optional(CONF_SRAM1_AS_IRAM, default=False): cv.boolean,
                 cv.Optional(CONF_FLASH_CHIP): cv.one_of(
@@ -2619,6 +2732,7 @@ CONFIG_SCHEMA = cv.All(
     _resolve_toolchain,
     _detect_variant,
     _set_default_framework,
+    _apply_detected_chip_revision,
     _check_versions,
     set_core_data,
     _require_ipv4_on_arduino,
@@ -3442,6 +3556,11 @@ async def to_code(config):
             for rev, flag in ESP32_CHIP_REVISIONS.items():
                 add_idf_sdkconfig_option(flag, rev == min_rev)
             cg.add_define("USE_ESP32_MIN_CHIP_REVISION_SET")
+    elif variant == VARIANT_ESP32P4:
+        min_rev = conf[CONF_ADVANCED].get(CONF_MINIMUM_CHIP_REVISION)
+        if min_rev is not None:
+            for rev, flag in ESP32P4_CHIP_REVISIONS.items():
+                add_idf_sdkconfig_option(flag, rev == min_rev)
 
     # Keep only the flash vendor driver the board needs; the boot log names it
     if (flash_chip := conf[CONF_ADVANCED].get(CONF_FLASH_CHIP)) is not None:
