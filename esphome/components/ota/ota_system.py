@@ -81,6 +81,8 @@ def _unit_value(config: dict[str, Any], unit: tuple[str, int | None]) -> Any:
     domain, index = unit
     value = config.get(domain)
     if index is None:
+        if isinstance(value, list) and len(value) == 1:
+            return value[0]
         return value
     return value[index] if isinstance(value, list) and index < len(value) else None
 
@@ -192,6 +194,11 @@ def derive(
 
     declares: dict[str, tuple[str, int | None]] = {}
     references: dict[tuple[str, int | None], set[str]] = {}
+    for unit in units:
+        value = reduced[unit]
+        own = value.get(CONF_ID) if isinstance(value, dict) else None
+        if isinstance(own, ID):
+            declares[str(own.id)] = unit
     for unit in units:
         declared: set[str] = set()
         referenced: set[str] = set()
