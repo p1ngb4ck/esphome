@@ -98,36 +98,23 @@ void FirmwareUpdateComponent::load_manifest(const std::string &path, std::functi
   this->manifest_name_.clear();
   this->manifest_summary_.clear();
 #ifdef USE_FIRMWARE_UPDATE_ASYNC
-  static constexpr uint64_t MANIFEST_MAX = 16384;
-  if (this->running_ || this->manifest_open_) {
+  if (this->running_) {
     this->fail_("Busy");
     on_done(false);
     return;
   }
-  const char *rel = nullptr;
-  storage::PathStorage *ps = storage::global_storage_registry->resolve_path(path.c_str(), &rel);
-  storage::FileStat st{};
-  if (ps == nullptr || rel == nullptr || storage::global_storage_worker->has_active_task_io(ps) ||
-      ps->stat(rel, &st) != storage::StorageError::STORAGE_ERROR_OK || st.is_dir || st.size == 0 ||
-      st.size > MANIFEST_MAX) {
-    this->fail_("Manifest not readable");
-    on_done(false);
-    return;
-  }
-  this->manifest_path_ = path;
-  this->manifest_done_ = std::move(on_done);
-  this->manifest_json_.assign(static_cast<size_t>(st.size), '\0');
+  auto done = std::make_shared<std::function<void(bool)>>(std::move(on_done));
   const storage::StorageError err =
-      storage::global_storage_worker->begin_read(ps, rel, &this->manifest_stream_, [this](storage::StorageError e) {
-        if (e != storage::StorageError::STORAGE_ERROR_OK) {
-          this->manifest_finish_(false);
-          return;
-        }
-        this->manifest_read_(0);
+      storage::text::load(path, [this, path, done](storage::StorageError e, const char *text, size_t len) {
+        const bool ok = e == storage::StorageError::STORAGE_ERROR_OK && this->parse_manifest_(path, text, len);
+        if (e != storage::StorageError::STORAGE_ERROR_OK)
+          this->fail_("Manifest not readable");
+        (*done)(ok);
       });
-  this->manifest_open_ = err == storage::StorageError::STORAGE_ERROR_OK;
-  if (!this->manifest_open_)
-    this->manifest_finish_(false);
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
+    this->fail_("Manifest not readable");
+    (*done)(false);
+  }
 #else
   this->fail_("No storage worker in this build");
   on_done(false);
@@ -135,73 +122,40 @@ void FirmwareUpdateComponent::load_manifest(const std::string &path, std::functi
 }
 
 #ifdef USE_FIRMWARE_UPDATE_ASYNC
-void FirmwareUpdateComponent::manifest_read_(size_t at) {
-  if (at >= this->manifest_json_.size()) {
-    this->manifest_finish_(true);
-    return;
-  }
-  this->got_ = 0;
-  const storage::StorageError err = storage::global_storage_worker->read_chunk(
-      this->manifest_stream_, reinterpret_cast<uint8_t *>(&this->manifest_json_[at]), this->manifest_json_.size() - at,
-      &this->got_, [this, at](storage::StorageError e) {
-        if (e != storage::StorageError::STORAGE_ERROR_OK || this->got_ == 0) {
-          this->manifest_finish_(false);
-          return;
-        }
-        this->manifest_read_(at + this->got_);
-      });
-  if (err != storage::StorageError::STORAGE_ERROR_OK)
-    this->manifest_finish_(false);
-}
-
-void FirmwareUpdateComponent::manifest_finish_(bool read_ok) {
-  if (this->manifest_open_) {
-    storage::global_storage_worker->end_read(this->manifest_stream_, [](storage::StorageError) {});
-    this->manifest_open_ = false;
-  }
+bool FirmwareUpdateComponent::parse_manifest_(const std::string &path, const char *text, size_t len) {
   std::string firmware;
   std::string md5;
-  bool ok = false;
-  if (!read_ok) {
-    this->fail_("Manifest not readable");
-  } else {
-    const bool valid = json::parse_json(this->manifest_json_, [this, &firmware, &md5](JsonObject root) -> bool {
-      if (!root["name"].is<const char *>() || !root["version"].is<const char *>() || !root["builds"].is<JsonArray>())
-        return false;
-      this->manifest_name_ = root["name"].as<std::string>();
-      this->manifest_version_ = root["version"].as<std::string>();
-      for (JsonObject build : root["builds"].as<JsonArray>()) {
-        if (build["chipFamily"] != ESPHOME_VARIANT || !build["ota"].is<JsonObject>())
-          continue;
-        JsonObject ota = build["ota"].as<JsonObject>();
-        if (!ota["path"].is<const char *>() || !ota["md5"].is<const char *>())
-          return false;
-        firmware = ota["path"].as<std::string>();
-        md5 = ota["md5"].as<std::string>();
-        if (ota["summary"].is<const char *>())
-          this->manifest_summary_ = ota["summary"].as<std::string>();
-        return true;
-      }
+  const bool valid = json::parse_json(reinterpret_cast<const uint8_t *>(text), len,
+                                      [this, &firmware, &md5](JsonObject root) -> bool {
+    if (!root["name"].is<const char *>() || !root["version"].is<const char *>() || !root["builds"].is<JsonArray>())
       return false;
-    });
-    if (!valid || firmware.empty() || md5.size() != 32) {
-      this->fail_("Manifest without a build for this chip or without its MD5");
-    } else {
-      if (firmware[0] != '/') {
-        const size_t slash = this->manifest_path_.rfind('/');
-        firmware = this->manifest_path_.substr(0, slash + 1) + firmware;
-      }
-      this->path_ = firmware;
-      this->md5_expected_ = md5;
-      ok = true;
+    this->manifest_name_ = root["name"].as<std::string>();
+    this->manifest_version_ = root["version"].as<std::string>();
+    for (JsonObject build : root["builds"].as<JsonArray>()) {
+      if (build["chipFamily"] != ESPHOME_VARIANT || !build["ota"].is<JsonObject>())
+        continue;
+      JsonObject ota = build["ota"].as<JsonObject>();
+      if (!ota["path"].is<const char *>() || !ota["md5"].is<const char *>())
+        return false;
+      firmware = ota["path"].as<std::string>();
+      md5 = ota["md5"].as<std::string>();
+      if (ota["summary"].is<const char *>())
+        this->manifest_summary_ = ota["summary"].as<std::string>();
+      return true;
     }
+    return false;
+  });
+  if (!valid || firmware.empty() || md5.size() != 32) {
+    this->fail_("Manifest without a build for this chip or without its MD5");
+    return false;
   }
-  this->manifest_json_.clear();
-  this->manifest_json_.shrink_to_fit();
-  auto done = std::move(this->manifest_done_);
-  this->manifest_done_ = nullptr;
-  if (done)
-    done(ok);
+  if (firmware[0] != '/') {
+    const size_t slash = path.rfind('/');
+    firmware = path.substr(0, slash + 1) + firmware;
+  }
+  this->path_ = firmware;
+  this->md5_expected_ = md5;
+  return true;
 }
 #endif
 
