@@ -1,3 +1,5 @@
+from typing import Any
+
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components.const import CONF_ON_STATE_CHANGE
@@ -22,6 +24,7 @@ from esphome.const import (
 from esphome.core import CORE, ID, coroutine_with_priority
 from esphome.coroutine import CoroPriority
 from esphome.cpp_generator import MockObj, MockObjClass
+from esphome.helpers import fnv1_hash
 from esphome.types import ConfigType
 
 from .ota_system import (
@@ -71,6 +74,8 @@ RebootToSystemAction = ota_ns.class_("RebootToSystemAction", automation.Action)
 RebootToAppAction = ota_ns.class_("RebootToAppAction", automation.Action)
 RebootToSystemService = ota_ns.class_("RebootToSystemService")
 SystemRunningService = ota_ns.class_("SystemRunningService")
+OtaSystemElfAction = ota_ns.class_("OtaSystemElfAction")
+OTA_SYSTEM_ELF_ACTION = "ota_system_elf"
 
 OTA_SYSTEM_METHODS = ["factory_image", "serial_then_ota"]
 
@@ -209,15 +214,22 @@ async def final_step() -> None:
         if platform.get(CONF_SYSTEM_BUILD):
             cg.add_define("USE_OTA_SYSTEM_BUILD")
             await _register_api_service("ota_system_running_service", SystemRunningService)
+        if (CONF_OTA_SYSTEM in platform or platform.get(CONF_SYSTEM_BUILD)) and CONF_API in CORE.config:
+            cg.add_define("USE_OTA_SYSTEM_ELF_ACTION")
+            cg.add_define("USE_API_USER_DEFINED_ACTION_RESPONSES")
+            cg.add_define("USE_API_USER_DEFINED_ACTION_RESPONSES_JSON")
+            await _register_api_service(
+                "ota_system_elf_action", OtaSystemElfAction, fnv1_hash(OTA_SYSTEM_ELF_ACTION)
+            )
 
 
-async def _register_api_service(name: str, service_class: MockObjClass) -> None:
+async def _register_api_service(name: str, service_class: MockObjClass, *args: Any) -> None:
     if CONF_API not in CORE.config:
         return
     cg.add_define("USE_API_USER_DEFINED_ACTIONS")
     cg.add_define("USE_API_CUSTOM_SERVICES")
     api = await cg.get_variable(CORE.config[CONF_API][CONF_ID])
-    service = cg.new_Pvariable(ID(name, True, service_class))
+    service = cg.new_Pvariable(ID(name, True, service_class), *args)
     cg.add(api.register_user_service(service))
 
 
