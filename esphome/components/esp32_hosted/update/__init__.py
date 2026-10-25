@@ -26,6 +26,7 @@ CONF_HTTP_REQUEST_ID = "http_request_id"
 TYPE_EMBEDDED = "embedded"
 TYPE_HTTP = "http"
 TYPE_STORAGE = "storage"
+TYPE_MANIFEST = "manifest"
 
 
 def AUTO_LOAD(config: ConfigType) -> list[str]:
@@ -33,7 +34,7 @@ def AUTO_LOAD(config: ConfigType) -> list[str]:
     the storage component, pulled in only when 'type: storage' is selected — other sources pay
     nothing for it."""
     base = ["sha256", "watchdog", "json"]
-    if config and config.get(CONF_TYPE) == TYPE_STORAGE:
+    if config and config.get(CONF_TYPE) in (TYPE_STORAGE, TYPE_MANIFEST):
         return base + ["storage"]
     return base
 
@@ -88,12 +89,20 @@ STORAGE_SCHEMA = BASE_SCHEMA.extend(
     }
 )
 
+MANIFEST_SCHEMA = BASE_SCHEMA.extend(
+    {
+        cv.GenerateID(CONF_HTTP_REQUEST_ID): cv.use_id(HttpRequestComponent),
+        cv.Optional(CONF_SOURCE): cv.string_strict,
+    }
+)
+
 CONFIG_SCHEMA = cv.All(
     cv.typed_schema(
         {
             TYPE_EMBEDDED: EMBEDDED_SCHEMA,
             TYPE_HTTP: HTTP_SCHEMA,
             TYPE_STORAGE: STORAGE_SCHEMA,
+            TYPE_MANIFEST: MANIFEST_SCHEMA,
         }
     ),
     esp32.only_on_variant(
@@ -197,6 +206,13 @@ async def to_code(config: dict[str, Any]) -> None:
         cg.add(var.set_firmware_sha256([HexInt(b) for b in sha256_bytes]))
         cg.add(var.set_storage_path(config[CONF_SOURCE]))
         cg.add_define("USE_ESP32_HOSTED_STORAGE_UPDATE")
+    elif firmware_type == TYPE_MANIFEST:
+        await cg.add_variable(var.set_http_request_parent, config[CONF_HTTP_REQUEST_ID])
+        if CONF_SOURCE in config:
+            cg.add(var.set_manifest(config[CONF_SOURCE]))
+        cg.add_define("USE_ESP32_HOSTED_HTTP_UPDATE")
+        cg.add_define("USE_ESP32_HOSTED_STORAGE_UPDATE")
+        cg.add_define("USE_ESP32_HOSTED_MANIFEST_UPDATE")
     else:
         await cg.add_variable(var.set_http_request_parent, config[CONF_HTTP_REQUEST_ID])
         cg.add(var.set_source_url(config[CONF_SOURCE]))
