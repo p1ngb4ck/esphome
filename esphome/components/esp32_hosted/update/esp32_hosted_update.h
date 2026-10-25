@@ -31,17 +31,9 @@ class Esp32HostedUpdate final : public update::UpdateEntity, public PollingCompo
   // HTTP mode setters
   void set_source_url(const char *url) { this->source_url_ = url; }
   void set_http_request_parent(http_request::HttpRequestComponent *parent) { this->http_request_parent_ = parent; }
-#endif
-#ifdef USE_ESP32_HOSTED_STORAGE_UPDATE
+#elif defined(USE_ESP32_HOSTED_STORAGE_UPDATE)
   // Storage mode setters
   void set_storage_path(const std::string &path) { this->storage_path_ = path; }
-#endif
-#ifdef USE_ESP32_HOSTED_MANIFEST_UPDATE
-  void set_manifest(const std::string &source);
-  const std::string &get_manifest() const { return this->manifest_source_; }
-  const char *get_last_error() const { return this->last_error_; }
-#endif
-#if defined(USE_ESP32_HOSTED_HTTP_UPDATE) || defined(USE_ESP32_HOSTED_STORAGE_UPDATE)
   void set_firmware_sha256(const std::array<uint8_t, 32> &sha256) { this->firmware_sha256_ = sha256; }
 #else
   // Embedded mode setters
@@ -51,34 +43,23 @@ class Esp32HostedUpdate final : public update::UpdateEntity, public PollingCompo
 #endif
 
  protected:
-#if defined(USE_ESP32_HOSTED_HTTP_UPDATE) || defined(USE_ESP32_HOSTED_STORAGE_UPDATE)
-  bool parse_manifest_(const std::string &json_str);
-  std::string firmware_url_;
-#endif
 #ifdef USE_ESP32_HOSTED_HTTP_UPDATE
   // HTTP mode members
   http_request::HttpRequestComponent *http_request_parent_{nullptr};
   const char *source_url_{nullptr};  // literal from codegen
+  std::string firmware_url_;
 
   // HTTP mode helpers
   bool fetch_manifest_();
   bool stream_firmware_to_coprocessor_();
   uint8_t initial_check_remaining_{0};
-#endif
-#ifdef USE_ESP32_HOSTED_STORAGE_UPDATE
+#elif defined(USE_ESP32_HOSTED_STORAGE_UPDATE)
   // Storage mode members
   std::string storage_path_;
 
   // Storage mode helper
   bool stream_firmware_from_storage_();
-#endif
-#ifdef USE_ESP32_HOSTED_MANIFEST_UPDATE
-  bool read_manifest_from_storage_(std::string &json_str);
-  void fail_(const char *error);
-  std::string manifest_source_;
-  const char *last_error_{""};
-#endif
-#if !defined(USE_ESP32_HOSTED_HTTP_UPDATE) && !defined(USE_ESP32_HOSTED_STORAGE_UPDATE)
+#else
   // Embedded mode members
   const uint8_t *firmware_data_{nullptr};
   size_t firmware_size_{0};
