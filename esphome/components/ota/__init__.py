@@ -68,6 +68,7 @@ OTAStateChangeTrigger = ota_ns.class_(
     "OTAStateChangeTrigger", automation.Trigger.template()
 )
 RebootToSystemAction = ota_ns.class_("RebootToSystemAction", automation.Action)
+RebootToAppAction = ota_ns.class_("RebootToAppAction", automation.Action)
 RebootToSystemService = ota_ns.class_("RebootToSystemService")
 SystemRunningService = ota_ns.class_("SystemRunningService")
 
@@ -233,6 +234,22 @@ async def reboot_to_system_to_code(
     args: list,
 ) -> MockObj:
     cg.add_define("USE_OTA_REBOOT_TO_SYSTEM")
+    return cg.new_Pvariable(action_id, template_arg)
+
+
+@automation.register_action(
+    "ota.reboot_to_app",
+    RebootToAppAction,
+    cv.All(cv.Schema({}), cv.only_on_esp32),
+    synchronous=True,
+)
+async def reboot_to_app_to_code(
+    config: ConfigType,
+    action_id: ID,
+    template_arg: cg.TemplateArguments,
+    args: list,
+) -> MockObj:
+    cg.add_define("USE_OTA_REBOOT_TO_APP")
     return cg.new_Pvariable(action_id, template_arg)
 
 

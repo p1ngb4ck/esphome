@@ -29,6 +29,15 @@ class RebootToSystemService : public api::UserServiceDynamic<> {
 #endif
 #endif
 
+#ifdef USE_OTA_REBOOT_TO_APP
+bool reboot_to_app();
+
+template<typename... Ts> class RebootToAppAction : public Action<Ts...> {
+ public:
+  void play(const Ts &...x) override { reboot_to_app(); }
+};
+#endif
+
 #if defined(USE_OTA_SYSTEM_BUILD) && defined(USE_API_CUSTOM_SERVICES)
 class SystemRunningService : public api::UserServiceDynamic<> {
  public:
