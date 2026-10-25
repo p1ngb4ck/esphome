@@ -12,9 +12,7 @@
 #endif
 
 #ifdef USE_ESP32_HOSTED_STORAGE_UPDATE
-#include "esphome/components/sha256/sha256.h"
 #include "esphome/components/storage/storage.h"
-#include "esphome/components/storage/storage_worker.h"
 #endif
 
 namespace esphome::esp32_hosted {
@@ -33,12 +31,9 @@ class Esp32HostedUpdate final : public update::UpdateEntity, public PollingCompo
   // HTTP mode setters
   void set_source_url(const char *url) { this->source_url_ = url; }
   void set_http_request_parent(http_request::HttpRequestComponent *parent) { this->http_request_parent_ = parent; }
-#endif
-#ifdef USE_ESP32_HOSTED_STORAGE_UPDATE
+#elif defined(USE_ESP32_HOSTED_STORAGE_UPDATE)
   // Storage mode setters
   void set_storage_path(const std::string &path) { this->storage_path_ = path; }
-#endif
-#if defined(USE_ESP32_HOSTED_HTTP_UPDATE) || defined(USE_ESP32_HOSTED_STORAGE_UPDATE)
   void set_firmware_sha256(const std::array<uint8_t, 32> &sha256) { this->firmware_sha256_ = sha256; }
 #else
   // Embedded mode setters
@@ -48,7 +43,6 @@ class Esp32HostedUpdate final : public update::UpdateEntity, public PollingCompo
 #endif
 
  protected:
-  void finish_install_(update::UpdateState prev_state, bool ok);
 #ifdef USE_ESP32_HOSTED_HTTP_UPDATE
   // HTTP mode members
   http_request::HttpRequestComponent *http_request_parent_{nullptr};
@@ -57,36 +51,15 @@ class Esp32HostedUpdate final : public update::UpdateEntity, public PollingCompo
 
   // HTTP mode helpers
   bool fetch_manifest_();
-  bool parse_manifest_(const std::string &json_str);
-  void finish_check_();
   bool stream_firmware_to_coprocessor_();
   uint8_t initial_check_remaining_{0};
-#endif
-#ifdef USE_ESP32_HOSTED_STORAGE_UPDATE
+#elif defined(USE_ESP32_HOSTED_STORAGE_UPDATE)
   // Storage mode members
   std::string storage_path_;
 
-  storage::PathStorage *open_storage_(const char **rel, uint64_t *size);
-  void close_stream_();
-#ifdef USE_ESP32_HOSTED_HTTP_UPDATE
-  void storage_check_();
-  void storage_check_read_(size_t at);
-  std::string manifest_json_;
-#endif
-  void storage_flash_(update::UpdateState prev_state);
-  void storage_flash_read_();
-  void storage_flash_done_(bool ok);
-  storage::StreamHandle stream_{};
-  bool stream_open_{false};
-  uint8_t *chunk_{nullptr};
-  uint64_t total_{0};
-  uint64_t offset_{0};
-  size_t got_{0};
-  uint32_t last_progress_{0};
-  sha256::SHA256 hasher_;
-  update::UpdateState prev_state_{update::UPDATE_STATE_UNKNOWN};
-#endif
-#if !defined(USE_ESP32_HOSTED_HTTP_UPDATE) && !defined(USE_ESP32_HOSTED_STORAGE_UPDATE)
+  // Storage mode helper
+  bool stream_firmware_from_storage_();
+#else
   // Embedded mode members
   const uint8_t *firmware_data_{nullptr};
   size_t firmware_size_{0};
