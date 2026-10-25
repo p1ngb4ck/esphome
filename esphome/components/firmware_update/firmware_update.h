@@ -31,6 +31,16 @@ class FirmwareUpdateComponent final : public ota::OTAComponent {
   float get_setup_priority() const override { return setup_priority::LATE; }
 
   void set_path(const std::string &path) { this->path_ = path; }
+  void set_md5(const std::string &md5) { this->md5_expected_ = md5; }
+  void set_project_name(const std::string &name) { this->project_name_ = name; }
+  bool load_manifest(const std::string &path);
+  const std::string &get_path() const { return this->path_; }
+  const std::string &get_manifest_version() const { return this->manifest_version_; }
+  const std::string &get_manifest_name() const { return this->manifest_name_; }
+  const std::string &get_manifest_summary() const { return this->manifest_summary_; }
+  const char *get_last_error() const { return this->last_error_; }
+  std::string installed_version() const;
+  bool is_running() const;
 
   // Read the firmware image from storage and flash it. Reboots on success; on any failure the
   // OTA backend is aborted and the boot slot is left untouched (the running app keeps booting).
@@ -61,7 +71,16 @@ class FirmwareUpdateComponent final : public ota::OTAComponent {
   bool stream_open_{false};
 #endif
 
+  bool check_head_(const uint8_t *data, size_t len);
+  void fail_(const char *error);
+
   std::string path_{};
+  std::string md5_expected_{};
+  std::string project_name_{};
+  std::string manifest_version_{};
+  std::string manifest_name_{};
+  std::string manifest_summary_{};
+  const char *last_error_{""};
   bool update_started_{false};
 };
 
