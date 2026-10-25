@@ -13,6 +13,10 @@ static const char *const TAG = "firmware_update";
 
 // Firmware read chunk size. One reused buffer on the stack -- never the whole image in RAM.
 static constexpr size_t CHUNK_SIZE = 1024;
+#ifdef USE_FIRMWARE_UPDATE_ASYNC
+static constexpr size_t ASYNC_CHUNK_SIZE = 4096;
+static constexpr uint32_t ASYNC_PROGRESS_MS = 250;
+#endif
 
 void FirmwareUpdateComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "Firmware Update (from storage):");
@@ -24,10 +28,20 @@ void FirmwareUpdateComponent::flash() {
     ESP_LOGE(TAG, "Path not set; cannot start update");
     return;
   }
+#ifdef USE_FIRMWARE_UPDATE_ASYNC
+  if (this->running_) {
+    ESP_LOGW(TAG, "An update is already running");
+    return;
+  }
+#endif
 
   ESP_LOGI(TAG, "Starting firmware update from '%s'", this->path_.c_str());
 #ifdef USE_OTA_STATE_LISTENER
   this->notify_state_(ota::OTA_STARTED, 0.0f, 0);
+#endif
+#ifdef USE_FIRMWARE_UPDATE_ASYNC
+  if (this->start_async_())
+    return;
 #endif
 
 #ifdef USE_STORAGE
@@ -194,5 +208,135 @@ uint8_t FirmwareUpdateComponent::stream_from_storage_(ota::OTABackendPtr &backen
   return ota::OTA_RESPONSE_OK;
 }
 #endif  // USE_STORAGE
+
+#ifdef USE_FIRMWARE_UPDATE_ASYNC
+bool FirmwareUpdateComponent::start_async_() {
+  storage::TransferBuffer *tb = storage::global_transfer_buffer;
+  if (storage::global_storage_worker == nullptr || storage::global_storage_registry == nullptr || tb == nullptr)
+    return false;
+  const char *rel_raw = nullptr;
+  storage::PathStorage *ps = storage::global_storage_registry->resolve_path(this->path_.c_str(), &rel_raw);
+  if (ps == nullptr || rel_raw == nullptr)
+    return false;
+  const std::string rel(rel_raw);
+  storage::FileStat st{};
+  if (ps->stat(rel.c_str(), &st) != storage::StorageError::STORAGE_ERROR_OK || st.is_dir || st.size == 0)
+    return false;
+  this->buf_ = tb->try_acquire(ASYNC_CHUNK_SIZE);
+  if (this->buf_ == nullptr)
+    return false;
+
+  ESP_LOGI(TAG, "Firmware size: %llu bytes", static_cast<unsigned long long>(st.size));
+  this->running_ = true;
+  this->update_started_ = false;
+  this->total_ = st.size;
+  this->offset_ = 0;
+  this->last_progress_ = millis();
+  this->md5_.init();
+  this->backend_ = ota::make_ota_backend();
+  const auto begin_result = this->backend_->begin(static_cast<size_t>(st.size));
+  if (begin_result != ota::OTA_RESPONSE_OK) {
+    ESP_LOGE(TAG, "backend->begin error: %d", begin_result);
+    this->finish_async_(begin_result);
+    return true;
+  }
+  this->stream_open_ = true;
+  const storage::StorageError err =
+      storage::global_storage_worker->begin_read(ps, rel.c_str(), &this->stream_, [this](storage::StorageError e) {
+        if (e != storage::StorageError::STORAGE_ERROR_OK) {
+          ESP_LOGE(TAG, "Opening '%s' failed (%s)", this->path_.c_str(), storage::error_to_string(e));
+          this->finish_async_(ota::OTA_RESPONSE_ERROR_UNKNOWN);
+          return;
+        }
+        this->read_next_();
+      });
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGE(TAG, "Opening '%s' failed (%s)", this->path_.c_str(), storage::error_to_string(err));
+    this->stream_open_ = false;
+    this->finish_async_(ota::OTA_RESPONSE_ERROR_UNKNOWN);
+  }
+  return true;
+}
+
+void FirmwareUpdateComponent::read_next_() {
+  const size_t want = static_cast<size_t>(std::min<uint64_t>(ASYNC_CHUNK_SIZE, this->total_ - this->offset_));
+  this->got_ = 0;
+  const storage::StorageError err = storage::global_storage_worker->read_chunk(
+      this->stream_, this->buf_, want, &this->got_, [this](storage::StorageError e) { this->on_chunk_(e); });
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGE(TAG, "Read failed at %llu (%s)", static_cast<unsigned long long>(this->offset_),
+             storage::error_to_string(err));
+    this->finish_async_(ota::OTA_RESPONSE_ERROR_UNKNOWN);
+  }
+}
+
+void FirmwareUpdateComponent::on_chunk_(storage::StorageError err) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK || this->got_ == 0) {
+    ESP_LOGE(TAG, "Read failed at %llu (%s)", static_cast<unsigned long long>(this->offset_),
+             err != storage::StorageError::STORAGE_ERROR_OK ? storage::error_to_string(err) : "truncated");
+    this->finish_async_(ota::OTA_RESPONSE_ERROR_UNKNOWN);
+    return;
+  }
+  this->md5_.add(this->buf_, this->got_);
+  this->update_started_ = true;
+  const uint8_t result = this->backend_->write(this->buf_, this->got_);
+  if (result != ota::OTA_RESPONSE_OK) {
+    ESP_LOGE(TAG, "Writing to flash failed at %llu (code 0x%02X)", static_cast<unsigned long long>(this->offset_),
+             result);
+    this->finish_async_(result);
+    return;
+  }
+  this->offset_ += this->got_;
+  const uint32_t now = millis();
+  if (now - this->last_progress_ >= ASYNC_PROGRESS_MS || this->offset_ == this->total_) {
+    this->last_progress_ = now;
+#ifdef USE_OTA_STATE_LISTENER
+    this->notify_state_(ota::OTA_IN_PROGRESS, this->offset_ * 100.0f / this->total_, 0);
+#endif
+  }
+  if (this->offset_ < this->total_) {
+    this->read_next_();
+    return;
+  }
+  this->defer([this]() {
+    char md5_str[33];
+    this->md5_.calculate();
+    this->md5_.get_hex(md5_str);
+    this->backend_->set_update_md5(md5_str);
+    const uint8_t end_result = this->backend_->end();
+    if (end_result != ota::OTA_RESPONSE_OK)
+      ESP_LOGE(TAG, "backend->end error: 0x%02X", end_result);
+    this->finish_async_(end_result);
+  });
+}
+
+void FirmwareUpdateComponent::finish_async_(uint8_t status) {
+  if (this->stream_open_) {
+    storage::global_storage_worker->end_read(this->stream_, [](storage::StorageError) {});
+    this->stream_open_ = false;
+  }
+  if (this->buf_ != nullptr) {
+    storage::global_transfer_buffer->release();
+    this->buf_ = nullptr;
+  }
+  this->running_ = false;
+  if (status == ota::OTA_RESPONSE_OK) {
+    this->backend_.reset();
+#ifdef USE_OTA_STATE_LISTENER
+    this->notify_state_(ota::OTA_COMPLETED, 100.0f, status);
+#endif
+    ESP_LOGI(TAG, "Update complete; rebooting");
+    App.safe_reboot();
+    return;
+  }
+  if (this->update_started_ && this->backend_ != nullptr)
+    this->backend_->abort();
+  this->backend_.reset();
+#ifdef USE_OTA_STATE_LISTENER
+  this->notify_state_(ota::OTA_ERROR, 0.0f, status);
+#endif
+  ESP_LOGE(TAG, "Update failed (code 0x%02X)", status);
+}
+#endif  // USE_FIRMWARE_UPDATE_ASYNC
 
 }  // namespace esphome::firmware_update
