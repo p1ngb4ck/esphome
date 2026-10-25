@@ -6,6 +6,7 @@ from esphome.config_helpers import (
     filter_source_files_from_platform,
 )
 import esphome.config_validation as cv
+import esphome.final_validate as fv
 from esphome.const import (
     CONF_API,
     CONF_ESPHOME,
@@ -79,6 +80,15 @@ def _ota_final_validate(config: ConfigType) -> None:
         )
     if sum(1 for platform in config if CONF_OTA_SYSTEM in platform) > 1:
         raise cv.Invalid(f"'{CONF_OTA_SYSTEM}' may be set on one '{CONF_OTA}' platform only")
+    for platform in config:
+        if CONF_OTA_SYSTEM in platform:
+            system = platform[CONF_OTA_SYSTEM]
+            write_ota_system(
+                system[CONF_KEEP_COMPONENTS],
+                system[CONF_INCLUDES],
+                system[CONF_MIGRATE_VIA_OTA],
+                fv.full_config.get(),
+            )
 
 
 FINAL_VALIDATE_SCHEMA = _ota_final_validate
@@ -190,12 +200,6 @@ async def final_step() -> None:
         cg.add_define("USE_OTA_STATE_LISTENER")
     for platform in CORE.config.get(CONF_OTA, []):
         if CONF_OTA_SYSTEM in platform:
-            system = platform[CONF_OTA_SYSTEM]
-            write_ota_system(
-                system[CONF_KEEP_COMPONENTS],
-                system[CONF_INCLUDES],
-                system[CONF_MIGRATE_VIA_OTA],
-            )
             cg.add_define("USE_OTA_REBOOT_TO_SYSTEM")
             await _register_api_service("ota_reboot_to_system_service", RebootToSystemService)
         if platform.get(CONF_SYSTEM_BUILD):

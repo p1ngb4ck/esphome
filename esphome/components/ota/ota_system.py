@@ -129,10 +129,12 @@ def _target() -> Path:
 
 
 def derive(
-    keep_components: list[str], includes: list[Path], migrate_via_ota: bool
+    keep_components: list[str],
+    includes: list[Path],
+    migrate_via_ota: bool,
+    validated: dict[str, Any],
 ) -> dict[str, Any]:
     raw = CORE.raw_config
-    validated = CORE.config
     units = _units(raw)
     reduced = {u: _reduce_value(u[0], _unit_value(validated, u)) for u in units}
 
@@ -181,15 +183,25 @@ def derive(
     return derived
 
 
-def write(keep_components: list[str], includes: list[Path], migrate_via_ota: bool) -> Path:
-    derived = derive(keep_components, includes, migrate_via_ota)
+def write(
+    keep_components: list[str],
+    includes: list[Path],
+    migrate_via_ota: bool,
+    validated: dict[str, Any],
+) -> Path:
+    derived = derive(keep_components, includes, migrate_via_ota, validated)
     target = _target()
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(yaml_util.dump(derived, show_secrets=False), encoding="utf-8", newline="\n")
+    _write_if_changed(target, yaml_util.dump(derived, show_secrets=False))
     secrets = CORE.relative_config_path(yaml_util.SECRET_YAML)
     if secrets.is_file():
         include = Path(os.path.relpath(secrets.absolute(), target.parent)).as_posix()
-        (target.parent / yaml_util.SECRET_YAML).write_text(
-            f"<<: !include {include}\n", encoding="utf-8", newline="\n"
-        )
+        _write_if_changed(target.parent / yaml_util.SECRET_YAML, f"<<: !include {include}\n")
     return target
+
+
+def _write_if_changed(path: Path, text: str) -> None:
+    data = text.encode("utf-8")
+    if path.is_file() and path.read_bytes() == data:
+        return
+    path.write_bytes(data)
