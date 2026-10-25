@@ -4,7 +4,9 @@
 
 #ifdef USE_ESP32
 
+#include <cstddef>
 #include <cstdint>
+#include <string>
 
 #ifdef USE_OTA_MAIN_YAML
 #include "esphome/components/store_yaml/store_yaml.h"
@@ -23,7 +25,15 @@ struct MainYamlRecord {
 inline void keep_main_yaml_record(const MainYamlRecord *record) { asm volatile("" : : "r"(record)); }
 
 #ifdef USE_OTA_MAIN_YAML
-void adopt_main_yaml(store_yaml::StoreYamlComponent *store);
+struct MainYaml {
+  const uint8_t *data;
+  size_t size;
+  size_t uncompressed_size;
+};
+
+void map_main_yaml();
+const MainYaml &main_yaml();
+bool export_main_yaml(const std::string &path);
 #endif
 
 }

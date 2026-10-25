@@ -10,9 +10,7 @@
 #include <cinttypes>
 #include <cstring>
 
-#ifdef USE_STORE_YAML_EXPORT
 extern "C" unsigned long long ZSTD_getFrameContentSize(const void *src, size_t src_size);
-#endif
 
 namespace esphome::ota {
 
@@ -49,8 +47,9 @@ static bool find_main_yaml(const esp_partition_t *app, uint32_t *offset, uint32_
   return false;
 }
 
-void adopt_main_yaml(store_yaml::StoreYamlComponent *store) {
-  store->set_data(nullptr, 0, 0);
+static MainYaml found_main_yaml{};
+
+void map_main_yaml() {
   const esp_partition_t *app =
       esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, nullptr);
   uint32_t offset = 0;
@@ -68,14 +67,20 @@ void adopt_main_yaml(store_yaml::StoreYamlComponent *store) {
     ESP_LOGD(TAG, "The main firmware's YAML record points to no zstd frame");
     return;
   }
-  size_t uncompressed = 0;
-#ifdef USE_STORE_YAML_EXPORT
   const unsigned long long content = ZSTD_getFrameContentSize(data, size);
-  if (content < ZSTD_CONTENT_SIZE_ERROR)
-    uncompressed = static_cast<size_t>(content);
-#endif
-  store->set_data(static_cast<const uint8_t *>(data), size, uncompressed);
-  ESP_LOGD(TAG, "Main firmware YAML: %" PRIu32 " bytes (%zu uncompressed)", size, uncompressed);
+  found_main_yaml.data = static_cast<const uint8_t *>(data);
+  found_main_yaml.size = size;
+  found_main_yaml.uncompressed_size = content < ZSTD_CONTENT_SIZE_ERROR ? static_cast<size_t>(content) : 0;
+  ESP_LOGD(TAG, "Main firmware YAML: %" PRIu32 " bytes (%zu uncompressed)", size, found_main_yaml.uncompressed_size);
+}
+
+const MainYaml &main_yaml() { return found_main_yaml; }
+
+bool export_main_yaml(const std::string &path) {
+  if (store_yaml::global_store_yaml == nullptr)
+    return false;
+  return store_yaml::global_store_yaml->export_blob_to_storage(found_main_yaml.data, found_main_yaml.size,
+                                                               found_main_yaml.uncompressed_size, path.c_str(), false);
 }
 
 }

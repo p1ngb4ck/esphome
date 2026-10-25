@@ -227,7 +227,7 @@ async def final_step() -> None:
             await _register_api_service("ota_reboot_to_app_service", RebootToAppService)
             _mark_system_image()
             if STORE_YAML in CORE.config:
-                await _adopt_main_yaml()
+                await _map_main_yaml()
         if (CONF_OTA_SYSTEM in platform or platform.get(CONF_SYSTEM_BUILD)) and CONF_API in CORE.config:
             cg.add_define("USE_OTA_SYSTEM_ELF_ACTION")
             cg.add_define("USE_API_USER_DEFINED_ACTION_RESPONSES")
@@ -249,10 +249,10 @@ async def _embed_main_yaml_record() -> None:
     cg.add(ota_ns.keep_main_yaml_record(cg.RawExpression(f"&{MAIN_YAML_RECORD}")))
 
 
-async def _adopt_main_yaml() -> None:
+async def _map_main_yaml() -> None:
     cg.add_define("USE_OTA_MAIN_YAML")
-    store = await cg.get_variable(CORE.config[STORE_YAML][CONF_ID])
-    cg.add(ota_ns.adopt_main_yaml(store))
+    cg.add_define("USE_STORE_YAML_EXPORT")
+    cg.add(ota_ns.map_main_yaml())
 
 
 def _mark_system_image() -> None:
