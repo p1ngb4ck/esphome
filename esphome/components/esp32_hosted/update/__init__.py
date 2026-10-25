@@ -40,6 +40,7 @@ def AUTO_LOAD(config: ConfigType) -> list[str]:
 esp32_hosted_ns = cg.esphome_ns.namespace("esp32_hosted")
 http_request_ns = cg.esphome_ns.namespace("http_request")
 HttpRequestComponent = http_request_ns.class_("HttpRequestComponent", cg.Component)
+UpdateMethod = esp32_hosted_ns.enum("UpdateMethod", is_class=True)
 Esp32HostedUpdate = esp32_hosted_ns.class_(
     "Esp32HostedUpdate", update.UpdateEntity, cg.PollingComponent
 )
@@ -81,11 +82,20 @@ HTTP_SCHEMA = BASE_SCHEMA.extend(
 # Read the co-processor firmware from a mounted storage at runtime. CONF_SOURCE is a plain
 # storage path (e.g. /sdcard/slave_fw.bin) resolved through the storage registry — not a URL and
 # not a build-time file, so it is validated as a string and never opened during config.
-STORAGE_SCHEMA = BASE_SCHEMA.extend(
-    {
-        cv.Required(CONF_SOURCE): cv.string_strict,
-        cv.Required(CONF_SHA256): _validate_sha256,
-    }
+def _validate_storage_source(config: ConfigType) -> ConfigType:
+    if not config[CONF_SOURCE].lower().endswith(".json") and CONF_SHA256 not in config:
+        raise cv.Invalid("sha256 is required unless source is a manifest (.json)")
+    return config
+
+
+STORAGE_SCHEMA = cv.All(
+    BASE_SCHEMA.extend(
+        {
+            cv.Required(CONF_SOURCE): cv.string_strict,
+            cv.Optional(CONF_SHA256): _validate_sha256,
+        }
+    ),
+    _validate_storage_source,
 )
 
 CONFIG_SCHEMA = cv.All(
@@ -190,16 +200,24 @@ async def to_code(config: dict[str, Any]) -> None:
         cg.add(var.set_firmware_sha256([HexInt(b) for b in sha256_bytes]))
         cg.add(var.set_firmware_data(prog_arr))
         cg.add(var.set_firmware_size(len(firmware_data)))
+        cg.add(var.set_method(UpdateMethod.EMBEDDED))
+        cg.add_define("USE_ESP32_HOSTED_EMBEDDED_UPDATE")
     elif firmware_type == TYPE_STORAGE:
         # Read the firmware from a mounted storage at runtime. The path is resolved through the
         # storage registry when the update is performed; the sha256 is verified while streaming.
-        sha256_bytes = bytes.fromhex(config[CONF_SHA256])
-        cg.add(var.set_firmware_sha256([HexInt(b) for b in sha256_bytes]))
+        from esphome.components.storage import request_storage_worker
+
+        if CONF_SHA256 in config:
+            sha256_bytes = bytes.fromhex(config[CONF_SHA256])
+            cg.add(var.set_firmware_sha256([HexInt(b) for b in sha256_bytes]))
+        cg.add(var.set_method(UpdateMethod.STORAGE))
         cg.add(var.set_storage_path(config[CONF_SOURCE]))
         cg.add_define("USE_ESP32_HOSTED_STORAGE_UPDATE")
+        request_storage_worker()
     else:
         await cg.add_variable(var.set_http_request_parent, config[CONF_HTTP_REQUEST_ID])
         cg.add(var.set_source_url(config[CONF_SOURCE]))
+        cg.add(var.set_method(UpdateMethod.HTTP))
         cg.add_define("USE_ESP32_HOSTED_HTTP_UPDATE")
 
     await cg.register_component(var, config)
