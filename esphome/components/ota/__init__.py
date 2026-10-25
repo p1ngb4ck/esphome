@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 from esphome import automation
@@ -10,8 +11,10 @@ from esphome.config_helpers import (
 import esphome.config_validation as cv
 import esphome.final_validate as fv
 from esphome.const import (
+    CONF_ADVANCED,
     CONF_API,
     CONF_ESPHOME,
+    CONF_FRAMEWORK,
     CONF_ID,
     CONF_INCLUDES,
     CONF_METHOD,
@@ -19,6 +22,7 @@ from esphome.const import (
     CONF_OTA,
     CONF_PLATFORM,
     CONF_TRIGGER_ID,
+    PLATFORM_ESP32,
     PlatformFramework,
 )
 from esphome.core import CORE, ID, coroutine_with_priority
@@ -35,6 +39,8 @@ from .ota_system import (
     CONF_SYSTEM_BUILD,
 )
 from .ota_system import write as write_ota_system
+
+_LOGGER = logging.getLogger(__name__)
 
 OTA_STATE_LISTENER_KEY = "ota_state_listener"
 
@@ -74,6 +80,8 @@ RebootToSystemAction = ota_ns.class_("RebootToSystemAction", automation.Action)
 RebootToAppAction = ota_ns.class_("RebootToAppAction", automation.Action)
 RebootToSystemService = ota_ns.class_("RebootToSystemService")
 SystemRunningService = ota_ns.class_("SystemRunningService")
+RebootToAppService = ota_ns.class_("RebootToAppService")
+OTA_SYSTEM_IMAGE_MARKER = "ota-system"
 OtaSystemElfAction = ota_ns.class_("OtaSystemElfAction")
 OTA_SYSTEM_ELF_ACTION = "ota_system_elf"
 
@@ -213,7 +221,10 @@ async def final_step() -> None:
             await _register_api_service("ota_reboot_to_system_service", RebootToSystemService)
         if platform.get(CONF_SYSTEM_BUILD):
             cg.add_define("USE_OTA_SYSTEM_BUILD")
+            cg.add_define("USE_OTA_REBOOT_TO_APP")
             await _register_api_service("ota_system_running_service", SystemRunningService)
+            await _register_api_service("ota_reboot_to_app_service", RebootToAppService)
+            _mark_system_image()
         if (CONF_OTA_SYSTEM in platform or platform.get(CONF_SYSTEM_BUILD)) and CONF_API in CORE.config:
             cg.add_define("USE_OTA_SYSTEM_ELF_ACTION")
             cg.add_define("USE_API_USER_DEFINED_ACTION_RESPONSES")
@@ -221,6 +232,22 @@ async def final_step() -> None:
             await _register_api_service(
                 "ota_system_elf_action", OtaSystemElfAction, fnv1_hash(OTA_SYSTEM_ELF_ACTION)
             )
+
+
+def _mark_system_image() -> None:
+    from esphome.components.const import CONF_ENABLE_OTA_DOWNGRADE_PROTECTION
+    from esphome.components.esp32 import add_idf_sdkconfig_option
+
+    advanced = CORE.config.get(PLATFORM_ESP32, {}).get(CONF_FRAMEWORK, {}).get(CONF_ADVANCED, {})
+    if advanced.get(CONF_ENABLE_OTA_DOWNGRADE_PROTECTION):
+        _LOGGER.warning(
+            "OTA system: downgrade protection keeps the project version in the image, so the OTA "
+            "system cannot mark its image and cannot update itself over OTA"
+        )
+        return
+    cg.add_define("USE_OTA_SYSTEM_SELF_UPDATE")
+    add_idf_sdkconfig_option("CONFIG_APP_PROJECT_VER_FROM_CONFIG", True)
+    add_idf_sdkconfig_option("CONFIG_APP_PROJECT_VER", OTA_SYSTEM_IMAGE_MARKER)
 
 
 async def _register_api_service(name: str, service_class: MockObjClass, *args: Any) -> None:
@@ -291,7 +318,8 @@ _filter_define_source_files = filter_source_files_from_defines(
         "ota_signature_esp_idf.cpp": "USE_OTA_SIGNED_VERIFICATION_MULTI_KEY",
         "ota_bootloader_esp_idf.cpp": "USE_OTA_PARTITIONS",
         "ota_partitions_esp_idf.cpp": "USE_OTA_PARTITIONS",
-        "ota_system_esp_idf.cpp": "USE_OTA_REBOOT_TO_SYSTEM",
+        "ota_system_esp_idf.cpp": ("USE_OTA_REBOOT_TO_SYSTEM", "USE_OTA_REBOOT_TO_APP"),
+        "ota_system_update_esp_idf.cpp": "USE_OTA_SYSTEM_SELF_UPDATE",
     }
 )
 

@@ -54,6 +54,10 @@ OTAResponseTypes IDFOTABackend::write_app_(const uint8_t *data, size_t len) {
 OTAResponseTypes IDFOTABackend::decide_stream_head_() {
   this->head_decided_ = true;
   if (memcmp(this->head_buf_, PREFILL_MAGIC, sizeof(PREFILL_MAGIC)) != 0) {
+#ifdef USE_OTA_SYSTEM_SELF_UPDATE
+    if (is_system_image(this->head_buf_, this->head_have_))
+      return this->system_image_begin_();
+#endif
     // A plain app image: begin the slot for the announced total and replay the buffered
     // head — from here everything behaves exactly like the immediate-begin path.
     OTAResponseTypes result = this->app_slot_begin_(this->pending_total_);
@@ -297,10 +301,20 @@ OTAResponseTypes IDFOTABackend::write(uint8_t *data, size_t len) {
       return OTA_RESPONSE_OK;
     // Remainder of the deciding chunk: seam-routed for a pre-fill stream, straight to the
     // slot for a plain app (its bytes are already hashed above).
+#ifdef USE_OTA_SYSTEM_SELF_UPDATE
+    if (this->system_image_ != nullptr)
+      return this->system_store_(data, len);
+#endif
     if (this->data_active_)
       return this->route_stream_(data, len);
     return this->write_app_(data, len);
   }
+#ifdef USE_OTA_SYSTEM_SELF_UPDATE
+  if (this->ota_type_ == ota::OTA_TYPE_UPDATE_APP && this->system_image_ != nullptr) {
+    this->md5_.add(data, len);
+    return this->system_store_(data, len);
+  }
+#endif
   if (this->ota_type_ == ota::OTA_TYPE_UPDATE_APP && this->data_active_) {
     this->md5_.add(data, len);
     return this->route_stream_(data, len);
@@ -385,6 +399,10 @@ OTAResponseTypes IDFOTABackend::end() {
     if (result != OTA_RESPONSE_OK)
       return result;
   }
+#ifdef USE_OTA_SYSTEM_SELF_UPDATE
+  if (this->system_image_ != nullptr)
+    return this->hold_lock_if_ok_(this->system_image_finish_());
+#endif
   if (!this->is_app_or_bootloader_update_()) {
     return OTA_RESPONSE_ERROR_UNSUPPORTED_OTA_TYPE;
   }
@@ -456,6 +474,10 @@ void IDFOTABackend::abort() {
     return;
 #ifdef USE_OTA_PARTITIONS
   this->finish_data_partition_(false);
+#ifdef USE_OTA_SYSTEM_SELF_UPDATE
+  this->system_image_.reset();
+  this->system_have_ = 0;
+#endif
   if (this->partition_table_part_ != nullptr) {
     esp_partition_deregister_external(this->partition_table_part_);
     this->partition_table_part_ = nullptr;

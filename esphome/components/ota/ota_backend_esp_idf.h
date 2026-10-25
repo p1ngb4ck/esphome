@@ -19,6 +19,14 @@
 
 namespace esphome::ota {
 
+#if defined(USE_OTA_SYSTEM_SELF_UPDATE) && defined(USE_OTA_PARTITIONS)
+struct PsramFree {
+  void operator()(uint8_t *data) const;
+};
+
+bool is_system_image(const uint8_t *head, size_t len);
+#endif
+
 #ifdef USE_OTA_PARTITIONS
 // Staging buffer holds the entire partition table for verification before any flash op.
 static constexpr size_t PARTITION_TABLE_BUFFER_SIZE = ESP_PARTITION_TABLE_MAX_LEN;  // 0xC00
@@ -84,6 +92,11 @@ class IDFOTABackend final {
   OTAResponseTypes write_app_(const uint8_t *data, size_t len);
   OTAResponseTypes decide_stream_head_();
   OTAResponseTypes route_stream_(const uint8_t *data, size_t len);
+#ifdef USE_OTA_SYSTEM_SELF_UPDATE
+  OTAResponseTypes system_image_begin_();
+  OTAResponseTypes system_store_(const uint8_t *data, size_t len);
+  OTAResponseTypes system_image_finish_();
+#endif
   void finish_data_partition_(bool success);
 #endif
 
@@ -126,6 +139,10 @@ class IDFOTABackend final {
   size_t data_image_size_{0};
   size_t data_stream_pos_{0};
   bool data_active_{false};
+#ifdef USE_OTA_SYSTEM_SELF_UPDATE
+  std::unique_ptr<uint8_t[], PsramFree> system_image_;
+  size_t system_have_{0};
+#endif
 #endif
 };
 

@@ -45,6 +45,16 @@ template<typename... Ts> class RebootToAppAction : public Action<Ts...> {
  public:
   void play(const Ts &...x) override { reboot_to_app(); }
 };
+
+#ifdef USE_API_CUSTOM_SERVICES
+class RebootToAppService : public api::UserServiceDynamic<> {
+ public:
+  RebootToAppService() : api::UserServiceDynamic<>("reboot_to_main", {}) {}
+
+ protected:
+  void execute(uint32_t call_id, bool return_response) override { reboot_to_app(); }
+};
+#endif
 #endif
 
 #ifdef USE_OTA_SYSTEM_ELF_ACTION
@@ -71,11 +81,23 @@ class OtaSystemElfAction : public api::UserServiceBase<> {
       api::global_api_server->unregister_active_action_call(call_id);
       return;
     }
-    char json[96];
+    char json[200];
     int len = snprintf(json, sizeof(json), "{\"elf_sha256\":\"");
     for (uint8_t byte : desc.app_elf_sha256)
       len += snprintf(json + len, sizeof(json) - len, "%02x", byte);
+    const esp_partition_t *app =
+        esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, nullptr);
+    esp_app_desc_t app_desc;
+    if (app != nullptr && esp_ota_get_partition_description(app, &app_desc) == ESP_OK) {
+      len += snprintf(json + len, sizeof(json) - len, "\",\"main_elf_sha256\":\"");
+      for (uint8_t byte : app_desc.app_elf_sha256)
+        len += snprintf(json + len, sizeof(json) - len, "%02x", byte);
+    }
+#ifdef USE_OTA_SYSTEM_SELF_UPDATE
+    len += snprintf(json + len, sizeof(json) - len, "\",\"self_update\":true}");
+#else
     len += snprintf(json + len, sizeof(json) - len, "\"}");
+#endif
     api::global_api_server->send_action_response(call_id, true, StringRef(""), reinterpret_cast<const uint8_t *>(json),
                                                  static_cast<size_t>(len));
     api::global_api_server->unregister_active_action_call(call_id);
