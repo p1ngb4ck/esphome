@@ -26,7 +26,6 @@ from esphome.core import CORE, ID, Lambda
 CONF_OTA_SYSTEM = "ota_system"
 CONF_KEEP_COMPONENTS = "keep_components"
 CONF_KEEP_IDS = "keep_ids"
-CONF_MIGRATE_VIA_OTA = "migrate_via_ota"
 CONF_ALLOW_PARTITION_ACCESS = "allow_partition_access"
 CONF_SYSTEM_BUILD = "system_build"
 BUILD_PATH_SUFFIX = "-ota-system"
@@ -191,7 +190,6 @@ def derive(
     keep_components: list[str],
     keep_ids: list[str],
     includes: list[Path],
-    migrate_via_ota: bool,
     validated: dict[str, Any],
     raw: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -265,11 +263,10 @@ def write(
     keep_components: list[str],
     keep_ids: list[str],
     includes: list[Path],
-    migrate_via_ota: bool,
     validated: dict[str, Any],
 ) -> Path:
     raw = _user_config()
-    derived = derive(keep_components, keep_ids, includes, migrate_via_ota, validated, raw)
+    derived = derive(keep_components, keep_ids, includes, validated, raw)
     target = _target()
     target.parent.mkdir(parents=True, exist_ok=True)
     text = yaml_util.dump(derived, show_secrets=False)
