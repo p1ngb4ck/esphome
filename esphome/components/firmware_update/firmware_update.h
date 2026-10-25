@@ -7,6 +7,7 @@
 #include "esphome/core/helpers.h"
 
 #include <functional>
+#include <memory>
 #include <string>
 
 #ifdef USE_STORAGE
@@ -16,6 +17,7 @@
 #define USE_FIRMWARE_UPDATE_ASYNC
 #include "esphome/components/md5/md5.h"
 #include "esphome/components/storage/storage_worker.h"
+#include "esphome/components/storage/text_doc.h"
 #include "esphome/components/storage/transfer_buffer.h"
 #endif
 
@@ -70,13 +72,7 @@ class FirmwareUpdateComponent final : public ota::OTAComponent {
   uint32_t last_progress_{0};
   bool running_{false};
   bool stream_open_{false};
-  void manifest_read_(size_t at);
-  void manifest_finish_(bool read_ok);
-  storage::StreamHandle manifest_stream_{};
-  std::string manifest_path_{};
-  std::string manifest_json_{};
-  std::function<void(bool)> manifest_done_{};
-  bool manifest_open_{false};
+  bool parse_manifest_(const std::string &path, const char *text, size_t len);
 #endif
 
   bool check_head_(const uint8_t *data, size_t len);
