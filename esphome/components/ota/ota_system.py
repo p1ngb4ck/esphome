@@ -31,6 +31,7 @@ CONF_ALLOW_PARTITION_ACCESS = "allow_partition_access"
 CONF_SYSTEM_BUILD = "system_build"
 BUILD_PATH_SUFFIX = "-ota-system"
 FINGERPRINT_FILENAME = "ota_system.fingerprint"
+MAIN_FINGERPRINT_FILENAME = "main.fingerprint"
 CHIP_REVISION_ENV = "ESPHOME_CHIP_REVISION"
 FINGERPRINT_SKIP_DOMAINS = {CONF_ESPHOME, CONF_PACKAGES, CONF_SUBSTITUTIONS, "external_components"}
 API_DROP_KEYS = ("actions", "services")
@@ -192,8 +193,10 @@ def derive(
     includes: list[Path],
     migrate_via_ota: bool,
     validated: dict[str, Any],
+    raw: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    raw = _user_config()
+    if raw is None:
+        raw = _user_config()
     units = _units(raw)
     reduced = {u: _reduce_value(u[0], _unit_value(validated, u)) for u in units}
 
@@ -265,7 +268,8 @@ def write(
     migrate_via_ota: bool,
     validated: dict[str, Any],
 ) -> Path:
-    derived = derive(keep_components, keep_ids, includes, migrate_via_ota, validated)
+    raw = _user_config()
+    derived = derive(keep_components, keep_ids, includes, migrate_via_ota, validated, raw)
     target = _target()
     target.parent.mkdir(parents=True, exist_ok=True)
     text = yaml_util.dump(derived, show_secrets=False)
@@ -275,6 +279,10 @@ def write(
         include = Path(os.path.relpath(secrets.absolute(), target.parent)).as_posix()
         _write_if_changed(target.parent / yaml_util.SECRET_YAML, f"<<: !include {include}\n")
     _write_if_changed(target.parent / FINGERPRINT_FILENAME, _fingerprint(text, derived, secrets) + "\n")
+    main_text = yaml_util.dump(raw, show_secrets=False)
+    _write_if_changed(
+        target.parent / MAIN_FINGERPRINT_FILENAME, _fingerprint(main_text, validated, secrets) + "\n"
+    )
     return target
 
 
@@ -338,6 +346,8 @@ def _referenced_files(value: Any) -> set[Path]:
         return set().union(*(_referenced_files(v) for v in value.values()))
     if isinstance(value, list):
         return set().union(*(_referenced_files(v) for v in value))
+    if isinstance(value, Path) and value.is_absolute() and value.is_file():
+        return {value}
     if isinstance(value, str) and "\n" not in value and os.path.isabs(value) and os.path.isfile(value):
         return {Path(value)}
     return set()
