@@ -31,6 +31,13 @@ static constexpr uint8_t PREFILL_MAGIC[4] = {'E', 'P', 'F', '2'};
 
 OTAResponseTypes IDFOTABackend::write_app_(const uint8_t *data, size_t len) {
   // No md5 here: every caller has already hashed these bytes when they arrived.
+  if (this->written_ + len > this->partition_->size)
+    return OTA_RESPONSE_ERROR_ESP32_NOT_ENOUGH_SPACE;
+#ifdef USE_OTA_BLOCK_ERASE_AHEAD
+  OTAResponseTypes erase_result = this->erase_ahead_(len);
+  if (erase_result != OTA_RESPONSE_OK)
+    return erase_result;
+#endif
   esp_err_t err = esp_ota_write(this->update_handle_, data, len);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_ota_write failed (err=0x%X)", err);
@@ -40,6 +47,7 @@ OTAResponseTypes IDFOTABackend::write_app_(const uint8_t *data, size_t len) {
       return OTA_RESPONSE_ERROR_WRITING_FLASH;
     return OTA_RESPONSE_ERROR_UNKNOWN;
   }
+  this->written_ += len;
   return OTA_RESPONSE_OK;
 }
 
