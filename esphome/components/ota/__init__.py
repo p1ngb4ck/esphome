@@ -26,6 +26,7 @@ from esphome.types import ConfigType
 
 from .ota_system import (
     CONF_KEEP_COMPONENTS,
+    CONF_KEEP_IDS,
     CONF_MIGRATE_VIA_OTA,
     CONF_OTA_SYSTEM,
     CONF_SYSTEM_BUILD,
@@ -85,6 +86,7 @@ def _ota_final_validate(config: ConfigType) -> None:
             system = platform[CONF_OTA_SYSTEM]
             write_ota_system(
                 system[CONF_KEEP_COMPONENTS],
+                system[CONF_KEEP_IDS],
                 system[CONF_INCLUDES],
                 system[CONF_MIGRATE_VIA_OTA],
                 fv.full_config.get(),
@@ -99,6 +101,7 @@ OTA_SYSTEM_SCHEMA = cv.All(
             cv.Required(CONF_METHOD): cv.one_of(*OTA_SYSTEM_METHODS, lower=True),
             cv.Optional(CONF_MIGRATE_VIA_OTA, default=False): cv.boolean,
             cv.Optional(CONF_KEEP_COMPONENTS, default=[]): cv.ensure_list(cv.string_strict),
+            cv.Optional(CONF_KEEP_IDS, default=[]): cv.ensure_list(cv.string_strict),
             cv.Optional(CONF_INCLUDES, default=[]): cv.ensure_list(cv.file_),
         }
     ),

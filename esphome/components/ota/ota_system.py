@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 from pathlib import Path
 from typing import Any
@@ -14,12 +15,15 @@ from esphome.const import (
     CONF_ID,
     CONF_INCLUDES,
     CONF_OTA,
+    CONF_PACKAGES,
     CONF_PLATFORM,
+    CONF_SUBSTITUTIONS,
 )
 from esphome.core import CORE, ID, Lambda
 
 CONF_OTA_SYSTEM = "ota_system"
 CONF_KEEP_COMPONENTS = "keep_components"
+CONF_KEEP_IDS = "keep_ids"
 CONF_MIGRATE_VIA_OTA = "migrate_via_ota"
 CONF_ALLOW_PARTITION_ACCESS = "allow_partition_access"
 CONF_SYSTEM_BUILD = "system_build"
@@ -113,15 +117,30 @@ def _reduce_value(domain: str, value: Any) -> Any:
     }
 
 
-def _declared_dependencies(domain: str, value: Any) -> list[str]:
+def _manifest_loads(manifest: Any, validated_value: Any) -> list[str]:
+    loads = list(manifest.dependencies)
+    auto_load = manifest.auto_load
+    if callable(auto_load):
+        try:
+            if inspect.signature(auto_load).parameters:
+                auto_load = auto_load(validated_value)
+            else:
+                auto_load = auto_load()
+        except (KeyError, TypeError, AttributeError):
+            auto_load = []
+    loads.extend(auto_load)
+    return loads
+
+
+def _declared_dependencies(domain: str, value: Any, validated_value: Any) -> list[str]:
     deps = []
     component = loader.get_component(domain)
     if component is not None:
-        deps.extend(component.dependencies)
+        deps.extend(_manifest_loads(component, validated_value))
     if isinstance(value, dict) and CONF_PLATFORM in value:
         platform = loader.get_platform(domain, str(value[CONF_PLATFORM]))
         if platform is not None:
-            deps.extend(platform.dependencies)
+            deps.extend(_manifest_loads(platform, validated_value))
     return [d.split(".")[0] for d in deps]
 
 
@@ -139,17 +158,35 @@ def _relocate(value: Any) -> Any:
     return path.absolute().as_posix()
 
 
+def _user_config() -> dict[str, Any]:
+    from esphome import config as esphome_config
+    from esphome.components.packages import do_packages_pass, merge_packages
+    from esphome.components.substitutions import do_substitution_pass
+
+    config = yaml_util.load_yaml(CORE.config_path)
+    if CONF_PACKAGES in config:
+        config = do_packages_pass(config)
+    config = do_substitution_pass(config, None)
+    if CONF_PACKAGES in config:
+        config = merge_packages(config)
+    config.pop(CONF_SUBSTITUTIONS, None)
+    esphome_config._resolve_component_aliases(config)
+    esphome_config.resolve_extend_remove(config)
+    return config
+
+
 def _target() -> Path:
     return CORE.relative_config_path(CORE.config_path.stem, "ota", "ota_system.yaml")
 
 
 def derive(
     keep_components: list[str],
+    keep_ids: list[str],
     includes: list[Path],
     migrate_via_ota: bool,
     validated: dict[str, Any],
 ) -> dict[str, Any]:
-    raw = CORE.raw_config
+    raw = _user_config()
     units = _units(raw)
     reduced = {u: _reduce_value(u[0], _unit_value(validated, u)) for u in units}
 
@@ -165,11 +202,17 @@ def derive(
 
     wanted_domains = set(BASE_COMPONENTS) | set(keep_components)
     kept = {u for u in units if u[0] in wanted_domains}
+    for name in keep_ids:
+        if name not in declares:
+            raise cv.Invalid(f"{CONF_KEEP_IDS}: '{name}' is not declared in this configuration")
+        kept.add(declares[name])
     pending = list(kept)
     while pending:
         unit = pending.pop()
         needed = set()
-        for domain in _declared_dependencies(unit[0], _unit_value(raw, unit)):
+        for domain in _declared_dependencies(
+            unit[0], _unit_value(raw, unit), _unit_value(validated, unit)
+        ):
             needed.update(u for u in units if u[0] == domain)
         needed.update(declares[name] for name in references[unit] if name in declares)
         for other in needed - kept:
@@ -206,11 +249,12 @@ def derive(
 
 def write(
     keep_components: list[str],
+    keep_ids: list[str],
     includes: list[Path],
     migrate_via_ota: bool,
     validated: dict[str, Any],
 ) -> Path:
-    derived = derive(keep_components, includes, migrate_via_ota, validated)
+    derived = derive(keep_components, keep_ids, includes, migrate_via_ota, validated)
     target = _target()
     target.parent.mkdir(parents=True, exist_ok=True)
     _write_if_changed(target, yaml_util.dump(derived, show_secrets=False))
