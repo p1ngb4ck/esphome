@@ -18,6 +18,7 @@ from esphome.components.const import (
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ADVANCED,
+    CONF_API,
     CONF_BOARD,
     CONF_COMPONENTS,
     CONF_DISABLED,
@@ -25,6 +26,7 @@ from esphome.const import (
     CONF_ENABLE_OTA_ROLLBACK,
     CONF_ESPHOME,
     CONF_FRAMEWORK,
+    CONF_ID,
     CONF_IGNORE_EFUSE_CUSTOM_MAC,
     CONF_IGNORE_EFUSE_MAC_CRC,
     CONF_LOG_LEVEL,
@@ -53,13 +55,13 @@ from esphome.const import (
     Toolchain,
     __version__,
 )
-from esphome.core import CORE, EsphomeError, HexInt, TimePeriod
+from esphome.core import CORE, ID, EsphomeError, HexInt, TimePeriod
 from esphome.core.config import BOARD_MAX_LENGTH
 from esphome.coroutine import CoroPriority, coroutine_with_priority
 from esphome.espidf.component import IDFComponent, generate_idf_components
 from esphome.espidf.toolchain import _get_idf_path
 import esphome.final_validate as fv
-from esphome.helpers import copy_file_if_changed, rmtree, write_file_if_changed
+from esphome.helpers import copy_file_if_changed, fnv1_hash, rmtree, write_file_if_changed
 from esphome.schema_extractors import SCHEMA_EXTRACT, schema_extractor
 from esphome.types import ConfigType
 from esphome.writer import clean_build, clean_cmake_cache
@@ -101,12 +103,17 @@ from .const import (
     VARIANT_ESP32S31,
     VARIANT_FRIENDLY,
     VARIANTS,
+    esp32_ns,
 )
 
 # force import gpio to register pin schema
 from .gpio import esp32_pin_to_code  # noqa: F401
 
 _LOGGER = logging.getLogger(__name__)
+
+CHIP_REVISION_ACTION = "chip_revision"
+ChipRevisionAction = esp32_ns.class_("ChipRevisionAction")
+
 AUTO_LOAD = ["preferences"]
 CODEOWNERS = ["@esphome/core"]
 DOMAIN = "esp32"
@@ -2696,6 +2703,23 @@ def register_exclude_components_cmake_arg() -> None:
 
 
 @coroutine_with_priority(CoroPriority.FINAL)
+async def _add_chip_revision_action() -> None:
+    if CONF_API not in CORE.config:
+        return
+    cg.add_define("USE_ESP32_CHIP_REVISION_ACTION")
+    cg.add_define("USE_API_USER_DEFINED_ACTIONS")
+    cg.add_define("USE_API_CUSTOM_SERVICES")
+    cg.add_define("USE_API_USER_DEFINED_ACTION_RESPONSES")
+    cg.add_define("USE_API_USER_DEFINED_ACTION_RESPONSES_JSON")
+    api = await cg.get_variable(CORE.config[CONF_API][CONF_ID])
+    action = cg.new_Pvariable(
+        ID("esp32_chip_revision_action", True, ChipRevisionAction),
+        fnv1_hash(CHIP_REVISION_ACTION),
+    )
+    cg.add(api.register_user_service(action))
+
+
+@coroutine_with_priority(CoroPriority.FINAL)
 async def _write_exclude_components() -> None:
     """Write EXCLUDE_COMPONENTS cmake arg after all components have registered exclusions."""
     # NVS encryption needs nvs_sec_provider however it was enabled: the
@@ -3833,6 +3857,7 @@ async def to_code(config):
     # finalized with esp_driver_jpeg still excluded. _init_hw_jpeg() self-guards on the
     # esp32_hw_jpeg_required flag and no-ops if nothing requested it.
     CORE.add_job(_init_hw_jpeg)
+    CORE.add_job(_add_chip_revision_action)
 
     # Write EXCLUDE_COMPONENTS at FINAL priority after all components have had
     # a chance to call include_builtin_idf_component() to re-enable components they need.
