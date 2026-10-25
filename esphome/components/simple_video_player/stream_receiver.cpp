@@ -176,9 +176,6 @@ bool SimpleVideoPlayer::setup_stream_() {
 #endif
 #ifdef SVP_SPICE
   this->spice_ = reinterpret_cast<SpiceState *>(this->pool_.alloc(sizeof(SpiceState)));
-  // Internal RAM: every message but a picture is read into it.
-  this->spice_scratch_ =
-      static_cast<uint8_t *>(heap_caps_malloc(SPICE_SCRATCH_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   this->spice_saved_ = reinterpret_cast<SpiceSaved *>(this->pool_.alloc(this->spice_saved_count_ * sizeof(SpiceSaved)));
   this->spice_saved_prefs_ = reinterpret_cast<ESPPreferenceObject *>(
       this->pool_.alloc(this->spice_saved_count_ * sizeof(ESPPreferenceObject)));
@@ -193,7 +190,7 @@ bool SimpleVideoPlayer::setup_stream_() {
   this->spice_cursor_lock_ = xSemaphoreCreateMutex();
   this->desktop_lock_ = xSemaphoreCreateMutex();
   this->spice_wake_fd_ = eventfd(0, 0);
-  if (this->spice_ == nullptr || this->spice_scratch_ == nullptr || this->spice_saved_ == nullptr ||
+  if (this->spice_ == nullptr || this->spice_saved_ == nullptr ||
       this->spice_saved_prefs_ == nullptr || !file_ok || this->spice_lock_ == nullptr ||
       this->spice_cursor_lock_ == nullptr || this->desktop_lock_ == nullptr || this->spice_wake_fd_ < 0 ||
       !create_psram_task(spice_task_entry_, "svp_spice", 8192, this, 4, &this->spice_task_, 0)) {

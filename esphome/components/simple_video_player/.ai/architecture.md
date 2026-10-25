@@ -250,7 +250,9 @@ listing leaves `images_` empty (`picture_listing_failed()`, the device YAML show
 the pool exists (picture folders, controls buttons, keyboards). Stay outside by decision:
 the codec libraries' own working buffers (FLAC_MALLOC etc.) -- ESPHome's audio
 codecs as they are, in PSRAM.
-Outside the pool (svp): `spice_scratch_` 20 KiB internal; per USB slot 4 KiB internal `stage_` +
+Pool, per desktop session: `spice_scratch_` 64 KiB PSRAM, taken by the svp_spice task when a connection is
+asked for (before the SPICE / VNC probe) and given back when the session ends.
+Outside the pool (svp): per USB slot 4 KiB internal `stage_` +
 bookkeeping; task stacks 48 KiB PSRAM; the configuration's PsramVector lists (above); `channel_http_` response buffer PSRAM 16-256 KiB per request; AudioDecoder internals;
 PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
 

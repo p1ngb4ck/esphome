@@ -2514,14 +2514,14 @@ class SimpleVideoPlayer : public Component
   uint32_t stream_stats_ms_{0};                // the last report (network task)
 #endif
 #ifdef SVP_SPICE
-  static constexpr size_t SPICE_SCRATCH_BYTES = 20480;  // internal RAM: a 64x64 cursor's message fits
+  static constexpr size_t SPICE_SCRATCH_BYTES = 65536;
   struct SpiceState {
     char host[64];
     char password[61];  // SPICE_MAX_PASSWORD_LENGTH + 1
     uint16_t port;
   };
   SpiceState *spice_{nullptr};          // PSRAM pool
-  uint8_t *spice_scratch_{nullptr};     // internal RAM: the session's messages
+  uint8_t *spice_scratch_{nullptr};
   SemaphoreHandle_t spice_lock_{nullptr};  // spice_->host/password/port
   TaskHandle_t spice_task_{nullptr};
   int spice_wake_fd_{-1};

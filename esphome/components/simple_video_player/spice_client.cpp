@@ -2700,6 +2700,14 @@ void SimpleVideoPlayer::spice_loop_() {
         ::read(this->spice_wake_fd_, &count, sizeof(count));
       }
     }
+    this->spice_scratch_ = this->pool_.alloc(SPICE_SCRATCH_BYTES);
+    if (this->spice_scratch_ == nullptr) {
+      ESP_LOGE(TAG, "No PSRAM for the desktop's %u B message buffer", static_cast<unsigned>(SPICE_SCRATCH_BYTES));
+      this->spice_failed_.store(true, std::memory_order_release);
+      this->spice_changed_.store(true, std::memory_order_release);
+      App.wake_loop_threadsafe();
+      continue;
+    }
     this->spice_failed_.store(false, std::memory_order_release);
     this->spice_connecting_.store(true, std::memory_order_release);
     this->spice_changed_.store(true, std::memory_order_release);
@@ -2717,6 +2725,8 @@ void SimpleVideoPlayer::spice_loop_() {
       SpiceSession session(this);
       session.run(host, port, password);
     }
+    this->pool_.free(this->spice_scratch_);
+    this->spice_scratch_ = nullptr;
     std::memset(password, 0, sizeof(password));
     this->spice_failed_.store(!this->desktop_took_, std::memory_order_release);
     this->spice_connecting_.store(false, std::memory_order_release);
