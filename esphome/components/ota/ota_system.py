@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import os
 from pathlib import Path
 from typing import Any
 
-from esphome import loader, yaml_util
+from esphome import const, loader, yaml_util
+import esphome.core as esphome_core
 import esphome.config_validation as cv
 from esphome.config_helpers import merge_config
 from esphome.const import (
@@ -28,6 +30,8 @@ CONF_MIGRATE_VIA_OTA = "migrate_via_ota"
 CONF_ALLOW_PARTITION_ACCESS = "allow_partition_access"
 CONF_SYSTEM_BUILD = "system_build"
 BUILD_PATH_SUFFIX = "-ota-system"
+FINGERPRINT_FILENAME = "ota_system.fingerprint"
+FINGERPRINT_SKIP_DOMAINS = {CONF_ESPHOME, CONF_PACKAGES, CONF_SUBSTITUTIONS, "external_components"}
 API_DROP_KEYS = ("actions", "services")
 
 BASE_COMPONENTS = {
@@ -263,12 +267,78 @@ def write(
     derived = derive(keep_components, keep_ids, includes, migrate_via_ota, validated)
     target = _target()
     target.parent.mkdir(parents=True, exist_ok=True)
-    _write_if_changed(target, yaml_util.dump(derived, show_secrets=False))
+    text = yaml_util.dump(derived, show_secrets=False)
+    _write_if_changed(target, text)
     secrets = CORE.relative_config_path(yaml_util.SECRET_YAML)
     if secrets.is_file():
         include = Path(os.path.relpath(secrets.absolute(), target.parent)).as_posix()
         _write_if_changed(target.parent / yaml_util.SECRET_YAML, f"<<: !include {include}\n")
+    _write_if_changed(target.parent / FINGERPRINT_FILENAME, _fingerprint(text, derived, secrets) + "\n")
     return target
+
+
+def _fingerprint(text: str, derived: dict[str, Any], secrets: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(const.__version__.encode())
+    digest.update(_host_independent(text).encode("utf-8"))
+    for directory in sorted({Path(esphome_core.__file__).parent, *_component_dirs(derived)}):
+        _hash_tree(digest, directory)
+    for path in sorted(_referenced_files(derived)):
+        digest.update(_host_independent(path.as_posix()).encode("utf-8"))
+        digest.update(path.read_bytes())
+    if secrets.is_file():
+        digest.update(secrets.read_bytes())
+    return digest.hexdigest()
+
+
+def _host_independent(text: str) -> str:
+    for prefix in (Path(CORE.data_dir).absolute().as_posix(), Path(CORE.config_dir).absolute().as_posix()):
+        text = text.replace(prefix, "")
+    return text
+
+
+def _component_dirs(derived: dict[str, Any]) -> set[Path]:
+    pending = []
+    for domain, value in derived.items():
+        if domain in FINGERPRINT_SKIP_DOMAINS:
+            continue
+        pending.append(loader.get_component(domain))
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, dict) and CONF_PLATFORM in item:
+                pending.append(loader.get_platform(domain, str(item[CONF_PLATFORM])))
+    dirs: set[Path] = set()
+    seen: set[str] = set()
+    while pending:
+        manifest = pending.pop()
+        if manifest is None:
+            continue
+        parts = manifest.module.__name__.split(".")
+        if len(parts) < 3 or parts[1] != "components" or parts[2] in seen:
+            continue
+        seen.add(parts[2])
+        module_file = Path(manifest.module.__file__).absolute()
+        dirs.update(p for p in module_file.parents if p.name == parts[2] and p.parent.name == "components")
+        for name in _manifest_loads(manifest, None):
+            pending.append(loader.get_component(name.split(".")[0]))
+    return dirs
+
+
+def _hash_tree(digest: Any, directory: Path) -> None:
+    for path in sorted(directory.rglob("*")):
+        if "__pycache__" in path.parts or not path.is_file():
+            continue
+        digest.update(path.relative_to(directory.parent).as_posix().encode("utf-8"))
+        digest.update(path.read_bytes())
+
+
+def _referenced_files(value: Any) -> set[Path]:
+    if isinstance(value, dict):
+        return set().union(*(_referenced_files(v) for v in value.values()))
+    if isinstance(value, list):
+        return set().union(*(_referenced_files(v) for v in value))
+    if isinstance(value, str) and "\n" not in value and os.path.isabs(value) and os.path.isfile(value):
+        return {Path(value)}
+    return set()
 
 
 def _write_if_changed(path: Path, text: str) -> None:
