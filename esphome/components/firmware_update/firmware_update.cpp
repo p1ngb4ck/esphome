@@ -1,11 +1,19 @@
 #include "firmware_update.h"
 
+#include "esphome/components/json/json_util.h"
 #include "esphome/components/md5/md5.h"
 #include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
 #include <algorithm>
+#include <cstring>
+
+#ifdef USE_ESP32
+#include <esp_app_desc.h>
+#include <esp_image_format.h>
+#include <esp_ota_ops.h>
+#endif
 
 namespace esphome::firmware_update {
 
@@ -23,9 +31,166 @@ void FirmwareUpdateComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Path: %s", this->path_.c_str());
 }
 
+void FirmwareUpdateComponent::fail_(const char *error) {
+  ESP_LOGW(TAG, "%s", error);
+  this->last_error_ = error;
+}
+
+bool FirmwareUpdateComponent::is_running() const {
+#ifdef USE_FIRMWARE_UPDATE_ASYNC
+  return this->running_;
+#else
+  return false;
+#endif
+}
+
+std::string FirmwareUpdateComponent::installed_version() const {
+#ifdef USE_ESP32
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  const esp_partition_t *slot = esp_ota_get_next_update_partition(nullptr);
+  if (slot == nullptr || slot == running)
+    return {};
+  esp_app_desc_t desc{};
+  if (esp_ota_get_partition_description(slot, &desc) != ESP_OK)
+    return {};
+  std::string text = desc.project_name;
+  text += ' ';
+  text += desc.version;
+  text += " (";
+  text += desc.date;
+  text += ' ';
+  text += desc.time;
+  text += ')';
+  return text;
+#else
+  return {};
+#endif
+}
+
+bool FirmwareUpdateComponent::check_head_(const uint8_t *data, size_t len) {
+#ifdef USE_ESP32
+  if (this->project_name_.empty())
+    return true;
+  const size_t offset = sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t);
+  if (len < offset + sizeof(esp_app_desc_t) || data[0] != ESP_IMAGE_HEADER_MAGIC) {
+    this->fail_("Not an app image");
+    return false;
+  }
+  esp_app_desc_t desc;
+  memcpy(&desc, data + offset, sizeof(desc));
+  if (desc.magic_word != ESP_APP_DESC_MAGIC_WORD) {
+    this->fail_("No app description in the image");
+    return false;
+  }
+  desc.project_name[sizeof(desc.project_name) - 1] = '\0';
+  if (this->project_name_ != desc.project_name) {
+    ESP_LOGW(TAG, "Image is '%s', expected '%s'", desc.project_name, this->project_name_.c_str());
+    this->fail_("The image is another firmware");
+    return false;
+  }
+#endif
+  return true;
+}
+
+bool FirmwareUpdateComponent::load_manifest(const std::string &path) {
+  static constexpr size_t MANIFEST_MAX = 16384;
+  this->last_error_ = "";
+  this->manifest_version_.clear();
+  this->manifest_name_.clear();
+  this->manifest_summary_.clear();
+#ifdef USE_STORAGE
+  const char *rel_raw = nullptr;
+  storage::PathStorage *ps = storage::global_storage_registry == nullptr
+                                 ? nullptr
+                                 : storage::global_storage_registry->resolve_path(path.c_str(), &rel_raw);
+  if (ps == nullptr || rel_raw == nullptr) {
+    this->fail_("Manifest not on a mounted storage");
+    return false;
+  }
+#ifdef USE_FIRMWARE_UPDATE_ASYNC
+  if (storage::global_storage_worker->has_active_task_io(ps)) {
+    this->fail_("Storage busy");
+    return false;
+  }
+#endif
+  const std::string rel(rel_raw);
+  storage::FileStat st{};
+  if (ps->stat(rel.c_str(), &st) != storage::StorageError::STORAGE_ERROR_OK || st.is_dir || st.size == 0 ||
+      st.size > MANIFEST_MAX) {
+    this->fail_("Manifest missing or too large");
+    return false;
+  }
+  std::string json_str;
+  json_str.resize(static_cast<size_t>(st.size));
+  size_t got = 0;
+  storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
+  if (ps->get_storage_type() == storage::StorageType::STORAGE_TYPE_FILESYSTEM) {
+    auto *fs = static_cast<storage::FilesystemStorage *>(ps);
+    storage::FileHandle *handle = nullptr;
+    err = fs->open(rel.c_str(), handle, storage::OpenMode::OPEN_MODE_READ);
+    if (err == storage::StorageError::STORAGE_ERROR_OK) {
+      while (got < json_str.size() && err == storage::StorageError::STORAGE_ERROR_OK) {
+        size_t n = 0;
+        err = fs->read(handle, reinterpret_cast<uint8_t *>(&json_str[got]), json_str.size() - got, &n);
+        if (n == 0)
+          break;
+        got += n;
+      }
+      fs->close(handle);
+    }
+  } else if (ps->get_storage_type() == storage::StorageType::STORAGE_TYPE_NETWORK) {
+    err = static_cast<storage::NetworkStorage *>(ps)->read_chunk(
+        rel.c_str(), reinterpret_cast<uint8_t *>(&json_str[0]), 0, json_str.size(), &got);
+  } else {
+    err = storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED;
+  }
+  if (err != storage::StorageError::STORAGE_ERROR_OK || got != json_str.size()) {
+    this->fail_("Manifest not readable");
+    return false;
+  }
+  std::string firmware;
+  std::string md5;
+  const bool valid = json::parse_json(json_str, [this, &firmware, &md5](JsonObject root) -> bool {
+    if (!root["name"].is<const char *>() || !root["version"].is<const char *>() || !root["builds"].is<JsonArray>())
+      return false;
+    this->manifest_name_ = root["name"].as<std::string>();
+    this->manifest_version_ = root["version"].as<std::string>();
+    for (JsonObject build : root["builds"].as<JsonArray>()) {
+      if (build["chipFamily"] != ESPHOME_VARIANT || !build["ota"].is<JsonObject>())
+        continue;
+      JsonObject ota = build["ota"].as<JsonObject>();
+      if (!ota["path"].is<const char *>() || !ota["md5"].is<const char *>())
+        return false;
+      firmware = ota["path"].as<std::string>();
+      md5 = ota["md5"].as<std::string>();
+      if (ota["summary"].is<const char *>())
+        this->manifest_summary_ = ota["summary"].as<std::string>();
+      return true;
+    }
+    return false;
+  });
+  if (!valid || firmware.empty() || md5.size() != 32) {
+    this->fail_("Manifest without a build for this chip or without its MD5");
+    return false;
+  }
+  if (firmware[0] != '/') {
+    const size_t slash = path.rfind('/');
+    firmware = path.substr(0, slash + 1) + firmware;
+  }
+  this->path_ = firmware;
+  this->md5_expected_ = md5;
+  return true;
+#else
+  this->fail_("No storage in this build");
+  return false;
+#endif
+}
+
 void FirmwareUpdateComponent::flash() {
+  this->last_error_ = "";
   if (this->path_.empty()) {
     ESP_LOGE(TAG, "Path not set; cannot start update");
+    this->fail_("No firmware selected");
     return;
   }
 #ifdef USE_FIRMWARE_UPDATE_ASYNC
@@ -160,6 +325,10 @@ uint8_t FirmwareUpdateComponent::stream_from_storage_(ota::OTABackendPtr &backen
       break;
     }
 
+    if (offset == 0 && !this->check_head_(buffer, got)) {
+      result = ota::OTA_RESPONSE_ERROR_UNKNOWN;
+      break;
+    }
     md5.add(buffer, got);
     this->update_started_ = true;
     result = backend->write(buffer, got);
@@ -195,7 +364,7 @@ uint8_t FirmwareUpdateComponent::stream_from_storage_(ota::OTABackendPtr &backen
   char md5_str[33];
   md5.calculate();
   md5.get_hex(md5_str);
-  backend->set_update_md5(md5_str);
+  backend->set_update_md5(this->md5_expected_.empty() ? md5_str : this->md5_expected_.c_str());
 
   App.feed_wdt();
   yield();
@@ -277,6 +446,10 @@ void FirmwareUpdateComponent::on_chunk_(storage::StorageError err) {
     this->finish_async_(ota::OTA_RESPONSE_ERROR_UNKNOWN);
     return;
   }
+  if (this->offset_ == 0 && !this->check_head_(this->buf_, this->got_)) {
+    this->finish_async_(ota::OTA_RESPONSE_ERROR_UNKNOWN);
+    return;
+  }
   this->md5_.add(this->buf_, this->got_);
   this->update_started_ = true;
   const uint8_t result = this->backend_->write(this->buf_, this->got_);
@@ -302,10 +475,13 @@ void FirmwareUpdateComponent::on_chunk_(storage::StorageError err) {
     char md5_str[33];
     this->md5_.calculate();
     this->md5_.get_hex(md5_str);
-    this->backend_->set_update_md5(md5_str);
+    this->backend_->set_update_md5(this->md5_expected_.empty() ? md5_str : this->md5_expected_.c_str());
     const uint8_t end_result = this->backend_->end();
-    if (end_result != ota::OTA_RESPONSE_OK)
+    if (end_result != ota::OTA_RESPONSE_OK) {
       ESP_LOGE(TAG, "backend->end error: 0x%02X", end_result);
+      if (!this->md5_expected_.empty() && this->md5_expected_ != md5_str)
+        this->fail_("MD5 mismatch");
+    }
     this->finish_async_(end_result);
   });
 }
@@ -329,6 +505,8 @@ void FirmwareUpdateComponent::finish_async_(uint8_t status) {
     App.safe_reboot();
     return;
   }
+  if (this->last_error_[0] == '\0')
+    this->last_error_ = "Flashing failed";
   if (this->update_started_ && this->backend_ != nullptr)
     this->backend_->abort();
   this->backend_.reset();

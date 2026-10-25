@@ -11,7 +11,7 @@ CODEOWNERS = ["@p1ngb4ck"]
 # The flash engine (app slot, partition table, combined pre-fill routing) is provided by the ota
 # component and compiled once there; this platform links against it instead of duplicating it.
 DEPENDENCIES = ["storage"]
-AUTO_LOAD = ["md5", "ota"]
+AUTO_LOAD = ["json", "md5", "ota"]
 
 CONF_ALLOW_PARTITION_ACCESS = "allow_partition_access"
 
