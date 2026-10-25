@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 from esphome import loader, yaml_util
+import esphome.config_validation as cv
 from esphome.config_helpers import merge_config
 from esphome.const import CONF_ID, CONF_INCLUDES, CONF_PLATFORM
 from esphome.core import CORE, ID, Lambda
@@ -105,6 +107,24 @@ def _declared_dependencies(domain: str, value: Any) -> list[str]:
     return [d.split(".")[0] for d in deps]
 
 
+def _relocate(value: Any, target_dir: Path) -> Any:
+    if isinstance(value, dict):
+        return {k: _relocate(v, target_dir) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_relocate(v, target_dir) for v in value]
+    if not isinstance(value, str) or os.path.isabs(value):
+        return value
+    try:
+        path = cv.file_(value)
+    except cv.Invalid:
+        return value
+    return Path(os.path.relpath(path.absolute(), target_dir)).as_posix()
+
+
+def _target() -> Path:
+    return CORE.relative_config_path(CORE.config_path.stem, "ota", "ota_system.yaml")
+
+
 def derive(keep_components: list[str], includes: list[Path]) -> dict[str, Any]:
     raw = CORE.raw_config
     validated = CORE.config
@@ -139,7 +159,7 @@ def derive(keep_components: list[str], includes: list[Path]) -> dict[str, Any]:
         if unit not in kept:
             continue
         domain, index = unit
-        value = _reduce_value(domain, _unit_value(raw, unit))
+        value = _relocate(_reduce_value(domain, _unit_value(raw, unit)), _target().parent)
         if index is None:
             derived[domain] = value
         else:
@@ -152,7 +172,13 @@ def derive(keep_components: list[str], includes: list[Path]) -> dict[str, Any]:
 
 def write(keep_components: list[str], includes: list[Path]) -> Path:
     derived = derive(keep_components, includes)
-    target = CORE.relative_config_path(CORE.config_path.stem, "ota", "ota_system.yaml")
+    target = _target()
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(yaml_util.dump(derived, show_secrets=False), encoding="utf-8", newline="\n")
+    secrets = CORE.relative_config_path(yaml_util.SECRET_YAML)
+    if secrets.is_file():
+        include = Path(os.path.relpath(secrets.absolute(), target.parent)).as_posix()
+        (target.parent / yaml_util.SECRET_YAML).write_text(
+            f"<<: !include {include}\n", encoding="utf-8", newline="\n"
+        )
     return target
