@@ -113,6 +113,10 @@ _LOGGER = logging.getLogger(__name__)
 
 CHIP_REVISION_ACTION = "chip_revision"
 ChipRevisionAction = esp32_ns.class_("ChipRevisionAction")
+NVS_ACTIONS = {
+    "nvs_list": esp32_ns.class_("NvsListAction"),
+    "nvs_erase": esp32_ns.class_("NvsEraseAction"),
+}
 COREDUMP_ACTIONS = {
     "coredump_info": esp32_ns.class_("CoredumpInfoAction"),
     "coredump_read": esp32_ns.class_("CoredumpReadAction"),
@@ -2853,6 +2857,10 @@ async def _add_api_actions() -> None:
         fnv1_hash(CHIP_REVISION_ACTION),
     )
     cg.add(api.register_user_service(action))
+    cg.add_define("USE_ESP32_NVS_ACTIONS")
+    for name, action_class in NVS_ACTIONS.items():
+        action = cg.new_Pvariable(ID(f"esp32_{name}_action", True, action_class), fnv1_hash(name))
+        cg.add(api.register_user_service(action))
     if has_coredump_partition(CORE.config[PLATFORM_ESP32]):
         cg.add_define("USE_ESP32_COREDUMP_ACTIONS")
         for name, action_class in COREDUMP_ACTIONS.items():
