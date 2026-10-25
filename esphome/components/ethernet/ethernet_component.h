@@ -27,7 +27,17 @@
 #if CONFIG_ETH_USE_ESP32_EMAC
 extern "C" eth_esp32_emac_config_t eth_esp32_emac_default_config(void);
 #endif
+#if CONFIG_ETH_USE_ESP32_EMAC && !defined(USE_ETHERNET_SPI) && !defined(USE_ETHERNET_OPENETH)
+#define USE_ETHERNET_EMAC_PROBE
+#include <atomic>
+#include "esp_timer.h"
+#include "hal/emac_hal.h"
+#endif
 #endif  // USE_ESP32
+
+#ifdef USE_NETWORK_DEFAULT_ROUTE
+#include "esphome/components/network/network_component.h"
+#endif
 
 #ifdef USE_RP2
 #if defined(USE_ETHERNET_W5500)
@@ -124,9 +134,17 @@ enum eth_speed_t { ETH_SPEED_10M, ETH_SPEED_100M };
 // NOLINTEND(readability-identifier-naming)
 #endif
 
-class EthernetComponent final : public Component {
+class EthernetComponent final : public Component
+#if defined(USE_NETWORK_DEFAULT_ROUTE) && defined(NETWORK_ACTIVE_INTERFACE_LISTENER_COUNT)
+    ,
+                                public network::ActiveInterfaceListener
+#endif
+{
  public:
   EthernetComponent();
+#if defined(USE_NETWORK_DEFAULT_ROUTE) && defined(NETWORK_ACTIVE_INTERFACE_LISTENER_COUNT)
+  void on_active_interface(network::NetworkInterface) override { this->enable_loop(); }
+#endif
   void setup() override;
   void loop() override;
   void dump_config() override;
@@ -251,6 +269,15 @@ class EthernetComponent final : public Component {
   // from enable() on first runtime enable. Mirrors wifi_lazy_init_() in WiFi.
   void ethernet_lazy_init_();
 #endif
+#ifdef USE_ETHERNET_EMAC_PROBE
+  void driver_uninstall_();
+  void update_driver_();
+  bool outranked_() const;
+  void probe_start_();
+  void probe_stop_(bool power_down);
+  bool probe_write_now_(uint32_t reg, uint32_t value);
+  static void probe_tick_(void *arg);
+#endif
 
 #ifdef USE_ETHERNET_IP_STATE_LISTENERS
   void notify_ip_state_listeners_();
@@ -314,6 +341,19 @@ class EthernetComponent final : public Component {
   esp_netif_t *eth_netif_{nullptr};
   esp_eth_handle_t eth_handle_;
   esp_eth_phy_t *phy_{nullptr};
+  esp_eth_mac_t *mac_{nullptr};
+  esp_eth_netif_glue_handle_t eth_glue_{nullptr};
+#ifdef USE_ETHERNET_EMAC_PROBE
+  esp_timer_handle_t probe_timer_{nullptr};
+  emac_hal_context_t probe_hal_{};
+  std::atomic<bool> probe_link_{false};
+  std::atomic<bool> probe_busy_{false};
+  bool probe_running_{false};
+  bool probe_reading_{false};
+  bool probe_bmcr_done_{false};
+  std::atomic<bool> link_lost_{false};
+#endif
+  bool handlers_registered_{false};
 #endif  // USE_ESP32
 
 #ifdef USE_RP2

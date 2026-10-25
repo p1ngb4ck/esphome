@@ -8,6 +8,7 @@ from esphome.components.network import (
     get_network_priority,
     get_priority_interfaces_from_full_config,
     ip_address_literal,
+    register_active_interface_listener,
     require_ipv4,
 )
 from esphome.config_helpers import (
@@ -730,6 +731,9 @@ async def _to_code_esp32(var: cg.MockObj, config: ConfigType) -> None:
         include_builtin_idf_component,
         request_ethernet,
     )
+
+    if config[CONF_TYPE] not in SPI_ETHERNET_TYPES and config[CONF_TYPE] != "OPENETH":
+        await register_active_interface_listener(var)
 
     if config[CONF_TYPE] in SPI_ETHERNET_TYPES:
         if (spi_id := config.get(CONF_SPI_ID)) is not None:
