@@ -8,6 +8,7 @@ from esphome import loader, yaml_util
 import esphome.config_validation as cv
 from esphome.config_helpers import merge_config
 from esphome.const import (
+    CONF_API,
     CONF_BUILD_PATH,
     CONF_ESPHOME,
     CONF_ID,
@@ -23,6 +24,7 @@ CONF_MIGRATE_VIA_OTA = "migrate_via_ota"
 CONF_ALLOW_PARTITION_ACCESS = "allow_partition_access"
 CONF_SYSTEM_BUILD = "system_build"
 BUILD_PATH_SUFFIX = "-ota-system"
+API_DROP_KEYS = ("actions", "services")
 
 BASE_COMPONENTS = {
     "esphome",
@@ -103,7 +105,12 @@ def _reduce_value(domain: str, value: Any) -> Any:
         return value
     if domain == "lvgl":
         return {k: v for k, v in value.items() if k in LVGL_KEEP_KEYS}
-    return {k: v for k, v in value.items() if not _is_automation_key(k) and k != CONF_OTA_SYSTEM}
+    dropped = API_DROP_KEYS if domain == CONF_API else ()
+    return {
+        k: v
+        for k, v in value.items()
+        if not _is_automation_key(k) and k != CONF_OTA_SYSTEM and k not in dropped
+    }
 
 
 def _declared_dependencies(domain: str, value: Any) -> list[str]:
