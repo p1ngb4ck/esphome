@@ -246,8 +246,7 @@ def derive(
     for platform in derived.get(CONF_OTA, []):
         if isinstance(platform, dict) and platform.get(CONF_PLATFORM) == CONF_ESPHOME:
             platform[CONF_SYSTEM_BUILD] = True
-            if migrate_via_ota:
-                platform[CONF_ALLOW_PARTITION_ACCESS] = True
+            platform[CONF_ALLOW_PARTITION_ACCESS] = True
 
     for include in includes:
         derived = merge_config(derived, yaml_util.load_yaml(include))
