@@ -488,6 +488,6 @@ void FirmwareUpdateComponent::finish_async_(uint8_t status) {
 #endif
   ESP_LOGE(TAG, "Update failed (code 0x%02X)", status);
 }
-#endif  // USE_FIRMWARE_UPDATE_ASYNC
+#endif
 
 }  // namespace esphome::firmware_update
