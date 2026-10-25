@@ -15,7 +15,7 @@
     if ((Tile & 0x1ff) >= 256) \
        TileAddr += S9xBG.NameSelect; \
     TileAddr &= 0xffff; \
-    pCache = &S9xBG.Buffer[(TileNumber = (TileAddr >> BG.TileShift)) << 6]; \
+    pCache = &S9xBG.Buffer[(TileNumber = (TileAddr >> S9xBG.TileShift)) << 6]; \
     if (S9xBG.Buffered [TileNumber] != (0x10|S9xBG.Depth)) \
     { \
       S9xBG.Buffered[TileAddr >> 4] = S9xBG.Buffered[TileAddr >> 5] = S9xBG.Buffered[TileAddr >> 6] = false; \
