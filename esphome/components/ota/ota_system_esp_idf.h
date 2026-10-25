@@ -20,7 +20,7 @@
 namespace esphome::ota {
 
 #ifdef USE_OTA_REBOOT_TO_SYSTEM
-bool reboot_to_system();
+bool reboot_to_system(bool safe = true);
 
 template<typename... Ts> class RebootToSystemAction : public Action<Ts...> {
  public:

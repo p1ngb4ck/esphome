@@ -9,6 +9,10 @@
 #include <cinttypes>
 #include <cstdio>
 
+#ifdef USE_OTA_REBOOT_TO_SYSTEM
+#include "esphome/components/ota/ota_system_esp_idf.h"
+#endif
+
 #ifdef USE_OTA_ROLLBACK
 #ifdef USE_ZEPHYR
 #include <zephyr/dfu/mcuboot.h>
@@ -175,6 +179,11 @@ bool SafeModeComponent::get_safe_mode_pending() {
 }
 
 void SafeModeComponent::restart_in_safe_mode() {
+#ifdef USE_OTA_REBOOT_TO_SYSTEM
+  ESP_LOGI(TAG, "Restarting into the OTA system");
+  if (ota::reboot_to_system())
+    return;
+#endif
   ESP_LOGI(TAG, "Restarting in safe mode");
   this->set_safe_mode_pending(true);
   // Let MQTT settle a bit
@@ -220,6 +229,12 @@ bool SafeModeComponent::should_enter_safe_mode(uint8_t num_attempts, uint32_t en
   if (!is_manual) {
     ESP_LOGE(TAG, "Boot loop detected");
   }
+
+#ifdef USE_OTA_REBOOT_TO_SYSTEM
+  ESP_LOGW(TAG, "Restarting into the OTA system");
+  if (ota::reboot_to_system(false))
+    return true;
+#endif
 
 #if defined(USE_ESP32) && defined(USE_OTA_ROLLBACK) && !defined(USE_OTA_PARTITIONS)
   // Allow recovery of soft-bricked devices

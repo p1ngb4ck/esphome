@@ -12,7 +12,7 @@ namespace esphome::ota {
 ESPHOME_LOG_TAG(TAG, "ota.system");
 
 #ifdef USE_OTA_REBOOT_TO_SYSTEM
-bool reboot_to_system() {
+bool reboot_to_system(bool safe) {
   const esp_partition_t *system =
       esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, nullptr);
   if (system == nullptr) {
@@ -25,7 +25,11 @@ bool reboot_to_system() {
     return false;
   }
   ESP_LOGI(TAG, "Rebooting into the OTA system");
-  App.safe_reboot();
+  if (safe) {
+    App.safe_reboot();
+  } else {
+    App.reboot();
+  }
   return true;
 }
 #endif
