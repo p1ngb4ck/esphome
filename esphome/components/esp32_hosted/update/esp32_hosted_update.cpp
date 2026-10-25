@@ -467,6 +467,7 @@ void Esp32HostedUpdate::storage_check_() {
   storage::PathStorage *ps = this->open_storage_(this->storage_path_, &rel, &size);
   if (ps == nullptr || size > MANIFEST_MAX) {
     this->status_set_error(LOG_STR("Failed to read manifest"));
+    this->publish_state();
     return;
   }
   this->busy_ = true;
@@ -542,7 +543,7 @@ bool Esp32HostedUpdate::open_storage_read_() {
           this->install_done_(false);
           return;
         }
-        this->next_chunk_();
+        this->start_ota_();
       });
   this->stream_open_ = err == storage::StorageError::STORAGE_ERROR_OK;
   if (!this->stream_open_)
@@ -627,22 +628,7 @@ void Esp32HostedUpdate::begin_install_() {
     this->install_done_(false);
     return;
   }
-
-  // Begin OTA on coprocessor
-  esp_err_t err;
-  {
-    watchdog::WatchdogManager wdt(OTA_WDT_TIMEOUT_MS);
-    err = esp_hosted_slave_ota_begin();  // NOLINT
-  }
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to begin OTA: %s", esp_err_to_name(err));
-    this->status_set_error(LOG_STR("Failed to begin OTA"));
-    this->finish_install_(false);
-    return;
-  }
-
   this->offset_ = 0;
-  this->last_progress_ = millis();
   this->hasher_.init();
   switch (this->method_) {
 #ifdef USE_ESP32_HOSTED_HTTP_UPDATE
@@ -651,7 +637,7 @@ void Esp32HostedUpdate::begin_install_() {
         this->install_done_(false);
         return;
       }
-      this->next_chunk_();
+      this->start_ota_();
       return;
 #endif
 #ifdef USE_ESP32_HOSTED_STORAGE_UPDATE
@@ -664,13 +650,31 @@ void Esp32HostedUpdate::begin_install_() {
     case UpdateMethod::EMBEDDED:
       ESP_LOGI(TAG, "Starting OTA update (%zu bytes)", this->firmware_size_);
       this->total_ = this->firmware_size_;
-      this->next_chunk_();
+      this->start_ota_();
       return;
 #endif
     default:
       this->install_done_(false);
       return;
   }
+}
+
+void Esp32HostedUpdate::start_ota_() {
+  // Begin OTA on coprocessor
+  esp_err_t err;
+  {
+    watchdog::WatchdogManager wdt(OTA_WDT_TIMEOUT_MS);
+    err = esp_hosted_slave_ota_begin();  // NOLINT
+  }
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to begin OTA: %s", esp_err_to_name(err));
+    this->status_set_error(LOG_STR("Failed to begin OTA"));
+    this->install_done_(false);
+    return;
+  }
+  this->ota_open_ = true;
+  this->last_progress_ = millis();
+  this->next_chunk_();
 }
 
 void Esp32HostedUpdate::next_chunk_() {
@@ -745,12 +749,13 @@ void Esp32HostedUpdate::install_done_(bool ok) {
       ESP_LOGI(TAG, "SHA256 verified successfully");
     }
   }
-  if (!ok && this->chunk_ != nullptr)
+  if (!ok && this->ota_open_)
     ota_end_guarded();
   this->finish_install_(ok);
 }
 
 void Esp32HostedUpdate::finish_install_(bool ok) {
+  this->ota_open_ = false;
   if (this->chunk_ != nullptr) {
     RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::ALLOC_EXTERNAL).deallocate(this->chunk_, CHUNK_SIZE);
     this->chunk_ = nullptr;

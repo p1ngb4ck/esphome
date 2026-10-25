@@ -50,6 +50,7 @@ class Esp32HostedUpdate final : public update::UpdateEntity, public PollingCompo
 
  protected:
   void begin_install_();
+  void start_ota_();
   void next_chunk_();
   void on_chunk_();
   void install_done_(bool ok);
@@ -99,6 +100,7 @@ class Esp32HostedUpdate final : public update::UpdateEntity, public PollingCompo
   uint32_t last_progress_{0};
   update::UpdateState prev_state_{update::UPDATE_STATE_UNKNOWN};
   bool busy_{false};
+  bool ota_open_{false};
 };
 
 }  // namespace esphome::esp32_hosted
