@@ -7,7 +7,14 @@ from typing import Any
 from esphome import loader, yaml_util
 import esphome.config_validation as cv
 from esphome.config_helpers import merge_config
-from esphome.const import CONF_ESPHOME, CONF_ID, CONF_INCLUDES, CONF_OTA, CONF_PLATFORM
+from esphome.const import (
+    CONF_BUILD_PATH,
+    CONF_ESPHOME,
+    CONF_ID,
+    CONF_INCLUDES,
+    CONF_OTA,
+    CONF_PLATFORM,
+)
 from esphome.core import CORE, ID, Lambda
 
 CONF_OTA_SYSTEM = "ota_system"
@@ -15,6 +22,7 @@ CONF_KEEP_COMPONENTS = "keep_components"
 CONF_MIGRATE_VIA_OTA = "migrate_via_ota"
 CONF_ALLOW_PARTITION_ACCESS = "allow_partition_access"
 CONF_SYSTEM_BUILD = "system_build"
+BUILD_PATH_SUFFIX = "-ota-system"
 
 BASE_COMPONENTS = {
     "esphome",
@@ -171,6 +179,12 @@ def derive(
             derived[domain] = value
         else:
             derived.setdefault(domain, []).append(value)
+
+    esphome_conf = derived.get(CONF_ESPHOME)
+    if isinstance(esphome_conf, dict):
+        esphome_conf[CONF_BUILD_PATH] = (
+            f"{validated[CONF_ESPHOME][CONF_BUILD_PATH]}{BUILD_PATH_SUFFIX}"
+        )
 
     for platform in derived.get(CONF_OTA, []):
         if isinstance(platform, dict) and platform.get(CONF_PLATFORM) == CONF_ESPHOME:
