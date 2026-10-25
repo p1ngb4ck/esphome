@@ -127,7 +127,7 @@ def _relocate(value: Any) -> Any:
         return value
     try:
         path = cv.file_(value)
-    except cv.Invalid:
+    except (cv.Invalid, OSError, ValueError):
         return value
     return path.absolute().as_posix()
 
