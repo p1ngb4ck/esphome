@@ -131,7 +131,8 @@ bool FirmwareUpdateComponent::parse_manifest_(const std::string &path, const cha
       return false;
     this->manifest_name_ = root["name"].as<std::string>();
     this->manifest_version_ = root["version"].as<std::string>();
-    for (JsonObject build : root["builds"].as<JsonArray>()) {
+    JsonArray builds = root["builds"].as<JsonArray>();
+    for (JsonObject build : builds) {
       if (build["chipFamily"] != ESPHOME_VARIANT || !build["ota"].is<JsonObject>())
         continue;
       JsonObject ota = build["ota"].as<JsonObject>();
@@ -328,7 +329,7 @@ uint8_t FirmwareUpdateComponent::stream_from_storage_(ota::OTABackendPtr &backen
   if (result != ota::OTA_RESPONSE_OK || offset != total_size) {
     if (this->update_started_)
       backend->abort();
-    return result != ota::OTA_RESPONSE_OK ? result : ota::OTA_RESPONSE_ERROR_UNKNOWN;
+    return result != ota::OTA_RESPONSE_OK ? result : static_cast<uint8_t>(ota::OTA_RESPONSE_ERROR_UNKNOWN);
   }
 
   // Hand the computed digest to the backend and finalize. end() checks the digest, lets the app
