@@ -461,60 +461,20 @@ void Esp32HostedUpdate::close_stream_() {
 }
 
 void Esp32HostedUpdate::storage_check_() {
-  static constexpr uint64_t MANIFEST_MAX = 16384;
-  const char *rel = nullptr;
-  uint64_t size = 0;
-  storage::PathStorage *ps = this->open_storage_(this->storage_path_, &rel, &size);
-  if (ps == nullptr || size > MANIFEST_MAX) {
-    this->status_set_error(LOG_STR("Failed to read manifest"));
-    this->publish_state();
-    return;
-  }
   this->busy_ = true;
-  this->manifest_json_.assign(static_cast<size_t>(size), '\0');
-  const storage::StorageError err =
-      storage::global_storage_worker->begin_read(ps, rel, &this->stream_, [this](storage::StorageError e) {
-        if (e != storage::StorageError::STORAGE_ERROR_OK) {
-          this->storage_check_done_(false);
-          return;
-        }
-        this->storage_check_read_(0);
-      });
-  this->stream_open_ = err == storage::StorageError::STORAGE_ERROR_OK;
-  if (!this->stream_open_)
-    this->storage_check_done_(false);
-}
-
-void Esp32HostedUpdate::storage_check_read_(size_t at) {
-  if (at >= this->manifest_json_.size()) {
-    this->storage_check_done_(true);
-    return;
-  }
-  this->got_ = 0;
-  const storage::StorageError err = storage::global_storage_worker->read_chunk(
-      this->stream_, reinterpret_cast<uint8_t *>(&this->manifest_json_[at]), this->manifest_json_.size() - at,
-      &this->got_, [this, at](storage::StorageError e) {
-        if (e != storage::StorageError::STORAGE_ERROR_OK || this->got_ == 0) {
-          this->storage_check_done_(false);
-          return;
-        }
-        this->storage_check_read_(at + this->got_);
+  const storage::StorageError err = storage::text::load(
+      this->storage_path_, [this](storage::StorageError e, const char *text, size_t len) {
+        this->storage_check_done_(e == storage::StorageError::STORAGE_ERROR_OK &&
+                                  this->parse_manifest_(std::string(text, len)));
       });
   if (err != storage::StorageError::STORAGE_ERROR_OK)
     this->storage_check_done_(false);
 }
 
 void Esp32HostedUpdate::storage_check_done_(bool ok) {
-  this->close_stream_();
-  if (ok) {
-    ok = this->parse_manifest_(this->manifest_json_);
-    if (!ok)
-      ESP_LOGE(TAG, "Failed to parse manifest JSON");
-  }
-  this->manifest_json_.clear();
-  this->manifest_json_.shrink_to_fit();
   this->busy_ = false;
   if (!ok) {
+    ESP_LOGE(TAG, "Failed to read manifest %s", this->storage_path_.c_str());
     this->status_set_error(LOG_STR("Failed to read manifest"));
     this->publish_state();
     return;

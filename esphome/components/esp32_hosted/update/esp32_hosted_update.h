@@ -16,6 +16,7 @@
 #ifdef USE_ESP32_HOSTED_STORAGE_UPDATE
 #include "esphome/components/storage/storage.h"
 #include "esphome/components/storage/storage_worker.h"
+#include "esphome/components/storage/text_doc.h"
 #endif
 
 namespace esphome::esp32_hosted {
@@ -76,12 +77,10 @@ class Esp32HostedUpdate final : public update::UpdateEntity, public PollingCompo
   storage::PathStorage *open_storage_(const std::string &path, const char **rel, uint64_t *size);
   void close_stream_();
   void storage_check_();
-  void storage_check_read_(size_t at);
   void storage_check_done_(bool ok);
   bool open_storage_read_();
   void read_storage_();
   std::string storage_path_;
-  std::string manifest_json_;
   storage::StreamHandle stream_{};
   bool stream_open_{false};
 #endif
