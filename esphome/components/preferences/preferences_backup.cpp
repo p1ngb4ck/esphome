@@ -1071,6 +1071,78 @@ static bool decode_entity_value(const char *s, size_t len, const RuntimeEntry &r
 
 // ---- shared NVS plumbing ----
 
+static constexpr const char *const PREF_TYPE_TAGS[] = {"hex", "bool", "i8",  "u8",  "i16", "u16",
+                                                        "i32", "u32",  "f32", "f64", "str"};
+static constexpr const char *const ENTITY_KIND_TAGS[] = {"raw",  "bool",   "float", "text",  "fan",  "cover",
+                                                         "valve", "light", "climate", "select", "media", "date",
+                                                         "time", "datetime", "u32", "i32"};
+static constexpr const char *const ENTITY_TAG_PREFIX = "e.";
+static constexpr const char *const KEY_TAG_SEPARATOR = " @";
+
+struct KeyTag {
+  uint32_t key;
+  bool entity;
+  uint8_t type;
+  uint16_t count;
+};
+
+static void append_key_tag(std::string &out, uint32_t key, bool entity, uint8_t type, uint16_t count) {
+  char buf[40];
+  const char *name = entity ? ENTITY_KIND_TAGS[type] : PREF_TYPE_TAGS[type];
+  int n = snprintf(buf, sizeof(buf), "%08" PRIx32 ":%s%s", key, entity ? ENTITY_TAG_PREFIX : "", name);
+  if (count > 1 && n > 0 && static_cast<size_t>(n) < sizeof(buf))
+    snprintf(buf + n, sizeof(buf) - n, "[%u]", static_cast<unsigned>(count));
+  out += buf;
+}
+
+static bool parse_key_tag(const char *s, size_t len, KeyTag *tag) {
+  char buf[40];
+  if (len < 10 || len >= sizeof(buf) || s[8] != ':')
+    return false;
+  memcpy(buf, s, len);
+  buf[len] = '\0';
+  buf[8] = '\0';
+  char *end = nullptr;
+  tag->key = static_cast<uint32_t>(strtoul(buf, &end, 16));
+  if (end != buf + 8)
+    return false;
+  char *type = buf + 9;
+  tag->count = 1;
+  if (char *open = strchr(type, '['); open != nullptr) {
+    const unsigned long count = strtoul(open + 1, &end, 10);
+    if (end == nullptr || *end != ']' || end[1] != '\0' || count == 0 || count > MAX_BLOB_LEN)
+      return false;
+    tag->count = static_cast<uint16_t>(count);
+    *open = '\0';
+  }
+  tag->entity = strncmp(type, ENTITY_TAG_PREFIX, strlen(ENTITY_TAG_PREFIX)) == 0;
+  if (tag->entity)
+    type += strlen(ENTITY_TAG_PREFIX);
+  const char *const *names = tag->entity ? ENTITY_KIND_TAGS : PREF_TYPE_TAGS;
+  const size_t names_count = tag->entity ? std::size(ENTITY_KIND_TAGS) : std::size(PREF_TYPE_TAGS);
+  for (size_t i = 0; i < names_count; i++) {
+    if (strcmp(type, names[i]) == 0) {
+      tag->type = static_cast<uint8_t>(i);
+      return true;
+    }
+  }
+  return false;
+}
+
+static void split_key_tag(const char *value, size_t *value_len, KeyTag *tag, bool *tagged) {
+  *tagged = false;
+  const size_t sep = strlen(KEY_TAG_SEPARATOR);
+  for (size_t i = *value_len; i >= sep + 1; i--) {
+    if (memcmp(value + i - sep - 1, KEY_TAG_SEPARATOR, sep) != 0)
+      continue;
+    if (parse_key_tag(value + i - 1, *value_len - (i - 1), tag)) {
+      *tagged = true;
+      *value_len = i - sep - 1;
+    }
+    return;
+  }
+}
+
 struct NvsEntry {
   uint32_t key;
   uint8_t blob[MAX_BLOB_LEN];
@@ -1447,6 +1519,7 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
     auto buf = json::build_json([&](JsonObject root) {
       root["version"] = 1;
       JsonObject prefs = root["preferences"].to<JsonObject>();
+      JsonObject types = root["types"].to<JsonObject>();
       exported = collect_entries(
           kv, sel, count, restrict_to_selection, selected_entities, selected_entity_count,
           [&](const NvsEntry &e, const PrefSelection *s) {
@@ -1466,21 +1539,28 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
               append_hex(value, e.blob, e.len);
             }
             const char *name = s != nullptr ? s->name : (re != nullptr ? re->name.c_str() : key_str);
+            std::string tag;
+            if (s != nullptr)
+              append_key_tag(tag, e.key, false, static_cast<uint8_t>(s->type), s->count);
+            else if (re != nullptr)
+              append_key_tag(tag, e.key, true, static_cast<uint8_t>(re->kind), re->aux);
             // The document is ArduinoJson's, so there is no size to read
             // back mid-build -- track what this entry will render as
             // instead: "name":"value", quotes, colon and separator.
-            json_bytes += strlen(name) + value.size() + 6;
+            json_bytes += strlen(name) + value.size() + 6 + (tag.empty() ? 0 : strlen(name) + tag.size() + 6);
             if (budget != 0 && json_bytes > budget) {
               over_budget = true;
               return;
             }
             prefs[name] = value;
+            if (!tag.empty())
+              types[name] = tag;
           });
     });
     out.assign(buf.data(), buf.size());
   } else {
     out += "# ESPHome preferences export (kv v1)\n";
-    out += "# <global id or numeric NVS key>=<typed value or hex:...>\n";
+    out += "# <global id or numeric NVS key>=<typed value or hex:...> @<NVS key>:<type>\n";
     exported = collect_entries(kv, sel, count, restrict_to_selection, selected_entities, selected_entity_count,
                                [&](const NvsEntry &e, const PrefSelection *s) {
                                  if (over_budget)
@@ -1493,6 +1573,8 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
                                    out += s->name;
                                    out += '=';
                                    encode_value(out, *s, e.blob, e.len);
+                                   out += KEY_TAG_SEPARATOR;
+                                   append_key_tag(out, e.key, false, static_cast<uint8_t>(s->type), s->count);
                                  } else {
                                    const RuntimeEntry *re =
                                        runtime_by_key(e.key, restrict_to_selection ? selected_entities : nullptr,
@@ -1508,6 +1590,10 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
                                    if (re == nullptr || !encode_entity_value(out, *re, e.blob, e.len)) {
                                      out += HEX_PREFIX;
                                      append_hex(out, e.blob, e.len);
+                                   }
+                                   if (re != nullptr) {
+                                     out += KEY_TAG_SEPARATOR;
+                                     append_key_tag(out, e.key, true, static_cast<uint8_t>(re->kind), re->aux);
                                    }
                                  }
                                  out += '\n';
@@ -1533,10 +1619,37 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
 // ---- import ----
 
 // Writes one parsed name/value pair through the preferences KV store; shared by both formats.
+static bool import_tagged(storage::KeyValueStorage *kv, const char *name, size_t name_len, const char *value,
+                          size_t value_len, const KeyTag &tag, uint8_t *blob, size_t &imported, size_t &skipped) {
+  size_t blob_len = 0;
+  bool ok;
+  if (value_len >= strlen(HEX_PREFIX) && memcmp(value, HEX_PREFIX, strlen(HEX_PREFIX)) == 0) {
+    ok = parse_hex(value + strlen(HEX_PREFIX), value_len - strlen(HEX_PREFIX), blob, &blob_len);
+  } else if (tag.entity) {
+    const RuntimeEntry re{tag.key, std::string(), static_cast<EntityKind>(tag.type),
+                          tag.count > 1 ? tag.count : static_cast<uint16_t>(0), nullptr};
+    ok = decode_entity_value(value, value_len, re, blob, &blob_len);
+  } else {
+    const PrefSelection sel{"", tag.key, static_cast<PrefType>(tag.type), tag.count};
+    ok = decode_value(value, value_len, sel, blob, &blob_len);
+  }
+  if (!ok) {
+    ESP_LOGW(TAG, "Skipping malformed value for '%.*s'", (int) name_len, name);
+    skipped++;
+    return true;
+  }
+  if (kv->set(tag.key, blob, blob_len) != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGE(TAG, "storing key %" PRIu32 " failed", tag.key);
+    return false;
+  }
+  imported++;
+  return true;
+}
+
 static bool import_one(storage::KeyValueStorage *kv, const char *name, size_t name_len, const char *value,
                        size_t value_len, const PrefSelection *sel, size_t count, bool restrict_to_selection,
                        esphome::EntityBase *const *selected_entities, size_t selected_entity_count, size_t &imported,
-                       size_t &skipped) {
+                       size_t &skipped, const KeyTag *tag = nullptr) {
   // One buffer for both paths below. They never overlap in time, but MAX_BLOB_LEN is 4 kB and
   // whether the compiler folds two of them into one stack slot is not something to rely on --
   // this runs on the main loop, whose stack is 8 kB by default.
@@ -1560,6 +1673,8 @@ static bool import_one(storage::KeyValueStorage *kv, const char *name, size_t na
         return true;
       }
     }
+  } else if (tag != nullptr && !restrict_to_selection) {
+    return import_tagged(kv, name, name_len, value, value_len, *tag, blob, imported, skipped);
   } else {
     char buf[16];
     if (name_len == 0 || name_len >= sizeof(buf)) {
@@ -1644,6 +1759,7 @@ bool preferences_import_from_storage(const char *path, const char *format, bool 
         ESP_LOGE(TAG, "JSON import: missing 'preferences' object");
         return false;
       }
+      JsonObject types = root["types"];
       for (JsonPair kv : prefs) {
         const char *value = kv.value().as<const char *>();
         if (value == nullptr) {
@@ -1651,8 +1767,12 @@ bool preferences_import_from_storage(const char *path, const char *format, bool 
           skipped++;
           continue;
         }
+        KeyTag tag{};
+        const char *tag_text = types.isNull() ? nullptr : types[kv.key()].as<const char *>();
+        const bool tagged = tag_text != nullptr && parse_key_tag(tag_text, strlen(tag_text), &tag);
         if (!import_one(store, kv.key().c_str(), strlen(kv.key().c_str()), value, strlen(value), sel, count,
-                        restrict_to_selection, selected_entities, selected_entity_count, imported, skipped))
+                        restrict_to_selection, selected_entities, selected_entity_count, imported, skipped,
+                        tagged ? &tag : nullptr))
           return false;
       }
       return true;
@@ -1677,8 +1797,12 @@ bool preferences_import_from_storage(const char *path, const char *format, bool 
         skipped++;
         continue;
       }
-      ok = import_one(store, line, eq - line, eq + 1, line_len - (eq + 1 - line), sel, count, restrict_to_selection,
-                      selected_entities, selected_entity_count, imported, skipped);
+      size_t value_len = line_len - (eq + 1 - line);
+      KeyTag tag{};
+      bool tagged = false;
+      split_key_tag(eq + 1, &value_len, &tag, &tagged);
+      ok = import_one(store, line, eq - line, eq + 1, value_len, sel, count, restrict_to_selection,
+                      selected_entities, selected_entity_count, imported, skipped, tagged ? &tag : nullptr);
     }
   }
 
