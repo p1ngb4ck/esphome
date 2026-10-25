@@ -42,7 +42,8 @@ extern const SOpcodes S9xOpcodesM1X0 [256];
 extern const SOpcodes S9xOpcodesM0X1 [256];
 extern const SOpcodes S9xOpcodesM0X0 [256];
 
-extern SICPU ICPU;
+extern SICPU *ICPU_ptr;
+#define ICPU (*ICPU_ptr)
 
 static INLINE void S9xUnpackStatus(void)
 {

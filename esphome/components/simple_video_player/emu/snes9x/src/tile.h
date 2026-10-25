@@ -11,22 +11,22 @@
     uint32_t TileAddr
 
 #define TILE_PREAMBLE_CODE() \
-    TileAddr = BG.TileAddress + ((Tile & 0x3ff) << BG.TileShift); \
+    TileAddr = S9xBG.TileAddress + ((Tile & 0x3ff) << S9xBG.TileShift); \
     if ((Tile & 0x1ff) >= 256) \
-       TileAddr += BG.NameSelect; \
+       TileAddr += S9xBG.NameSelect; \
     TileAddr &= 0xffff; \
-    pCache = &BG.Buffer[(TileNumber = (TileAddr >> BG.TileShift)) << 6]; \
-    if (BG.Buffered [TileNumber] != (0x10|BG.Depth)) \
+    pCache = &S9xBG.Buffer[(TileNumber = (TileAddr >> BG.TileShift)) << 6]; \
+    if (S9xBG.Buffered [TileNumber] != (0x10|S9xBG.Depth)) \
     { \
-      BG.Buffered[TileAddr >> 4] = BG.Buffered[TileAddr >> 5] = BG.Buffered[TileAddr >> 6] = false; \
-      BG.Buffered[TileNumber] = ConvertTile (pCache, TileAddr); \
+      S9xBG.Buffered[TileAddr >> 4] = S9xBG.Buffered[TileAddr >> 5] = S9xBG.Buffered[TileAddr >> 6] = false; \
+      S9xBG.Buffered[TileNumber] = ConvertTile (pCache, TileAddr); \
     } \
-    if (BG.Buffered [TileNumber] == BLANK_TILE) \
+    if (S9xBG.Buffered [TileNumber] == BLANK_TILE) \
        return; \
-    if (BG.DirectColourMode) \
-       ScreenColors = &IPPU.DirectColors [((Tile >> 10) & BG.PaletteMask) << 8]; \
+    if (S9xBG.DirectColourMode) \
+       ScreenColors = &IPPU.DirectColors [((Tile >> 10) & S9xBG.PaletteMask) << 8]; \
     else \
-       ScreenColors = &IPPU.ScreenColors [(((Tile >> 10) & BG.PaletteMask) << BG.PaletteShift) + BG.StartPalette]
+       ScreenColors = &IPPU.ScreenColors [(((Tile >> 10) & S9xBG.PaletteMask) << S9xBG.PaletteShift) + S9xBG.StartPalette]
 
 #define RENDER_TILE(NORMAL, FLIPPED, N) \
     switch (Tile & (V_FLIP | H_FLIP)) \

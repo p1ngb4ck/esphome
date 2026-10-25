@@ -10,35 +10,58 @@
 #include "gfx.h"
 #include "soundux.h"
 
-SICPU ICPU;
-SCPUState CPU;
+SICPU *ICPU_ptr;
+SCPUState *CPU_ptr;
 
 #ifndef USE_BLARGG_APU
-SAPU APU;
-SIAPU IAPU;
-SSoundData SoundData;
+SAPU *APU_ptr;
+SIAPU *IAPU_ptr;
+SSoundData *SoundData_ptr;
 SoundStatus so;
 #endif
 
-SSettings Settings;
+SSettings *Settings_ptr;
 
 int32_t OpAddress = 0;
 
-CMemory Memory;
+CMemory *Memory_ptr;
 
 uint8_t OpenBus = 0;
 
-SPPU PPU;
-InternalPPU IPPU;
+SPPU *PPU_ptr;
+InternalPPU *IPPU_ptr;
 
-SDMA DMA[8];
+SDMA (*S9xDMA_ptr)[8];
 
 uint8_t* HDMAMemPointers [8];
 uint8_t* HDMABasePointers [8];
 
-SBG BG;
+SBG *S9xBG_ptr;
 
-SGFX GFX;
+SGFX *GFX_ptr;
+
+bool S9xInitHot(void)
+{
+   ICPU_ptr = (SICPU*)emu_calloc_hot(1, sizeof(SICPU));
+   CPU_ptr = (SCPUState*)emu_calloc_hot(1, sizeof(SCPUState));
+#ifndef USE_BLARGG_APU
+   APU_ptr = (SAPU*)emu_calloc_hot(1, sizeof(SAPU));
+   IAPU_ptr = (SIAPU*)emu_calloc_hot(1, sizeof(SIAPU));
+   SoundData_ptr = (SSoundData*)emu_calloc_hot(1, sizeof(SSoundData));
+#endif
+   Settings_ptr = (SSettings*)emu_calloc_hot(1, sizeof(SSettings));
+   Memory_ptr = (CMemory*)emu_calloc_hot(1, sizeof(CMemory));
+   PPU_ptr = (SPPU*)emu_calloc_hot(1, sizeof(SPPU));
+   IPPU_ptr = (InternalPPU*)emu_calloc_hot(1, sizeof(InternalPPU));
+   S9xDMA_ptr = (SDMA (*)[8])emu_calloc_hot(1, sizeof(SDMA[8]));
+   S9xBG_ptr = (SBG*)emu_calloc_hot(1, sizeof(SBG));
+   GFX_ptr = (SGFX*)emu_calloc_hot(1, sizeof(SGFX));
+   return ICPU_ptr && CPU_ptr &&
+#ifndef USE_BLARGG_APU
+      APU_ptr && IAPU_ptr && SoundData_ptr &&
+#endif
+      Settings_ptr && Memory_ptr && PPU_ptr && IPPU_ptr && S9xDMA_ptr && S9xBG_ptr && GFX_ptr;
+}
 
 const int32_t NoiseFreq [32] =
 {

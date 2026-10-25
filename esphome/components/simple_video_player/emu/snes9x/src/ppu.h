@@ -219,9 +219,12 @@ uint8_t S9xGetC4(uint16_t Address);
 void S9xSetC4RAM(uint8_t Byte, uint16_t Address);
 uint8_t S9xGetC4RAM(uint16_t Address);
 
-extern SPPU PPU;
-extern SDMA DMA [8];
-extern InternalPPU IPPU;
+extern SPPU *PPU_ptr;
+#define PPU (*PPU_ptr)
+extern SDMA (*S9xDMA_ptr)[8];
+#define S9xDMA (*S9xDMA_ptr)
+extern InternalPPU *IPPU_ptr;
+#define IPPU (*IPPU_ptr)
 
 #include "memmap.h"
 

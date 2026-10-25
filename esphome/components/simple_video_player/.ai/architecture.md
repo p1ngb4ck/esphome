@@ -307,12 +307,16 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
   `panel_ready()` once LVGL let go), RUNNING (svp_game), PAUSING / PAUSED (the menu key; the task parks, the panel goes
   back to LVGL, `on_paused`), STOPPING (the task ends, `StaticTask::deallocate()`), then everything is given back
   (`on_ended`).
-- Memory: the cores' `malloc` / `calloc` / `realloc` / `free` (forced `emu_force.h`) go to `GameEmulator`: a piece of at
-  most 16 KiB internal while the system's internal budget lasts (NES 24 KiB, Game Boy 24 KiB, SMS 25 KiB, SNES 20 KiB,
+- Memory: the cores' `malloc` / `calloc` / `realloc` / `free` (forced `emu_force.h`) go to `GameEmulator`: a piece internal
+  (at most 16 KiB, a hot piece any size) while the system's internal budget lasts (NES 24 KiB, Game Boy 24 KiB, SMS
+  25 KiB, SNES 96 KiB,
   Mega Drive 14 KiB, PC Engine 8 KiB, Lynx 12 KiB, others 0; SNES, Mega Drive, PC Engine and Lynx only for the pieces
   their cores ask for with `emu_calloc_hot` / `emu_new_hot`: Lynx handy's CSystem, CMikie, CSusie and C65C02 objects
   (its 64 KiB CRam stays in the pool), PC Engine its work RAM `PCE.RAM` (zero page and stack), SNES
-  the memory map `Map` and `MapInfo`, Mega Drive the Z80 RAM `ZRAM`, the YM2612's `sin_tab`, the VDP's `SAT_CACHE`
+  in this order its state structs (`S9xInitHot()` before the core starts: CPU, ICPU, APU, IAPU, SoundData, Settings,
+  Memory, PPU, IPPU, `S9xDMA`, `S9xBG`, GFX, 6.8 KiB; pointers in `.bss` behind macros of their names, `BG` and `DMA`
+  renamed as `PPU.BG` is a field), the 64 KiB VRAM (one block; without a free 64 KiB block it goes to the pool), the
+  memory map `Map` and `MapInfo` and the palette `IPPU.ScreenColors`, 95 KiB together, Mega Drive the Z80 RAM `ZRAM`, the YM2612's `sin_tab`, the VDP's `SAT_CACHE`
   and `CRAM565`, allocated by its port before the core starts),
   else the pool (`POOL_USER_GAME`, owner row: outputs, video, desktop); every piece in a table of 96, all given back at
   the end. The cores' hot structs (nofrendo: nes, cpu, mem with its RAM as a pointer, ppu, apu) are allocated in their

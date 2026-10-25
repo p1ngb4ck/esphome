@@ -66,7 +66,7 @@ static uint8_t ConvertTile(uint8_t* pCache, uint32_t TileAddr)
    uint32_t p2;
    uint8_t pix;
 
-   switch (BG.BitShift)
+   switch (S9xBG.BitShift)
    {
    case 8:
       for (line = 8; line != 0; line--, tp += 2)
@@ -166,7 +166,7 @@ static uint8_t ConvertTile(uint8_t* pCache, uint32_t TileAddr)
       }
       break;
    }
-   return non_zero ? (0x10|BG.Depth) : BLANK_TILE;
+   return non_zero ? (0x10|S9xBG.Depth) : BLANK_TILE;
 }
 
 #define PLOT_PIXEL(screen, pixel) (pixel)

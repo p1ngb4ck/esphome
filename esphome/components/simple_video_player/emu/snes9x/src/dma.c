@@ -30,7 +30,7 @@ void S9xDoDMA(uint8_t Channel)
       return;
 
    CPU.InDMA = true;
-   d = &DMA[Channel];
+   d = &S9xDMA[Channel];
    count = d->TransferBytes;
 
    /* Prepare for custom chip DMA */
@@ -393,7 +393,7 @@ update_address:
    Memory.FillRAM [0x4305 + (Channel << 4)] = 0;
    Memory.FillRAM [0x4306 + (Channel << 4)] = 0;
 
-   DMA[Channel].IndirectAddress = 0;
+   S9xDMA[Channel].IndirectAddress = 0;
    d->TransferBytes = 0;
 
    CPU.InDMA = false;
@@ -412,10 +412,10 @@ void S9xStartHDMA(void)
       if (IPPU.HDMA & (1 << i))
       {
          CPU.Cycles += SLOW_ONE_CYCLE;
-         DMA [i].LineCount = 0;
-         DMA [i].FirstLine = true;
-         DMA [i].Address = DMA [i].AAddress;
-         if (DMA[i].HDMAIndirectAddressing)
+         S9xDMA [i].LineCount = 0;
+         S9xDMA [i].FirstLine = true;
+         S9xDMA [i].Address = S9xDMA [i].AAddress;
+         if (S9xDMA[i].HDMAIndirectAddressing)
             CPU.Cycles += (SLOW_ONE_CYCLE << 2);
       }
       HDMAMemPointers [i] = NULL;
@@ -425,7 +425,7 @@ void S9xStartHDMA(void)
 uint8_t S9xDoHDMA(uint8_t byte)
 {
    uint8_t mask;
-   SDMA* p = &DMA [0];
+   SDMA* p = &S9xDMA [0];
    int32_t d = 0;
    CPU.InDMA = true;
    CPU.Cycles += ONE_CYCLE * 3;
@@ -573,16 +573,16 @@ void S9xResetDMA(void)
    int32_t c, d;
    for (d = 0; d < 8; d++)
    {
-      DMA [d].TransferDirection = false;
-      DMA [d].HDMAIndirectAddressing = false;
-      DMA [d].AAddressFixed = true;
-      DMA [d].AAddressDecrement = false;
-      DMA [d].TransferMode = 7;
-      DMA [d].ABank = 0xff;
-      DMA [d].AAddress = 0xffff;
-      DMA [d].Address = 0xffff;
-      DMA [d].BAddress = 0xff;
-      DMA [d].TransferBytes = 0xffff;
-      DMA [d].IndirectAddress = 0xffff;
+      S9xDMA [d].TransferDirection = false;
+      S9xDMA [d].HDMAIndirectAddressing = false;
+      S9xDMA [d].AAddressFixed = true;
+      S9xDMA [d].AAddressDecrement = false;
+      S9xDMA [d].TransferMode = 7;
+      S9xDMA [d].ABank = 0xff;
+      S9xDMA [d].AAddress = 0xffff;
+      S9xDMA [d].Address = 0xffff;
+      S9xDMA [d].BAddress = 0xff;
+      S9xDMA [d].TransferBytes = 0xffff;
+      S9xDMA [d].IndirectAddress = 0xffff;
    }
 }

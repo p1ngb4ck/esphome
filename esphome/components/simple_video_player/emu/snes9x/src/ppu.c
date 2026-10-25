@@ -1100,12 +1100,12 @@ void S9xSetCPU(uint8_t byte, uint16_t Address)
       case 0x4360:
       case 0x4370:
          d = (Address >> 4) & 0x7;
-         DMA[d].TransferDirection = (bool) (byte & 0x80);
-         DMA[d].HDMAIndirectAddressing = (bool) (byte & 0x40);
+         S9xDMA[d].TransferDirection = (bool) (byte & 0x80);
+         S9xDMA[d].HDMAIndirectAddressing = (bool) (byte & 0x40);
          Memory.FillRAM [Address | 0xf] = (byte & 0x20);
-         DMA[d].AAddressDecrement = (bool) (byte & 0x10);
-         DMA[d].AAddressFixed = (bool) (byte & 0x08);
-         DMA[d].TransferMode = (byte & 7);
+         S9xDMA[d].AAddressDecrement = (bool) (byte & 0x10);
+         S9xDMA[d].AAddressFixed = (bool) (byte & 0x08);
+         S9xDMA[d].TransferMode = (byte & 7);
          break;
       case 0x4301:
       case 0x4311:
@@ -1115,7 +1115,7 @@ void S9xSetCPU(uint8_t byte, uint16_t Address)
       case 0x4351:
       case 0x4361:
       case 0x4371:
-         DMA[((Address >> 4) & 0x7)].BAddress = byte;
+         S9xDMA[((Address >> 4) & 0x7)].BAddress = byte;
          break;
       case 0x4302:
       case 0x4312:
@@ -1126,8 +1126,8 @@ void S9xSetCPU(uint8_t byte, uint16_t Address)
       case 0x4362:
       case 0x4372:
          d = (Address >> 4) & 0x7;
-         DMA[d].AAddress &= 0xFF00;
-         DMA[d].AAddress |= byte;
+         S9xDMA[d].AAddress &= 0xFF00;
+         S9xDMA[d].AAddress |= byte;
          break;
       case 0x4303:
       case 0x4313:
@@ -1138,8 +1138,8 @@ void S9xSetCPU(uint8_t byte, uint16_t Address)
       case 0x4363:
       case 0x4373:
          d = (Address >> 4) & 0x7;
-         DMA[d].AAddress &= 0xFF;
-         DMA[d].AAddress |= byte << 8;
+         S9xDMA[d].AAddress &= 0xFF;
+         S9xDMA[d].AAddress |= byte << 8;
          break;
       case 0x4304:
       case 0x4314:
@@ -1149,7 +1149,7 @@ void S9xSetCPU(uint8_t byte, uint16_t Address)
       case 0x4354:
       case 0x4364:
       case 0x4374:
-         DMA[((Address >> 4) & 0x7)].ABank = byte;
+         S9xDMA[((Address >> 4) & 0x7)].ABank = byte;
          HDMAMemPointers[((Address >> 4) & 0x7)] = NULL;
          break;
       case 0x4305:
@@ -1161,10 +1161,10 @@ void S9xSetCPU(uint8_t byte, uint16_t Address)
       case 0x4365:
       case 0x4375:
          d = (Address >> 4) & 0x7;
-         DMA[d].TransferBytes &= 0xff00;
-         DMA[d].TransferBytes |= byte;
-         DMA[d].IndirectAddress &= 0xff00;
-         DMA[d].IndirectAddress |= byte;
+         S9xDMA[d].TransferBytes &= 0xff00;
+         S9xDMA[d].TransferBytes |= byte;
+         S9xDMA[d].IndirectAddress &= 0xff00;
+         S9xDMA[d].IndirectAddress |= byte;
          HDMAMemPointers[d] = NULL;
          break;
       case 0x4306:
@@ -1176,10 +1176,10 @@ void S9xSetCPU(uint8_t byte, uint16_t Address)
       case 0x4366:
       case 0x4376:
          d = (Address >> 4) & 0x7;
-         DMA[d].TransferBytes &= 0xFF;
-         DMA[d].TransferBytes |= byte << 8;
-         DMA[d].IndirectAddress &= 0xff;
-         DMA[d].IndirectAddress |= byte << 8;
+         S9xDMA[d].TransferBytes &= 0xFF;
+         S9xDMA[d].TransferBytes |= byte << 8;
+         S9xDMA[d].IndirectAddress &= 0xff;
+         S9xDMA[d].IndirectAddress |= byte << 8;
          HDMAMemPointers[d] = NULL;
          break;
       case 0x4307:
@@ -1190,7 +1190,7 @@ void S9xSetCPU(uint8_t byte, uint16_t Address)
       case 0x4357:
       case 0x4367:
       case 0x4377:
-         DMA[d = ((Address >> 4) & 0x7)].IndirectBank = byte;
+         S9xDMA[d = ((Address >> 4) & 0x7)].IndirectBank = byte;
          HDMAMemPointers[d] = NULL;
          break;
       case 0x4308:
@@ -1202,8 +1202,8 @@ void S9xSetCPU(uint8_t byte, uint16_t Address)
       case 0x4368:
       case 0x4378:
          d = (Address >> 4) & 7;
-         DMA[d].Address &= 0xff00;
-         DMA[d].Address |= byte;
+         S9xDMA[d].Address &= 0xff00;
+         S9xDMA[d].Address |= byte;
          HDMAMemPointers[d] = NULL;
          break;
       case 0x4309:
@@ -1215,8 +1215,8 @@ void S9xSetCPU(uint8_t byte, uint16_t Address)
       case 0x4369:
       case 0x4379:
          d = (Address >> 4) & 0x7;
-         DMA[d].Address &= 0xff;
-         DMA[d].Address |= byte << 8;
+         S9xDMA[d].Address &= 0xff;
+         S9xDMA[d].Address |= byte << 8;
          HDMAMemPointers[d] = NULL;
          break;
       case 0x430A:
@@ -1228,8 +1228,8 @@ void S9xSetCPU(uint8_t byte, uint16_t Address)
       case 0x436A:
       case 0x437A:
          d = (Address >> 4) & 0x7;
-         DMA[d].LineCount = byte & 0x7f;
-         DMA[d].Repeat = !(byte & 0x80);
+         S9xDMA[d].LineCount = byte & 0x7f;
+         S9xDMA[d].Repeat = !(byte & 0x80);
          break;
       case 0x430B:
       case 0x431B:
@@ -1425,9 +1425,9 @@ uint8_t S9xGetCPU(uint16_t Address)
       case 0x4360:
       case 0x4370:
          d = (Address >> 4) & 0x7;
-         return (DMA[d].TransferDirection ? 0x80 : 0x00) | (DMA[d].HDMAIndirectAddressing ? 0x40 : 0x00) |
-                ((uint8_t) Memory.FillRAM [Address]) | (DMA[d].AAddressDecrement ? 0x10 : 0x00) |
-                (DMA[d].AAddressFixed ? 0x08 : 0x00) | (DMA[d].TransferMode & 7);
+         return (S9xDMA[d].TransferDirection ? 0x80 : 0x00) | (S9xDMA[d].HDMAIndirectAddressing ? 0x40 : 0x00) |
+                ((uint8_t) Memory.FillRAM [Address]) | (S9xDMA[d].AAddressDecrement ? 0x10 : 0x00) |
+                (S9xDMA[d].AAddressFixed ? 0x08 : 0x00) | (S9xDMA[d].TransferMode & 7);
       case 0x4301:
       case 0x4311:
       case 0x4321:
@@ -1436,7 +1436,7 @@ uint8_t S9xGetCPU(uint16_t Address)
       case 0x4351:
       case 0x4361:
       case 0x4371:
-         return DMA[((Address >> 4) & 0x7)].BAddress;
+         return S9xDMA[((Address >> 4) & 0x7)].BAddress;
       case 0x4302:
       case 0x4312:
       case 0x4322:
@@ -1445,7 +1445,7 @@ uint8_t S9xGetCPU(uint16_t Address)
       case 0x4352:
       case 0x4362:
       case 0x4372:
-         return DMA[((Address >> 4) & 0x7)].AAddress & 0xFF;
+         return S9xDMA[((Address >> 4) & 0x7)].AAddress & 0xFF;
       case 0x4303:
       case 0x4313:
       case 0x4323:
@@ -1454,7 +1454,7 @@ uint8_t S9xGetCPU(uint16_t Address)
       case 0x4353:
       case 0x4363:
       case 0x4373:
-         return DMA[((Address >> 4) & 0x7)].AAddress >> 8;
+         return S9xDMA[((Address >> 4) & 0x7)].AAddress >> 8;
       case 0x4304:
       case 0x4314:
       case 0x4324:
@@ -1463,7 +1463,7 @@ uint8_t S9xGetCPU(uint16_t Address)
       case 0x4354:
       case 0x4364:
       case 0x4374:
-         return DMA[((Address >> 4) & 0x7)].ABank;
+         return S9xDMA[((Address >> 4) & 0x7)].ABank;
       case 0x4305:
       case 0x4315:
       case 0x4325:
@@ -1472,7 +1472,7 @@ uint8_t S9xGetCPU(uint16_t Address)
       case 0x4355:
       case 0x4365:
       case 0x4375:
-         return DMA[((Address >> 4) & 0x7)].IndirectAddress & 0xff;
+         return S9xDMA[((Address >> 4) & 0x7)].IndirectAddress & 0xff;
       case 0x4306:
       case 0x4316:
       case 0x4326:
@@ -1481,7 +1481,7 @@ uint8_t S9xGetCPU(uint16_t Address)
       case 0x4356:
       case 0x4366:
       case 0x4376:
-         return DMA[((Address >> 4) & 0x7)].IndirectAddress >> 8;
+         return S9xDMA[((Address >> 4) & 0x7)].IndirectAddress >> 8;
       case 0x4307:
       case 0x4317:
       case 0x4327:
@@ -1490,7 +1490,7 @@ uint8_t S9xGetCPU(uint16_t Address)
       case 0x4357:
       case 0x4367:
       case 0x4377:
-         return DMA[((Address >> 4) & 0x7)].IndirectBank;
+         return S9xDMA[((Address >> 4) & 0x7)].IndirectBank;
       case 0x4308:
       case 0x4318:
       case 0x4328:
@@ -1499,7 +1499,7 @@ uint8_t S9xGetCPU(uint16_t Address)
       case 0x4358:
       case 0x4368:
       case 0x4378:
-         return DMA[((Address >> 4) & 0x7)].Address & 0xFF;
+         return S9xDMA[((Address >> 4) & 0x7)].Address & 0xFF;
       case 0x4309:
       case 0x4319:
       case 0x4329:
@@ -1508,7 +1508,7 @@ uint8_t S9xGetCPU(uint16_t Address)
       case 0x4359:
       case 0x4369:
       case 0x4379:
-         return DMA[((Address >> 4) & 0x7)].Address >> 8;
+         return S9xDMA[((Address >> 4) & 0x7)].Address >> 8;
       case 0x430A:
       case 0x431A:
       case 0x432A:
@@ -1518,7 +1518,7 @@ uint8_t S9xGetCPU(uint16_t Address)
       case 0x436A:
       case 0x437A:
          d = (Address >> 4) & 0x7;
-         return DMA[d].LineCount ^ (DMA[d].Repeat ? 0x00 : 0x80);
+         return S9xDMA[d].LineCount ^ (S9xDMA[d].Repeat ? 0x00 : 0x80);
       case 0x430B:
       case 0x431B:
       case 0x432B:

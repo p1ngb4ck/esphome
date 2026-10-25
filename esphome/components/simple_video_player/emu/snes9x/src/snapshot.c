@@ -25,7 +25,7 @@ bool S9xSaveState(const char *filename)
    chunks += fwrite(&CPU, sizeof(CPU), 1, fp);
    chunks += fwrite(&ICPU, sizeof(ICPU), 1, fp);
    chunks += fwrite(&PPU, sizeof(PPU), 1, fp);
-   chunks += fwrite(&DMA, sizeof(DMA), 1, fp);
+   chunks += fwrite(&S9xDMA, sizeof(S9xDMA), 1, fp);
    chunks += fwrite(Memory.VRAM, VRAM_SIZE, 1, fp);
    chunks += fwrite(Memory.RAM, RAM_SIZE, 1, fp);
    chunks += fwrite(Memory.SRAM, SRAM_SIZE, 1, fp);
@@ -65,7 +65,7 @@ bool S9xLoadState(const char *filename)
    chunks += fread(&CPU, sizeof(CPU), 1, fp);
    chunks += fread(&ICPU, sizeof(ICPU), 1, fp);
    chunks += fread(&PPU, sizeof(PPU), 1, fp);
-   chunks += fread(&DMA, sizeof(DMA), 1, fp);
+   chunks += fread(&S9xDMA, sizeof(S9xDMA), 1, fp);
    chunks += fread(Memory.VRAM, VRAM_SIZE, 1, fp);
    chunks += fread(Memory.RAM, RAM_SIZE, 1, fp);
    chunks += fread(Memory.SRAM, SRAM_SIZE, 1, fp);

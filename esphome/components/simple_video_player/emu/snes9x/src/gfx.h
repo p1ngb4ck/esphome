@@ -67,7 +67,8 @@ typedef struct
 } SGFX;
 
 /* External port interface which must be implemented or initialised for each port. */
-extern SGFX GFX;
+extern SGFX *GFX_ptr;
+#define GFX (*GFX_ptr)
 
 typedef struct
 {
@@ -109,7 +110,8 @@ typedef struct
    int16_t CentreY;
 } SLineMatrixData;
 
-extern SBG BG;
+extern SBG *S9xBG_ptr;
+#define S9xBG (*S9xBG_ptr)
 
 /* Could use BSWAP instruction on Intel port... */
 #define SWAP_DWORD(dword) dword = ((((dword) & 0x000000ff) << 24) \

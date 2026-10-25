@@ -218,8 +218,11 @@ typedef struct
    bool     HardDisableAudio;
 } SSettings;
 
-extern SSettings Settings;
-extern SCPUState CPU;
+extern SSettings *Settings_ptr;
+extern SCPUState *CPU_ptr;
+#define Settings (*Settings_ptr)
+#define CPU (*CPU_ptr)
+bool S9xInitHot(void);
 extern char String [513];
 
 void S9xSetPause(uint32_t mask);

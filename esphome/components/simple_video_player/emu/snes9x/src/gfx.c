@@ -647,17 +647,17 @@ static void DrawOBJS(bool OnMain, uint8_t D)
 
    int32_t clipcount;
    uint32_t Y, Offset;
-   BG.BitShift = 4;
-   BG.TileShift = 5;
-   BG.TileAddress = PPU.OBJNameBase;
-   BG.StartPalette = 128;
-   BG.PaletteShift = 4;
-   BG.PaletteMask = 7;
-   BG.Depth = TILE_4BIT;
-   BG.Buffer = IPPU.TileCache;
-   BG.Buffered = IPPU.TileCached;
-   BG.NameSelect = PPU.OBJNameSelect;
-   BG.DirectColourMode = false;
+   S9xBG.BitShift = 4;
+   S9xBG.TileShift = 5;
+   S9xBG.TileAddress = PPU.OBJNameBase;
+   S9xBG.StartPalette = 128;
+   S9xBG.PaletteShift = 4;
+   S9xBG.PaletteMask = 7;
+   S9xBG.Depth = TILE_4BIT;
+   S9xBG.Buffer = IPPU.TileCache;
+   S9xBG.Buffered = IPPU.TileCached;
+   S9xBG.NameSelect = PPU.OBJNameSelect;
+   S9xBG.DirectColourMode = false;
    GFX.PixSize = 1;
    clipcount = GFX.pCurrentClip->Count [4];
 
@@ -830,9 +830,9 @@ static void DrawBackgroundMosaic(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8
    depths[1] = Z2;
 
    if (BGMode == 0)
-      BG.StartPalette = bg << 5;
+      S9xBG.StartPalette = bg << 5;
    else
-      BG.StartPalette = 0;
+      S9xBG.StartPalette = 0;
 
    SC0 = (uint16_t*) &Memory.VRAM[PPU.BG[bg].SCBase << 1];
 
@@ -862,7 +862,7 @@ static void DrawBackgroundMosaic(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8
    if (((uint8_t*)SC3 - Memory.VRAM) >= 0x10000)
       SC3 -= 0x08000;
 
-   if (BG.TileSize == 16)
+   if (S9xBG.TileSize == 16)
    {
       OffsetMask = 0x3ff;
       OffsetShift = 4;
@@ -943,7 +943,7 @@ static void DrawBackgroundMosaic(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8
             if (x + PixWidth >= Right)
                PixWidth = Right - x;
 
-            if (BG.TileSize == 8 && !m5)
+            if (S9xBG.TileSize == 8 && !m5)
             {
                if (Quot > 31)
                   t = b2 + (Quot & 0x1f);
@@ -962,7 +962,7 @@ static void DrawBackgroundMosaic(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8
             GFX.Z1 = GFX.Z2 = depths [(Tile & 0x2000) >> 13];
 
             /* Draw tile... */
-            if (BG.TileSize != 8)
+            if (S9xBG.TileSize != 8)
             {
                if (Tile & H_FLIP)
                {
@@ -1034,7 +1034,7 @@ static void DrawBackgroundOffset(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8
 
    depths[0] = Z1;
    depths[1] = Z2;
-   BG.StartPalette = 0;
+   S9xBG.StartPalette = 0;
    BPS0 = (uint16_t*) &Memory.VRAM[PPU.BG[2].SCBase << 1];
 
    if (PPU.BG[2].SCSize & 1)
@@ -1082,7 +1082,7 @@ static void DrawBackgroundOffset(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8
 
    OffsetEnableMask = 1 << (bg + 13);
 
-   if (BG.TileSize == 16)
+   if (S9xBG.TileSize == 16)
    {
       OffsetMask = 0x3ff;
       OffsetShift = 4;
@@ -1254,7 +1254,7 @@ static void DrawBackgroundOffset(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8
 
             Quot = HPos >> 3;
 
-            if (BG.TileSize == 8)
+            if (S9xBG.TileSize == 8)
             {
                if (Quot > 31)
                   t = b2 + (Quot & 0x1f);
@@ -1282,7 +1282,7 @@ static void DrawBackgroundOffset(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8
             Tile = READ_2BYTES(t);
             GFX.Z1 = GFX.Z2 = depths [(Tile & 0x2000) >> 13];
 
-            if (BG.TileSize == 8)
+            if (S9xBG.TileSize == 8)
                (*DrawClippedTilePtr)(Tile, s, Offset, Count, VirtAlign, Lines);
             else
             {
@@ -1331,7 +1331,7 @@ static void DrawBackgroundMode5(uint32_t bg, uint8_t Z1, uint8_t Z2)
    GFX.PixSize = 1;
    depths[0]       = Z1;
    depths[1]       = Z2;
-   BG.StartPalette = 0;
+   S9xBG.StartPalette = 0;
 
    SC0 = (uint16_t*) &Memory.VRAM[PPU.BG[bg].SCBase << 1];
 
@@ -1359,7 +1359,7 @@ static void DrawBackgroundMode5(uint32_t bg, uint8_t Z1, uint8_t Z2)
    if (((uint8_t*)SC3 - Memory.VRAM) >= 0x10000)
       SC3 -= 0x08000;
 
-   if (BG.TileSize == 16)
+   if (S9xBG.TileSize == 16)
       VOffsetShift = 4;
    else
       VOffsetShift = 3;
@@ -1459,7 +1459,7 @@ static void DrawBackgroundMode5(uint32_t bg, uint8_t Z1, uint8_t Z2)
             Tile = READ_2BYTES(t);
             GFX.Z1 = GFX.Z2 = depths [(Tile & 0x2000) >> 13];
 
-            if (BG.TileSize == 8)
+            if (S9xBG.TileSize == 8)
             {
                if (!(Tile & H_FLIP)) /* Normal, unflipped */
                   (*DrawHiResClippedTilePtr)(Tile + (Quot & 1), s, Offset, Count, VirtAlign, Lines);
@@ -1499,7 +1499,7 @@ static void DrawBackgroundMode5(uint32_t bg, uint8_t Z1, uint8_t Z2)
          {
             Tile = READ_2BYTES(t);
             GFX.Z1 = GFX.Z2 = depths [(Tile & 0x2000) >> 13];
-            if (BG.TileSize == 8)
+            if (S9xBG.TileSize == 8)
             {
                if (!(Tile & H_FLIP)) /* Normal, unflipped */
                   (*DrawHiResTilePtr)(Tile + (Quot & 1), s, VirtAlign, Lines);
@@ -1533,7 +1533,7 @@ static void DrawBackgroundMode5(uint32_t bg, uint8_t Z1, uint8_t Z2)
          {
             Tile = READ_2BYTES(t);
             GFX.Z1 = GFX.Z2 = depths [(Tile & 0x2000) >> 13];
-            if (BG.TileSize == 8)
+            if (S9xBG.TileSize == 8)
             {
                if (!(Tile & H_FLIP)) /* Normal, unflipped */
                   (*DrawHiResClippedTilePtr)(Tile + (Quot & 1), s, 0, Count, VirtAlign, Lines);
@@ -1576,17 +1576,17 @@ static void DrawBackground(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8_t Z2)
    int32_t OffsetShift;
    GFX.PixSize = 1;
 
-   BG.TileSize = 8 << (PPU.BG[bg].BGSize);
-   BG.BitShift = BitShifts[BGMode][bg];
-   BG.TileShift = TileShifts[BGMode][bg];
-   BG.TileAddress = PPU.BG[bg].NameBase << 1;
-   BG.NameSelect = 0;
-   BG.Depth = Depths [BGMode][bg];
-   BG.Buffer = IPPU.TileCache;
-   BG.Buffered = IPPU.TileCached;
-   BG.PaletteShift = PaletteShifts[BGMode][bg];
-   BG.PaletteMask = PaletteMasks[BGMode][bg];
-   BG.DirectColourMode = (BGMode == 3 || BGMode == 4) && bg == 0 && (GFX.r2130 & 1);
+   S9xBG.TileSize = 8 << (PPU.BG[bg].BGSize);
+   S9xBG.BitShift = BitShifts[BGMode][bg];
+   S9xBG.TileShift = TileShifts[BGMode][bg];
+   S9xBG.TileAddress = PPU.BG[bg].NameBase << 1;
+   S9xBG.NameSelect = 0;
+   S9xBG.Depth = Depths [BGMode][bg];
+   S9xBG.Buffer = IPPU.TileCache;
+   S9xBG.Buffered = IPPU.TileCached;
+   S9xBG.PaletteShift = PaletteShifts[BGMode][bg];
+   S9xBG.PaletteMask = PaletteMasks[BGMode][bg];
+   S9xBG.DirectColourMode = (BGMode == 3 || BGMode == 4) && bg == 0 && (GFX.r2130 & 1);
 
    if (PPU.BGMosaic [bg] && PPU.Mosaic > 1)
    {
@@ -1610,9 +1610,9 @@ static void DrawBackground(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8_t Z2)
    depths [1] = Z2;
 
    if (BGMode == 0)
-      BG.StartPalette = bg << 5;
+      S9xBG.StartPalette = bg << 5;
    else
-      BG.StartPalette = 0;
+      S9xBG.StartPalette = 0;
 
    SC0 = (uint16_t*) &Memory.VRAM[PPU.BG[bg].SCBase << 1];
 
@@ -1640,7 +1640,7 @@ static void DrawBackground(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8_t Z2)
    if (((uint8_t*)SC3 - Memory.VRAM) >= 0x10000)
       SC3 -= 0x08000;
 
-   if (BG.TileSize == 16)
+   if (S9xBG.TileSize == 16)
    {
       OffsetMask = 0x3ff;
       OffsetShift = 4;
@@ -1724,7 +1724,7 @@ static void DrawBackground(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8_t Z2)
          HPos = (HOffset + Left) & OffsetMask;
          Quot = HPos >> 3;
 
-         if (BG.TileSize == 8)
+         if (S9xBG.TileSize == 8)
          {
             if (Quot > 31)
                t = b2 + (Quot & 0x1f);
@@ -1751,7 +1751,7 @@ static void DrawBackground(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8_t Z2)
             Tile = READ_2BYTES(t);
             GFX.Z1 = GFX.Z2 = depths [(Tile & 0x2000) >> 13];
 
-            if (BG.TileSize == 8)
+            if (S9xBG.TileSize == 8)
                (*DrawClippedTilePtr)(Tile, s, Offset, Count, VirtAlign, Lines);
             else if (!(Tile & (V_FLIP | H_FLIP))) /* Normal, unflipped */
                (*DrawClippedTilePtr)(Tile + t1 + (Quot & 1), s, Offset, Count, VirtAlign, Lines);
@@ -1765,7 +1765,7 @@ static void DrawBackground(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8_t Z2)
             else /* V flip only */
                (*DrawClippedTilePtr)(Tile + t2 + (Quot & 1), s, Offset, Count, VirtAlign, Lines);
 
-            if (BG.TileSize == 8)
+            if (S9xBG.TileSize == 8)
             {
                t++;
                if (Quot == 31)
@@ -1795,7 +1795,7 @@ static void DrawBackground(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8_t Z2)
             Tile = READ_2BYTES(t);
             GFX.Z1 = GFX.Z2 = depths [(Tile & 0x2000) >> 13];
 
-            if (BG.TileSize != 8)
+            if (S9xBG.TileSize != 8)
             {
                if (Tile & H_FLIP) /* Horizontal flip, but what about vertical flip? */
                {
@@ -1812,7 +1812,7 @@ static void DrawBackground(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8_t Z2)
             else
                (*DrawTilePtr)(Tile, s, VirtAlign, Lines);
 
-            if (BG.TileSize == 8)
+            if (S9xBG.TileSize == 8)
             {
                t++;
                if (Quot == 31)
@@ -1835,7 +1835,7 @@ static void DrawBackground(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8_t Z2)
             Tile = READ_2BYTES(t);
             GFX.Z1 = GFX.Z2 = depths [(Tile & 0x2000) >> 13];
 
-            if (BG.TileSize == 8)
+            if (S9xBG.TileSize == 8)
                (*DrawClippedTilePtr)(Tile, s, 0, Count, VirtAlign, Lines);
             else
             {

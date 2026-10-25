@@ -152,7 +152,7 @@ uint32_t GameEmulator::internal_budget_(EmuSystem system) const {
     case EmuSystem::SMS:
       return 25 * 1024;
     case EmuSystem::SNES:
-      return 20 * 1024;
+      return 96 * 1024;
     case EmuSystem::MD:
       return 14 * 1024;
     case EmuSystem::PCE:
@@ -1150,7 +1150,7 @@ void *GameEmulator::alloc_(size_t size, bool zero, bool hot) {
     return nullptr;
   void *ptr = nullptr;
   bool internal = false;
-  if ((hot || !this->hot_only_now_) && size <= INTERNAL_PIECE_MAX &&
+  if ((hot || (!this->hot_only_now_ && size <= INTERNAL_PIECE_MAX)) &&
       this->internal_used_ + size <= this->internal_budget_now_) {
     ptr = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     internal = ptr != nullptr;

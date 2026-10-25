@@ -105,7 +105,8 @@ typedef struct
    int32_t  noise_hertz;
 } SSoundData;
 
-extern SSoundData SoundData;
+extern SSoundData *SoundData_ptr;
+#define SoundData (*SoundData_ptr)
 
 void S9xSetSoundVolume(int32_t channel, int16_t volume_left, int16_t volume_right);
 void S9xSetSoundFrequency(int32_t channel, int32_t hertz);

@@ -82,6 +82,8 @@ void JustifierButtons(uint32_t *justifiers)
 
 bool snes_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels)
 {
+    if (!S9xInitHot())
+        return false;
     s_channels = channels > 1 ? 2 : 1;
     s_rate = rate;
     s_frame = calloc(SNES_WIDTH * SNES_HEIGHT_EXTENDED, sizeof(uint16_t));
