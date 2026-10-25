@@ -71,10 +71,17 @@ EMBEDDED_SCHEMA = cv.All(
     cv.has_exactly_one_key(CONF_PATH, CONF_URL),
 )
 
+def _url_or_storage_path(value: Any) -> str:
+    value = cv.string_strict(value)
+    if value.startswith("/"):
+        return value
+    return cv.url(value)
+
+
 HTTP_SCHEMA = BASE_SCHEMA.extend(
     {
         cv.GenerateID(CONF_HTTP_REQUEST_ID): cv.use_id(HttpRequestComponent),
-        cv.Required(CONF_SOURCE): cv.url,
+        cv.Required(CONF_SOURCE): _url_or_storage_path,
     }
 )
 
@@ -177,6 +184,8 @@ FINAL_VALIDATE_SCHEMA = _validate_firmware
 
 
 async def to_code(config: dict[str, Any]) -> None:
+    from esphome.components.storage import request_storage_worker
+
     var = await update.new_update(config)
 
     firmware_type = config[CONF_TYPE]
@@ -197,9 +206,13 @@ async def to_code(config: dict[str, Any]) -> None:
         cg.add(var.set_firmware_sha256([HexInt(b) for b in sha256_bytes]))
         cg.add(var.set_storage_path(config[CONF_SOURCE]))
         cg.add_define("USE_ESP32_HOSTED_STORAGE_UPDATE")
+        request_storage_worker()
     else:
         await cg.add_variable(var.set_http_request_parent, config[CONF_HTTP_REQUEST_ID])
         cg.add(var.set_source_url(config[CONF_SOURCE]))
         cg.add_define("USE_ESP32_HOSTED_HTTP_UPDATE")
+        if "storage" in CORE.loaded_integrations:
+            cg.add_define("USE_ESP32_HOSTED_STORAGE_UPDATE")
+            request_storage_worker()
 
     await cg.register_component(var, config)

@@ -18,6 +18,8 @@
 
 #ifdef USE_ESP32_HOSTED_STORAGE_UPDATE
 #include "esphome/components/storage/storage.h"
+#include "esphome/components/storage/storage_worker.h"
+#include <cstring>
 #endif
 
 extern "C" {
@@ -146,7 +148,7 @@ void Esp32HostedUpdate::setup() {
   // Publish state
   this->status_clear_error();
   this->publish_state();
-#elif defined(USE_ESP32_HOSTED_STORAGE_UPDATE)
+#elif !defined(USE_ESP32_HOSTED_HTTP_UPDATE)
   // Storage mode: no availability/version discovery — the firmware to install is whatever the
   // user placed on the configured storage path. Offer it as available; the install reads and
   // verifies (sha256) at perform() time.
@@ -204,6 +206,12 @@ void Esp32HostedUpdate::dump_config() {
 
 void Esp32HostedUpdate::check() {
 #ifdef USE_ESP32_HOSTED_HTTP_UPDATE
+#ifdef USE_ESP32_HOSTED_STORAGE_UPDATE
+  if (this->source_url_[0] == '/') {
+    this->storage_check_();
+    return;
+  }
+#endif
   if (!network::is_connected()) {
     ESP_LOGD(TAG, "Network not connected, skipping update check");
     return;
@@ -213,6 +221,12 @@ void Esp32HostedUpdate::check() {
     return;
   }
 
+  this->finish_check_();
+#endif
+}
+
+#ifdef USE_ESP32_HOSTED_HTTP_UPDATE
+void Esp32HostedUpdate::finish_check_() {
   const bool was_available = this->state_ == update::UPDATE_STATE_AVAILABLE;
 
   // Compare versions
@@ -230,10 +244,8 @@ void Esp32HostedUpdate::check() {
   if (this->state_ == update::UPDATE_STATE_AVAILABLE && !was_available && this->update_available_trigger_) {
     this->update_available_trigger_->trigger(this->update_info_);
   }
-#endif
 }
 
-#ifdef USE_ESP32_HOSTED_HTTP_UPDATE
 bool Esp32HostedUpdate::fetch_manifest_() {
   ESP_LOGD(TAG, "Fetching manifest");
 
@@ -268,10 +280,20 @@ bool Esp32HostedUpdate::fetch_manifest_() {
   }
   container->end();
 
+  if (!this->parse_manifest_(json_str)) {
+    ESP_LOGE(TAG, "Failed to parse manifest JSON");
+    this->status_set_error(LOG_STR("Failed to parse manifest"));
+    return false;
+  }
+
+  return true;
+}
+
+bool Esp32HostedUpdate::parse_manifest_(const std::string &json_str) {
   // Parse JSON manifest
   // Format: {"versions": [{"version": "2.7.0", "url": "...", "sha256": "..."}]}
   // Only consider versions <= host library version to avoid compatibility issues
-  bool valid = json::parse_json(json_str, [this](JsonObject root) -> bool {
+  return json::parse_json(json_str, [this](JsonObject root) -> bool {
     if (!root["versions"].is<JsonArray>()) {
       ESP_LOGE(TAG, "Manifest does not contain 'versions' array");
       return false;
@@ -325,6 +347,11 @@ bool Esp32HostedUpdate::fetch_manifest_() {
 
     this->update_info_.latest_version = best_version;
     this->firmware_url_ = best_url;
+    if (best_url.rfind("http", 0) != 0 && best_url[0] != '/') {
+      const char *slash = strrchr(this->source_url_, '/');
+      if (slash != nullptr)
+        this->firmware_url_.insert(0, this->source_url_, slash - this->source_url_ + 1);
+    }
 
     // Parse SHA256 hex string to bytes
     if (!parse_hex(best_sha256, this->firmware_sha256_.data(), 32)) {
@@ -336,14 +363,6 @@ bool Esp32HostedUpdate::fetch_manifest_() {
 
     return true;
   });
-
-  if (!valid) {
-    ESP_LOGE(TAG, "Failed to parse manifest JSON");
-    this->status_set_error(LOG_STR("Failed to parse manifest"));
-    return false;
-  }
-
-  return true;
 }
 
 bool Esp32HostedUpdate::stream_firmware_to_coprocessor_() {
@@ -432,133 +451,192 @@ bool Esp32HostedUpdate::stream_firmware_to_coprocessor_() {
   ESP_LOGI(TAG, "SHA256 verified successfully");
   return true;
 }
-#elif defined(USE_ESP32_HOSTED_STORAGE_UPDATE)
-bool Esp32HostedUpdate::stream_firmware_from_storage_() {
-  ESP_LOGI(TAG, "Reading firmware from '%s'", this->storage_path_.c_str());
-
-  if (storage::global_storage_registry == nullptr) {
-    ESP_LOGE(TAG, "Storage registry not available");
-    this->status_set_error(LOG_STR("Storage not available"));
-    return false;
-  }
-
-  // Resolve the configured path to a mounted PathStorage (filesystem or network) and its
-  // storage-relative remainder. resolve_path returns a pointer into resolver scratch, so the
-  // relative path is copied for the streaming loop.
-  const char *rel_raw = nullptr;
-  storage::PathStorage *ps = storage::global_storage_registry->resolve_path(this->storage_path_.c_str(), &rel_raw);
-  if (ps == nullptr || rel_raw == nullptr) {
-    ESP_LOGE(TAG, "'%s' does not resolve to a mounted storage", this->storage_path_.c_str());
-    this->status_set_error(LOG_STR("Path not on a mounted storage"));
-    return false;
-  }
-  std::string rel(rel_raw);
-
-  // Stat for the total size (also an early existence/type check).
+#endif
+#ifdef USE_ESP32_HOSTED_STORAGE_UPDATE
+storage::PathStorage *Esp32HostedUpdate::open_storage_(const char **rel, uint64_t *size) {
+  storage::PathStorage *ps = storage::global_storage_registry == nullptr
+                                 ? nullptr
+                                 : storage::global_storage_registry->resolve_path(this->storage_path_.c_str(), rel);
   storage::FileStat st{};
-  storage::StorageError serr = ps->stat(rel.c_str(), &st);
-  if (serr != storage::StorageError::STORAGE_ERROR_OK) {
-    ESP_LOGE(TAG, "Cannot stat '%s' (%s)", this->storage_path_.c_str(), storage::error_to_string(serr));
-    this->status_set_error(LOG_STR("Firmware file not found"));
-    return false;
+  if (ps == nullptr || *rel == nullptr || storage::global_storage_worker == nullptr ||
+      storage::global_storage_worker->has_active_task_io(ps) ||
+      ps->stat(*rel, &st) != storage::StorageError::STORAGE_ERROR_OK || st.is_dir || st.size == 0) {
+    ESP_LOGE(TAG, "'%s' is not a readable file on a mounted storage", this->storage_path_.c_str());
+    return nullptr;
   }
-  if (st.is_dir || st.size == 0) {
-    ESP_LOGE(TAG, "'%s' is not a readable firmware file", this->storage_path_.c_str());
-    this->status_set_error(LOG_STR("Invalid firmware file"));
-    return false;
-  }
-  const uint64_t total_size = st.size;
-  ESP_LOGI(TAG, "Firmware size: %llu bytes", static_cast<unsigned long long>(total_size));
+  *size = st.size;
+  return ps;
+}
 
-  // FILESYSTEM storages stream through a DATA-PLANE handle; NETWORK (NFS) is stateless and reads
-  // by path+offset. get_storage_type() is the no-RTTI discrimination hook the API provides.
-  const bool is_fs = ps->get_storage_type() == storage::StorageType::STORAGE_TYPE_FILESYSTEM;
-  storage::FileHandle *handle = nullptr;
-  if (is_fs) {
-    serr = static_cast<storage::FilesystemStorage *>(ps)->open(rel.c_str(), handle, storage::OpenMode::OPEN_MODE_READ);
-    if (serr != storage::StorageError::STORAGE_ERROR_OK) {
-      ESP_LOGE(TAG, "Opening '%s' failed (%s)", this->storage_path_.c_str(), storage::error_to_string(serr));
-      this->status_set_error(LOG_STR("Cannot open firmware file"));
-      return false;
+void Esp32HostedUpdate::close_stream_() {
+  if (this->stream_open_) {
+    storage::global_storage_worker->end_read(this->stream_, [](storage::StorageError) {});
+    this->stream_open_ = false;
+  }
+}
+
+#ifdef USE_ESP32_HOSTED_HTTP_UPDATE
+void Esp32HostedUpdate::storage_check_() {
+  static constexpr uint64_t MANIFEST_MAX = 16384;
+  if (this->stream_open_)
+    return;
+  this->storage_path_ = this->source_url_;
+  const char *rel = nullptr;
+  uint64_t size = 0;
+  storage::PathStorage *ps = this->open_storage_(&rel, &size);
+  if (ps == nullptr || size > MANIFEST_MAX) {
+    this->status_set_error(LOG_STR("Failed to read manifest"));
+    return;
+  }
+  this->manifest_json_.assign(static_cast<size_t>(size), '\0');
+  const storage::StorageError err =
+      storage::global_storage_worker->begin_read(ps, rel, &this->stream_, [this](storage::StorageError e) {
+        if (e != storage::StorageError::STORAGE_ERROR_OK) {
+          this->close_stream_();
+          this->status_set_error(LOG_STR("Failed to read manifest"));
+          return;
+        }
+        this->storage_check_read_(0);
+      });
+  this->stream_open_ = err == storage::StorageError::STORAGE_ERROR_OK;
+  if (!this->stream_open_)
+    this->status_set_error(LOG_STR("Failed to read manifest"));
+}
+
+void Esp32HostedUpdate::storage_check_read_(size_t at) {
+  if (at >= this->manifest_json_.size()) {
+    this->close_stream_();
+    const bool valid = this->parse_manifest_(this->manifest_json_);
+    this->manifest_json_.clear();
+    this->manifest_json_.shrink_to_fit();
+    if (!valid) {
+      ESP_LOGE(TAG, "Failed to parse manifest JSON");
+      this->status_set_error(LOG_STR("Failed to parse manifest"));
+      return;
     }
-  } else if (ps->get_storage_type() != storage::StorageType::STORAGE_TYPE_NETWORK) {
-    ESP_LOGE(TAG, "Storage type of '%s' does not support streaming reads", this->storage_path_.c_str());
-    this->status_set_error(LOG_STR("Unsupported storage type"));
-    return false;
+    this->finish_check_();
+    return;
   }
+  this->got_ = 0;
+  const storage::StorageError err = storage::global_storage_worker->read_chunk(
+      this->stream_, reinterpret_cast<uint8_t *>(&this->manifest_json_[at]), this->manifest_json_.size() - at,
+      &this->got_, [this, at](storage::StorageError e) {
+        if (e != storage::StorageError::STORAGE_ERROR_OK || this->got_ == 0) {
+          this->close_stream_();
+          this->status_set_error(LOG_STR("Failed to read manifest"));
+          return;
+        }
+        this->storage_check_read_(at + this->got_);
+      });
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
+    this->close_stream_();
+    this->status_set_error(LOG_STR("Failed to read manifest"));
+  }
+}
+#endif
 
-  // Begin OTA on coprocessor.
-  esp_err_t err = esp_hosted_slave_ota_begin();  // NOLINT
+void Esp32HostedUpdate::storage_flash_(update::UpdateState prev_state) {
+  this->prev_state_ = prev_state;
+  ESP_LOGI(TAG, "Reading firmware from '%s'", this->storage_path_.c_str());
+  const char *rel = nullptr;
+  storage::PathStorage *ps = this->stream_open_ ? nullptr : this->open_storage_(&rel, &this->total_);
+  if (ps == nullptr) {
+    this->status_set_error(LOG_STR("Firmware file not readable"));
+    this->finish_install_(prev_state, false);
+    return;
+  }
+  this->chunk_ = RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::ALLOC_EXTERNAL).allocate(CHUNK_SIZE);
+  if (this->chunk_ == nullptr) {
+    this->status_set_error(LOG_STR("No memory"));
+    this->finish_install_(prev_state, false);
+    return;
+  }
+  esp_err_t err;
+  {
+    watchdog::WatchdogManager wdt(OTA_WDT_TIMEOUT_MS);
+    err = esp_hosted_slave_ota_begin();  // NOLINT
+  }
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to begin OTA: %s", esp_err_to_name(err));
-    if (is_fs)
-      static_cast<storage::FilesystemStorage *>(ps)->close(handle);
+    RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::ALLOC_EXTERNAL).deallocate(this->chunk_, CHUNK_SIZE);
+    this->chunk_ = nullptr;
     this->status_set_error(LOG_STR("Failed to begin OTA"));
-    return false;
+    this->finish_install_(prev_state, false);
+    return;
   }
-
-  // Stream to the coprocessor while computing SHA256. One reused chunk buffer (MCU) — never the
-  // whole firmware in RAM. Mirrors the http streaming path.
-  sha256::SHA256 hasher;
-  hasher.init();
-
-  uint8_t buffer[CHUNK_SIZE];
-  uint64_t offset = 0;
-  bool ok = true;
-  while (offset < total_size) {
-    size_t want = static_cast<size_t>(std::min<uint64_t>(sizeof(buffer), total_size - offset));
-    size_t got = 0;
-    if (is_fs) {
-      serr = static_cast<storage::FilesystemStorage *>(ps)->read(handle, buffer, want, &got);
-    } else {
-      serr = static_cast<storage::NetworkStorage *>(ps)->read_chunk(rel.c_str(), buffer, offset, want, &got);
-    }
-    App.feed_wdt();
-    yield();
-    if (serr != storage::StorageError::STORAGE_ERROR_OK) {
-      ESP_LOGE(TAG, "Read failed at %llu (%s)", static_cast<unsigned long long>(offset),
-               storage::error_to_string(serr));
-      this->status_set_error(LOG_STR("Firmware read failed"));
-      ok = false;
-      break;
-    }
-    if (got == 0)  // unexpected short read before total_size
-      break;
-
-    hasher.add(buffer, got);
-    err = esp_hosted_slave_ota_write(buffer, got);  // NOLINT
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to write OTA data: %s", esp_err_to_name(err));
-      this->status_set_error(LOG_STR("Failed to write OTA data"));
-      ok = false;
-      break;
-    }
-    offset += got;
-  }
-
-  if (is_fs)
-    static_cast<storage::FilesystemStorage *>(ps)->close(handle);
-
-  if (!ok || offset != total_size) {
-    if (ok)  // loop ended early without an error set
-      this->status_set_error(LOG_STR("Firmware truncated"));
-    esp_hosted_slave_ota_end();  // NOLINT
-    return false;
-  }
-
-  // Verify SHA256 over the streamed bytes.
-  hasher.calculate();
-  if (!hasher.equals_bytes(this->firmware_sha256_.data())) {
-    ESP_LOGE(TAG, "SHA256 mismatch");
-    esp_hosted_slave_ota_end();  // NOLINT
-    this->status_set_error(LOG_STR("SHA256 verification failed"));
-    return false;
-  }
-
-  ESP_LOGI(TAG, "SHA256 verified successfully");
-  return true;
+  this->offset_ = 0;
+  this->last_progress_ = millis();
+  this->hasher_.init();
+  const storage::StorageError serr =
+      storage::global_storage_worker->begin_read(ps, rel, &this->stream_, [this](storage::StorageError e) {
+        if (e != storage::StorageError::STORAGE_ERROR_OK) {
+          ESP_LOGE(TAG, "Opening '%s' failed (%s)", this->storage_path_.c_str(), storage::error_to_string(e));
+          this->storage_flash_done_(false);
+          return;
+        }
+        this->storage_flash_read_();
+      });
+  this->stream_open_ = serr == storage::StorageError::STORAGE_ERROR_OK;
+  if (!this->stream_open_)
+    this->storage_flash_done_(false);
 }
-#else
+
+void Esp32HostedUpdate::storage_flash_read_() {
+  if (this->offset_ >= this->total_) {
+    this->storage_flash_done_(true);
+    return;
+  }
+  const size_t want = static_cast<size_t>(std::min<uint64_t>(CHUNK_SIZE, this->total_ - this->offset_));
+  this->got_ = 0;
+  const storage::StorageError err = storage::global_storage_worker->read_chunk(
+      this->stream_, this->chunk_, want, &this->got_, [this](storage::StorageError e) {
+        if (e != storage::StorageError::STORAGE_ERROR_OK || this->got_ == 0) {
+          ESP_LOGE(TAG, "Read failed at %llu", static_cast<unsigned long long>(this->offset_));
+          this->storage_flash_done_(false);
+          return;
+        }
+        this->hasher_.add(this->chunk_, this->got_);
+        if (esp_hosted_slave_ota_write(this->chunk_, this->got_) != ESP_OK) {  // NOLINT
+          ESP_LOGE(TAG, "Failed to write OTA data");
+          this->storage_flash_done_(false);
+          return;
+        }
+        this->offset_ += this->got_;
+        const uint32_t now = millis();
+        if (now - this->last_progress_ >= 500) {
+          this->last_progress_ = now;
+          this->update_info_.has_progress = true;
+          this->update_info_.progress = this->offset_ * 100.0f / this->total_;
+          this->publish_state();
+        }
+        this->storage_flash_read_();
+      });
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
+    this->storage_flash_done_(false);
+}
+
+void Esp32HostedUpdate::storage_flash_done_(bool ok) {
+  this->close_stream_();
+  if (this->chunk_ != nullptr) {
+    RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::ALLOC_EXTERNAL).deallocate(this->chunk_, CHUNK_SIZE);
+    this->chunk_ = nullptr;
+  }
+  if (ok) {
+    this->hasher_.calculate();
+    ok = this->hasher_.equals_bytes(this->firmware_sha256_.data());
+    if (!ok)
+      ESP_LOGE(TAG, "SHA256 mismatch");
+  }
+  if (!ok) {
+    esp_hosted_slave_ota_end();  // NOLINT
+    this->status_set_error(LOG_STR("Firmware read failed or SHA256 mismatch"));
+  } else {
+    ESP_LOGI(TAG, "SHA256 verified successfully");
+  }
+  this->finish_install_(this->prev_state_, ok);
+}
+#endif
+#if !defined(USE_ESP32_HOSTED_HTTP_UPDATE) && !defined(USE_ESP32_HOSTED_STORAGE_UPDATE)
 bool Esp32HostedUpdate::write_embedded_firmware_to_coprocessor_() {
   if (this->firmware_data_ == nullptr || this->firmware_size_ == 0) {
     ESP_LOGE(TAG, "No firmware data available");
@@ -630,14 +708,25 @@ void Esp32HostedUpdate::perform(bool force) {
   this->update_info_.has_progress = false;
   this->publish_state();
 
-#ifdef USE_ESP32_HOSTED_HTTP_UPDATE
-  if (!this->stream_firmware_to_coprocessor_())
+#if defined(USE_ESP32_HOSTED_HTTP_UPDATE) && defined(USE_ESP32_HOSTED_STORAGE_UPDATE)
+  if (this->firmware_url_[0] == '/') {
+    this->storage_path_ = this->firmware_url_;
+    this->storage_flash_(prev_state);
+    return;
+  }
+  this->finish_install_(prev_state, this->stream_firmware_to_coprocessor_());
+#elif defined(USE_ESP32_HOSTED_HTTP_UPDATE)
+  this->finish_install_(prev_state, this->stream_firmware_to_coprocessor_());
 #elif defined(USE_ESP32_HOSTED_STORAGE_UPDATE)
-  if (!this->stream_firmware_from_storage_())
+  this->storage_flash_(prev_state);
 #else
-  if (!this->write_embedded_firmware_to_coprocessor_())
+  this->finish_install_(prev_state, this->write_embedded_firmware_to_coprocessor_());
 #endif
-  {
+}
+
+void Esp32HostedUpdate::finish_install_(update::UpdateState prev_state, bool ok) {
+  this->update_info_.has_progress = false;
+  if (!ok) {
     this->state_ = prev_state;
     this->publish_state();
     return;
