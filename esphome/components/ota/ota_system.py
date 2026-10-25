@@ -152,7 +152,7 @@ def derive(keep_components: list[str], includes: list[Path]) -> dict[str, Any]:
 
 def write(keep_components: list[str], includes: list[Path]) -> Path:
     derived = derive(keep_components, includes)
-    target = Path(CORE.relative_build_path("ota_system.yaml"))
+    target = CORE.relative_config_path(CORE.config_path.stem, "ota", "ota_system.yaml")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(yaml_util.dump(derived, show_secrets=False), encoding="utf-8", newline="\n")
     return target
