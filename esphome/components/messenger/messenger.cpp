@@ -604,11 +604,14 @@ bool Messenger::receive_webhook(const std::string &json) {
     if (strcmp(object, "whatsapp_business_account") == 0) {
       if (!this->is_enabled(Channel::WHATSAPP))
         return false;
-      for (JsonObject entry : root["entry"].as<JsonArray>()) {
-        for (JsonObject change : entry["changes"].as<JsonArray>()) {
+      JsonArray entries = root["entry"];
+      for (JsonObject entry : entries) {
+        JsonArray changes = entry["changes"];
+        for (JsonObject change : changes) {
           JsonObject value = change["value"];
           const char *profile = value["contacts"][0]["profile"]["name"] | "";
-          for (JsonObject msg : value["messages"].as<JsonArray>()) {
+          JsonArray messages = value["messages"];
+          for (JsonObject msg : messages) {
             const char *from = msg["from"] | "";
             const int64_t chat_id = strtoll(from, nullptr, 10);
             if (!this->is_chat_allowed(Channel::WHATSAPP, chat_id)) {
@@ -652,8 +655,10 @@ bool Messenger::receive_webhook(const std::string &json) {
     if (strcmp(object, "page") == 0) {
       if (!this->is_enabled(Channel::FACEBOOK))
         return false;
-      for (JsonObject entry : root["entry"].as<JsonArray>()) {
-        for (JsonObject event : entry["messaging"].as<JsonArray>()) {
+      JsonArray entries = root["entry"];
+      for (JsonObject entry : entries) {
+        JsonArray events = entry["messaging"];
+        for (JsonObject event : events) {
           JsonObject msg = event["message"];
           if (msg.isNull() || (msg["is_echo"] | false))
             continue;
