@@ -2954,23 +2954,6 @@ async def _write_exclude_components() -> None:
 
 
 @coroutine_with_priority(CoroPriority.FINAL)
-async def _pin_bluedroid_to_loop_core() -> None:
-    opts = CORE.data[KEY_ESP32][KEY_SDKCONFIG_OPTIONS]
-    if not is_idf_sdkconfig_option_enabled("CONFIG_BT_BLUEDROID_ENABLED"):
-        return
-    if is_idf_sdkconfig_option_enabled("CONFIG_FREERTOS_UNICORE"):
-        return
-    if get_esp32_variant() not in (VARIANT_ESP32, VARIANT_ESP32S3, VARIANT_ESP32P4):
-        return
-    if (
-        "CONFIG_BT_BLUEDROID_PINNED_TO_CORE_0" in opts
-        or "CONFIG_BT_BLUEDROID_PINNED_TO_CORE_1" in opts
-    ):
-        return
-    add_idf_sdkconfig_option("CONFIG_BT_BLUEDROID_PINNED_TO_CORE_1", True)
-
-
-@coroutine_with_priority(CoroPriority.FINAL)
 async def _write_arduino_libs_stub(stubs_dir: Path, idf_ver: cv.Version) -> None:
     """Write stub package to skip downloading precompiled Arduino libs."""
     stubs_dir.mkdir(parents=True, exist_ok=True)
@@ -4047,8 +4030,6 @@ async def to_code(config):
 
     # FINAL priority: runs after every require_libc_picolibc_newlib_compat() call
     CORE.add_job(_set_libc_picolibc_newlib_compat)
-
-    CORE.add_job(_pin_bluedroid_to_loop_core)
 
     # FINAL priority: runs after every network/coexistence request_*() call
     CORE.add_job(_reconcile_network_sdkconfig)
