@@ -816,11 +816,7 @@ bool TelegramCall::start_media_(CallSession *s, TlReader call) {
   }
   s->tx_pending = 0;
   esp_peer_default_cfg_t &extra = s->peer_extra;
-  extra.agent_recv_timeout = 100;
-  extra.rtp_cfg.audio_recv_jitter.cache_size = 16384;
-  extra.rtp_cfg.send_pool_size = 16384;
-  extra.rtp_cfg.send_queue_num = 32;
-  extra.max_candidates = 8;
+  extra.agent_recv_timeout = 500;
   esp_peer_cfg_t &cfg = s->peer_cfg;
   cfg.server_lists = s->servers;
   cfg.server_num = s->server_count;
