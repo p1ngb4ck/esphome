@@ -134,15 +134,87 @@ typedef struct
    size_t   ROM_Offset;
 } CMemory;
 
-uint8_t S9xGetByte(uint32_t Address);
-uint16_t S9xGetWord(uint32_t Address);
-void S9xSetByte(uint8_t Byte, uint32_t Address);
-void S9xSetWord(uint16_t Byte, uint32_t Address);
+uint8_t S9xGetByteSlow(uint32_t Address);
+uint16_t S9xGetWordSlow(uint32_t Address);
+void S9xSetByteSlow(uint8_t Byte, uint32_t Address);
+void S9xSetWordSlow(uint16_t Word, uint32_t Address);
 void S9xSetPCBase(uint32_t Address);
 uint8_t* S9xGetMemPointer(uint32_t Address);
 uint8_t* GetBasePointer(uint32_t Address);
 
 extern CMemory Memory;
 extern uint8_t OpenBus;
+
+static inline uint8_t S9xGetByte(uint32_t Address)
+{
+   const int32_t block = (Address >> MEMMAP_SHIFT) & MEMMAP_MASK;
+   uint8_t* GetAddress = Memory.Map[block];
+   if (GetAddress >= (uint8_t*) MAP_LAST)
+   {
+      CPU.Cycles += Memory.MapInfo[block].Speed;
+      if (Memory.MapInfo[block].Type == MAP_TYPE_RAM)
+         CPU.WaitAddress = CPU.PCAtOpcodeStart;
+      return GetAddress[Address & 0xffff];
+   }
+   return S9xGetByteSlow(Address);
+}
+
+static inline uint16_t S9xGetWord(uint32_t Address)
+{
+   if ((Address & 0x0fff) != 0x0fff)
+   {
+      const int32_t block = (Address >> MEMMAP_SHIFT) & MEMMAP_MASK;
+      uint8_t* GetAddress = Memory.Map[block];
+      if (GetAddress >= (uint8_t*) MAP_LAST)
+      {
+         CPU.Cycles += Memory.MapInfo[block].Speed << 1;
+         if (Memory.MapInfo[block].Type == MAP_TYPE_RAM)
+            CPU.WaitAddress = CPU.PCAtOpcodeStart;
+#ifdef FAST_LSB_WORD_ACCESS
+         return *(uint16_t*) (GetAddress + (Address & 0xffff));
+#else
+         return *(GetAddress + (Address & 0xffff)) | (*(GetAddress + (Address & 0xffff) + 1) << 8);
+#endif
+      }
+   }
+   return S9xGetWordSlow(Address);
+}
+
+static inline void S9xSetByte(uint8_t Byte, uint32_t Address)
+{
+   const int32_t block = (Address >> MEMMAP_SHIFT) & MEMMAP_MASK;
+   uint8_t* SetAddress = Memory.Map[block];
+   if (SetAddress >= (uint8_t*) MAP_LAST && Memory.MapInfo[block].Type != MAP_TYPE_ROM)
+   {
+      CPU.WaitAddress = NULL;
+      CPU.Cycles += Memory.MapInfo[block].Speed;
+      SetAddress[Address & 0xffff] = Byte;
+      return;
+   }
+   S9xSetByteSlow(Byte, Address);
+}
+
+static inline void S9xSetWord(uint16_t Word, uint32_t Address)
+{
+   if ((Address & 0x0FFF) != 0x0FFF)
+   {
+      const int32_t block = (Address >> MEMMAP_SHIFT) & MEMMAP_MASK;
+      uint8_t* SetAddress = Memory.Map[block];
+      if (SetAddress >= (uint8_t*) MAP_LAST && Memory.MapInfo[block].Type != MAP_TYPE_ROM)
+      {
+         CPU.WaitAddress = NULL;
+         CPU.Cycles += Memory.MapInfo[block].Speed << 1;
+         SetAddress += Address & 0xffff;
+#ifdef FAST_LSB_WORD_ACCESS
+         *(uint16_t*) SetAddress = Word;
+#else
+         *SetAddress = (uint8_t) Word;
+         *(SetAddress + 1) = Word >> 8;
+#endif
+         return;
+      }
+   }
+   S9xSetWordSlow(Word, Address);
+}
 
 #endif /* _memmap_h_ */
