@@ -29,7 +29,7 @@ struct CallSession;
 class TelegramCall {
  public:
   static constexpr uint32_t TASK_STACK = 16384;
-  static constexpr UBaseType_t TASK_PRIORITY = 5;
+  static constexpr UBaseType_t TASK_PRIORITY = 10;
 
   void attach(mtproto::Mtproto *mtproto, Component *owner);
   void set_audio(resampler::ResamplerMicrophone *microphone, speaker::Speaker *speaker);

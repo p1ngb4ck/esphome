@@ -87,6 +87,8 @@ constexpr size_t MAX_SERVERS = 8;
 constexpr size_t MAX_CANDIDATES = 16;
 constexpr size_t SDP_SIZE = 2048;
 constexpr int DEFAULT_PT = 111;
+constexpr uint32_t PLAYOUT_MS = 60;
+constexpr uint32_t PLAY_WAIT_MS = 20;
 
 struct Event {
   uint8_t type;
@@ -129,6 +131,7 @@ struct CallSession {
   int16_t pcm[DECODE_SAMPLES];
   uint8_t packet[MAX_PACKET];
   uint32_t pts;
+  bool playing;
   char local_ufrag[64];
   char local_pwd[128];
   char local_hash[16];
@@ -323,7 +326,8 @@ bool TelegramCall::start(int64_t user_id, int64_t access_hash, const std::string
   this->session_->user_id = user_id;
   this->session_->user_hash = access_hash;
   this->set_state_(CallState::OUTGOING);
-  if (!this->task_.create(&TelegramCall::task_entry_, "tg_call", TASK_STACK, this, TASK_PRIORITY, false, 1)) {
+  if (!this->task_.create(&TelegramCall::task_entry_, "tg_call", TASK_STACK, this, TASK_PRIORITY, false,
+                          LOOP_TASK_CORE)) {
     this->fail_("No memory for the call task");
     this->finish_();
     return false;
@@ -335,7 +339,8 @@ void TelegramCall::accept() {
   if (this->state_.load() != CallState::INCOMING || this->session_ == nullptr || this->task_.is_created())
     return;
   this->set_state_(CallState::CONNECTING);
-  if (!this->task_.create(&TelegramCall::task_entry_, "tg_call", TASK_STACK, this, TASK_PRIORITY, false, 1)) {
+  if (!this->task_.create(&TelegramCall::task_entry_, "tg_call", TASK_STACK, this, TASK_PRIORITY, false,
+                          LOOP_TASK_CORE)) {
     this->fail_("No memory for the call task");
     this->post_(EVENT_DECLINE, nullptr, 0);
     this->hangup();
@@ -1246,10 +1251,29 @@ void TelegramCall::pump_audio_(CallSession *s) {
 void TelegramCall::play_audio_(CallSession *s, const uint8_t *data, size_t length) {
   if (s->decoder == nullptr)
     return;
+  if (!s->playing) {
+    s->playing = true;
+    memset(s->pcm, 0, sizeof(s->pcm));
+    size_t silence = SAMPLE_RATE * sizeof(int16_t) * PLAYOUT_MS / 1000;
+    while (silence > 0) {
+      const size_t chunk = std::min(silence, sizeof(s->pcm));
+      this->speaker_->play(reinterpret_cast<const uint8_t *>(s->pcm), chunk, 0);
+      silence -= chunk;
+    }
+  }
   const int frames = opus_decode(s->decoder, data, static_cast<opus_int32>(length), s->pcm,
                                  static_cast<int>(DECODE_SAMPLES), 0);
-  if (frames > 0)
-    this->speaker_->play(reinterpret_cast<const uint8_t *>(s->pcm), static_cast<size_t>(frames) * sizeof(int16_t), 0);
+  if (frames <= 0)
+    return;
+  const uint8_t *pcm = reinterpret_cast<const uint8_t *>(s->pcm);
+  size_t left = static_cast<size_t>(frames) * sizeof(int16_t);
+  while (left > 0) {
+    const size_t written = this->speaker_->play(pcm, left, pdMS_TO_TICKS(PLAY_WAIT_MS));
+    if (written == 0)
+      break;
+    pcm += written;
+    left -= written;
+  }
 }
 
 }
