@@ -316,10 +316,7 @@ PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
   in this order its state structs (`S9xInitHot()` before the core starts: CPU, ICPU, APU, IAPU, SoundData, Settings,
   Memory, PPU, IPPU, `S9xDMA`, `S9xBG`, GFX, 6.8 KiB; pointers in `.bss` behind macros of their names, `BG` and `DMA`
   renamed as `PPU.BG` is a field), the 64 KiB VRAM (one block; without a free 64 KiB block it goes to the pool), the
-  memory map `Map` and `MapInfo` and the palette `IPPU.ScreenColors`, 95 KiB together; for the VRAM's one block a
-  constructor (priority 101, before ipc, esp_timer, the main task, IDLE, Tmr Svc and sys_evt exist) takes 64.5 KiB in
-  the largest internal heap region, so everything of the boot is placed around it, and the first `service()` after
-  the components' setup gives it back as one free block, Mega Drive the Z80 RAM `ZRAM`, the YM2612's `sin_tab`, the VDP's `SAT_CACHE`
+  memory map `Map` and `MapInfo` and the palette `IPPU.ScreenColors`, 95 KiB together, Mega Drive the Z80 RAM `ZRAM`, the YM2612's `sin_tab`, the VDP's `SAT_CACHE`
   and `CRAM565`, allocated by its port before the core starts),
   else the pool (`POOL_USER_GAME`, owner row: outputs, video, desktop); every piece in a table of 96, all given back at
   the end. The cores' hot structs (nofrendo: nes, cpu, mem with its RAM as a pointer, ppu, apu) are allocated in their
