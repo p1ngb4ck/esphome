@@ -55,6 +55,7 @@ static constexpr size_t SPARE_SLOTS = 1;
 static USBBluetooth *g_instance = nullptr;
 static const esp_bluedroid_hci_driver_callbacks_t *g_host_cb = nullptr;
 static bool g_stack_started = false;
+static std::atomic<bool> g_stack_starting{false};
 
 static void hci_drv_send(uint8_t *data, uint16_t len) {
   if (g_instance != nullptr)
@@ -82,6 +83,7 @@ static void bluedroid_start_task(void * /*arg*/) {
   } else {
     ESP_LOGI(TAG, "Bluedroid running on the USB dongle");
   }
+  g_stack_starting.store(false, std::memory_order_release);
   vTaskDelete(nullptr);
 }
 #endif
@@ -362,9 +364,12 @@ void USBBluetooth::start_bluedroid_() {
   }
   this->stack_attached_.store(true, std::memory_order_release);
   g_stack_started = true;
+  g_stack_starting.store(true, std::memory_order_release);
   if (xTaskCreatePinnedToCore(bluedroid_start_task, "usb_bt_start", 4096, nullptr, 5, nullptr, LOOP_TASK_CORE) !=
-      pdPASS)
+      pdPASS) {
+    g_stack_starting.store(false, std::memory_order_release);
     ESP_LOGE(TAG, "Starting Bluedroid failed: no task");
+  }
 }
 #endif
 
@@ -595,6 +600,21 @@ void USBBluetooth::download_fragment_(uint32_t i) {
       this->probe_identity_();
     });
   });
+}
+
+bool USBBluetooth::starting_() const {
+#ifdef USE_USB_BLUETOOTH_HCI_SPLIT
+  return this->stack_attached_.load(std::memory_order_acquire) && esp32_ble::global_ble != nullptr &&
+         !esp32_ble::global_ble->is_active() && !esp32_ble::global_ble->is_failed();
+#elif defined(USE_USB_BLUETOOTH_BLUEDROID)
+#ifdef USE_BT_PERSISTENCE
+  if (this->waiting_for_store_.load(std::memory_order_acquire))
+    return true;
+#endif
+  return g_stack_starting.load(std::memory_order_acquire);
+#else
+  return false;
+#endif
 }
 
 void USBBluetooth::probe_done_(bool ok) {
