@@ -20,6 +20,7 @@ void sha1_parts(const uint8_t *a, size_t a_len, const uint8_t *b, size_t b_len, 
 void sha256_parts(const uint8_t *a, size_t a_len, const uint8_t *b, size_t b_len, uint8_t *out32);
 
 bool aes_ige(const uint8_t *key, const uint8_t *iv, uint8_t *data, size_t length, bool encrypt);
+bool aes_ctr(const uint8_t *key, const uint8_t *iv, uint8_t *data, size_t length);
 bool pbkdf2_sha512(const uint8_t *password, size_t password_len, const uint8_t *salt, size_t salt_len,
                    uint32_t iterations, uint8_t *out64);
 

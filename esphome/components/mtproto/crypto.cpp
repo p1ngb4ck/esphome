@@ -193,6 +193,52 @@ bool aes_ige(const uint8_t *key, const uint8_t *iv, uint8_t *data, size_t length
   return ok;
 }
 
+bool aes_ctr(const uint8_t *key, const uint8_t *iv, uint8_t *data, size_t length) {
+#ifdef MTPROTO_PSA
+  psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+  psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
+  psa_set_key_bits(&attributes, 256);
+  psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_ENCRYPT);
+  psa_set_key_algorithm(&attributes, PSA_ALG_ECB_NO_PADDING);
+  psa_key_id_t key_id = 0;
+  if (psa_import_key(&attributes, key, 32, &key_id) != PSA_SUCCESS)
+    return false;
+#else
+  mbedtls_aes_context ctx;
+  mbedtls_aes_init(&ctx);
+  if (mbedtls_aes_setkey_enc(&ctx, key, 256) != 0) {
+    mbedtls_aes_free(&ctx);
+    return false;
+  }
+#endif
+  uint8_t counter[16];
+  uint8_t stream[16];
+  memcpy(counter, iv, 16);
+  bool ok = true;
+  for (size_t offset = 0; offset < length && ok; offset += 16) {
+#ifdef MTPROTO_PSA
+    size_t produced = 0;
+    ok = psa_cipher_encrypt(key_id, PSA_ALG_ECB_NO_PADDING, counter, 16, stream, 16, &produced) == PSA_SUCCESS &&
+         produced == 16;
+#else
+    ok = mbedtls_aes_crypt_ecb(&ctx, MBEDTLS_AES_ENCRYPT, counter, stream) == 0;
+#endif
+    const size_t chunk = std::min<size_t>(16, length - offset);
+    for (size_t i = 0; i < chunk; i++)
+      data[offset + i] ^= stream[i];
+    for (int i = 15; i >= 0; i--) {
+      if (++counter[i] != 0)
+        break;
+    }
+  }
+#ifdef MTPROTO_PSA
+  psa_destroy_key(key_id);
+#else
+  mbedtls_aes_free(&ctx);
+#endif
+  return ok;
+}
+
 bool pbkdf2_sha512(const uint8_t *password, size_t password_len, const uint8_t *salt, size_t salt_len,
                    uint32_t iterations, uint8_t *out64) {
 #ifdef MTPROTO_PSA
