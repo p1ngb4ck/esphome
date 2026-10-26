@@ -157,6 +157,9 @@ void SimpleVideoPlayer::setup() {
     this->audio_sample_rate_ = AUDIO_SAMPLE_RATE;
     this->audio_bits_per_sample_ = AUDIO_BITS_PER_SAMPLE;
     this->audio_frame_bytes_ = AUDIO_BYTES_PER_FRAME;
+    this->speaker_->add_audio_output_callback([this](uint32_t frames, int64_t) {
+      this->sound_played_.fetch_add(frames, std::memory_order_relaxed);
+    });
 
     this->sound_block_len_ = this->sound_bytes_(0);
     this->sound_lead_ms_ = 0;
@@ -862,7 +865,12 @@ void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
   this->duration_frames_.store(0, std::memory_order_relaxed);
   this->position_frame_.store(0, std::memory_order_relaxed);
 #ifdef USE_AUDIO
-  this->audio_lead_us_ = std::min<uint32_t>(this->audio_latency_.value(), this->max_audio_latency_ms_) * 1000;
+  {
+    const uint32_t preroll = std::min<uint32_t>(this->audio_preroll_.value(), this->max_audio_latency_ms_);
+    const uint32_t lead = std::min<uint32_t>(this->audio_latency_.value() + preroll, this->max_audio_latency_ms_);
+    this->audio_lead_us_ = lead * 1000;
+    this->audio_preroll_us_ = preroll * 1000;
+  }
 #endif
   this->state_.store(PlayerState::PLAYING, std::memory_order_release);
   this->note_state_();
@@ -1498,6 +1506,8 @@ void SimpleVideoPlayer::playback_loop_() {
                  !playing() || millis() - start >= 1000;
         });
   }
+  this->sound_base_ =
+      this->sound_written_.load(std::memory_order_acquire) - this->sound_played_.load(std::memory_order_acquire);
 #endif
   this->av_started_.store(true, std::memory_order_release);
   this->audio_wait_.wake();
@@ -3343,6 +3353,37 @@ void SimpleVideoPlayer::restart_audio_feed_() {
   }
 }
 
+void SimpleVideoPlayer::sound_preroll_(TickType_t wait) {
+  if (this->audio_preroll_us_ == 0 || this->audio_temp_buffer_ == nullptr ||
+      this->state_.load(std::memory_order_acquire) != PlayerState::PLAYING)
+    return;
+  const auto &info = this->speaker_->get_audio_stream_info();
+  const uint32_t frame_bytes = info.frames_to_bytes(1);
+  if (frame_bytes == 0)
+    return;
+  const int32_t in_flight = static_cast<int32_t>(this->sound_written_.load(std::memory_order_acquire) -
+                                                 this->sound_played_.load(std::memory_order_acquire) -
+                                                 this->sound_base_);
+  const int64_t want = static_cast<int64_t>(info.get_sample_rate()) * this->audio_preroll_us_ / 1000000 -
+                       std::max<int32_t>(in_flight, 0);
+  if (want <= 0)
+    return;
+  size_t remaining = static_cast<size_t>(want) * frame_bytes;
+  const size_t chunk = AUDIO_TEMP_BUFFER_SIZE - AUDIO_TEMP_BUFFER_SIZE % frame_bytes;
+  memset(this->audio_temp_buffer_, 0, std::min(chunk, remaining));
+  size_t pending = 0;
+  while (remaining > 0 && !this->audio_task_stop_ && !this->audio_hold_.load(std::memory_order_acquire)) {
+    const size_t written = this->speaker_->play(this->audio_temp_buffer_, std::min(chunk, remaining), wait);
+    remaining -= std::min(written, remaining);
+    pending += written;
+    if (pending >= frame_bytes) {
+      this->sound_written_.fetch_add(pending / frame_bytes, std::memory_order_release);
+      pending %= frame_bytes;
+    }
+    esp_task_wdt_reset();
+  }
+}
+
 // Reader task. The cursor starts where the reader is.
 void SimpleVideoPlayer::reset_audio_cursor_() {
   this->audio_cursor_pos_ = this->file_reader_ ? this->file_reader_->tell() : 0;
@@ -3451,6 +3492,12 @@ void SimpleVideoPlayer::audio_processing_loop_() {
   // only bounds how soon a stop or a seek is seen while neither comes.
   static constexpr TickType_t AUDIO_WAIT = pdMS_TO_TICKS(20);
   uint32_t audio_decode_failures = 0;
+  const uint32_t frame_bytes = this->speaker_->get_audio_stream_info().frames_to_bytes(1);
+  const uint64_t rate = this->speaker_->get_audio_stream_info().get_sample_rate();
+  size_t written_bytes = 0;
+  uint32_t ms_base = this->audio_decoder_ ? this->audio_decoder_->get_playback_ms() : 0;
+  this->sound_preroll_(AUDIO_WAIT);
+  uint32_t frames_base = this->sound_written_.load(std::memory_order_relaxed);
 
   while (!this->audio_task_stop_) {
     esp_task_wdt_reset();
@@ -3474,6 +3521,10 @@ void SimpleVideoPlayer::audio_processing_loop_() {
           },
           portMAX_DELAY);
       esp_task_wdt_add(nullptr);
+      written_bytes = 0;
+      ms_base = this->audio_decoder_ ? this->audio_decoder_->get_playback_ms() : 0;
+      this->sound_preroll_(AUDIO_WAIT);
+      frames_base = this->sound_written_.load(std::memory_order_relaxed);
       continue;
     }
 
@@ -3484,6 +3535,10 @@ void SimpleVideoPlayer::audio_processing_loop_() {
     const bool use_decoder = this->audio_use_decoder_.load(std::memory_order_acquire);
     if (use_decoder) {
       audio::AudioDecoderState decode_state = this->audio_decoder_->decode(false);
+      this->sound_written_.store(
+          frames_base + static_cast<uint32_t>(
+                            static_cast<uint64_t>(this->audio_decoder_->get_playback_ms() - ms_base) * rate / 1000),
+          std::memory_order_release);
 
       if (decode_state == audio::AudioDecoderState::FAILED) {
         if (++audio_decode_failures >= AUDIO_MAX_CONSECUTIVE_DECODE_FAILURES) {
@@ -3514,6 +3569,11 @@ void SimpleVideoPlayer::audio_processing_loop_() {
         const size_t written = this->speaker_->play(write_ptr, bytes_remaining, AUDIO_WAIT);
         bytes_remaining -= written;
         write_ptr += written;
+        written_bytes += written;
+        if (frame_bytes != 0 && written_bytes >= frame_bytes) {
+          this->sound_written_.fetch_add(written_bytes / frame_bytes, std::memory_order_release);
+          written_bytes %= frame_bytes;
+        }
         esp_task_wdt_reset();
       }
     }

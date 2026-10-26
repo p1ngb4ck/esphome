@@ -159,6 +159,13 @@ each start, clamped to `max_audio_latency_ms_`: what the pool's ring room leaves
 `bt_out.set_max_output_delay_ms()`, the BT delay slider's and number's most). The session's ring and
 sound block are sized for this lead; sound released when the cursor leads by `audio_lead_frames_`
 (the cursor peeks the ring that far ahead); picture clock anchored that much later.
+`audio_preroll` (device YAML: the a2dp buffer while the output is Bluetooth, else 0): at a feed's start (playback,
+resume, after a seek) the audio task writes silence to `speaker_` so that the feed's first sound has that much in front
+of it in the speaker chain - minus what of its own sound is still in the chain (`sound_written_` against
+`sound_played_`, the speaker's audio output callback; `sound_base_` taken at the playback's start). The lead is
+audio_latency + audio_preroll (clamped together), so the picture stays with the sound and the chain keeps that much
+sound ahead of what it plays; without it the cursor writes the sound only about one video frame ahead of what a
+stream started at the sound's release plays. Pacing stays on the wall clock.
 
 ## 9. PSRAM pool and buffers (today)
 

@@ -417,6 +417,7 @@ CONF_HTTP_REQUEST_ID = "http_request_id"
 CONF_WIDGET_ID = "widget_id"
 CONF_AUDIO_CODEC = "audio_codec"
 CONF_AUDIO_LATENCY = "audio_latency"
+CONF_AUDIO_PREROLL = "audio_preroll"
 CONF_RELATIVE = "relative"
 CONF_PLAYLIST = "playlist"
 CONF_CONTROLS = "controls"
@@ -927,6 +928,9 @@ CONFIG_SCHEMA = cv.All(
             # How long the audio output takes to be heard (a Bluetooth sink's buffer, say): the
             # sound starts this much before the picture. A lambda is read at every start.
             cv.Optional(CONF_AUDIO_LATENCY): cv.templatable(
+                cv.positive_time_period_milliseconds
+            ),
+            cv.Optional(CONF_AUDIO_PREROLL): cv.templatable(
                 cv.positive_time_period_milliseconds
             ),
             # The player's PSRAM, one block taken at boot: every buffer it uses is cut from it
@@ -1484,6 +1488,14 @@ async def to_code(config):
                 to_exp=lambda period: period.total_milliseconds,
             )
             cg.add(var.set_audio_latency(latency))
+        if CONF_AUDIO_PREROLL in config:
+            preroll = await cg.templatable(
+                config[CONF_AUDIO_PREROLL],
+                [],
+                cg.uint32,
+                to_exp=lambda period: period.total_milliseconds,
+            )
+            cg.add(var.set_audio_preroll(preroll))
         if config.get(CONF_AUDIO_ROUTER):
             cg.add_define("SVP_AUDIO_ROUTER")
             cg.add(var.set_audio_router(spkr))

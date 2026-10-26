@@ -387,6 +387,7 @@ class SimpleVideoPlayer : public Component
   void set_speaker(speaker::Speaker *speaker) { this->speaker_ = speaker; }
   /// How long the audio output takes to be heard (ms): the sound starts this much before the picture.
   template<typename V> void set_audio_latency(V latency) { this->audio_latency_ = latency; }
+  template<typename V> void set_audio_preroll(V preroll) { this->audio_preroll_ = preroll; }
   /// The most the sound may lead with the prebuffer set (ms): ring and sound fit in their share.
   uint32_t max_audio_latency() const { return this->max_audio_latency_ms_; }
   void set_speaker_channel_mode(SpeakerChannelMode mode) { this->speaker_channel_mode_ = mode; }
@@ -1954,6 +1955,8 @@ class SimpleVideoPlayer : public Component
   // the frame read skips the ones it fed. At the start the sound is released audio_lead_us_ before
   // the first frame is shown.
   TemplatableFn<uint32_t> audio_latency_{};
+  TemplatableFn<uint32_t> audio_preroll_{};
+  uint32_t audio_preroll_us_{0};
   uint32_t audio_lead_us_{0};      // this session's latency, read when playback starts
   uint32_t audio_lead_frames_{0};  // the same in video frames
   uint64_t audio_cursor_pos_{0};   // reader position of the next chunk the cursor reads (reader task)
@@ -1968,6 +1971,10 @@ class SimpleVideoPlayer : public Component
   void reader_audio_chunk_(const AVIFrame &frame, const uint8_t *data, size_t size);
   void reader_passed_video_();
   void reset_audio_cursor_();
+  std::atomic<uint32_t> sound_written_{0};
+  std::atomic<uint32_t> sound_played_{0};
+  uint32_t sound_base_{0};
+  void sound_preroll_(TickType_t wait);
 #endif
   uint32_t avi_fps_num_{0};
   uint32_t avi_fps_den_{0};
