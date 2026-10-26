@@ -137,7 +137,8 @@ static void Sanitize(char* str, size_t bufsize)
 /**********************************************************************************************/
 bool S9xInitMemory(void)
 {
-   Memory.VRAM  = (uint8_t*)emu_calloc_hot(1, VRAM_SIZE);
+   if (Memory.VRAM == NULL)
+      Memory.VRAM = (uint8_t*)emu_calloc_hot(1, VRAM_SIZE);
    Memory.RAM   = (uint8_t*)malloc(RAM_SIZE);
    Memory.SRAM  = (uint8_t*)malloc(SRAM_SIZE);
    Memory.FillRAM = (uint8_t*)malloc(0x8000);

@@ -82,8 +82,10 @@ void JustifierButtons(uint32_t *justifiers)
 
 bool snes_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels)
 {
-    if (!S9xInitHot())
+    uint8_t *vram = (uint8_t *)emu_calloc_hot(1, VRAM_SIZE);
+    if (vram == NULL || !S9xInitHot())
         return false;
+    Memory.VRAM = vram;
     s_channels = channels > 1 ? 2 : 1;
     s_rate = rate;
     s_frame = calloc(SNES_WIDTH * SNES_HEIGHT_EXTENDED, sizeof(uint16_t));
