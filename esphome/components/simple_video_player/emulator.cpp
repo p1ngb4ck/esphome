@@ -1263,11 +1263,13 @@ bool GameEmulator::ppa_done_cb_(ppa_client_handle_t client, ppa_event_data_t *ev
   return woken == pdTRUE;
 }
 
-void GameEmulator::finish_ppa_() {
+void GameEmulator::finish_ppa_(bool wait) {
   if (!this->ppa_busy_)
     return;
+  if (xSemaphoreTake(this->ppa_done_, wait ? portMAX_DELAY : 0) != pdTRUE)
+    return;
   this->ppa_busy_ = false;
-  xSemaphoreTake(this->ppa_done_, portMAX_DELAY);
+  this->ppa_deferred_ = false;
   SimpleVideoPlayer *p = this->parent_;
   p->direct_show_(this->ppa_fb_, 0, 0, static_cast<int>(p->dsi_out_w_), static_cast<int>(p->dsi_out_h_), 0);
 }
@@ -1338,6 +1340,7 @@ void GameEmulator::release_output_() {
 void GameEmulator::task_entry_(void *arg) {
   auto *emu = static_cast<GameEmulator *>(arg);
   emu->task_loop_();
+  emu->finish_ppa_();
   emu->link_note_(LINK_BYE);
   emu->task_done_.store(true, std::memory_order_release);
   App.wake_loop_threadsafe();
@@ -1347,6 +1350,7 @@ void GameEmulator::task_entry_(void *arg) {
 
 bool GameEmulator::park_() {
   if (this->task_pause_.load(std::memory_order_acquire)) {
+    this->finish_ppa_();
     this->pace_reset_();
     this->link_note_(LINK_PAUSE);
     this->task_parked_.store(true, std::memory_order_release);
@@ -1393,7 +1397,7 @@ void GameEmulator::task_loop_() {
     this->draw_frame_(this->core_->video());
     this->play_audio_();
     this->pace_();
-    this->finish_ppa_();
+    this->finish_ppa_(!this->ppa_deferred_);
   }
 }
 
@@ -1405,7 +1409,7 @@ bool GameEmulator::host_frame_(uint16_t *pad1, uint16_t *pad2) {
   this->draw_frame_(this->core_->video());
   this->play_audio_();
   this->pace_();
-  this->finish_ppa_();
+  this->finish_ppa_(!this->ppa_deferred_);
   if (!this->park_())
     return false;
   uint16_t pads[2];
@@ -1418,6 +1422,7 @@ bool GameEmulator::host_frame_(uint16_t *pad1, uint16_t *pad2) {
 
 void GameEmulator::draw_frame_(const EmuVideo &video) {
   SimpleVideoPlayer *p = this->parent_;
+  this->finish_ppa_();
   if (p->direct_flips_() && !p->dsi_->scanout_flipped())
     return;
   size_t len = 0;
@@ -1474,6 +1479,7 @@ void GameEmulator::draw_frame_(const EmuVideo &video) {
     if (ppa_do_scale_rotate_mirror(this->ppa_, &cfg) == ESP_OK) {
       this->ppa_fb_ = fb;
       this->ppa_busy_ = true;
+      this->ppa_deferred_ = straight && video.double_buffered;
       return;
     }
   }

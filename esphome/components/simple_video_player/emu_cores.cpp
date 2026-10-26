@@ -41,7 +41,7 @@ class PortCore final : public EmuCore {
   EmuVideo video() override {
     emu_port_video_t v{};
     this->api_->video(&v);
-    return {v.pixels, v.palette, v.stride, v.width, v.height};
+    return {v.pixels, v.palette, v.stride, v.width, v.height, v.buffers > 1};
   }
   const int16_t *audio(size_t *frames) override { return this->api_->audio(frames); }
   uint32_t sample_rate() const override { return this->rate_; }

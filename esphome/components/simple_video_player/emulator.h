@@ -33,6 +33,7 @@ struct EmuVideo {
   uint32_t stride{0};
   uint16_t width{0};
   uint16_t height{0};
+  bool double_buffered{false};
 };
 
 class EmuCore {
@@ -265,7 +266,7 @@ class GameEmulator
   bool host_frame_(uint16_t *pad1, uint16_t *pad2);
   void draw_frame_(const EmuVideo &video);
   bool draw_cpu_(const EmuVideo &video, uint8_t *fb);
-  void finish_ppa_();
+  void finish_ppa_(bool wait = true);
   static bool ppa_done_cb_(ppa_client_handle_t client, ppa_event_data_t *event, void *arg);
   void play_audio_();
 
@@ -327,6 +328,7 @@ class GameEmulator
   ppa_client_handle_t ppa_{nullptr};
   SemaphoreHandle_t ppa_done_{nullptr};
   uint8_t *ppa_fb_{nullptr};
+  bool ppa_deferred_{false};
   bool ppa_busy_{false};
   uint32_t factor_{1};
   int32_t out_x_{0};

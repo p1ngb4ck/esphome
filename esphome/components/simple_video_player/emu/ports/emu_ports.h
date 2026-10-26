@@ -29,6 +29,7 @@ typedef struct {
     uint32_t stride;
     uint16_t width;
     uint16_t height;
+    uint8_t buffers;
 } emu_port_video_t;
 
 bool emu_host_frame(uint16_t *pad1, uint16_t *pad2);

@@ -4,6 +4,8 @@
 #include "snes9x.h"
 
 static uint16_t *s_frame;
+static uint16_t *s_frames[2];
+static uint8_t s_back;
 static int16_t *s_stereo;
 static int16_t *s_mix;
 static size_t s_mix_frames;
@@ -88,10 +90,13 @@ bool snes_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels)
     Memory.VRAM = vram;
     s_channels = channels > 1 ? 2 : 1;
     s_rate = rate;
-    s_frame = calloc(SNES_WIDTH * SNES_HEIGHT_EXTENDED, sizeof(uint16_t));
+    s_frames[0] = calloc(SNES_WIDTH * SNES_HEIGHT_EXTENDED, sizeof(uint16_t));
+    s_frames[1] = calloc(SNES_WIDTH * SNES_HEIGHT_EXTENDED, sizeof(uint16_t));
+    s_back = 0;
+    s_frame = s_frames[0];
     s_stereo = calloc((rate / 50 + 1) * 2, sizeof(int16_t));
     s_mix = calloc((rate / 50 + 1) * s_channels, sizeof(int16_t));
-    if (s_frame == NULL || s_stereo == NULL || s_mix == NULL)
+    if (s_frames[0] == NULL || s_frames[1] == NULL || s_stereo == NULL || s_mix == NULL)
         return false;
     Settings.CyclesPercentage = 100;
     Settings.H_Max = SNES_CYCLES_PER_SCANLINE;
@@ -118,8 +123,10 @@ void snes_port_frame(uint16_t pad1, uint16_t pad2)
     (void)pad2;
     s_pad = pad1;
     IPPU.RenderThisFrame = true;
-    GFX.Screen = (uint8_t *)s_frame;
+    GFX.Screen = (uint8_t *)s_frames[s_back];
     S9xMainLoop();
+    s_frame = s_frames[s_back];
+    s_back ^= 1;
     const uint32_t fps = Memory.ROMFramesPerSecond > 0 ? (uint32_t)Memory.ROMFramesPerSecond : 60;
     s_acc += s_rate;
     const size_t frames = s_acc / fps;
@@ -147,6 +154,7 @@ void snes_port_video(emu_port_video_t *video)
     video->pixels = (const uint8_t *)s_frame;
     video->palette = NULL;
     video->stride = SNES_WIDTH * 2;
+    video->buffers = 2;
     video->width = SNES_WIDTH;
     video->height = (uint16_t)(IPPU.RenderedScreenHeight > 0 && IPPU.RenderedScreenHeight <= SNES_HEIGHT_EXTENDED
                                    ? IPPU.RenderedScreenHeight
