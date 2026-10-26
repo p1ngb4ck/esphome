@@ -126,6 +126,8 @@ FACEBOOK_SCHEMA = cv.Schema(CHANNEL_BASE)
 def _request_opus(config: ConfigType) -> ConfigType:
     if CONF_MICROPHONE in config or CONF_CALL in config.get(CONF_TELEGRAM, {}):
         audio.request_opus_support()
+    if CONF_CALL in config.get(CONF_TELEGRAM, {}):
+        network.require_ipv6("messenger")(config)
     return config
 
 
