@@ -29,6 +29,7 @@ static constexpr uint32_t MEDIA_TASK_STACK = 8192;
 static constexpr UBaseType_t MEDIA_TASK_PRIORITY = 10;
 static constexpr size_t RX_PACKET_SIZE = 1500;
 static constexpr uint32_t TX_RING_MS = 100;
+static constexpr size_t RX_RING_BYTES = 4096;
 static constexpr uint16_t MAX_CONCEAL = 5;
 static constexpr uint8_t DTMF_FRAMES = 8;
 static constexpr uint8_t DTMF_GAP_FRAMES = 3;
@@ -84,8 +85,11 @@ bool CallMedia::start(const MediaConfig &config, speaker::Speaker *speaker, Medi
   this->held_ = alloc_external<Held>(HELD_PACKETS);
   this->tx_ring_ = ring_buffer::RingBuffer::create(config.pcm_rate * config.pcm_channels * sizeof(int16_t) *
                                                    TX_RING_MS / 1000);
+  if (config.transport != nullptr)
+    this->rx_ring_ = ring_buffer::RingBuffer::create(RX_RING_BYTES);
   if (this->rx_packet_ == nullptr || this->tx_packet_ == nullptr || this->pcm_ == nullptr ||
-      this->last_frame_ == nullptr || this->held_ == nullptr || this->tx_ring_ == nullptr) {
+      this->last_frame_ == nullptr || this->held_ == nullptr || this->tx_ring_ == nullptr ||
+      (config.transport != nullptr && this->rx_ring_ == nullptr)) {
     ESP_LOGE(TAG, "No PSRAM for the call's buffers");
     this->release();
     return false;
@@ -111,6 +115,7 @@ bool CallMedia::start(const MediaConfig &config, speaker::Speaker *speaker, Medi
   this->tx_ts_ = esp_random();
   this->tx_marker_ = true;
   this->rx_started_ = false;
+  this->rx_pending_ = 0;
   this->dtmf_seen_ = false;
   this->dtmf_event_ = -1;
   this->dtmf_gap_ = 0;
@@ -151,6 +156,7 @@ bool CallMedia::release() {
   free_external(this->last_frame_, this->frame_bytes_ / sizeof(int16_t));
   free_external(this->held_, HELD_PACKETS);
   this->tx_ring_.reset();
+  this->rx_ring_.reset();
   if (this->wake_fd_ >= 0) {
     ::close(this->wake_fd_);
     this->wake_fd_ = -1;
@@ -170,6 +176,20 @@ void CallMedia::on_mic_data(const std::vector<uint8_t> &data) {
       const uint64_t one = 1;
       ::write(this->wake_fd_, &one, sizeof(one));
     }
+  }
+  this->mic_users_.fetch_sub(1);
+}
+
+void CallMedia::on_payload(const uint8_t *payload, size_t len) {
+  if (len == 0 || len > MAX_PAYLOAD)
+    return;
+  this->mic_users_.fetch_add(1);
+  if (this->tx_active_.load() && this->rx_ring_ != nullptr && this->rx_ring_->free() >= sizeof(uint16_t) + len) {
+    const uint16_t length = static_cast<uint16_t>(len);
+    this->rx_ring_->write_without_replacement(&length, sizeof(length), 0);
+    this->rx_ring_->write_without_replacement(payload, len, 0);
+    const uint64_t one = 1;
+    ::write(this->wake_fd_, &one, sizeof(one));
   }
   this->mic_users_.fetch_sub(1);
 }
@@ -205,7 +225,8 @@ void CallMedia::run_() {
     while (!this->stop_.load()) {
       fd_set readable;
       FD_ZERO(&readable);
-      FD_SET(sock, &readable);
+      if (sock >= 0)
+        FD_SET(sock, &readable);
       FD_SET(this->wake_fd_, &readable);
       const int n = ::select(max_fd + 1, &readable, nullptr, nullptr, nullptr);
       if (n < 0) {
@@ -219,8 +240,10 @@ void CallMedia::run_() {
       }
       if (this->stop_.load())
         break;
-      if (FD_ISSET(sock, &readable))
+      if (sock >= 0 && FD_ISSET(sock, &readable))
         this->drain_socket_();
+      if (this->rx_ring_ != nullptr)
+        this->drain_payloads_();
       this->process_tx_();
     }
   }
@@ -307,6 +330,40 @@ void CallMedia::drain_socket_() {
   }
 }
 
+void CallMedia::drain_payloads_() {
+  for (;;) {
+    if (this->rx_pending_ == 0) {
+      if (this->rx_ring_->available() < sizeof(uint16_t))
+        return;
+      uint16_t length = 0;
+      this->rx_ring_->read(&length, sizeof(length), 0);
+      this->rx_pending_ = length;
+    }
+    if (this->rx_ring_->available() < this->rx_pending_)
+      return;
+    const size_t len = this->rx_ring_->read(this->rx_packet_, this->rx_pending_, 0);
+    this->rx_pending_ = 0;
+    if (!this->receive_.load())
+      continue;
+    this->start_playout_();
+    this->play_payload_(this->rx_packet_, len);
+  }
+}
+
+void CallMedia::start_playout_() {
+  if (this->rx_started_)
+    return;
+  this->rx_started_ = true;
+  memset(this->pcm_, 0, this->pcm_capacity_ * sizeof(int16_t));
+  size_t silence = static_cast<size_t>(this->config_.pcm_rate) * this->config_.pcm_channels * sizeof(int16_t) *
+                   this->config_.playout_ms / 1000;
+  while (silence > 0) {
+    const size_t chunk = std::min(silence, this->pcm_capacity_ * sizeof(int16_t));
+    this->speaker_->play(reinterpret_cast<const uint8_t *>(this->pcm_), chunk, 0);
+    silence -= chunk;
+  }
+}
+
 void CallMedia::handle_packet_(const uint8_t *packet, size_t len) {
   if (len < 12 || (packet[0] >> 6) != 2 || !this->receive_.load())
     return;
@@ -340,16 +397,8 @@ void CallMedia::handle_packet_(const uint8_t *packet, size_t len) {
     return;
 
   if (!this->rx_started_) {
-    this->rx_started_ = true;
     this->rx_expected_ = seq;
-    memset(this->pcm_, 0, this->pcm_capacity_ * sizeof(int16_t));
-    size_t silence = static_cast<size_t>(this->config_.pcm_rate) * this->config_.pcm_channels * sizeof(int16_t) *
-                     this->config_.playout_ms / 1000;
-    while (silence > 0) {
-      const size_t chunk = std::min(silence, this->pcm_capacity_ * sizeof(int16_t));
-      this->speaker_->play(reinterpret_cast<const uint8_t *>(this->pcm_), chunk, 0);
-      silence -= chunk;
-    }
+    this->start_playout_();
   }
   const int16_t diff = static_cast<int16_t>(seq - this->rx_expected_);
   if (diff < 0)
@@ -583,6 +632,10 @@ bool CallMedia::send_dtmf_frame_() {
 
 void CallMedia::send_rtp_(uint8_t payload_type, bool marker, uint32_t timestamp, const uint8_t *payload,
                           size_t len) {
+  if (this->config_.transport != nullptr) {
+    this->config_.transport->on_media_payload(payload, len, timestamp);
+    return;
+  }
   uint8_t *packet = this->tx_packet_;
   if (payload != packet + 12)
     memmove(packet + 12, payload, len);

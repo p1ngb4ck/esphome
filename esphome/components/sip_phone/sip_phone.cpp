@@ -681,8 +681,39 @@ void SipPhone::start_media_(const MediaConfig &media) {
   this->microphone_->start();
 }
 
-void SipPhone::stop_media_() {
+bool SipPhone::start_transport_media(MediaTransport *transport, bool mute) {
+#ifdef USE_SIP_PHONE_OPUS
+  if (this->media_running_ || this->media_parked_.load())
+    return false;
+  MediaConfig media;
+  media.format.codec = Codec::OPUS;
+  media.format.ptime = this->ptime_;
+  media.pcm_rate = this->opus_params_.sample_rate;
+  media.pcm_channels = this->opus_params_.channels;
+  media.opus_bitrate = this->opus_bitrate_;
+  media.opus_complexity = this->opus_complexity_;
+  media.playout_ms = this->playout_ms_;
+  media.transport = transport;
+  this->start_media_(media);
   if (!this->media_running_)
+    return false;
+  this->transport_media_ = true;
+  this->media_.set_mute(mute);
+  return true;
+#else
+  return false;
+#endif
+}
+
+void SipPhone::stop_transport_media() {
+  if (!this->transport_media_)
+    return;
+  this->transport_media_ = false;
+  this->stop_media_();
+}
+
+void SipPhone::stop_media_() {
+  if (!this->media_running_ || this->transport_media_)
     return;
   this->media_running_ = false;
   this->microphone_->stop();

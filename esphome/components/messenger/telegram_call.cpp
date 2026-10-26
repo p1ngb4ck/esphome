@@ -6,7 +6,6 @@
 
 #include "esphome/components/json/json_util.h"
 #include "esphome/components/mtproto/crypto.h"
-#include "esphome/components/ring_buffer/ring_buffer.h"
 #include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
@@ -16,7 +15,6 @@
 #include <esp_peer_default.h>
 #include <esp_random.h>
 #include <freertos/idf_additions.h>
-#include <opus.h>
 
 #include <algorithm>
 #include <cinttypes>
@@ -76,10 +74,6 @@ constexpr uint8_t EVENT_DECLINE = 4;
 
 constexpr size_t QUEUE_DEPTH = 24;
 constexpr uint32_t SAMPLE_RATE = 48000;
-constexpr uint32_t FRAME_MS = 20;
-constexpr size_t FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS / 1000;
-constexpr size_t DECODE_SAMPLES = SAMPLE_RATE * 120 / 1000;
-constexpr size_t MIC_RING_BYTES = SAMPLE_RATE * 2 * 200 / 1000;
 constexpr size_t MAX_PACKET = 1500;
 constexpr uint32_t PUMP_MS = 10;
 constexpr uint32_t RPC_WAIT_MS = 20000;
@@ -87,8 +81,6 @@ constexpr size_t MAX_SERVERS = 8;
 constexpr size_t MAX_CANDIDATES = 16;
 constexpr size_t SDP_SIZE = 2048;
 constexpr int DEFAULT_PT = 111;
-constexpr uint32_t PLAYOUT_MS = 60;
-constexpr uint32_t PLAY_WAIT_MS = 20;
 
 struct Event {
   uint8_t type;
@@ -125,13 +117,9 @@ struct CallSession {
   char server_user[MAX_SERVERS][96];
   char server_pass[MAX_SERVERS][96];
   uint8_t server_count;
-  OpusEncoder *encoder;
-  OpusDecoder *decoder;
-  ring_buffer::RingBuffer *ring;
-  int16_t pcm[DECODE_SAMPLES];
   uint8_t packet[MAX_PACKET];
-  uint32_t pts;
-  bool playing;
+  uint32_t ts_base;
+  bool ts_set;
   char local_ufrag[64];
   char local_pwd[128];
   char local_hash[16];
@@ -160,7 +148,7 @@ struct CallSession {
 
 namespace {
 
-std::atomic<uint8_t> mic_users{0};
+std::atomic<uint8_t> peer_users{0};
 
 void put_be32(uint8_t *p, uint32_t v) {
   p[0] = static_cast<uint8_t>(v >> 24);
@@ -213,18 +201,10 @@ void TelegramCall::attach(mtproto::Mtproto *mtproto, Component *owner) {
   mtproto->add_update_listener([this](TlReader updates) { this->on_updates_(updates); });
 }
 
-void TelegramCall::set_audio(resampler::ResamplerMicrophone *microphone, speaker::Speaker *speaker) {
-  this->microphone_ = microphone;
-  this->speaker_ = speaker;
-  microphone->add_data_callback([this](const std::vector<uint8_t> &data) {
-    if (!this->mic_on_.load(std::memory_order_acquire))
-      return;
-    mic_users.fetch_add(1);
-    CallSession *s = this->session_;
-    if (this->mic_on_.load(std::memory_order_acquire) && s != nullptr && s->ring != nullptr)
-      s->ring->write_without_replacement(data.data(), data.size(), 0);
-    mic_users.fetch_sub(1);
-  });
+void TelegramCall::set_mute(bool mute) {
+  this->mute_.store(mute);
+  if (this->phone_ != nullptr)
+    this->phone_->set_transport_mute(mute);
 }
 
 std::string TelegramCall::peer_name() const {
@@ -314,7 +294,7 @@ void TelegramCall::finish_() {
 }
 
 bool TelegramCall::start(int64_t user_id, int64_t access_hash, const std::string &name) {
-  if (this->state_.load() != CallState::IDLE || this->microphone_ == nullptr || this->mtproto_ == nullptr ||
+  if (this->state_.load() != CallState::IDLE || this->phone_ == nullptr || this->mtproto_ == nullptr ||
       !this->mtproto_->logged_in())
     return false;
   if (!this->begin_(true, 0, 0, nullptr))
@@ -464,7 +444,7 @@ void TelegramCall::on_phone_call_(TlReader call) {
       return;
     uint8_t body[64];
     TlWriter w(body, sizeof(body));
-    if (this->state_.load() != CallState::IDLE || this->microphone_ == nullptr) {
+    if (this->state_.load() != CallState::IDLE || this->phone_ == nullptr) {
       w.u32(ID_DISCARD_CALL);
       w.u32(0);
       w.u32(ID_INPUT_PHONE_CALL);
@@ -693,10 +673,8 @@ void TelegramCall::run_() {
       }
       heap_caps_free(event);
     }
-    if (s->peer != nullptr) {
+    if (s->peer != nullptr)
       esp_peer_main_loop(s->peer);
-      this->pump_audio_(s);
-    }
     if (s->ended) {
       ok = false;
       reason = ID_REASON_DISCONNECT;
@@ -822,32 +800,6 @@ bool TelegramCall::start_media_(CallSession *s, TlReader call) {
         break;
     }
   }
-  int err = 0;
-  s->encoder = opus_encoder_create(SAMPLE_RATE, 1, OPUS_APPLICATION_VOIP, &err);
-  if (s->encoder != nullptr && err == OPUS_OK) {
-    opus_encoder_ctl(s->encoder, OPUS_SET_BITRATE(32000));
-    opus_encoder_ctl(s->encoder, OPUS_SET_COMPLEXITY(2));
-    opus_encoder_ctl(s->encoder, OPUS_SET_INBAND_FEC(1));
-    opus_encoder_ctl(s->encoder, OPUS_SET_PACKET_LOSS_PERC(10));
-  }
-  s->decoder = opus_decoder_create(SAMPLE_RATE, 1, &err);
-  if (heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) >= MIC_RING_BYTES)
-    s->ring = ring_buffer::RingBuffer::create(MIC_RING_BYTES).release();
-  if (s->encoder == nullptr || s->decoder == nullptr || s->ring == nullptr) {
-    this->fail_("No memory for the call's audio");
-    return false;
-  }
-  s->media = true;
-  App.scheduler.set_timeout(this->owner_, static_cast<const char *>(nullptr), 0, [this]() {
-    if (this->session_ == nullptr || !this->session_->media)
-      return;
-    this->microphone_->set_target_format(SAMPLE_RATE, 1);
-    this->speaker_->set_audio_stream_info(audio::AudioStreamInfo(16, 1, SAMPLE_RATE));
-    this->speaker_->start();
-    this->microphone_->start();
-    this->mic_on_.store(true, std::memory_order_release);
-  });
-
   esp_peer_default_cfg_t &extra = s->peer_extra;
   extra.agent_recv_timeout = 100;
   extra.rtp_cfg.audio_recv_jitter.cache_size = 16384;
@@ -896,8 +848,10 @@ bool TelegramCall::start_media_(CallSession *s, TlReader call) {
   };
   cfg.on_audio_data = [](esp_peer_audio_frame_t *frame, void *ctx) -> int {
     auto *session = static_cast<CallSession *>(ctx);
-    if (frame != nullptr && frame->data != nullptr && frame->size > 0)
-      session->owner->play_audio_(session, frame->data, static_cast<size_t>(frame->size));
+    TelegramCall *self = session->owner;
+    if (self->media_on_.load(std::memory_order_acquire) && frame != nullptr && frame->data != nullptr &&
+        frame->size > 0)
+      self->phone_->transport_payload(frame->data, static_cast<size_t>(frame->size));
     return 0;
   };
   esp_peer_pre_generate_cert();
@@ -907,33 +861,36 @@ bool TelegramCall::start_media_(CallSession *s, TlReader call) {
     return false;
   }
   esp_peer_new_connection(s->peer);
+  s->media = true;
+  App.scheduler.set_timeout(this->owner_, static_cast<const char *>(nullptr), 0, [this]() {
+    if (this->session_ == nullptr || !this->session_->media)
+      return;
+    if (!this->phone_->start_transport_media(this, this->mute_.load())) {
+      this->fail_("Call audio busy");
+      this->hangup();
+      return;
+    }
+    this->media_on_.store(true, std::memory_order_release);
+  });
   this->set_state_(CallState::CONNECTING);
   return true;
 }
 
 void TelegramCall::stop_media_(CallSession *s) {
+  this->media_on_.store(false, std::memory_order_release);
+  while (peer_users.load() != 0)
+    vTaskDelay(1);
   if (s->peer != nullptr) {
     esp_peer_close(s->peer);
     s->peer = nullptr;
   }
-  this->mic_on_.store(false, std::memory_order_release);
-  while (mic_users.load() != 0)
-    vTaskDelay(1);
   if (s->media) {
     s->media = false;
     App.scheduler.set_timeout(this->owner_, static_cast<const char *>(nullptr), 0, [this]() {
-      this->microphone_->stop();
-      this->speaker_->stop();
+      this->media_on_.store(false, std::memory_order_release);
+      this->phone_->stop_transport_media();
     });
   }
-  delete s->ring;
-  s->ring = nullptr;
-  if (s->encoder != nullptr)
-    opus_encoder_destroy(s->encoder);
-  if (s->decoder != nullptr)
-    opus_decoder_destroy(s->decoder);
-  s->encoder = nullptr;
-  s->decoder = nullptr;
 }
 
 bool TelegramCall::decrypt_signaling_(CallSession *s, const uint8_t *data, size_t length, std::string *json) {
@@ -1226,54 +1183,22 @@ void TelegramCall::send_candidate_(CallSession *s, const char *candidate) {
   this->send_signaling_(s, json);
 }
 
-void TelegramCall::pump_audio_(CallSession *s) {
-  if (s->ring == nullptr || s->encoder == nullptr || s->peer == nullptr)
-    return;
-  const size_t frame_bytes = FRAME_SAMPLES * sizeof(int16_t);
-  while (s->ring->available() >= frame_bytes) {
-    s->ring->read(s->pcm, frame_bytes, 0);
-    if (this->state_.load() != CallState::ACTIVE)
-      continue;
-    if (this->mute_.load())
-      memset(s->pcm, 0, frame_bytes);
-    const opus_int32 bytes = opus_encode(s->encoder, s->pcm, FRAME_SAMPLES, s->packet, MAX_PACKET);
-    if (bytes > 0) {
-      esp_peer_audio_frame_t frame{};
-      frame.pts = s->pts;
-      frame.data = s->packet;
-      frame.size = bytes;
-      esp_peer_send_audio(s->peer, &frame);
+void TelegramCall::on_media_payload(const uint8_t *payload, size_t len, uint32_t timestamp) {
+  peer_users.fetch_add(1);
+  CallSession *s = this->session_;
+  if (this->media_on_.load(std::memory_order_acquire) && s != nullptr && s->peer != nullptr &&
+      this->state_.load() == CallState::ACTIVE) {
+    if (!s->ts_set) {
+      s->ts_base = timestamp;
+      s->ts_set = true;
     }
-    s->pts += FRAME_MS;
+    esp_peer_audio_frame_t frame{};
+    frame.pts = (timestamp - s->ts_base) / (SAMPLE_RATE / 1000);
+    frame.data = const_cast<uint8_t *>(payload);
+    frame.size = static_cast<int>(len);
+    esp_peer_send_audio(s->peer, &frame);
   }
-}
-
-void TelegramCall::play_audio_(CallSession *s, const uint8_t *data, size_t length) {
-  if (s->decoder == nullptr)
-    return;
-  if (!s->playing) {
-    s->playing = true;
-    memset(s->pcm, 0, sizeof(s->pcm));
-    size_t silence = SAMPLE_RATE * sizeof(int16_t) * PLAYOUT_MS / 1000;
-    while (silence > 0) {
-      const size_t chunk = std::min(silence, sizeof(s->pcm));
-      this->speaker_->play(reinterpret_cast<const uint8_t *>(s->pcm), chunk, 0);
-      silence -= chunk;
-    }
-  }
-  const int frames = opus_decode(s->decoder, data, static_cast<opus_int32>(length), s->pcm,
-                                 static_cast<int>(DECODE_SAMPLES), 0);
-  if (frames <= 0)
-    return;
-  const uint8_t *pcm = reinterpret_cast<const uint8_t *>(s->pcm);
-  size_t left = static_cast<size_t>(frames) * sizeof(int16_t);
-  while (left > 0) {
-    const size_t written = this->speaker_->play(pcm, left, pdMS_TO_TICKS(PLAY_WAIT_MS));
-    if (written == 0)
-      break;
-    pcm += written;
-    left -= written;
-  }
+  peer_users.fetch_sub(1);
 }
 
 }

@@ -176,6 +176,14 @@ class SipPhone final : public Component,
   Trigger<std::string, std::string> *get_message_trigger() { return &this->message_trigger_; }
   Trigger<std::string> *get_state_trigger() { return &this->state_trigger_; }
 
+  bool start_transport_media(MediaTransport *transport, bool mute);
+  void stop_transport_media();
+  void transport_payload(const uint8_t *payload, size_t len) { this->media_.on_payload(payload, len); }
+  void set_transport_mute(bool mute) {
+    if (this->transport_media_)
+      this->media_.set_mute(mute);
+  }
+
   void on_media_dtmf(char digit) override;
   void on_media_parked() override;
 #if defined(USE_NETWORK) && defined(NETWORK_ACTIVE_INTERFACE_LISTENER_COUNT)
@@ -407,6 +415,7 @@ class SipPhone final : public Component,
   bool dnd_{false};
   bool auto_answer_{false};
   bool media_running_{false};
+  bool transport_media_{false};
   bool dtmf_rtp_{false};
   std::atomic<bool> media_parked_{false};
   char last_error_[64]{};

@@ -27,6 +27,11 @@ class MediaListener {
   virtual void on_media_parked() = 0;
 };
 
+class MediaTransport {
+ public:
+  virtual void on_media_payload(const uint8_t *payload, size_t len, uint32_t timestamp) = 0;
+};
+
 struct MediaConfig {
   MediaFormat format;
   uint32_t pcm_rate{16000};
@@ -39,6 +44,7 @@ struct MediaConfig {
   uint16_t playout_ms{60};
   bool send{true};
   bool receive{true};
+  MediaTransport *transport{nullptr};
 };
 
 class CallMedia {
@@ -52,6 +58,7 @@ class CallMedia {
   bool parked() const { return this->parked_.load(); }
   bool release();
   void on_mic_data(const std::vector<uint8_t> &data);
+  void on_payload(const uint8_t *payload, size_t len);
   void set_mute(bool mute) { this->mute_.store(mute); }
   void send_dtmf(const char *digits);
   void update_remote(const struct sockaddr_in &remote, bool send, bool receive);
@@ -67,6 +74,8 @@ class CallMedia {
   static void task_entry_(void *param);
   void run_();
   void drain_socket_();
+  void drain_payloads_();
+  void start_playout_();
   void handle_packet_(const uint8_t *packet, size_t len);
   void handle_dtmf_(const uint8_t *payload, size_t len, uint32_t timestamp);
   void play_payload_(const uint8_t *payload, size_t len);
@@ -92,6 +101,8 @@ class CallMedia {
   std::atomic<uint8_t> mic_users_{0};
 
   std::unique_ptr<ring_buffer::RingBuffer> tx_ring_;
+  std::unique_ptr<ring_buffer::RingBuffer> rx_ring_;
+  uint16_t rx_pending_{0};
   uint8_t *rx_packet_{nullptr};
   uint8_t *tx_packet_{nullptr};
   int16_t *pcm_{nullptr};

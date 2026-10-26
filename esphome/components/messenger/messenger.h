@@ -130,7 +130,6 @@ class Messenger : public Component
 #endif
   }
   TelegramAccount *account() { return &this->account_; }
-  bool view_account_photo(int32_t message_id);
   bool load_avatar(int64_t peer_id);
   const uint8_t *avatar_data() const { return this->avatar_; }
   size_t avatar_size() const { return this->avatar_len_; }
@@ -139,9 +138,7 @@ class Messenger : public Component
   Trigger<uint8_t> *get_account_trigger() { return &this->account_trigger_; }
 #endif
 #ifdef USE_MESSENGER_CALL
-  void set_call_audio(resampler::ResamplerMicrophone *microphone, speaker::Speaker *speaker) {
-    this->call_.set_audio(microphone, speaker);
-  }
+  void set_call_phone(sip_phone::SipPhone *phone) { this->call_.set_phone(phone); }
   TelegramCall *call() { return &this->call_; }
   bool call_open_chat();
   Trigger<uint8_t> *get_call_trigger() { return &this->call_trigger_; }
@@ -223,14 +220,12 @@ class Messenger : public Component
   static constexpr uint32_t TASK_STACK = 10240;
   static constexpr size_t MAX_RESPONSE = 65536;
   static constexpr size_t DOWNLOAD_CHUNK = 16384;
-  static constexpr size_t VIEW_MAX_BYTES = 4 * 1024 * 1024;
   static constexpr size_t AVATAR_MAX_BYTES = 64 * 1024;
 
   ChannelConfig &config_(Channel channel) const { return this->configs_[static_cast<size_t>(channel)]; }
   bool direct_(Channel channel) const;
   bool run_account_(Job *job, std::string *error);
   bool run_account_download_(Job *job, std::string *error);
-  bool run_account_view_(Job *job, std::string *error);
   bool run_account_avatar_(Job *job, std::string *error);
   void save_sent_(Job *job);
   static void poll_task_entry_(void *param);

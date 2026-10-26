@@ -5,8 +5,7 @@
 #ifdef USE_MESSENGER_CALL
 
 #include "esphome/components/mtproto/mtproto.h"
-#include "esphome/components/resampler/microphone/resampler_microphone.h"
-#include "esphome/components/speaker/speaker.h"
+#include "esphome/components/sip_phone/sip_phone.h"
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/static_task.h"
@@ -26,24 +25,25 @@ enum class CallState : uint8_t { IDLE = 0, OUTGOING, RINGING, INCOMING, CONNECTI
 
 struct CallSession;
 
-class TelegramCall {
+class TelegramCall : public sip_phone::MediaTransport {
  public:
   static constexpr uint32_t TASK_STACK = 16384;
-  static constexpr UBaseType_t TASK_PRIORITY = 10;
+  static constexpr UBaseType_t TASK_PRIORITY = 5;
 
   void attach(mtproto::Mtproto *mtproto, Component *owner);
-  void set_audio(resampler::ResamplerMicrophone *microphone, speaker::Speaker *speaker);
+  void set_phone(sip_phone::SipPhone *phone) { this->phone_ = phone; }
 
   bool start(int64_t user_id, int64_t access_hash, const std::string &name);
   void accept();
   void hangup();
-  void set_mute(bool mute) { this->mute_.store(mute); }
+  void set_mute(bool mute);
   bool muted() const { return this->mute_.load(); }
   CallState state() const { return this->state_.load(); }
   std::string peer_name() const;
   std::string error() const;
   uint32_t seconds() const;
   bool take_change() { return this->changed_.exchange(false); }
+  void on_media_payload(const uint8_t *payload, size_t len, uint32_t timestamp) override;
 
  protected:
   void on_updates_(mtproto::TlReader updates);
@@ -72,18 +72,15 @@ class TelegramCall {
   void answer_offer_(CallSession *s);
   void send_candidate_(CallSession *s, const char *candidate);
   void set_remote_sdp_(CallSession *s);
-  void pump_audio_(CallSession *s);
-  void play_audio_(CallSession *s, const uint8_t *data, size_t length);
 
   mtproto::Mtproto *mtproto_{nullptr};
   Component *owner_{nullptr};
-  resampler::ResamplerMicrophone *microphone_{nullptr};
-  speaker::Speaker *speaker_{nullptr};
+  sip_phone::SipPhone *phone_{nullptr};
 
   std::atomic<CallState> state_{CallState::IDLE};
   std::atomic<bool> changed_{false};
   std::atomic<bool> mute_{false};
-  std::atomic<bool> mic_on_{false};
+  std::atomic<bool> media_on_{false};
   std::atomic<int64_t> call_id_{0};
   mutable Mutex lock_;
   char name_[64]{};

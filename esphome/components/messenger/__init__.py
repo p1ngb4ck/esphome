@@ -1,15 +1,15 @@
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components import audio, microphone, network, speaker
+from esphome.components import audio, microphone, network
 from esphome.components.esp32 import (
     add_idf_component,
     add_idf_sdkconfig_option,
     request_tls,
     require_mbedtls_tls_server,
 )
-from esphome.components.resampler.microphone import ResamplerMicrophone
 from esphome.components.mtproto import CONF_MTPROTO_ID, Mtproto
 from esphome.components.http_request import CONF_HTTP_REQUEST_ID, HttpRequestComponent
+from esphome.components.sip_phone import SipPhone
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_CHANNEL,
@@ -19,7 +19,6 @@ from esphome.const import (
     CONF_PATH,
     CONF_PAYLOAD,
     CONF_SIZE,
-    CONF_SPEAKER,
     CONF_TEXT,
     PLATFORM_ESP32,
 )
@@ -36,6 +35,7 @@ CONF_ALLOWED_CHATS = "allowed_chats"
 CONF_DEFAULT_CHAT = "default_chat"
 CONF_DEFAULT_CHANNEL = "default_channel"
 CONF_PHONE_NUMBER_ID = "phone_number_id"
+CONF_PHONE = "phone"
 CONF_API_VERSION = "api_version"
 CONF_SPOOL_DIR = "spool_dir"
 CONF_TOKEN = "token"
@@ -105,8 +105,7 @@ CHANNEL_BASE = {
 
 CALL_SCHEMA = cv.Schema(
     {
-        cv.Required(CONF_MICROPHONE): cv.use_id(ResamplerMicrophone),
-        cv.Required(CONF_SPEAKER): cv.use_id(speaker.Speaker),
+        cv.Required(CONF_PHONE): cv.use_id(SipPhone),
     }
 )
 
@@ -130,7 +129,7 @@ FACEBOOK_SCHEMA = cv.Schema(CHANNEL_BASE)
 
 
 def _request_opus(config: ConfigType) -> ConfigType:
-    if CONF_MICROPHONE in config or CONF_CALL in config.get(CONF_TELEGRAM, {}):
+    if CONF_MICROPHONE in config:
         audio.request_opus_support()
     if CONF_CALL in config.get(CONF_TELEGRAM, {}):
         network.require_ipv6("messenger")(config)
@@ -257,9 +256,8 @@ async def to_code(config: ConfigType) -> None:
             )
         if call := config[CONF_TELEGRAM].get(CONF_CALL):
             cg.add_define("USE_MESSENGER_CALL")
-            call_mic = await cg.get_variable(call[CONF_MICROPHONE])
-            call_spk = await cg.get_variable(call[CONF_SPEAKER])
-            cg.add(var.set_call_audio(call_mic, call_spk))
+            phone = await cg.get_variable(call[CONF_PHONE])
+            cg.add(var.set_call_phone(phone))
             add_idf_component(name="espressif/esp_peer", ref="1.5.7")
             request_tls()
             require_mbedtls_tls_server()
