@@ -34,6 +34,9 @@
 #include "esphome/components/network/network_component.h"
 #define USE_MESSENGER_NETWORK_LISTENER
 #endif
+#ifdef USE_MESSENGER_ACCOUNT
+#include "esphome/components/mtproto/mtproto.h"
+#endif
 
 namespace esphome::messenger {
 
@@ -41,7 +44,7 @@ enum class Channel : uint8_t { TELEGRAM, WHATSAPP, FACEBOOK };
 static constexpr size_t CHANNEL_COUNT = 3;
 const char *channel_name(Channel channel);
 
-enum class Transport : uint8_t { DIRECT, HOME_ASSISTANT };
+enum class Transport : uint8_t { DIRECT, HOME_ASSISTANT, ACCOUNT };
 
 enum class FileKind : uint8_t { NONE, PHOTO, VOICE, AUDIO, DOCUMENT, VIDEO };
 const char *file_kind_name(FileKind kind);
@@ -113,6 +116,10 @@ class Messenger : public Component
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
   void set_http_request(http_request::HttpRequestComponent *http) { this->http_ = http; }
+#ifdef USE_MESSENGER_ACCOUNT
+  void set_mtproto(mtproto::Mtproto *mtproto) { this->mtproto_ = mtproto; }
+#endif
+  bool is_account(Channel channel) const;
   void enable_channel(Channel channel, Transport transport);
   void set_default_channel(Channel channel) { this->default_channel_ = channel; }
   void set_api_version(const char *version) { this->api_version_ = version; }
@@ -270,6 +277,9 @@ class Messenger : public Component
   std::atomic<bool> io_abandoned_{false};
 #endif
 
+#ifdef USE_MESSENGER_ACCOUNT
+  mtproto::Mtproto *mtproto_{nullptr};
+#endif
 #ifdef USE_MESSENGER_CAMERA
   camera::Camera *camera_{nullptr};
   Job *camera_job_{nullptr};

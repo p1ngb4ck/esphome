@@ -198,7 +198,7 @@ void Messenger::dump_config() {
     if (!this->is_enabled(channel))
       continue;
     ESP_LOGCONFIG(TAG, "  %s: %s, %s", channel_name(channel),
-                  this->direct_(channel) ? "direct" : "Home Assistant",
+                  this->direct_(channel) ? "direct" : (this->is_account(channel) ? "account" : "Home Assistant"),
                   this->is_ready(channel) ? "ready" : "no credentials");
   }
 }
@@ -219,9 +219,20 @@ bool Messenger::direct_(Channel channel) const {
   return this->is_enabled(channel) && this->config_(channel).transport == Transport::DIRECT;
 }
 
+bool Messenger::is_account(Channel channel) const {
+  return this->is_enabled(channel) && this->config_(channel).transport == Transport::ACCOUNT;
+}
+
 bool Messenger::is_ready(Channel channel) const {
   if (!this->is_enabled(channel) || this->is_failed())
     return false;
+  if (this->is_account(channel)) {
+#ifdef USE_MESSENGER_ACCOUNT
+    return this->mtproto_ != nullptr && this->mtproto_->logged_in();
+#else
+    return false;
+#endif
+  }
   if (!this->direct_(channel))
     return true;
   LockGuard guard(this->lock_);
@@ -952,7 +963,7 @@ void Messenger::end_body_(Job *job) {
 }
 
 bool Messenger::send_message(Channel channel, int64_t chat_id, const std::string &text) {
-  if (!this->is_ready(channel) || chat_id == 0 || text.empty())
+  if (!this->is_ready(channel) || this->is_account(channel) || chat_id == 0 || text.empty())
     return false;
   if (!this->direct_(channel)) {
     this->outbound_(channel, chat_id, FileKind::NONE, text, "");
@@ -1145,7 +1156,7 @@ bool Messenger::run_file_(Job *job, std::string *error) {
 #ifdef USE_MESSENGER_STORAGE
 bool Messenger::send_file(Channel channel, int64_t chat_id, const std::string &path, FileKind kind,
                           const std::string &caption) {
-  if (!this->is_ready(channel) || chat_id == 0 || path.empty())
+  if (!this->is_ready(channel) || this->is_account(channel) || chat_id == 0 || path.empty())
     return false;
   if (!this->direct_(channel)) {
     this->outbound_(channel, chat_id, kind, caption, path);
@@ -1504,7 +1515,8 @@ void Messenger::set_camera(camera::Camera *cam) {
 }
 
 bool Messenger::send_camera_photo(Channel channel, int64_t chat_id, const std::string &caption) {
-  if (!this->is_ready(channel) || chat_id == 0 || this->camera_ == nullptr || this->camera_job_ != nullptr)
+  if (!this->is_ready(channel) || this->is_account(channel) || chat_id == 0 || this->camera_ == nullptr ||
+      this->camera_job_ != nullptr)
     return false;
   Job *job = new_job_(JobKind::FILE);
   if (job == nullptr)
@@ -1565,7 +1577,8 @@ void Messenger::set_microphone_source(microphone::MicrophoneSource *source) {
 }
 
 bool Messenger::voice_start(Channel channel, int64_t chat_id) {
-  if (this->mic_source_ == nullptr || this->voice_busy_.load() || !this->is_ready(channel) || chat_id == 0)
+  if (this->mic_source_ == nullptr || this->voice_busy_.load() || !this->is_ready(channel) ||
+      this->is_account(channel) || chat_id == 0)
     return false;
   const audio::AudioStreamInfo info = this->mic_source_->get_audio_stream_info();
   const uint32_t rate = info.get_sample_rate();

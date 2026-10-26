@@ -1,6 +1,7 @@
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import audio, microphone, network
+from esphome.components.mtproto import CONF_MTPROTO_ID, Mtproto
 from esphome.components.http_request import CONF_HTTP_REQUEST_ID, HttpRequestComponent
 import esphome.config_validation as cv
 from esphome.const import (
@@ -16,7 +17,7 @@ from esphome.const import (
 )
 from esphome.types import ConfigType
 
-AUTO_LOAD = ["json", "audio", "ring_buffer"]
+AUTO_LOAD = ["json", "audio", "ring_buffer", "mtproto"]
 DEPENDENCIES = ["network", "http_request"]
 
 CONF_TELEGRAM = "telegram"
@@ -60,6 +61,7 @@ Transport = messenger_ns.enum("Transport", is_class=True)
 TRANSPORTS = {
     "direct": Transport.DIRECT,
     "home_assistant": Transport.HOME_ASSISTANT,
+    "account": Transport.ACCOUNT,
 }
 FileKind = messenger_ns.enum("FileKind", is_class=True)
 FILE_KINDS = {
@@ -118,6 +120,9 @@ def _validate_channels(config: ConfigType) -> ConfigType:
         raise cv.Invalid("at least one of telegram, whatsapp, facebook is required")
     if CONF_DEFAULT_CHANNEL in config and config[CONF_DEFAULT_CHANNEL] not in enabled:
         raise cv.Invalid(f"default_channel {config[CONF_DEFAULT_CHANNEL]} is not configured")
+    for name in (CONF_WHATSAPP, CONF_FACEBOOK):
+        if name in config and config[name][CONF_TRANSPORT] == "account":
+            raise cv.Invalid(f"transport account is only for telegram (its own user account), not {name}")
     via_ha = any(config[name][CONF_TRANSPORT] == "home_assistant" for name in enabled)
     spools = CONF_CAMERA in config or CONF_MICROPHONE in config
     if via_ha and spools and CONF_SPOOL_DIR not in config:
@@ -132,6 +137,7 @@ CONFIG_SCHEMA = cv.All(
         {
             cv.GenerateID(): cv.declare_id(Messenger),
             cv.GenerateID(CONF_HTTP_REQUEST_ID): cv.use_id(HttpRequestComponent),
+            cv.GenerateID(CONF_MTPROTO_ID): cv.use_id(Mtproto),
             cv.Optional(CONF_TELEGRAM): TELEGRAM_SCHEMA,
             cv.Optional(CONF_WHATSAPP): WHATSAPP_SCHEMA,
             cv.Optional(CONF_FACEBOOK): FACEBOOK_SCHEMA,
@@ -204,6 +210,11 @@ async def to_code(config: ConfigType) -> None:
         cg.add(var.set_max_voice_seconds(config[CONF_MAX_VOICE].total_seconds))
     if CONF_TELEGRAM in config and config[CONF_TELEGRAM][CONF_TRANSPORT] == "direct":
         await network.register_active_interface_listener(var)
+    if CONF_TELEGRAM in config and config[CONF_TELEGRAM][CONF_TRANSPORT] == "account":
+        cg.add_define("USE_MESSENGER_ACCOUNT")
+        mtproto = await cg.get_variable(config[CONF_MTPROTO_ID])
+        cg.add(mtproto.enable())
+        cg.add(var.set_mtproto(mtproto))
 
     triggers = (
         (
