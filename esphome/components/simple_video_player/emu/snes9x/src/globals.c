@@ -10,57 +10,63 @@
 #include "gfx.h"
 #include "soundux.h"
 
-SICPU *ICPU_ptr;
-SCPUState *CPU_ptr;
+#include <esp_attr.h>
+#include <string.h>
+
+SPM_DRAM_ATTR SICPU ICPU;
+SPM_DRAM_ATTR SCPUState CPU;
 
 #ifndef USE_BLARGG_APU
-SAPU *APU_ptr;
-SIAPU *IAPU_ptr;
+SPM_DRAM_ATTR SAPU APU;
+SPM_DRAM_ATTR SIAPU IAPU;
 SSoundData *SoundData_ptr;
-SoundStatus so;
+SPM_DRAM_ATTR SoundStatus so;
 #endif
 
-SSettings *Settings_ptr;
+SPM_DRAM_ATTR SSettings Settings;
 
-int32_t OpAddress = 0;
+SPM_DRAM_ATTR int32_t OpAddress = 0;
 
-CMemory *Memory_ptr;
+SPM_DRAM_ATTR CMemory Memory;
 
-uint8_t OpenBus = 0;
+SPM_DRAM_ATTR uint8_t OpenBus = 0;
 
 SPPU *PPU_ptr;
 InternalPPU *IPPU_ptr;
 
-SDMA (*S9xDMA_ptr)[8];
+SPM_DRAM_ATTR SDMA S9xDMA[8];
 
 uint8_t* HDMAMemPointers [8];
 uint8_t* HDMABasePointers [8];
 
-SBG *S9xBG_ptr;
+SPM_DRAM_ATTR SBG S9xBG;
 
-SGFX *GFX_ptr;
+SPM_DRAM_ATTR SGFX GFX;
 
 bool S9xInitHot(void)
 {
-   ICPU_ptr = (SICPU*)emu_calloc_fast(1, sizeof(SICPU));
-   CPU_ptr = (SCPUState*)emu_calloc_fast(1, sizeof(SCPUState));
+   memset(&ICPU, 0, sizeof(ICPU));
+   memset(&CPU, 0, sizeof(CPU));
 #ifndef USE_BLARGG_APU
-   APU_ptr = (SAPU*)emu_calloc_fast(1, sizeof(SAPU));
-   IAPU_ptr = (SIAPU*)emu_calloc_fast(1, sizeof(SIAPU));
+   memset(&APU, 0, sizeof(APU));
+   memset(&IAPU, 0, sizeof(IAPU));
+   memset(&so, 0, sizeof(so));
    SoundData_ptr = (SSoundData*)emu_calloc_hot(1, sizeof(SSoundData));
 #endif
-   Settings_ptr = (SSettings*)emu_calloc_fast(1, sizeof(SSettings));
-   Memory_ptr = (CMemory*)emu_calloc_fast(1, sizeof(CMemory));
+   memset(&Settings, 0, sizeof(Settings));
+   memset(&Memory, 0, sizeof(Memory));
+   memset(S9xDMA, 0, sizeof(S9xDMA));
+   memset(&S9xBG, 0, sizeof(S9xBG));
+   memset(&GFX, 0, sizeof(GFX));
+   OpAddress = 0;
+   OpenBus = 0;
    PPU_ptr = (SPPU*)emu_calloc_hot(1, sizeof(SPPU));
    IPPU_ptr = (InternalPPU*)emu_calloc_hot(1, sizeof(InternalPPU));
-   S9xDMA_ptr = (SDMA (*)[8])emu_calloc_fast(1, sizeof(SDMA[8]));
-   S9xBG_ptr = (SBG*)emu_calloc_fast(1, sizeof(SBG));
-   GFX_ptr = (SGFX*)emu_calloc_fast(1, sizeof(SGFX));
-   return ICPU_ptr && CPU_ptr &&
+   return PPU_ptr && IPPU_ptr
 #ifndef USE_BLARGG_APU
-      APU_ptr && IAPU_ptr && SoundData_ptr &&
+      && SoundData_ptr
 #endif
-      Settings_ptr && Memory_ptr && PPU_ptr && IPPU_ptr && S9xDMA_ptr && S9xBG_ptr && GFX_ptr;
+      ;
 }
 
 const int32_t NoiseFreq [32] =

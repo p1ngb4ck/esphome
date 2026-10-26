@@ -221,8 +221,7 @@ uint8_t S9xGetC4RAM(uint16_t Address);
 
 extern SPPU *PPU_ptr;
 #define PPU (*PPU_ptr)
-extern SDMA (*S9xDMA_ptr)[8];
-#define S9xDMA (*S9xDMA_ptr)
+extern SDMA S9xDMA[8];
 extern InternalPPU *IPPU_ptr;
 #define IPPU (*IPPU_ptr)
 

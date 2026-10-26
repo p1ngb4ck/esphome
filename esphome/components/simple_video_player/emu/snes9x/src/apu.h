@@ -46,10 +46,8 @@ typedef struct
    bool     UNUSED2 [3];
 } SAPU;
 
-extern SAPU *APU_ptr;
-extern SIAPU *IAPU_ptr;
-#define APU (*APU_ptr)
-#define IAPU (*IAPU_ptr)
+extern SAPU APU;
+extern SIAPU IAPU;
 
 static INLINE void S9xAPUUnpackStatus(void)
 {

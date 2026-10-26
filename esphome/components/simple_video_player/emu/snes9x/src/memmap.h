@@ -142,8 +142,7 @@ void S9xSetPCBase(uint32_t Address);
 uint8_t* S9xGetMemPointer(uint32_t Address);
 uint8_t* GetBasePointer(uint32_t Address);
 
-extern CMemory *Memory_ptr;
-#define Memory (*Memory_ptr)
+extern CMemory Memory;
 extern uint8_t OpenBus;
 
 #endif /* _memmap_h_ */
