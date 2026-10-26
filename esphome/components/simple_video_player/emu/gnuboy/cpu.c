@@ -150,7 +150,7 @@ static gb_cpu_t *cpu_ptr;
 
 gb_cpu_t *gb_cpu_init(void)
 {
-	cpu_ptr = calloc(1, sizeof(gb_cpu_t));
+	cpu_ptr = emu_calloc_fast(1, sizeof(gb_cpu_t));
 	return cpu_ptr;
 }
 

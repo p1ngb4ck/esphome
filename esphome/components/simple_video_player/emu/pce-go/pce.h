@@ -227,7 +227,8 @@ typedef struct {
 } PCE_t;
 
 // The global structure for all hardware variables
-extern PCE_t PCE;
+extern PCE_t *PCE_ptr;
+#define PCE (*PCE_ptr)
 #define CPU PCE.CPU
 
 // physical address on emulator machine of each of the 256 banks

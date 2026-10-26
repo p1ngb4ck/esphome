@@ -65,6 +65,9 @@ bool pce_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels)
     s_channels = channels > 1 ? 2 : 1;
     s_rate = rate;
     s_frames = rate / 60 + 1;
+    PCE_ptr = emu_calloc_fast(1, sizeof(PCE_t));
+    if (PCE_ptr == NULL)
+        return false;
     s_frame = calloc(1, XBUF_WIDTH * XBUF_HEIGHT);
     s_stereo = calloc(s_frames * 2, sizeof(int16_t));
     s_mix = calloc(s_frames * s_channels, sizeof(int16_t));
