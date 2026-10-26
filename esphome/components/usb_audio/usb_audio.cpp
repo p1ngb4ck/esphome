@@ -68,12 +68,6 @@ static constexpr uint32_t MAX_WORK_TIME_MS = 20;
 // Share of the work budget a single blocking write may consume. The isochronous sink drains
 // at exactly real time, so a chunk worth more playback time than this can only time out.
 static constexpr uint32_t WRITE_BUDGET_DIVISOR = 2;
-// Window over which the accepted byte rate is measured before it is judged.
-static constexpr uint32_t RATE_WINDOW_MS = 1000;
-// Fraction of the nominal sample rate the sink must keep up with, in percent. A short write
-// is normal backpressure: the sink drains at exactly real time and the caller keeps the
-// remainder. Only a sustained shortfall below this means playback is actually breaking up.
-static constexpr uint32_t RATE_WARN_PERCENT = 80;
 // How long finish() waits for the queue to drain before stopping anyway.
 static constexpr uint32_t FINISH_TIMEOUT_MS = 1000;
 
@@ -564,7 +558,6 @@ void USBAudioSink::stop() {
     this->client_->cancel_timeout(this->timer_id_);
   }
   this->paused_.store(false);
-  this->rate_window_start_ms_ = 0;
   this->client_->enable_loop_soon_any_context();
 }
 
@@ -572,8 +565,6 @@ void USBAudioSink::set_pause_state(bool pause_state) {
   if (this->paused_.load() == pause_state)
     return;
   this->paused_.store(pause_state);
-  if (!pause_state)
-    this->rate_window_start_ms_ = 0;
 }
 
 void USBAudioSink::finish() {
@@ -707,41 +698,8 @@ size_t USBAudioSink::play_internal_(const uint8_t *data, size_t length, uint32_t
     }
   }
 
-  // Only a stream that runs can fall behind; one still opening (or without a free host channel)
-  // takes nothing, which is not an underrun.
-  if (device->get_speaker_packet_bytes() != 0) {
-    this->check_throughput_(total_written, bytes_per_ms);
-  } else {
-    this->rate_window_start_ms_ = 0;
-  }
   this->writers_.fetch_sub(1);
   return total_written;
-}
-
-// Judge the sink by throughput, not by whether a single write was short. Over a one second
-// window the accepted bytes have to track the sample clock; a sustained shortfall is the one
-// symptom that actually means the audio is breaking up (a stream that stopped draining, or a
-// device that fell behind), and it is worth one warning per window.
-void USBAudioSink::check_throughput_(size_t accepted, size_t bytes_per_ms) {
-  const uint32_t now = millis();
-  if (this->rate_window_start_ms_ == 0) {
-    this->rate_window_start_ms_ = now;
-    this->rate_window_bytes_ = accepted;
-    return;
-  }
-  this->rate_window_bytes_ += accepted;
-  const uint32_t elapsed_ms = now - this->rate_window_start_ms_;
-  if (elapsed_ms < RATE_WINDOW_MS)
-    return;
-
-  const size_t expected = bytes_per_ms * elapsed_ms;
-  const size_t floor_bytes = expected / 100 * RATE_WARN_PERCENT;
-  if (this->rate_window_bytes_ < floor_bytes) {
-    ESP_LOGW(TAG, "Speaker underrunning: accepted %u of %u bytes over %" PRIu32 " ms",
-             (unsigned) this->rate_window_bytes_, (unsigned) expected, elapsed_ms);
-  }
-  this->rate_window_start_ms_ = now;
-  this->rate_window_bytes_ = 0;
 }
 
 bool USBAudioSink::has_buffered_data() const {
