@@ -58,8 +58,6 @@ struct AccountFile {
   uint8_t ref_len;
   uint8_t ref[80];
   char thumb[4];
-  char view_thumb[4];
-  uint32_t view_size;
   char name[48];
 };
 
@@ -89,7 +87,6 @@ class TelegramAccount {
   static constexpr uint8_t CHANGED_FILES = 8;
   static constexpr uint8_t CHANGED_RESULT = 16;
   static constexpr size_t MAX_INCOMING_FILES = 8;
-  static constexpr uint32_t VIEW_MAX_SIDE = 800;
   static constexpr size_t MAX_CHATS = 60;
   static constexpr size_t MAX_CONTACTS = 300;
   static constexpr size_t MAX_MESSAGES = 60;
