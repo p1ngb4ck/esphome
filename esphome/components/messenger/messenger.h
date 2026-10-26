@@ -36,6 +36,7 @@
 #endif
 #ifdef USE_MESSENGER_ACCOUNT
 #include "esphome/components/mtproto/mtproto.h"
+#include "telegram_account.h"
 #endif
 
 namespace esphome::messenger {
@@ -96,6 +97,7 @@ struct Job {
   char name[128]{};
   char path[256]{};
   char ref[512]{};
+  uint32_t duration{0};
 };
 
 class Messenger : public Component
@@ -117,7 +119,12 @@ class Messenger : public Component
 
   void set_http_request(http_request::HttpRequestComponent *http) { this->http_ = http; }
 #ifdef USE_MESSENGER_ACCOUNT
-  void set_mtproto(mtproto::Mtproto *mtproto) { this->mtproto_ = mtproto; }
+  void set_mtproto(mtproto::Mtproto *mtproto) {
+    this->mtproto_ = mtproto;
+    this->account_.attach(mtproto, this);
+  }
+  TelegramAccount *account() { return &this->account_; }
+  Trigger<uint8_t> *get_account_trigger() { return &this->account_trigger_; }
 #endif
   bool is_account(Channel channel) const;
   void enable_channel(Channel channel, Transport transport);
@@ -192,6 +199,7 @@ class Messenger : public Component
 
   ChannelConfig &config_(Channel channel) const { return this->configs_[static_cast<size_t>(channel)]; }
   bool direct_(Channel channel) const;
+  bool run_account_(Job *job, std::string *error);
   static void poll_task_entry_(void *param);
   static void send_task_entry_(void *param);
   void poll_loop_();
@@ -279,6 +287,8 @@ class Messenger : public Component
 
 #ifdef USE_MESSENGER_ACCOUNT
   mtproto::Mtproto *mtproto_{nullptr};
+  TelegramAccount account_;
+  Trigger<uint8_t> account_trigger_;
 #endif
 #ifdef USE_MESSENGER_CAMERA
   camera::Camera *camera_{nullptr};

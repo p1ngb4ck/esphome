@@ -46,6 +46,7 @@ CONF_ON_DOWNLOADED = "on_downloaded"
 CONF_ON_SENT = "on_sent"
 CONF_ON_HISTORY = "on_history"
 CONF_ON_OUTBOUND = "on_outbound"
+CONF_ON_ACCOUNT = "on_account"
 
 CHAT_ID = cv.int_range(min=-(2**53), max=2**53)
 
@@ -161,6 +162,7 @@ CONFIG_SCHEMA = cv.All(
                 cv.Range(min=cv.TimePeriod(seconds=1), max=cv.TimePeriod(seconds=300)),
             ),
             cv.Optional(CONF_ON_MESSAGE): automation.validate_automation(single=True),
+            cv.Optional(CONF_ON_ACCOUNT): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_FILE): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_DOWNLOADED): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_SENT): automation.validate_automation(single=True),
@@ -215,6 +217,10 @@ async def to_code(config: ConfigType) -> None:
         mtproto = await cg.get_variable(config[CONF_MTPROTO_ID])
         cg.add(mtproto.enable())
         cg.add(var.set_mtproto(mtproto))
+        if CONF_ON_ACCOUNT in config:
+            await automation.build_automation(
+                var.get_account_trigger(), [(cg.uint8, "changes")], config[CONF_ON_ACCOUNT]
+            )
 
     triggers = (
         (

@@ -219,6 +219,22 @@ bool Messenger::direct_(Channel channel) const {
   return this->is_enabled(channel) && this->config_(channel).transport == Transport::DIRECT;
 }
 
+bool Messenger::run_account_(Job *job, std::string *error) {
+#ifdef USE_MESSENGER_ACCOUNT
+  const char *mime = job->file_kind == FileKind::VOICE ? "audio/ogg" : mime_of(job->name, job->file_kind);
+  const bool ok = this->account_.send_media(static_cast<uint8_t>(job->file_kind),
+                                            reinterpret_cast<const uint8_t *>(job->body.data()), job->body.size(),
+                                            job->name[0] != '\0' ? job->name : "file", mime, job->text, job->duration,
+                                            error);
+  job->body.clear();
+  job->body.shrink_to_fit();
+  return ok;
+#else
+  *error = "no account";
+  return false;
+#endif
+}
+
 bool Messenger::is_account(Channel channel) const {
   return this->is_enabled(channel) && this->config_(channel).transport == Transport::ACCOUNT;
 }
@@ -827,6 +843,11 @@ void Messenger::loop() {
   }
   if (this->history_changed_.exchange(false, std::memory_order_acq_rel))
     this->history_trigger_.trigger();
+#ifdef USE_MESSENGER_ACCOUNT
+  const uint8_t changes = this->account_.take_changes();
+  if (changes != 0)
+    this->account_trigger_.trigger(changes);
+#endif
   if (!more)
     this->disable_loop();
 }
@@ -963,7 +984,14 @@ void Messenger::end_body_(Job *job) {
 }
 
 bool Messenger::send_message(Channel channel, int64_t chat_id, const std::string &text) {
-  if (!this->is_ready(channel) || this->is_account(channel) || chat_id == 0 || text.empty())
+  if (this->is_account(channel)) {
+#ifdef USE_MESSENGER_ACCOUNT
+    return this->is_ready(channel) && this->account_.send_text(text);
+#else
+    return false;
+#endif
+  }
+  if (!this->is_ready(channel) || chat_id == 0 || text.empty())
     return false;
   if (!this->direct_(channel)) {
     this->outbound_(channel, chat_id, FileKind::NONE, text, "");
@@ -987,6 +1015,8 @@ void Messenger::send_loop_() {
     bool ok = false;
     if (job->kind == JobKind::VOICE) {
       ok = this->run_voice_(job, &error);
+    } else if (job->kind == JobKind::FILE && this->is_account(job->channel)) {
+      ok = this->run_account_(job, &error);
     } else if (job->spool) {
       ok = this->run_spool_(job, &error);
     } else if (!network::is_connected()) {
@@ -1156,9 +1186,9 @@ bool Messenger::run_file_(Job *job, std::string *error) {
 #ifdef USE_MESSENGER_STORAGE
 bool Messenger::send_file(Channel channel, int64_t chat_id, const std::string &path, FileKind kind,
                           const std::string &caption) {
-  if (!this->is_ready(channel) || this->is_account(channel) || chat_id == 0 || path.empty())
+  if (!this->is_ready(channel) || (chat_id == 0 && !this->is_account(channel)) || path.empty())
     return false;
-  if (!this->direct_(channel)) {
+  if (!this->direct_(channel) && !this->is_account(channel)) {
     this->outbound_(channel, chat_id, kind, caption, path);
     return true;
   }
@@ -1187,6 +1217,7 @@ bool Messenger::send_file(Channel channel, int64_t chat_id, const std::string &p
   job->channel = channel;
   job->chat_id = chat_id;
   job->file_kind = kind;
+  job->spool = this->is_account(channel);
   copy_str(job->text, sizeof(job->text), caption.c_str());
   copy_str(job->path, sizeof(job->path), path.c_str());
   const char *slash = strrchr(job->path, '/');
@@ -1515,7 +1546,7 @@ void Messenger::set_camera(camera::Camera *cam) {
 }
 
 bool Messenger::send_camera_photo(Channel channel, int64_t chat_id, const std::string &caption) {
-  if (!this->is_ready(channel) || this->is_account(channel) || chat_id == 0 || this->camera_ == nullptr ||
+  if (!this->is_ready(channel) || (chat_id == 0 && !this->is_account(channel)) || this->camera_ == nullptr ||
       this->camera_job_ != nullptr)
     return false;
   Job *job = new_job_(JobKind::FILE);
@@ -1578,7 +1609,7 @@ void Messenger::set_microphone_source(microphone::MicrophoneSource *source) {
 
 bool Messenger::voice_start(Channel channel, int64_t chat_id) {
   if (this->mic_source_ == nullptr || this->voice_busy_.load() || !this->is_ready(channel) ||
-      this->is_account(channel) || chat_id == 0)
+      (chat_id == 0 && !this->is_account(channel)))
     return false;
   const audio::AudioStreamInfo info = this->mic_source_->get_audio_stream_info();
   const uint32_t rate = info.get_sample_rate();
@@ -1795,6 +1826,9 @@ bool Messenger::run_voice_(Job *job, std::string *error) {
     *error = "recording too short";
     return false;
   }
+  job->duration = static_cast<uint32_t>(frames / 50);
+  if (this->is_account(job->channel))
+    return this->run_account_(job, error);
   if (job->spool)
     return this->run_spool_(job, error);
   if (!network::is_connected()) {
