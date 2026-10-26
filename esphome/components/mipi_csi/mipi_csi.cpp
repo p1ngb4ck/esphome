@@ -5,6 +5,8 @@
 #ifdef USE_ESP32_VARIANT_ESP32P4
 
 #include <algorithm>
+#include <cstdint>
+#include <cstdlib>
 #include <cerrno>
 #include <cinttypes>
 #include <cstring>
@@ -441,6 +443,8 @@ bool MipiCsiCamera::start_capture_() {
     }
   }
 
+  this->settle_count_ = 0;
+  this->settle_level_ = -1;
   int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   if (ioctl(this->fd_, VIDIOC_STREAMON, &type) != 0) {
     ESP_LOGE(TAG, "Starting the video stream failed: %s", strerror(errno));
@@ -571,7 +575,8 @@ void MipiCsiCamera::capture_task(void *param) {
       ESP_LOGW(TAG, "Returning a frame buffer failed: %s", strerror(errno));
     }
 
-    if (self->frame_wanted_.load() && (buffer.flags & V4L2_BUF_FLAG_ERROR) == 0) {
+    const bool settled = (buffer.flags & V4L2_BUF_FLAG_ERROR) == 0 && self->settled_(buffer.index);
+    if (self->frame_wanted_.load() && settled) {
       // The encoder is handed the whole buffer, as Espressif's reference does: the length is what
       // bounds the cache invalidation before the JPEG engine's DMA reads it.
       const FrameBuffer &frame = self->buffers_[buffer.index];
@@ -739,6 +744,53 @@ void MipiCsiCamera::loop() {
 /* ---------------- MipiCsiCamera: requests ---------------- */
 
 uint8_t MipiCsiCamera::bytes_per_pixel_() const { return get_format_mapping(this->pixel_format_).bytes_per_pixel; }
+
+int32_t MipiCsiCamera::frame_level_(const FrameBuffer &frame) const {
+  const size_t bpp = this->bytes_per_pixel_();
+  const size_t pixels = std::min(frame.length, this->expected_frame_size_) / bpp;
+  if (pixels == 0)
+    return 0;
+  esp_cache_msync(frame.data, frame.length, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+  const size_t samples = std::min<size_t>(1024, pixels);
+  const size_t step = pixels / samples;
+  uint32_t sum = 0;
+  for (size_t i = 0; i < samples; i++) {
+    const uint8_t *p = frame.data + i * step * bpp;
+    switch (this->pixel_format_) {
+      case PixelFormat::PIXEL_FORMAT_RGB565: {
+        const uint16_t v = static_cast<uint16_t>(p[0] | (p[1] << 8));
+        sum += ((v >> 11) & 0x1F) * 2 + ((v >> 5) & 0x3F) + (v & 0x1F) * 2;
+        break;
+      }
+      case PixelFormat::PIXEL_FORMAT_RGB888:
+        sum += p[0] + p[1] + p[2];
+        break;
+      case PixelFormat::PIXEL_FORMAT_YUV422:
+        sum += p[1];
+        break;
+      default:
+        sum += p[0];
+        break;
+    }
+  }
+  return static_cast<int32_t>(sum / samples);
+}
+
+bool MipiCsiCamera::settled_(uint32_t index) {
+  if (this->settle_count_ == UINT16_MAX)
+    return true;
+  const int32_t level = this->frame_level_(this->buffers_[index]);
+  const int32_t last = this->settle_level_;
+  this->settle_level_ = level;
+  this->settle_count_++;
+  const int32_t delta = last < 0 ? INT32_MAX : std::abs(level - last);
+  if ((this->settle_count_ >= 3 && delta <= std::max<int32_t>(2, last / 32)) ||
+      this->settle_count_ >= 2u * this->framerate_ + 2u) {
+    this->settle_count_ = UINT16_MAX;
+    return true;
+  }
+  return false;
+}
 
 void MipiCsiCamera::set_preview_buffer(uint8_t *buffer, size_t size) {
   uint8_t *old = this->preview_buffer_.exchange(buffer);
