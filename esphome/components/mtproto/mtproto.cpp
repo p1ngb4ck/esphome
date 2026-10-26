@@ -452,8 +452,11 @@ void Mtproto::run_() {
       this->target_dc_ = 0;
     }
     bool ok = this->connect_(this->dc_);
-    if (ok && !this->has_key_)
+    if (ok && !this->has_key_) {
       ok = this->handshake_();
+      if (!ok && this->error().empty())
+        this->fail_("Key exchange with Telegram failed");
+    }
     if (!ok) {
       this->disconnect_();
       this->backoff_ms_ = std::min(std::max(this->backoff_ms_ * 2, RETRY_MIN_MS), RETRY_MAX_MS);
@@ -599,8 +602,10 @@ bool Mtproto::connect_(int dc) {
   if (ip == nullptr)
     return false;
   this->fd_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (this->fd_ < 0)
+  if (this->fd_ < 0) {
+    this->fail_("No free socket for the Telegram connection");
     return false;
+  }
   struct sockaddr_in addr {};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(DC_PORT);
@@ -622,7 +627,9 @@ bool Mtproto::connect_(int dc) {
     }
   }
   if (result != 0) {
-    ESP_LOGW(TAG, "DC%d: no connection", dc);
+    char text[48];
+    snprintf(text, sizeof(text), "No connection to Telegram DC%d", dc);
+    this->fail_(text);
     return false;
   }
   fcntl(this->fd_, F_SETFL, flags & ~O_NONBLOCK);

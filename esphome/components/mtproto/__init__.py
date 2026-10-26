@@ -4,7 +4,7 @@ import re
 
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components import esp32, network
+from esphome.components import esp32, network, socket
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_ON_STATE, CONF_PASSWORD, PLATFORM_ESP32
 from esphome.core import CORE
@@ -12,7 +12,7 @@ from esphome.types import ConfigType
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["network"]
-AUTO_LOAD = ["sha256"]
+AUTO_LOAD = ["sha256", "socket"]
 
 CONF_MTPROTO_ID = "mtproto_id"
 CONF_API_ID = "api_id"
@@ -152,6 +152,7 @@ CONFIG_SCHEMA = cv.All(
     ).extend(cv.COMPONENT_SCHEMA),
     cv.only_on([PLATFORM_ESP32]),
     cv.has_none_or_all_keys(CONF_API_ID, CONF_API_HASH),
+    socket.consume_sockets(1, "mtproto"),
 )
 
 
