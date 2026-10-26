@@ -12,7 +12,7 @@ Line numbers drift: search the symbol when a line doesn't match.
 |---|---|
 | simple_video_player.cpp/.h | Component, main loop, sessions, playback task, reader, audio task, pool plan + media buffers, DSI/canvas output |
 | psram_pool.cpp/.h | `PsramPool`: one block (`jpeg_alloc_decoder_mem`, zeroed), 128-aligned pieces, merge on free, own mutex. `alloc` first fit (buffers), `alloc_top` last fit from the end (svp's objects). Piece table (128) at the block's start |
-| buffered_file_reader.* | Read-ahead ring over the storage interface; push mode for network AVI |
+| buffered_file_reader.* | Read-ahead ring over the storage interface; push mode for network AVI (a read waiting for data is woken by `push()` / `end_stream()`; it waits until data, the stream's end or the abort flag, not WAIT_CAP_MS: the network task's 30 s silence ends the stream) |
 | avi_parser.* | AVI/MJPEG parsing, index |
 | stream_receiver.cpp | TCP stream port: AVI from relay, udisp stills/PCM/input, draw task, 'V'/'A'/... reports |
 | pictures.cpp | Picture viewer, thumbnails, picture task (HW JPEG, PNG/BMP sw) |

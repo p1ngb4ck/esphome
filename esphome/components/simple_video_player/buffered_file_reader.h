@@ -143,6 +143,7 @@ class BufferedFileReader {
   uint64_t current_position_{0};
 
   TaskHandle_t waiting_task_{nullptr};
+  std::atomic<TaskHandle_t> data_waiter_{nullptr};
   std::atomic<bool> sync_done_{false};
   storage::StorageError sync_result_{storage::StorageError::STORAGE_ERROR_OK};
   const volatile bool *abort_flag_{nullptr};

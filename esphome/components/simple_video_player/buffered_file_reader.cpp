@@ -270,11 +270,16 @@ void BufferedFileReader::push(const uint8_t *data, size_t len) {
     this->ring_.write(data, std::min(len, this->ring_.free()));
   }
   xSemaphoreGive(this->stream_lock_);
+  if (TaskHandle_t waiter = this->data_waiter_.exchange(nullptr, std::memory_order_acq_rel))
+    xTaskNotifyGive(waiter);
 }
 
 void BufferedFileReader::end_stream() {
-  if (this->network_)
-    this->eof_.store(true, std::memory_order_release);
+  if (!this->network_)
+    return;
+  this->eof_.store(true, std::memory_order_release);
+  if (TaskHandle_t waiter = this->data_waiter_.exchange(nullptr, std::memory_order_acq_rel))
+    xTaskNotifyGive(waiter);
 }
 
 bool BufferedFileReader::prefill_cache() {
@@ -327,6 +332,13 @@ int BufferedFileReader::read(uint8_t *buffer, size_t size) {
       return copied > 0 ? static_cast<int>(copied) : -1;
     this->kick_fill_();
     this->waiting_task_ = xTaskGetCurrentTaskHandle();
+    if (this->network_) {
+      this->data_waiter_.store(this->waiting_task_, std::memory_order_release);
+      if (this->ring_.available() == 0 && !this->eof_.load(std::memory_order_acquire))
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAIT_SLICE_MS));
+      this->data_waiter_.store(nullptr, std::memory_order_release);
+      continue;
+    }
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAIT_SLICE_MS));
     if ((waited += WAIT_SLICE_MS) >= WAIT_CAP_MS)
       return copied > 0 ? static_cast<int>(copied) : -1;
