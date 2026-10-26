@@ -1226,6 +1226,15 @@ int64_t TelegramAccount::open_user_id() const {
   return this->open_.kind == PeerKind::USER ? this->open_.id : 0;
 }
 
+bool TelegramAccount::open_user(int64_t *id, int64_t *access_hash) const {
+  LockGuard guard(this->lock_);
+  if (this->open_.kind != PeerKind::USER || this->open_.id == 0)
+    return false;
+  *id = this->open_.id;
+  *access_hash = this->open_.access_hash;
+  return true;
+}
+
 bool TelegramAccount::send_text(const std::string &text) {
   if (!this->started_ || text.empty())
     return false;

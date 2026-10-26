@@ -108,6 +108,7 @@ class TelegramAccount {
   bool has_open_chat() const;
   std::string open_title() const;
   int64_t open_user_id() const;
+  bool open_user(int64_t *id, int64_t *access_hash) const;
   bool send_text(const std::string &text);
   bool send_media(uint8_t kind, const uint8_t *data, size_t length, const char *name, const char *mime,
                   const char *caption, uint32_t duration, std::string *error);

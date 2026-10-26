@@ -38,6 +38,9 @@
 #include "esphome/components/mtproto/mtproto.h"
 #include "telegram_account.h"
 #endif
+#ifdef USE_MESSENGER_CALL
+#include "telegram_call.h"
+#endif
 
 namespace esphome::messenger {
 
@@ -122,10 +125,21 @@ class Messenger : public Component
   void set_mtproto(mtproto::Mtproto *mtproto) {
     this->mtproto_ = mtproto;
     this->account_.attach(mtproto, this);
+#ifdef USE_MESSENGER_CALL
+    this->call_.attach(mtproto, this);
+#endif
   }
   TelegramAccount *account() { return &this->account_; }
   bool view_account_photo(int32_t message_id);
   Trigger<uint8_t> *get_account_trigger() { return &this->account_trigger_; }
+#endif
+#ifdef USE_MESSENGER_CALL
+  void set_call_audio(resampler::ResamplerMicrophone *microphone, speaker::Speaker *speaker) {
+    this->call_.set_audio(microphone, speaker);
+  }
+  TelegramCall *call() { return &this->call_; }
+  bool call_open_chat();
+  Trigger<uint8_t> *get_call_trigger() { return &this->call_trigger_; }
 #endif
   bool is_account(Channel channel) const;
   void enable_channel(Channel channel, Transport transport);
@@ -299,6 +313,10 @@ class Messenger : public Component
   mtproto::Mtproto *mtproto_{nullptr};
   TelegramAccount account_;
   Trigger<uint8_t> account_trigger_;
+#endif
+#ifdef USE_MESSENGER_CALL
+  TelegramCall call_;
+  Trigger<uint8_t> call_trigger_;
 #endif
   uint8_t *photo_{nullptr};
   size_t photo_len_{0};

@@ -219,6 +219,16 @@ bool Messenger::direct_(Channel channel) const {
   return this->is_enabled(channel) && this->config_(channel).transport == Transport::DIRECT;
 }
 
+#ifdef USE_MESSENGER_CALL
+bool Messenger::call_open_chat() {
+  int64_t id = 0;
+  int64_t access_hash = 0;
+  if (!this->is_ready(Channel::TELEGRAM) || !this->account_.open_user(&id, &access_hash))
+    return false;
+  return this->call_.start(id, access_hash, this->account_.open_title());
+}
+#endif
+
 bool Messenger::run_account_(Job *job, std::string *error) {
 #ifdef USE_MESSENGER_ACCOUNT
   const char *mime = job->file_kind == FileKind::VOICE ? "audio/ogg" : mime_of(job->name, job->file_kind);
@@ -843,6 +853,10 @@ void Messenger::loop() {
   }
   if (this->history_changed_.exchange(false, std::memory_order_acq_rel))
     this->history_trigger_.trigger();
+#ifdef USE_MESSENGER_CALL
+  if (this->call_.take_change())
+    this->call_trigger_.trigger(static_cast<uint8_t>(this->call_.state()));
+#endif
 #ifdef USE_MESSENGER_ACCOUNT
   const uint8_t changes = this->account_.take_changes();
   if (changes != 0)

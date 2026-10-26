@@ -1,6 +1,8 @@
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components import audio, microphone, network
+from esphome.components import audio, microphone, network, speaker
+from esphome.components.esp32 import add_idf_component, add_idf_sdkconfig_option
+from esphome.components.resampler.microphone import ResamplerMicrophone
 from esphome.components.mtproto import CONF_MTPROTO_ID, Mtproto
 from esphome.components.http_request import CONF_HTTP_REQUEST_ID, HttpRequestComponent
 import esphome.config_validation as cv
@@ -12,6 +14,7 @@ from esphome.const import (
     CONF_PATH,
     CONF_PAYLOAD,
     CONF_SIZE,
+    CONF_SPEAKER,
     CONF_TEXT,
     PLATFORM_ESP32,
 )
@@ -48,6 +51,8 @@ CONF_ON_HISTORY = "on_history"
 CONF_ON_OUTBOUND = "on_outbound"
 CONF_ON_ACCOUNT = "on_account"
 CONF_ON_PHOTO = "on_photo"
+CONF_ON_CALL = "on_call"
+CONF_CALL = "call"
 
 CHAT_ID = cv.int_range(min=-(2**53), max=2**53)
 
@@ -92,9 +97,17 @@ CHANNEL_BASE = {
     cv.Optional(CONF_DEFAULT_CHAT, default=0): CHAT_ID,
 }
 
+CALL_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_MICROPHONE): cv.use_id(ResamplerMicrophone),
+        cv.Required(CONF_SPEAKER): cv.use_id(speaker.Speaker),
+    }
+)
+
 TELEGRAM_SCHEMA = cv.Schema(
     {
         **CHANNEL_BASE,
+        cv.Optional(CONF_CALL): CALL_SCHEMA,
         cv.Optional(CONF_POLL_TIMEOUT, default="50s"): cv.All(
             cv.positive_time_period_seconds,
             cv.Range(min=cv.TimePeriod(seconds=1), max=cv.TimePeriod(seconds=60)),
@@ -111,7 +124,7 @@ FACEBOOK_SCHEMA = cv.Schema(CHANNEL_BASE)
 
 
 def _request_opus(config: ConfigType) -> ConfigType:
-    if CONF_MICROPHONE in config:
+    if CONF_MICROPHONE in config or CONF_CALL in config.get(CONF_TELEGRAM, {}):
         audio.request_opus_support()
     return config
 
@@ -122,6 +135,9 @@ def _validate_channels(config: ConfigType) -> ConfigType:
         raise cv.Invalid("at least one of telegram, whatsapp, facebook is required")
     if CONF_DEFAULT_CHANNEL in config and config[CONF_DEFAULT_CHANNEL] not in enabled:
         raise cv.Invalid(f"default_channel {config[CONF_DEFAULT_CHANNEL]} is not configured")
+    if CONF_TELEGRAM in config and CONF_CALL in config[CONF_TELEGRAM]:
+        if config[CONF_TELEGRAM][CONF_TRANSPORT] != "account":
+            raise cv.Invalid("telegram call needs transport account (the panel's own Telegram account)")
     for name in (CONF_WHATSAPP, CONF_FACEBOOK):
         if name in config and config[name][CONF_TRANSPORT] == "account":
             raise cv.Invalid(f"transport account is only for telegram (its own user account), not {name}")
@@ -169,6 +185,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_ON_SENT): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_HISTORY): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_PHOTO): automation.validate_automation(single=True),
+            cv.Optional(CONF_ON_CALL): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_OUTBOUND): automation.validate_automation(single=True),
         }
     ).extend(cv.COMPONENT_SCHEMA),
@@ -223,6 +240,19 @@ async def to_code(config: ConfigType) -> None:
             await automation.build_automation(
                 var.get_account_trigger(), [(cg.uint8, "changes")], config[CONF_ON_ACCOUNT]
             )
+        if call := config[CONF_TELEGRAM].get(CONF_CALL):
+            cg.add_define("USE_MESSENGER_CALL")
+            call_mic = await cg.get_variable(call[CONF_MICROPHONE])
+            call_spk = await cg.get_variable(call[CONF_SPEAKER])
+            cg.add(var.set_call_audio(call_mic, call_spk))
+            add_idf_component(name="espressif/esp_peer", ref="1.5.7")
+            add_idf_sdkconfig_option("CONFIG_MBEDTLS_SSL_PROTO_DTLS", True)
+            add_idf_sdkconfig_option("CONFIG_MBEDTLS_SSL_DTLS_SRTP", True)
+            add_idf_sdkconfig_option("CONFIG_MBEDTLS_X509_CREATE_C", True)
+            if CONF_ON_CALL in config:
+                await automation.build_automation(
+                    var.get_call_trigger(), [(cg.uint8, "state")], config[CONF_ON_CALL]
+                )
 
     triggers = (
         (
