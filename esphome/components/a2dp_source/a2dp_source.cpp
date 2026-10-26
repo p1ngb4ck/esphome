@@ -555,7 +555,14 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
 
   const bool feeding = this->speaker_active_.load() && !this->speaker_finishing_.load();
   if (this->priming_.load()) {
-    if (feeding && xRingbufferGetCurFreeSize(this->ring_) >= BYTES_PER_FRAME) {
+    const uint32_t delay = this->output_delay_ms();
+    size_t target = this->ring_bytes_;
+    if (delay != 0) {
+      target = std::min<size_t>(target, (size_t) SAMPLE_RATE * BYTES_PER_FRAME * delay / 1000);
+      target -= target % BYTES_PER_FRAME;
+    }
+    const size_t used = this->ring_bytes_ - xRingbufferGetCurFreeSize(this->ring_);
+    if (feeding && used < target) {
       memset(out, 0, wanted);
       return frame_count;
     }
