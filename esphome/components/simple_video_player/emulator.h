@@ -64,7 +64,8 @@ EmuCore *emu_make_core(EmuSystem system, void *store);
 class GameEmulator
 #ifdef USE_LVGL_HID
     : public lvgl::LvglComponent::PausedInput,
-      public lvgl::LvglComponent::KeyTap
+      public lvgl::LvglComponent::KeyTap,
+      public hid::DirectKeySink
 #endif
 {
  public:
@@ -137,6 +138,9 @@ class GameEmulator
   bool game_key_(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action, uint32_t codepoint,
                  bool level3, uint32_t source);
   bool key_tap(uint32_t source, const char *label, uint16_t page, uint16_t usage, bool pressed) override;
+  void direct_key(uint32_t source, uint16_t page, uint16_t usage, bool pressed) override;
+  bool is_direct_source_(uint32_t source) const;
+  void note_direct_source_(uint32_t source);
   bool paused_text(uint32_t codepoint) override { return true; }
   bool paused_pointer(int16_t dx, int16_t dy, int16_t wheel, uint8_t buttons) override { return true; }
 #endif
@@ -385,6 +389,9 @@ class GameEmulator
   std::atomic<bool> task_parked_{false};
   std::atomic<bool> task_done_{false};
   std::atomic<uint16_t> pads_[2]{};
+  static constexpr uint8_t DIRECT_SOURCES = 4;
+  std::atomic<uint32_t> direct_sources_[DIRECT_SOURCES]{};
+  bool direct_keyboard_{false};
   esp_timer_handle_t pace_timer_{nullptr};
   int64_t pace_next_us_{0};
   bool pace_anchored_{false};

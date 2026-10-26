@@ -339,17 +339,23 @@ void hh_cb(esp_hidh_cb_event_t event, esp_hidh_cb_param_t *param) {
       memcpy(e.bda, param->open.bd_addr, ESP_BD_ADDR_LEN);
       break;
     case ESP_HIDH_CLOSE_EVT:
+      if (BTHIDDevice *dev = find_by_handle(param->close.handle))
+        dev->set_decoding(false);
       e.type = HostEvent::CLOSE;
       e.handle = param->close.handle;
       e.status = param->close.reason;
       break;
     case ESP_HIDH_VC_UNPLUG_EVT:
+      if (BTHIDDevice *dev = find_by_handle(param->unplug.handle))
+        dev->set_decoding(false);
       e.type = HostEvent::CLOSE;
       e.handle = param->unplug.handle;
       break;
     case ESP_HIDH_GET_DSCP_EVT:
       if (param->dscp.status != ESP_HIDH_OK || param->dscp.dsc_list == nullptr || param->dscp.dl_len == 0)
         return;
+      if (BTHIDDevice *dev = find_by_handle(param->dscp.handle))
+        dev->set_decoding(false);
       e.type = HostEvent::DESCRIPTOR;
       e.handle = param->dscp.handle;
       e.value = static_cast<uint32_t>(param->dscp.vendor_id) << 16 | param->dscp.product_id;
@@ -358,11 +364,24 @@ void hh_cb(esp_hidh_cb_event_t event, esp_hidh_cb_param_t *param) {
     case ESP_HIDH_DATA_IND_EVT:
       if (param->data_ind.status != ESP_HIDH_OK || param->data_ind.data == nullptr || param->data_ind.len == 0)
         return;
+      if (BTHIDDevice *dev = find_by_handle(param->data_ind.handle)) {
+        if (dev->decoding()) {
+          dev->on_report_data(param->data_ind.data, param->data_ind.len);
+          return;
+        }
+      }
       e.type = HostEvent::DATA;
       e.handle = param->data_ind.handle;
       e.data.assign(param->data_ind.data, param->data_ind.data + param->data_ind.len);
       break;
     case ESP_HIDH_GET_RPT_EVT:
+      if (BTHIDDevice *dev = find_by_handle(param->get_rpt.handle)) {
+        if (dev->decoding()) {
+          const bool ok = param->get_rpt.status == ESP_HIDH_OK && param->get_rpt.data != nullptr;
+          dev->on_feature_data(ok ? param->get_rpt.data : nullptr, ok ? param->get_rpt.len : 0);
+          return;
+        }
+      }
       // A failed GET_REPORT arrives without data.
       e.type = HostEvent::FEATURE;
       e.handle = param->get_rpt.handle;
@@ -456,12 +475,16 @@ void handle_event(HostEvent &e) {
       }
       break;
     case HostEvent::DATA:
-      if (BTHIDDevice *dev = find_by_handle(e.handle))
-        dev->on_report(e.data);
+      if (BTHIDDevice *dev = find_by_handle(e.handle)) {
+        if (!dev->decoding())
+          dev->on_report(e.data);
+      }
       break;
     case HostEvent::FEATURE:
-      if (BTHIDDevice *dev = find_by_handle(e.handle))
-        dev->on_feature(e.data);
+      if (BTHIDDevice *dev = find_by_handle(e.handle)) {
+        if (!dev->decoding())
+          dev->on_feature(e.data);
+      }
       break;
     case HostEvent::PIN:
       if (BTHIDDevice *dev = find_by_address(e.bda))
@@ -741,6 +764,7 @@ void BTHIDDevice::restore_paired() {
 }
 
 void BTHIDDevice::loop() {
+  this->deliver_events();
   if (host().devices.front() == this)
     host_loop();
 }
@@ -1156,6 +1180,8 @@ void BTHIDDevice::on_open(uint8_t handle, bool success, int status) {
 }
 
 void BTHIDDevice::on_close() {
+  this->set_decoding(false);
+  this->set_deferred(false);
   const bool was_connected = this->connected_;
   if (was_connected) {
     char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
@@ -1182,6 +1208,8 @@ void BTHIDDevice::on_descriptor(const std::vector<uint8_t> &descriptor, uint16_t
   this->map_.reset(hid::HIDReportMap::parse_report_map_data(descriptor.data(), descriptor.size()));
   this->gamepad_attach_(hid::HIDBus::BT_CLASSIC, vid, pid, 0);
   this->gamepad_start_();
+  if (this->set_deferred(true))
+    this->set_decoding(true);
   if (this->map_ == nullptr) {
     ESP_LOGW(TAG, "Report descriptor (%u bytes) not understood", static_cast<unsigned>(descriptor.size()));
     return;
@@ -1189,10 +1217,12 @@ void BTHIDDevice::on_descriptor(const std::vector<uint8_t> &descriptor, uint16_t
   this->write_leds_(this->leds_);
 }
 
-void BTHIDDevice::on_feature(const std::vector<uint8_t> &report) {
+void BTHIDDevice::on_feature(const std::vector<uint8_t> &report) { this->on_feature_data(report.data(), report.size()); }
+
+void BTHIDDevice::on_feature_data(const uint8_t *data, size_t length) {
   const uint8_t id = this->feature_id_;
   this->feature_id_ = 0;
-  this->gamepad_feature_(id, report.data(), report.size());
+  this->gamepad_feature_(id, data, length);
 }
 
 // Output reports on the interrupt channel, report ID first where the device numbers them.
@@ -1221,13 +1251,13 @@ bool BTHIDDevice::request_feature_report(uint8_t id, uint16_t len) {
   return true;
 }
 
-void BTHIDDevice::on_report(const std::vector<uint8_t> &report) {
-  if (report.empty() || this->gamepad_report_(report.data(), report.size()))
+void BTHIDDevice::on_report(const std::vector<uint8_t> &report) { this->on_report_data(report.data(), report.size()); }
+
+void BTHIDDevice::on_report_data(const uint8_t *data, size_t length) {
+  if (length == 0 || this->gamepad_report_(data, length))
     return;
   if (this->map_ == nullptr)
     return;
-  const uint8_t *data = report.data();
-  size_t length = report.size();
   hid::HIDReportSource source;
   source.characteristic_handle = this->handle_;
   if (this->map_->uses_report_ids()) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include "esphome/core/defines.h"
 
 #ifdef USE_ESP32
@@ -134,6 +135,10 @@ class BTHIDDevice : public Component,
   void on_descriptor(const std::vector<uint8_t> &descriptor, uint16_t vid, uint16_t pid);
   void on_report(const std::vector<uint8_t> &report);
   void on_feature(const std::vector<uint8_t> &report);
+  void on_report_data(const uint8_t *data, size_t length);
+  void on_feature_data(const uint8_t *data, size_t length);
+  void set_decoding(bool decoding) { this->decoding_.store(decoding, std::memory_order_release); }
+  bool decoding() const { return this->decoding_.load(std::memory_order_acquire); }
 
   // Gamepad driver transport.
   bool send_output_report(const uint8_t *data, size_t len) override;
@@ -204,6 +209,7 @@ class BTHIDDevice : public Component,
   uint8_t handle_{0xFF};
   uint8_t feature_id_{0};  // the feature report asked for, 0 none
   bool connected_{false};
+  std::atomic<bool> decoding_{false};
   bool auto_connect_{true};
   bool fixed_address_{false};
   bool restored_{false};

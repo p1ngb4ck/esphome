@@ -1,5 +1,6 @@
 #include "hid_input.h"
 
+#include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
 #include <algorithm>
@@ -9,6 +10,10 @@
 namespace esphome::hid {
 
 static const char *const TAG = "hid";
+
+static std::atomic<DirectKeySink *> direct_sink{nullptr};
+
+void set_direct_key_sink(DirectKeySink *sink) { direct_sink.store(sink, std::memory_order_release); }
 
 static constexpr uint16_t USAGE_POINTER = 0x01;
 static constexpr uint16_t USAGE_MOUSE = 0x02;
@@ -111,7 +116,167 @@ void append_utf8(std::string &out, char32_t c) {
 
 bool HIDInput::is_key_down(uint16_t page, uint16_t usage) const {
   const uint32_t key = static_cast<uint32_t>(page) << 16 | usage;
-  return std::find(this->down_.begin(), this->down_.end(), key) != this->down_.end();
+  const uint8_t count = this->down_count_;
+  for (uint8_t i = 0; i < count && i < MAX_DOWN; i++) {
+    if (this->down_[i] == key)
+      return true;
+  }
+  return false;
+}
+
+bool HIDInput::set_deferred(bool deferred) {
+#ifdef USE_ESP32
+  if (deferred == (this->events_ != nullptr))
+    return true;
+  RAMAllocator<Event> allocator(RAMAllocator<Event>::ALLOC_EXTERNAL);
+  if (!deferred) {
+    this->deliver_events();
+    Event *events = this->events_;
+    portENTER_CRITICAL(&this->event_mux_);
+    this->events_ = nullptr;
+    this->event_head_ = this->event_tail_ = 0;
+    portEXIT_CRITICAL(&this->event_mux_);
+    allocator.deallocate(events, EVENT_SLOTS);
+    return true;
+  }
+  Event *events = allocator.allocate(EVENT_SLOTS);
+  if (events == nullptr)
+    return false;
+  portENTER_CRITICAL(&this->event_mux_);
+  this->event_head_ = this->event_tail_ = 0;
+  this->events_ = events;
+  portEXIT_CRITICAL(&this->event_mux_);
+  return true;
+#else
+  return !deferred;
+#endif
+}
+
+void HIDInput::push_event_(const Event &event) {
+#ifdef USE_ESP32
+  bool first = false;
+  portENTER_CRITICAL(&this->event_mux_);
+  if (this->events_ == nullptr || static_cast<uint8_t>(this->event_tail_ - this->event_head_) >= EVENT_SLOTS) {
+    if (this->events_ != nullptr)
+      this->events_dropped_++;
+  } else {
+    first = this->event_tail_ == this->event_head_;
+    this->events_[this->event_tail_ % EVENT_SLOTS] = event;
+    this->event_tail_++;
+  }
+  portEXIT_CRITICAL(&this->event_mux_);
+  if (first)
+    App.wake_loop_threadsafe();
+#endif
+}
+
+void HIDInput::deliver_events() {
+#ifdef USE_ESP32
+  while (true) {
+    Event e;
+    portENTER_CRITICAL(&this->event_mux_);
+    if (this->events_ == nullptr || this->event_head_ == this->event_tail_) {
+      portEXIT_CRITICAL(&this->event_mux_);
+      break;
+    }
+    e = this->events_[this->event_head_ % EVENT_SLOTS];
+    this->event_head_++;
+    portEXIT_CRITICAL(&this->event_mux_);
+    switch (e.kind) {
+      case EVENT_KEY:
+        this->key_source_ = e.source;
+        this->key_source_label_ = e.label;
+        this->key_cb_.call(e.page, e.usage, e.flag != 0);
+        break;
+      case EVENT_TEXT:
+        this->text_cb_.call(std::string(e.text, e.flag));
+        break;
+      case EVENT_POINTER:
+        this->pointer_cb_.call(e.motion[0], e.motion[1], e.motion[2], e.motion[3], e.flag);
+        break;
+      case EVENT_CONTROL:
+        this->control_cb_.call(e.page, e.usage, e.value);
+        break;
+      case EVENT_SEND_KEY:
+        this->send_key_(e.flag);
+        break;
+    }
+  }
+  if (this->events_dropped_ != 0) {
+    ESP_LOGW(TAG, "[%s] %u input events dropped: the main loop fell behind", this->log_name_,
+             static_cast<unsigned>(this->events_dropped_));
+    this->events_dropped_ = 0;
+  }
+#endif
+}
+
+void HIDInput::emit_key_(uint16_t page, uint16_t usage, bool pressed, uint32_t source, const char *label) {
+  if (this->events_ == nullptr) {
+    this->key_source_ = source;
+    this->key_source_label_ = label;
+    this->key_cb_.call(page, usage, pressed);
+    return;
+  }
+  Event e{};
+  e.kind = EVENT_KEY;
+  e.flag = pressed ? 1 : 0;
+  e.page = page;
+  e.usage = usage;
+  e.source = source;
+  e.label = label;
+  this->push_event_(e);
+}
+
+void HIDInput::emit_text_(const std::string &text) {
+  if (this->events_ == nullptr) {
+    this->text_cb_.call(text);
+    return;
+  }
+  Event e{};
+  e.kind = EVENT_TEXT;
+  const size_t n = std::min(text.size(), sizeof(e.text));
+  memcpy(e.text, text.data(), n);
+  e.flag = static_cast<uint8_t>(n);
+  this->push_event_(e);
+}
+
+void HIDInput::emit_pointer_(int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
+  if (this->events_ == nullptr) {
+    this->pointer_cb_.call(dx, dy, wheel, pan, buttons);
+    return;
+  }
+  Event e{};
+  e.kind = EVENT_POINTER;
+  e.flag = buttons;
+  e.motion[0] = dx;
+  e.motion[1] = dy;
+  e.motion[2] = wheel;
+  e.motion[3] = pan;
+  this->push_event_(e);
+}
+
+void HIDInput::emit_control_(uint16_t page, uint16_t usage, int32_t value) {
+  if (this->events_ == nullptr) {
+    this->control_cb_.call(page, usage, value);
+    return;
+  }
+  Event e{};
+  e.kind = EVENT_CONTROL;
+  e.page = page;
+  e.usage = usage;
+  e.value = value;
+  this->push_event_(e);
+}
+
+void HIDInput::emit_send_key_(uint8_t key) {
+  if (this->events_ == nullptr) {
+    this->send_key_(key);
+    return;
+  }
+  Event e{};
+  e.kind = EVENT_SEND_KEY;
+  e.flag = key;
+  this->push_event_(e);
 }
 
 void HIDInput::process_hid_values(const std::vector<HIDReportItemValue> &values) {
@@ -128,7 +293,7 @@ void HIDInput::process_hid_values(const std::vector<HIDReportItemValue> &values)
           pan += static_cast<int32_t>(v.value);
           pointer = true;
         } else {
-          this->control_cb_.call(page, usage, static_cast<int32_t>(v.value));
+          this->emit_control_(page, usage, static_cast<int32_t>(v.value));
         }
         continue;
       }
@@ -171,7 +336,7 @@ void HIDInput::process_hid_values(const std::vector<HIDReportItemValue> &values)
       this->key_(page, usage, v.value != 0);
       continue;
     }
-    this->control_cb_.call(page, usage, static_cast<int32_t>(v.value));
+    this->emit_control_(page, usage, static_cast<int32_t>(v.value));
   }
   if (this->touch_changed_) {
     this->touch_changed_ = false;
@@ -190,7 +355,7 @@ void HIDInput::process_hid_values(const std::vector<HIDReportItemValue> &values)
   }
   if (pointer) {
     auto clamp16 = [](int32_t x) { return static_cast<int16_t>(std::clamp<int32_t>(x, INT16_MIN, INT16_MAX)); };
-    this->pointer_cb_.call(clamp16(dx), clamp16(dy), clamp16(wheel), clamp16(pan), this->buttons_);
+    this->emit_pointer_(clamp16(dx), clamp16(dy), clamp16(wheel), clamp16(pan), this->buttons_);
   }
 }
 
@@ -221,12 +386,14 @@ bool HIDInput::touch_(const HIDReportItemValue &v) {
 }
 
 void HIDInput::release_all_hid() {
-  const auto down = this->down_;
-  for (auto it = down.rbegin(); it != down.rend(); ++it)
-    this->key_(*it >> 16, *it & 0xFFFF, false);
+  uint32_t down[MAX_DOWN];
+  const uint8_t count = this->down_count_;
+  memcpy(down, this->down_, count * sizeof(down[0]));
+  for (uint8_t i = count; i > 0; i--)
+    this->key_(down[i - 1] >> 16, down[i - 1] & 0xFFFF, false);
   if (this->buttons_ != 0) {
     this->buttons_ = 0;
-    this->pointer_cb_.call(0, 0, 0, 0, 0);
+    this->emit_pointer_(0, 0, 0, 0, 0);
   }
   this->modifiers_ = 0;
   this->dead_ = 0;
@@ -244,25 +411,32 @@ void HIDInput::set_battery(int8_t percent, HIDBattery state) {
   this->details_.battery = percent;
   this->details_.battery_state = state;
   if (changed && percent >= 0)
-    this->control_cb_.call(PAGE_GENERIC_DEVICE, USAGE_BATTERY_STRENGTH, percent);
+    this->emit_control_(PAGE_GENERIC_DEVICE, USAGE_BATTERY_STRENGTH, percent);
 }
 
 void HIDInput::set_signal(int8_t value, bool delta) {
   this->details_.has_signal = true;
   this->details_.signal_delta = delta;
   this->details_.signal = value;
-  this->control_cb_.call(PAGE_GENERIC_DEVICE, USAGE_SIGNAL, value);
+  this->emit_control_(PAGE_GENERIC_DEVICE, USAGE_SIGNAL, value);
 }
 
 void HIDInput::key_(uint16_t page, uint16_t usage, bool pressed) {
   const uint32_t key = static_cast<uint32_t>(page) << 16 | usage;
-  auto it = std::find(this->down_.begin(), this->down_.end(), key);
-  if (pressed == (it != this->down_.end()))
+  uint8_t at = 0;
+  while (at < this->down_count_ && this->down_[at] != key)
+    at++;
+  if (pressed == (at < this->down_count_))
     return;
   if (pressed) {
-    this->down_.push_back(key);
+    if (this->down_count_ >= MAX_DOWN)
+      return;
+    this->down_[this->down_count_] = key;
+    this->down_count_++;
   } else {
-    this->down_.erase(it);
+    for (uint8_t i = at; i + 1 < this->down_count_; i++)
+      this->down_[i] = this->down_[i + 1];
+    this->down_count_--;
   }
 #if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
   if (this->log_name_[0] != '\0')
@@ -272,10 +446,13 @@ void HIDInput::key_(uint16_t page, uint16_t usage, bool pressed) {
     const uint8_t bit = 1u << (usage - KEY_LEFT_CTRL);
     this->modifiers_ = pressed ? (this->modifiers_ | bit) : (this->modifiers_ & ~bit);
   }
-  this->key_source_ =
+  const uint32_t source =
       this->forward_source_ != 0 ? this->forward_source_ : static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this));
-  this->key_source_label_ = this->forward_label_ != nullptr ? this->forward_label_ : this->device_label_();
-  this->key_cb_.call(page, usage, pressed);
+  const char *label = this->forward_label_ != nullptr ? this->forward_label_ : this->device_label_();
+  DirectKeySink *sink = direct_sink.load(std::memory_order_acquire);
+  if (sink != nullptr)
+    sink->direct_key(source, page, usage, pressed);
+  this->emit_key_(page, usage, pressed, source, label);
   if (pressed && page == PAGE_KEYBOARD)
     this->type_key_(usage);
 }
@@ -296,7 +473,7 @@ void HIDInput::type_key_(uint16_t usage) {
   }
   if (usage == KEY_BACKSPACE) {
     this->dead_ = 0;
-    this->send_key_('\b');
+    this->emit_send_key_('\b');
     return;
   }
   // Shortcuts type nothing; AltGr (Right Alt) is a level, not a shortcut.
@@ -414,14 +591,14 @@ void HIDInput::type_(char32_t c) {
       if (alone != 0) {
         append_utf8(text, alone);
         if (alone < 0x80)
-          this->send_key_(static_cast<uint8_t>(alone));
+          this->emit_send_key_(static_cast<uint8_t>(alone));
       }
     }
   }
   append_utf8(text, c);
   if (c < 0x80)
-    this->send_key_(static_cast<uint8_t>(c));
-  this->text_cb_.call(text);
+    this->emit_send_key_(static_cast<uint8_t>(c));
+  this->emit_text_(text);
 }
 
 }  // namespace esphome::hid

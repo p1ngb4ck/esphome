@@ -5,10 +5,15 @@
 #include "gamepad.h"
 #include "hid_parser.h"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
+
+#ifdef USE_ESP32
+#include <freertos/FreeRTOS.h>
+#endif
 
 namespace esphome {
 class Component;
@@ -105,6 +110,12 @@ bool build_led_report(const HIDReportMap &map, uint8_t leds, uint8_t &report_id,
 
 enum class HIDBattery : uint8_t { UNKNOWN, DISCHARGING, CHARGING, FULL, NOT_CHARGING };
 
+class DirectKeySink {
+ public:
+  virtual void direct_key(uint32_t source, uint16_t page, uint16_t usage, bool pressed) = 0;
+};
+void set_direct_key_sink(DirectKeySink *sink);
+
 /// What a device reports about itself, where it does.
 struct HIDDeviceDetails {
   char firmware[24]{};  // "" when unknown
@@ -138,6 +149,9 @@ class HIDInput : public key_provider::KeyProvider {
   void process_hid_values(const std::vector<HIDReportItemValue> &values);
   /// The device went away: everything it held is released.
   void release_all_hid();
+  bool set_deferred(bool deferred);
+  bool is_deferred() const { return this->events_ != nullptr; }
+  void deliver_events();
 
   /// (page, usage, pressed) for every key and button.
   template<typename F> void add_on_key_event_callback(F &&cb) { this->key_cb_.add(std::forward<F>(cb)); }
@@ -230,6 +244,28 @@ class HIDInput : public key_provider::KeyProvider {
   void gamepad_hat_(const HIDReportItemValue &v);
 
   void key_(uint16_t page, uint16_t usage, bool pressed);
+  enum EventKind : uint8_t { EVENT_KEY, EVENT_TEXT, EVENT_POINTER, EVENT_CONTROL, EVENT_SEND_KEY };
+  struct Event {
+    EventKind kind;
+    uint8_t flag;
+    uint16_t page;
+    uint16_t usage;
+    union {
+      int32_t value;
+      int16_t motion[4];
+      char text[8];
+    };
+    uint32_t source;
+    const char *label;
+  };
+  static constexpr uint8_t EVENT_SLOTS = 64;
+  static constexpr uint8_t MAX_DOWN = 24;
+  void emit_key_(uint16_t page, uint16_t usage, bool pressed, uint32_t source, const char *label);
+  void emit_text_(const std::string &text);
+  void emit_pointer_(int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons);
+  void emit_control_(uint16_t page, uint16_t usage, int32_t value);
+  void emit_send_key_(uint8_t key);
+  void push_event_(const Event &event);
   void type_key_(uint16_t usage);
   const LayoutKey *layout_key_(uint16_t usage) const;
   /// The level of the key (plain, Shift, AltGr, Shift+AltGr) with the modifiers and Caps Lock now.
@@ -253,7 +289,15 @@ class HIDInput : public key_provider::KeyProvider {
   const KeyboardLayout *layout_{nullptr};
   const KeyboardLayout *device_layout_{nullptr};
   const char *log_name_{""};
-  std::vector<uint32_t> down_;  // page << 16 | usage of every key held
+  uint32_t down_[MAX_DOWN]{};
+  uint8_t down_count_{0};
+  Event *events_{nullptr};
+  uint8_t event_head_{0};
+  uint8_t event_tail_{0};
+  uint16_t events_dropped_{0};
+#ifdef USE_ESP32
+  portMUX_TYPE event_mux_ = portMUX_INITIALIZER_UNLOCKED;
+#endif
   char32_t dead_{0};
   uint8_t modifiers_{0};
   uint8_t leds_{LED_NUM_LOCK};
