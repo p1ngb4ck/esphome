@@ -54,6 +54,11 @@ if(CONFIG_SVP_EMU_SNES)
                                 COMPILE_DEFINITIONS "RIGHTSHIFT_IS_SAR;FAST_LSB_WORD_ACCESS;NO_ZERO_LUT")
     set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/snes9x/src/snapshot.c" PROPERTIES
                                 COMPILE_DEFINITIONS "RIGHTSHIFT_IS_SAR;FAST_LSB_WORD_ACCESS;NO_ZERO_LUT;${mem_io}")
+    set(snes_hot "")
+    foreach(f cpuexec cpuops getset ppu gfx tile clip dma apu spc700 soundux dsp)
+        list(APPEND snes_hot "${CMAKE_CURRENT_LIST_DIR}/snes9x/src/${f}.c")
+    endforeach()
+    set_source_files_properties(${snes_hot} PROPERTIES COMPILE_OPTIONS "-O2")
 endif()
 
 if(CONFIG_SVP_EMU_MD)
