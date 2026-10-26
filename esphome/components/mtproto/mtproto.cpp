@@ -912,7 +912,7 @@ bool Mtproto::handshake_() {
   if (!b_ok)
     return false;
 
-  uint8_t client_inner[DH_BYTES + 64];
+  uint8_t client_inner[20 + 4 + 16 + 16 + 8 + 4 + DH_BYTES + 16];
   TlWriter cw(client_inner + 20, sizeof(client_inner) - 20 - 16);
   cw.u32(ID_CLIENT_DH_INNER_DATA);
   cw.raw(nonce, 16);
