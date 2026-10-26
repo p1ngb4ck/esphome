@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <utility>
 
 namespace esphome::mtproto {
 
@@ -87,6 +88,10 @@ static constexpr uint32_t ID_UPDATE_SHORT_MESSAGE = 0x313bc7f8;
 static constexpr uint32_t ID_UPDATE_SHORT_CHAT_MESSAGE = 0x4d6deea5;
 static constexpr uint32_t ID_UPDATE_SHORT_SENT_MESSAGE = 0x9015e101;
 static constexpr uint32_t ID_UPDATES_GET_STATE = 0xedd4882a;
+static constexpr uint32_t ID_AUTH_EXPORT_AUTHORIZATION = 0xe5bfffcd;
+static constexpr uint32_t ID_AUTH_IMPORT_AUTHORIZATION = 0xa57a7dad;
+static constexpr uint32_t ID_AUTH_EXPORTED_AUTHORIZATION = 0xb434e2b8;
+static constexpr uint32_t LINK_WAIT_MS = 30000;
 
 struct DcAddress {
   int dc;
@@ -360,6 +365,10 @@ std::string Mtproto::error() const {
 }
 
 bool Mtproto::invoke(const uint8_t *query, size_t length, RpcCallback &&callback) {
+  return this->invoke_dc(0, query, length, std::move(callback));
+}
+
+bool Mtproto::invoke_dc(int dc, const uint8_t *query, size_t length, RpcCallback &&callback) {
   if (!this->started_ || length == 0)
     return false;
   auto *body = static_cast<uint8_t *>(heap_caps_malloc(length, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -370,7 +379,7 @@ bool Mtproto::invoke(const uint8_t *query, size_t length, RpcCallback &&callback
     return false;
   }
   memcpy(body, query, length);
-  Job *job = new (mem) Job{body, length, std::move(callback)};
+  Job *job = new (mem) Job{body, length, std::move(callback), dc};
   Command command{};
   command.type = CommandType::INVOKE;
   command.job = job;
@@ -382,6 +391,13 @@ bool Mtproto::invoke(const uint8_t *query, size_t length, RpcCallback &&callback
   }
   this->wake_();
   return true;
+}
+
+void Mtproto::close_dc() {
+  Command command{};
+  command.type = CommandType::CLOSE_DC;
+  if (xQueueSend(this->commands_, &command, 0) == pdTRUE)
+    this->wake_();
 }
 
 void Mtproto::finish_job_(Job *job, const char *error, TlReader result) {
@@ -635,9 +651,14 @@ void Mtproto::handle_command_(const Command &command) {
     case CommandType::INVOKE:
       if (this->fd_ < 0 || this->state_ != State::LOGGED_IN) {
         this->finish_job_(command.job, "OFFLINE", TlReader());
+      } else if (command.job->dc != 0 && command.job->dc != this->dc_) {
+        this->invoke_on_link_(command.job);
       } else if (!this->send_request_(Request::USER, command.job->body, command.job->length, command.job)) {
         this->finish_job_(command.job, "SEND_FAILED", TlReader());
       }
+      break;
+    case CommandType::CLOSE_DC:
+      this->close_link_();
       break;
     case CommandType::LOGOUT:
       if (this->fd_ >= 0 && this->user_id_ != 0) {
@@ -702,6 +723,7 @@ bool Mtproto::connect_(int dc) {
 }
 
 void Mtproto::disconnect_() {
+  this->close_link_();
   if (this->fd_ >= 0) {
     ::close(this->fd_);
     this->fd_ = -1;
@@ -1445,11 +1467,15 @@ void Mtproto::handle_result_(uint64_t req_msg_id, TlReader result) {
       this->finish_job_(job, "RPC_ERROR", TlReader());
       return;
     }
-    if (request == Request::USER) {
+    if (request == Request::USER || request == Request::EXPORT_AUTH || request == Request::IMPORT_AUTH) {
       char text[96];
       copy_text(text, sizeof(text), reinterpret_cast<const char *>(message), message_len);
       ESP_LOGW(TAG, "RPC error %" PRId32 " %s", code, text);
-      this->finish_job_(job, text, TlReader());
+      if (request == Request::USER) {
+        this->finish_job_(job, text, TlReader());
+      } else {
+        this->link_result_ = -1;
+      }
       return;
     }
     this->handle_error_(request, code, reinterpret_cast<const char *>(message), message_len);
@@ -1565,9 +1591,160 @@ void Mtproto::handle_result_(uint64_t req_msg_id, TlReader result) {
       if (id == ID_AUTH_AUTHORIZATION)
         this->login_done_(result);
       break;
+    case Request::EXPORT_AUTH: {
+      int64_t export_id = 0;
+      const uint8_t *data = nullptr;
+      size_t length = 0;
+      this->link_result_ = -1;
+      if (id != ID_AUTH_EXPORTED_AUTHORIZATION || !result.skip(4) || !result.i64(export_id) ||
+          !result.bytes(data, length) || length == 0)
+        break;
+      heap_caps_free(this->export_bytes_);
+      this->export_bytes_ = static_cast<uint8_t *>(heap_caps_malloc(length, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+      if (this->export_bytes_ == nullptr)
+        break;
+      memcpy(this->export_bytes_, data, length);
+      this->export_len_ = length;
+      this->export_id_ = export_id;
+      this->link_result_ = 1;
+      break;
+    }
+    case Request::IMPORT_AUTH:
+      this->link_result_ = id == ID_AUTH_AUTHORIZATION ? 1 : -1;
+      break;
     default:
       break;
   }
+}
+
+bool Mtproto::has_pending_(Job *job) const {
+  for (const Pending &pending : this->pending_) {
+    if (pending.request != Request::NONE && pending.job == job)
+      return true;
+  }
+  return false;
+}
+
+void Mtproto::swap_link_() {
+  Link &link = *this->link_;
+  std::swap(this->fd_, link.fd);
+  std::swap(this->dc_, link.dc);
+  std::swap(this->auth_key_, link.auth_key);
+  std::swap(this->auth_key_id_, link.auth_key_id);
+  std::swap(this->has_key_, link.has_key);
+  std::swap(this->home_key_, link.home_key);
+  std::swap(this->init_sent_, link.init_sent);
+  std::swap(this->server_salt_, link.server_salt);
+  std::swap(this->session_id_, link.session_id);
+  std::swap(this->seq_count_, link.seq_count);
+  std::swap(this->pending_, link.pending);
+  std::swap(this->acks_, link.acks);
+  std::swap(this->ack_count_, link.ack_count);
+  std::swap(this->ack_deadline_, link.ack_deadline);
+  std::swap(this->next_ping_, link.next_ping);
+}
+
+bool Mtproto::pump_(const std::function<bool()> &done, uint32_t timeout_ms) {
+  const uint32_t deadline = millis() + timeout_ms;
+  while (!done()) {
+    const uint32_t wait = elapsed_until(deadline, millis());
+    if (wait == 0 || this->fd_ < 0)
+      return false;
+    fd_set readable;
+    FD_ZERO(&readable);
+    FD_SET(this->fd_, &readable);
+    struct timeval tv = {.tv_sec = static_cast<time_t>(wait / 1000),
+                         .tv_usec = static_cast<suseconds_t>((wait % 1000) * 1000)};
+    const int n = ::select(this->fd_ + 1, &readable, nullptr, nullptr, &tv);
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n <= 0 || !this->receive_(READ_TIMEOUT_MS))
+      return false;
+  }
+  return true;
+}
+
+bool Mtproto::open_link_(int dc) {
+  if (this->link_ != nullptr && this->link_->dc == dc && this->link_->fd >= 0 && this->link_->authorized)
+    return true;
+  this->close_link_();
+  if (dc_ip(dc) == nullptr)
+    return false;
+  uint8_t body[8];
+  TlWriter w(body, sizeof(body));
+  w.u32(ID_AUTH_EXPORT_AUTHORIZATION);
+  w.i32(dc);
+  this->link_result_ = 0;
+  if (!this->send_request_(Request::EXPORT_AUTH, w.data(), w.size()) ||
+      !this->pump_([this]() { return this->link_result_ != 0; }, LINK_WAIT_MS) || this->link_result_ < 0)
+    return false;
+  this->link_ = static_cast<Link *>(heap_caps_calloc(1, sizeof(Link), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (this->link_ == nullptr) {
+    heap_caps_free(this->export_bytes_);
+    this->export_bytes_ = nullptr;
+    return false;
+  }
+  this->link_->fd = -1;
+  this->link_->dc = dc;
+  this->swap_link_();
+  bool ok = this->connect_(dc) && this->handshake_();
+  if (ok) {
+    this->start_session_();
+    TlWriter request(this->tx_ + SCRATCH_OFFSET, BUFFER_SIZE - SCRATCH_OFFSET);
+    request.u32(ID_AUTH_IMPORT_AUTHORIZATION);
+    request.i64(this->export_id_);
+    request.bytes(this->export_bytes_, this->export_len_);
+    this->link_result_ = 0;
+    ok = request.ok() && this->send_request_(Request::IMPORT_AUTH, request.data(), request.size()) &&
+         this->pump_([this]() { return this->link_result_ != 0; }, LINK_WAIT_MS) && this->link_result_ > 0;
+  }
+  if (this->ack_count_ != 0 && ok)
+    ok = this->send_acks_();
+  this->swap_link_();
+  heap_caps_free(this->export_bytes_);
+  this->export_bytes_ = nullptr;
+  this->export_len_ = 0;
+  if (!ok) {
+    ESP_LOGW(TAG, "No file connection to DC%d", dc);
+    this->close_link_();
+    return false;
+  }
+  this->link_->authorized = true;
+  ESP_LOGI(TAG, "File connection to DC%d", dc);
+  return true;
+}
+
+void Mtproto::close_link_() {
+  Link *link = this->link_;
+  if (link == nullptr)
+    return;
+  this->link_ = nullptr;
+  if (link->fd >= 0)
+    ::close(link->fd);
+  for (Pending &pending : link->pending) {
+    Job *job = pending.job;
+    heap_caps_free(pending.body);
+    pending = Pending{};
+    this->finish_job_(job, "DISCONNECTED", TlReader());
+  }
+  heap_caps_free(link);
+}
+
+void Mtproto::invoke_on_link_(Job *job) {
+  if (!this->open_link_(job->dc)) {
+    this->finish_job_(job, "FILE_DC_UNREACHABLE", TlReader());
+    return;
+  }
+  this->swap_link_();
+  const bool sent = this->send_request_(Request::USER, job->body, job->length, job);
+  bool ok = sent && this->pump_([this, job]() { return !this->has_pending_(job); }, LINK_WAIT_MS);
+  if (ok && this->ack_count_ != 0)
+    ok = this->send_acks_();
+  this->swap_link_();
+  if (!sent)
+    this->finish_job_(job, "SEND_FAILED", TlReader());
+  if (!ok)
+    this->close_link_();
 }
 
 void Mtproto::handle_error_(Request request, int32_t code, const char *message, size_t length) {

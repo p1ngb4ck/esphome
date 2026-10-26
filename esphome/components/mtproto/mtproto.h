@@ -79,13 +79,16 @@ class Mtproto final : public Component
 
   using RpcCallback = std::function<void(const char *error, TlReader result)>;
   bool invoke(const uint8_t *query, size_t length, RpcCallback &&callback);
+  bool invoke_dc(int dc, const uint8_t *query, size_t length, RpcCallback &&callback);
+  void close_dc();
+  int home_dc() const { return this->home_dc_; }
   void add_update_listener(std::function<void(TlReader updates)> &&listener) {
     this->update_listeners_.add(std::move(listener));
   }
   Trigger<std::string> *get_state_trigger() { return &this->state_trigger_; }
 
  protected:
-  enum class CommandType : uint8_t { WAKE, SET_API, PASSWORD, LOGOUT, INVOKE };
+  enum class CommandType : uint8_t { WAKE, SET_API, PASSWORD, LOGOUT, INVOKE, CLOSE_DC };
   enum class EventType : uint8_t { STATE, SAVE_SESSION };
   enum class Request : uint8_t {
     NONE = 0,
@@ -97,12 +100,15 @@ class Mtproto final : public Component
     LOGOUT,
     GET_STATE,
     USER,
+    EXPORT_AUTH,
+    IMPORT_AUTH,
   };
 
   struct Job {
     uint8_t *body;
     size_t length;
     RpcCallback callback;
+    int dc;
   };
 
   struct Command {
@@ -133,6 +139,25 @@ class Mtproto final : public Component
     uint8_t *body;
     uint32_t length;
     Job *job;
+  };
+
+  struct Link {
+    int fd;
+    int dc;
+    uint8_t auth_key[256];
+    uint8_t auth_key_id[8];
+    bool has_key;
+    bool home_key;
+    bool init_sent;
+    bool authorized;
+    uint64_t server_salt;
+    uint64_t session_id;
+    uint32_t seq_count;
+    Pending pending[MAX_PENDING];
+    uint64_t acks[MAX_ACKS];
+    size_t ack_count;
+    uint32_t ack_deadline;
+    uint32_t next_ping;
   };
 
   struct Password {
@@ -183,6 +208,13 @@ class Mtproto final : public Component
   void handle_updates_(TlReader updates);
   Pending *take_pending_(uint64_t msg_id);
   void drop_pending_();
+  bool has_pending_(Job *job) const;
+
+  void invoke_on_link_(Job *job);
+  bool open_link_(int dc);
+  void close_link_();
+  void swap_link_();
+  bool pump_(const std::function<bool()> &done, uint32_t timeout_ms);
 
   void handle_command_(const Command &command);
   void start_session_();
@@ -256,6 +288,11 @@ class Mtproto final : public Component
   size_t migrate_token_len_{0};
   Password password_{};
   bool logging_out_{false};
+  Link *link_{nullptr};
+  int8_t link_result_{0};
+  int64_t export_id_{0};
+  uint8_t *export_bytes_{nullptr};
+  size_t export_len_{0};
 };
 
 template<typename... Ts> class LogoutAction : public Action<Ts...>, public Parented<Mtproto> {

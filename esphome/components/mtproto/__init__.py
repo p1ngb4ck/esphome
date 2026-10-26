@@ -152,7 +152,7 @@ CONFIG_SCHEMA = cv.All(
     ).extend(cv.COMPONENT_SCHEMA),
     cv.only_on([PLATFORM_ESP32]),
     cv.has_none_or_all_keys(CONF_API_ID, CONF_API_HASH),
-    socket.consume_sockets(1, "mtproto"),
+    socket.consume_sockets(2, "mtproto"),
 )
 
 
