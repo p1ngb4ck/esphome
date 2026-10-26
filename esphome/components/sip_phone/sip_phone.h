@@ -256,6 +256,7 @@ class SipPhone final : public Component,
     bool cancel_pending;
     bool ack_pending;
     bool late_offer;
+    bool direct;
     char call_id[64];
     char local_hdr[224];
     char remote_hdr[224];

@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 #include <new>
+#include <strings.h>
 #include <unistd.h>
 
 namespace esphome::sip_phone {
@@ -1236,7 +1237,7 @@ void SipPhone::event_from_dialog_(Event &event) const {
 }
 
 void SipPhone::dialog_dest_(struct sockaddr_in &dest) const {
-  if (this->account_set_() && this->registrar_resolved_) {
+  if (!this->dialog_.direct && this->account_set_() && this->registrar_resolved_) {
     dest = this->registrar_;
     return;
   }
@@ -1276,7 +1277,11 @@ bool SipPhone::start_call_(const char *target) {
   }
   struct sockaddr_in dest {};
   bool routed = false;
-  if (this->account_set_()) {
+  Span uri_span = make_span(uri);
+  char host[64];
+  uri_host(uri_span).copy_to(host, sizeof(host));
+  const Account &account = this->task_account_;
+  if (this->account_set_() && (strcasecmp(host, account.domain) == 0 || strcasecmp(host, account.server) == 0)) {
     if (!this->registrar_resolved_ &&
         this->resolve_(this->task_account_.server, this->task_account_.port != 0 ? this->task_account_.port : 5060,
                        this->registrar_))
@@ -1286,12 +1291,9 @@ bool SipPhone::start_call_(const char *target) {
       routed = true;
     }
   }
-  if (!routed) {
-    Span uri_span = make_span(uri);
-    char host[64];
-    uri_host(uri_span).copy_to(host, sizeof(host));
+  const bool direct = !routed;
+  if (!routed)
     routed = this->resolve_(host, uri_port(uri_span, 5060), dest);
-  }
   if (!routed || !this->local_ip_for_(dest)) {
     copy_str(failed.text, sizeof(failed.text), "not_found");
     this->post_event_(failed);
@@ -1307,6 +1309,7 @@ bool SipPhone::start_call_(const char *target) {
   }
   d.active = true;
   d.outgoing = true;
+  d.direct = direct;
   snprintf(d.call_id, sizeof(d.call_id), "%08" PRIx32 "%08" PRIx32 "@%s", esp_random(), esp_random(),
            this->local_ip_);
   char aor[136];
@@ -1951,6 +1954,7 @@ void SipPhone::handle_invite_(const SipMessage &msg, const struct sockaddr_in &f
   memset(static_cast<void *>(&d), 0, offsetof(Dialog, ok_buf));
   d.rtp_fd = -1;
   d.active = true;
+  d.direct = !this->registrar_resolved_ || from.sin_addr.s_addr != this->registrar_.sin_addr.s_addr;
   msg.header("Call-ID").copy_to(d.call_id, sizeof(d.call_id));
   from_header.copy_to(d.remote_hdr, sizeof(d.remote_hdr));
   char tag[16];
