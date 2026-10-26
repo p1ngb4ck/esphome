@@ -757,6 +757,13 @@ void BluetoothA2DPSource::process_user_state_callbacks(uint16_t event,
         audio_state = a2d->audio_stat.state;
       }
       break;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0)
+    case ESP_A2D_REPORT_SNK_DELAY_VALUE_EVT:
+      a2d = (esp_a2d_cb_param_t *)(param);
+      if (delay_report_callback != nullptr)
+        delay_report_callback(a2d->a2d_report_delay_value_stat.delay_value, delay_report_obj);
+      break;
+#endif
   }
 }
 
