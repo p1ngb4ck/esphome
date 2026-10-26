@@ -299,7 +299,8 @@ void read_photo(TlReader photo, AccountFile &file) {
         read_int(item, "w", w);
         read_int(item, "h", h);
         const int64_t area = static_cast<int64_t>(w) * h;
-        const bool fits = static_cast<uint32_t>(std::max(w, h)) <= TelegramAccount::VIEW_MAX_SIDE;
+        const bool fits =
+            size_ctor == ID_PHOTO_SIZE && static_cast<uint32_t>(std::max(w, h)) <= TelegramAccount::VIEW_MAX_SIDE;
         if ((area > best || (fits && area > view_best)) && read_bytes(item, "type", type, type_len) && type_len > 0 &&
             type_len < sizeof(file.thumb)) {
           int32_t size = 0;

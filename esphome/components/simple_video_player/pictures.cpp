@@ -1716,10 +1716,10 @@ bool SimpleVideoPlayer::show_canvas_picture(lv_obj_t *canvas, const uint8_t *dat
   job.path = name;
   job.target_w = w;
   job.target_h = h;
-  job.target_stride = static_cast<uint32_t>(align_up(w, 16) * 2);
+  job.target_stride = lv_draw_buf_width_to_stride(w, LV_COLOR_FORMAT_RGB565);
   job.fit = this->fit_mode_;
   job.background = true;
-  this->view_capacity_ = align_up(align_up(w, 16) * align_up(h, 16) * 2, PsramPool::ALIGN);
+  this->view_capacity_ = align_up(static_cast<size_t>(job.target_stride) * h, PsramPool::ALIGN);
   this->view_data_ = this->pool_take_(this->view_capacity_, POOL_USER_PICTURES);
   if (this->view_data_ == nullptr) {
     ESP_LOGW(TAG, "%s: no room in the PSRAM pool", name);
