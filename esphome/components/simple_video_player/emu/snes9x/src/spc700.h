@@ -63,14 +63,14 @@ typedef struct
 #define ONE_APU_CYCLE 21
 
 void APUExecute(void);
+void APUExecuteUntil(int32_t target_cycles);
 
 #define APU_EXECUTE1() \
 APUExecute();
 
 #define APU_EXECUTE() \
-if (IAPU.APUExecuting) \
-    while (APU.Cycles <= CPU.Cycles) \
-      APUExecute();
+if (IAPU.APUExecuting && APU.Cycles <= CPU.Cycles) \
+    APUExecuteUntil(CPU.Cycles);
 
 #endif
 #endif

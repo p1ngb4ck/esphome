@@ -332,7 +332,7 @@ if (!(S9xAPUGetByteZ (Work8) & (1 << (b)))) \
 else \
     IAPU.PC += 3
 
-void APUExecute(void/*int32_t target_cycles*/)
+void APUExecuteUntil(int32_t target_cycles)
 {
    int8_t   Int8;
    int16_t  Int16;
@@ -341,8 +341,8 @@ void APUExecute(void/*int32_t target_cycles*/)
    uint16_t Work16;
    uint32_t Work32;
 
-   // while (APU.Cycles <= target_cycles)
-   // {
+   while (APU.Cycles <= target_cycles)
+   {
       uint8_t opcode = *IAPU.PC;
 
       APU.Cycles += S9xAPUCycles[opcode];
@@ -1805,6 +1805,11 @@ void APUExecute(void/*int32_t target_cycles*/)
          Settings.APUEnabled = false; /* re-enabled on next APU reset */
          break;
       }
-   // }
+   }
+}
+
+void APUExecute(void)
+{
+   APUExecuteUntil(APU.Cycles);
 }
 #endif
