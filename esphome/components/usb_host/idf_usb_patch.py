@@ -1119,6 +1119,73 @@ void hcd_port_get_channels(hcd_port_handle_t port_hdl, int *used, int *total)
 hcd_port_event_t hcd_port_handle_event(hcd_port_handle_t port_hdl)
 {"""
 
+_WAKE_INCLUDE_ANCHOR = """#include "freertos/FreeRTOS.h"
+"""
+
+_WAKE_INCLUDE_REPLACEMENT = """#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+"""
+
+_WAKE_PUBLIC_ANCHOR = """esp_err_t usb_host_client_unblock(usb_host_client_handle_t client_hdl);
+"""
+
+_WAKE_PUBLIC_REPLACEMENT = """esp_err_t usb_host_client_unblock(usb_host_client_handle_t client_hdl);
+
+void usb_host_client_set_wake_task(TaskHandle_t task);
+"""
+
+_WAKE_PRIVATE_ANCHOR = """static bool _unblock_client(client_t *client_obj, bool in_isr)
+{
+    bool yield;
+
+    HOST_EXIT_CRITICAL_SAFE();
+    if (in_isr) {
+        BaseType_t xTaskWoken = pdFALSE;
+        xSemaphoreGiveFromISR(client_obj->constant.event_sem, &xTaskWoken);
+        yield = (xTaskWoken == pdTRUE);
+    } else {
+        xSemaphoreGive(client_obj->constant.event_sem);
+        yield = false;
+    }
+    HOST_ENTER_CRITICAL_SAFE();
+
+    return yield;
+}
+"""
+
+_WAKE_PRIVATE_REPLACEMENT = """static TaskHandle_t s_client_wake_task = NULL;
+
+void usb_host_client_set_wake_task(TaskHandle_t task)
+{
+    s_client_wake_task = task;
+}
+
+static bool _unblock_client(client_t *client_obj, bool in_isr)
+{
+    bool yield;
+
+    HOST_EXIT_CRITICAL_SAFE();
+    if (in_isr) {
+        BaseType_t xTaskWoken = pdFALSE;
+        xSemaphoreGiveFromISR(client_obj->constant.event_sem, &xTaskWoken);
+        if (s_client_wake_task != NULL) {
+            vTaskNotifyGiveFromISR(s_client_wake_task, &xTaskWoken);
+        }
+        yield = (xTaskWoken == pdTRUE);
+    } else {
+        xSemaphoreGive(client_obj->constant.event_sem);
+        if (s_client_wake_task != NULL) {
+            xTaskNotifyGive(s_client_wake_task);
+        }
+        yield = false;
+    }
+    HOST_ENTER_CRITICAL_SAFE();
+
+    return yield;
+}
+"""
+
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -1191,6 +1258,9 @@ PATCHES = (
     ("private_include/usbh.h", _BUDGET_USBH_HEADER_ANCHOR, _BUDGET_USBH_HEADER_REPLACEMENT),
     ("private_include/hcd.h", _BUDGET_HCD_HEADER_ANCHOR, _BUDGET_HCD_HEADER_REPLACEMENT),
     ("src/hcd_dwc.c", _BUDGET_HCD_IMPL_ANCHOR, _BUDGET_HCD_IMPL_REPLACEMENT),
+    ("include/usb/usb_host.h", _WAKE_INCLUDE_ANCHOR, _WAKE_INCLUDE_REPLACEMENT),
+    ("include/usb/usb_host.h", _WAKE_PUBLIC_ANCHOR, _WAKE_PUBLIC_REPLACEMENT),
+    ("src/usb_host.c", _WAKE_PRIVATE_ANCHOR, _WAKE_PRIVATE_REPLACEMENT),
 )
 
 # Identifies an existing patched copy. It has to change whenever anything about that copy

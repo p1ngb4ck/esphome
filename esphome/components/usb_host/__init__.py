@@ -684,6 +684,7 @@ async def to_code(config: ConfigType) -> None:
         # The patched copy also counts every device's host channels before it is configured and claims
         # interfaces without the endpoints their driver never uses (idf_usb_patch.py)
         cg.add_define("USE_USB_HOST_CHANNEL_BUDGET")
+        cg.add_define("USE_USB_HOST_SHARED_TASK")
 
     add_idf_sdkconfig_option("CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE", 1024)
     if config.get(CONF_ENABLE_HUBS):

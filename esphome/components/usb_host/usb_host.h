@@ -128,6 +128,8 @@ static constexpr size_t USB_TASK_STACK_SIZE = 4096;
 // completed. 12 keeps it above the application tier and well below the Wi-Fi/RTOS range; it is
 // mostly blocked, so the higher priority costs nothing when idle.
 static constexpr UBaseType_t USB_TASK_PRIORITY = 12;
+static constexpr size_t SHARED_USB_TASK_STACK_SIZE = 6144;
+static constexpr size_t MAX_ACTIVE_CLIENTS = 16;
 
 // Transfer status reported to callback
 struct TransferStatus {
@@ -639,12 +641,28 @@ class USBClient : public Component {
   void report_connected_();
   virtual void on_disconnected() { this->trq_in_use_.store(0); }
 
+#ifdef USE_USB_HOST_SHARED_TASK
+  enum class Registration : uint8_t { READY, WAIT, FAIL };
+  static constexpr uint8_t RELEASE_NONE = 0;
+  static constexpr uint8_t RELEASE_WANTED = 1;
+  static constexpr uint8_t RELEASE_DONE = 2;
+  static constexpr uint8_t RELEASE_FAILED = 3;
+  Registration ensure_registered_();
+  void release_if_idle_();
+  bool unopened_devices_() const;
+#else
   static void usb_task_fn(void *arg);
   [[noreturn]] void usb_task_loop_() const;
+#endif
   static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg);
 
   TransferRequest requests_[MAX_REQUESTS]{};
+#ifdef USE_USB_HOST_SHARED_TASK
+  std::atomic<uint8_t> release_{RELEASE_NONE};
+  bool registered_{false};
+#else
   TaskHandle_t usb_task_handle_{nullptr};
+#endif
   usb_host_client_handle_t handle_{};
   usb_device_handle_t device_handle_{};
   const usb_device_desc_t *device_desc_{nullptr};
@@ -769,6 +787,10 @@ class USBHost final : public Component {
   // Every driver registers in its setup(). USBHost opens each new device once, reads its
   // descriptors and hands it, interface by interface, to the drivers that match it.
   void register_client(USBClient *client);
+#ifdef USE_USB_HOST_SHARED_TASK
+  bool attach_client(USBClient *client);
+  void release_client(USBClient *client);
+#endif
   // A driver let its device go: declined it, lost it, or failed to open it.
   void client_released(USBClient *client, int addr);
   /// The devices open now (main loop only).
@@ -813,6 +835,12 @@ class USBHost final : public Component {
   void finish_mode_switch_(usb_device_handle_t handle);
   void forget_device_(usb_device_handle_t handle);
   void continue_take_(RoutedDevice &dev);
+#ifdef USE_USB_HOST_SHARED_TASK
+  static void client_task_fn(void *arg);
+  [[noreturn]] void client_task_loop_();
+  TaskHandle_t client_task_{nullptr};
+  std::atomic<USBClient *> active_[MAX_ACTIVE_CLIENTS]{};
+#endif
 
   std::vector<USBClient *> clients_{};
   std::vector<ModeSwitch> mode_switches_{};

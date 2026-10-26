@@ -91,8 +91,58 @@ void USBHost::setup() {
     this->mark_failed();
     return;
   }
+#ifdef USE_USB_HOST_SHARED_TASK
+  xTaskCreatePinnedToCore(USBHost::client_task_fn, "usb_task", SHARED_USB_TASK_STACK_SIZE, this, USB_TASK_PRIORITY,
+                          &this->client_task_, LOOP_TASK_CORE);
+  if (this->client_task_ == nullptr) {
+    this->status_set_error(LOG_STR("USB task create failed"));
+    this->mark_failed();
+    return;
+  }
+  usb_host_client_set_wake_task(this->client_task_);
+#endif
   usb_host_ref() = this;
 }
+
+#ifdef USE_USB_HOST_SHARED_TASK
+void USBHost::client_task_fn(void *arg) { static_cast<USBHost *>(arg)->client_task_loop_(); }
+
+void USBHost::client_task_loop_() {
+  while (true) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    for (auto &slot : this->active_) {
+      USBClient *client = slot.load(std::memory_order_acquire);
+      if (client == nullptr)
+        continue;
+      usb_host_client_handle_events(client->handle_, 0);
+      if (client->release_.load(std::memory_order_acquire) != USBClient::RELEASE_WANTED)
+        continue;
+      if (usb_host_client_deregister(client->handle_) == ESP_OK) {
+        slot.store(nullptr, std::memory_order_release);
+        client->handle_ = nullptr;
+        client->release_.store(USBClient::RELEASE_DONE, std::memory_order_release);
+      } else {
+        client->release_.store(USBClient::RELEASE_FAILED, std::memory_order_release);
+      }
+      client->enable_loop_soon_any_context();
+    }
+  }
+}
+
+bool USBHost::attach_client(USBClient *client) {
+  for (auto &slot : this->active_) {
+    USBClient *expected = nullptr;
+    if (slot.compare_exchange_strong(expected, client, std::memory_order_acq_rel))
+      return true;
+  }
+  return false;
+}
+
+void USBHost::release_client(USBClient *client) {
+  client->release_.store(USBClient::RELEASE_WANTED, std::memory_order_release);
+  xTaskNotifyGive(this->client_task_);
+}
+#endif
 
 void USBHost::loop() {
   int err;

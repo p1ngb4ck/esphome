@@ -307,6 +307,7 @@ void USBClient::client_event_cb(const usb_host_client_event_msg_t *event_msg, vo
 // -- USBClient lifecycle -------------------------------------------------------
 
 void USBClient::setup() {
+#ifndef USE_USB_HOST_SHARED_TASK
   usb_host_client_config_t config{.is_synchronous = false,
                                   .max_num_event_msg = 5,
                                   .async = {.client_event_callback = USBClient::client_event_cb, .callback_arg = this}};
@@ -317,6 +318,7 @@ void USBClient::setup() {
     this->mark_failed();
     return;
   }
+#endif
   this->host_ = get_usb_host();
   if (this->host_ == nullptr) {
     ESP_LOGE(TAG, "USB host component not available");
@@ -330,20 +332,73 @@ void USBClient::setup() {
   // bulk packets where one on the full-speed controller sees 64, and both run at the same
   // time from this same code. The pool is allocated in handle_open_state_() once the
   // descriptors say what this device needs, and released again in disconnect().
+#ifndef USE_USB_HOST_SHARED_TASK
   xTaskCreatePinnedToCore(usb_task_fn, "usb_task", USB_TASK_STACK_SIZE, this, USB_TASK_PRIORITY,
                           &this->usb_task_handle_, LOOP_TASK_CORE);
   if (this->usb_task_handle_ == nullptr) {
     ESP_LOGE(TAG, "Failed to create USB task");
     this->mark_failed();
   }
+#endif
 }
 
+#ifdef USE_USB_HOST_SHARED_TASK
+USBClient::Registration USBClient::ensure_registered_() {
+  if (this->registered_) {
+    const uint8_t release = this->release_.load(std::memory_order_acquire);
+    if (release == RELEASE_WANTED)
+      return Registration::WAIT;
+    if (release == RELEASE_FAILED) {
+      this->release_.store(RELEASE_NONE, std::memory_order_release);
+      return Registration::READY;
+    }
+    if (release == RELEASE_NONE)
+      return Registration::READY;
+    this->registered_ = false;
+    this->release_.store(RELEASE_NONE, std::memory_order_release);
+  }
+  usb_host_client_config_t config{.is_synchronous = false,
+                                  .max_num_event_msg = 5,
+                                  .async = {.client_event_callback = USBClient::client_event_cb, .callback_arg = this}};
+  const esp_err_t err = usb_host_client_register(&config, &this->handle_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "client register failed: %s", esp_err_to_name(err));
+    this->handle_ = nullptr;
+    return Registration::FAIL;
+  }
+  if (!this->host_->attach_client(this)) {
+    ESP_LOGE(TAG, "No slot for another active USB client");
+    usb_host_client_deregister(this->handle_);
+    this->handle_ = nullptr;
+    return Registration::FAIL;
+  }
+  this->registered_ = true;
+  return Registration::READY;
+}
+
+bool USBClient::unopened_devices_() const {
+  for (const auto &dev : this->devices_) {
+    if (!dev->opened)
+      return true;
+  }
+  return false;
+}
+
+void USBClient::release_if_idle_() {
+  if (!this->registered_ || this->release_.load(std::memory_order_acquire) != RELEASE_NONE)
+    return;
+  if (this->state_ != USB_CLIENT_INIT || !this->devices_.empty() || !this->dead_devices_.empty() || this->starting_())
+    return;
+  this->host_->release_client(this);
+}
+#else
 void USBClient::usb_task_fn(void *arg) { static_cast<USBClient *>(arg)->usb_task_loop_(); }
 
 void USBClient::usb_task_loop_() const {
   while (true)
     usb_host_client_handle_events(this->handle_, portMAX_DELAY);
 }
+#endif
 
 bool USBClient::process_usb_events_() {
   bool had_work = false;
@@ -360,6 +415,30 @@ bool USBClient::process_usb_events_() {
   uint16_t dropped = this->event_queue.get_and_reset_dropped_count();
   if (dropped > 0)
     ESP_LOGW(TAG, "Dropped %u USB events due to queue overflow", dropped);
+#ifdef USE_USB_HOST_SHARED_TASK
+  if (this->state_ == USB_CLIENT_OPEN || (this->accepts_more_devices_() && this->unopened_devices_())) {
+    const Registration registration = this->ensure_registered_();
+    if (registration == Registration::WAIT)
+      return had_work;
+    if (registration == Registration::FAIL) {
+      if (this->state_ == USB_CLIENT_OPEN) {
+        const int addr = this->device_addr_;
+        this->state_ = USB_CLIENT_INIT;
+        this->device_addr_ = -1;
+        this->routed_interfaces_ = 0;
+        this->host_->client_released(this, addr);
+      }
+      for (size_t i = 0; i < this->devices_.size();) {
+        if (!this->devices_[i]->opened) {
+          this->drop_device_(this->devices_[i].get());
+          continue;
+        }
+        i++;
+      }
+      return true;
+    }
+  }
+#endif
   if (this->state_ == USB_CLIENT_OPEN) {
     had_work = true;
     this->handle_open_state_();
@@ -372,7 +451,11 @@ bool USBClient::process_usb_events_() {
 }
 
 void USBClient::loop() {
-  if (!this->process_usb_events_())
+  const bool work = this->process_usb_events_();
+#ifdef USE_USB_HOST_SHARED_TASK
+  this->release_if_idle_();
+#endif
+  if (!work)
     this->disable_loop();
 }
 
@@ -658,6 +741,9 @@ void USBClient::disconnect() {
   }
   if (addr >= 0)
     this->host_->client_released(this, addr);
+#ifdef USE_USB_HOST_SHARED_TASK
+  this->enable_loop();
+#endif
 }
 
 void USBClient::dump_config() {
@@ -1062,6 +1148,9 @@ void USBClient::drop_device_(UsbDevice *dev) {
   }
   if (addr >= 0)
     this->host_->client_released(this, addr);
+#ifdef USE_USB_HOST_SHARED_TASK
+  this->enable_loop();
+#endif
 }
 
 // -- Isochronous thin forwarders -----------------------------------------------
