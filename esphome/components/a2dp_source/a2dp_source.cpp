@@ -60,6 +60,16 @@ void A2DPSource::connection_state_(esp_a2d_connection_state_t state, void *self)
   } else if (!connected && was) {
     component->disconnect_pending_.store(true);
   }
+  if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED)
+    component->reported_delay_ms_.store(0, std::memory_order_relaxed);
+}
+
+void A2DPSource::delay_report_(uint16_t delay, void *self) {
+  auto *component = static_cast<A2DPSource *>(self);
+  if (component == nullptr)
+    return;
+  component->reported_delay_ms_.store(std::min<uint32_t>((delay + 5u) / 10u, MAX_OUTPUT_DELAY_MS),
+                                      std::memory_order_relaxed);
 }
 
 void A2DPSource::audio_state_(esp_a2d_audio_state_t state, void *self) {
@@ -155,6 +165,7 @@ void A2DPSource::setup() {
   this->source_.set_ssid_callback(A2DPSource::device_filter_);
   this->source_.set_on_connection_state_changed(A2DPSource::connection_state_, this);
   this->source_.set_on_audio_state_changed(A2DPSource::audio_state_, this);
+  this->source_.set_on_delay_report(A2DPSource::delay_report_, this);
   this->source_.set_on_authentication_complete(A2DPSource::authentication_complete_);
 
   this->media_wanted_ = this->idle_timeout_ms_ == 0;

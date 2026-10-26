@@ -21,6 +21,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/ringbuf.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <string>
@@ -64,6 +65,7 @@ class A2DPSource : public Component
   void set_fallback_time(uint32_t seconds) { this->fallback_seconds_ = seconds; }
   void set_volume(uint8_t volume) { this->volume_ = volume; }
   void set_buffer_duration_ms(uint32_t ms) { this->buffer_duration_ms_ = ms; }
+  uint32_t buffer_duration_ms() const { return this->buffer_duration_ms_; }
   void set_idle_timeout_ms(uint32_t ms) { this->idle_timeout_ms_ = ms; }
   void set_pair_on_boot_if_empty(bool enable) { this->pair_on_boot_if_empty_ = enable; }
   /// @brief Not connected, outside a pairing window: page the stored device every interval (true),
@@ -88,7 +90,13 @@ class A2DPSource : public Component
   /// @brief How long the connected device takes to play what it receives (ms), as set for it; 0
   ///        while none is connected. Kept per device.
   uint32_t output_delay_ms() const {
-    return this->connected_.load() ? this->delay_ms_.load(std::memory_order_relaxed) : 0;
+    if (!this->connected_.load())
+      return 0;
+    const uint32_t set = this->delay_ms_.load(std::memory_order_relaxed);
+    if (set != 0)
+      return set;
+    return std::min<uint32_t>(this->reported_delay_ms_.load(std::memory_order_relaxed),
+                              this->max_delay_ms_.load(std::memory_order_relaxed));
   }
   /// @brief Sets and keeps the delay of the connected device.
   void set_output_delay_ms(uint32_t ms);
@@ -187,6 +195,7 @@ class A2DPSource : public Component
   static int32_t audio_callback_(Frame *frames, int32_t frame_count);
   static void connection_state_(esp_a2d_connection_state_t state, void *self);
   static void audio_state_(esp_a2d_audio_state_t state, void *self);
+  static void delay_report_(uint16_t delay, void *self);
   static void authentication_complete_(esp_bt_status_t status);
   static bool discovery_gate_();
   static bool gap_fallback_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void *arg);
@@ -244,6 +253,7 @@ class A2DPSource : public Component
   std::atomic<bool> pairing_mode_{false};
   std::atomic<bool> connected_{false};
   std::atomic<uint32_t> delay_ms_{0};
+  std::atomic<uint32_t> reported_delay_ms_{0};
   std::atomic<uint32_t> max_delay_ms_{MAX_OUTPUT_DELAY_MS};
   ESPPreferenceObject delay_pref_;
   bool delay_pref_valid_{false};
