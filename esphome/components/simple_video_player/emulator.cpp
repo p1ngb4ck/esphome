@@ -17,7 +17,6 @@ namespace esphome::simple_video_player {
 
 static const char *const TAG = "simple_video_player.emulator";
 
-#ifdef SVP_EMU_SNES
 static constexpr size_t BOOT_RESERVE = 64 * 1024 + 512;
 static void *s_boot_reserve = nullptr;
 
@@ -52,7 +51,6 @@ __attribute__((constructor(101))) static void emu_boot_reserve() {
   for (void *miss : misses)
     heap_caps_free(miss);
 }
-#endif
 
 static const char *const MSX_BIOS[] = {"MSX.ROM",     "MSX2.ROM",  "MSX2EXT.ROM", "MSX2P.ROM",
                                        "MSX2PEXT.ROM", "DISK.ROM",  "MSXDOS2.ROM", "FMPAC.ROM",
@@ -294,12 +292,10 @@ bool GameEmulator::start_(const std::string &path, bool assign) {
 }
 
 void GameEmulator::service() {
-#ifdef SVP_EMU_SNES
   if (s_boot_reserve != nullptr) {
     heap_caps_free(s_boot_reserve);
     s_boot_reserve = nullptr;
   }
-#endif
   if (this->link_changed_.exchange(false, std::memory_order_acq_rel))
     this->parent_->status_callbacks_.call();
   if (this->players_open_)
