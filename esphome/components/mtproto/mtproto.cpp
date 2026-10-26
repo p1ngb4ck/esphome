@@ -639,8 +639,10 @@ bool Mtproto::connect_(int dc) {
   const int one = 1;
   setsockopt(this->fd_, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
   static const uint8_t INTERMEDIATE[4] = {0xee, 0xee, 0xee, 0xee};
-  if (::send(this->fd_, INTERMEDIATE, sizeof(INTERMEDIATE), 0) != sizeof(INTERMEDIATE))
+  if (::send(this->fd_, INTERMEDIATE, sizeof(INTERMEDIATE), 0) != sizeof(INTERMEDIATE)) {
+    this->fail_("Telegram connection closed at once");
     return false;
+  }
   this->dc_ = dc;
   ESP_LOGI(TAG, "Connected to DC%d", dc);
   return true;
