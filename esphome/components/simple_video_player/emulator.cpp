@@ -493,9 +493,9 @@ void GameEmulator::loaded_() {
   if (p->speaker_ != nullptr)
     p->speaker_->set_audio_stream_info(audio::AudioStreamInfo(16, this->core_->channels(), this->core_->sample_rate()));
 #endif
-  ESP_LOGI(TAG, "Loaded: %zu bytes, %u x %u x%u, %u Hz %u ch", this->rom_size_, this->core_->video().width,
-           this->core_->video().height, static_cast<unsigned>(this->factor_),
-           static_cast<unsigned>(this->core_->sample_rate()), this->core_->channels());
+  ESP_LOGI(TAG, "Loaded: %zu bytes, %u x %u x%u, %u Hz %u ch, internal %zu bytes", this->rom_size_,
+           this->core_->video().width, this->core_->video().height, static_cast<unsigned>(this->factor_),
+           static_cast<unsigned>(this->core_->sample_rate()), this->core_->channels(), this->internal_used_);
   size_t sram_size = 0;
   if (this->core_->sram(&sram_size) != nullptr && sram_size != 0) {
     this->job_wanted_ = Job::SAV_LOAD;
