@@ -1152,7 +1152,7 @@ void *GameEmulator::alloc_(size_t size, bool zero, bool hot) {
   bool internal = false;
   if ((hot || (!this->hot_only_now_ && size <= INTERNAL_PIECE_MAX)) &&
       this->internal_used_ + size <= this->internal_budget_now_) {
-    ptr = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT | MALLOC_CAP_DMA);
+    ptr = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT | MALLOC_CAP_SIMD);
     internal = ptr != nullptr;
   }
   if (ptr == nullptr) {
