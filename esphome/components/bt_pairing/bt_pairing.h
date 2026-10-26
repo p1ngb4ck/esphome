@@ -235,6 +235,7 @@ class BTPairing : public Component
   bool decode_(const uint8_t *data, size_t length);
   std::vector<uint8_t> encode_(bool fixed_size) const;
   void forget_index_(size_t index);
+  void device_label_into_(const PairingTarget *target, std::string &out) const;
 #ifdef USE_BT_PAIRING_STORAGE
   storage::PathStorage *resolve_file_(const char **rel);
   // The file, through the storage worker (the main loop never waits for it): read once, written

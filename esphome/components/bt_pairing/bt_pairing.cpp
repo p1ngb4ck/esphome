@@ -712,12 +712,21 @@ void BTPairing::dispatch_(const ScannedDevice &device, PairingTarget *target) {
 }
 
 std::string BTPairing::device_label(const PairingTarget *target) const {
+  std::string label;
+  this->device_label_into_(target, label);
+  return label;
+}
+
+void BTPairing::device_label_into_(const PairingTarget *target, std::string &out) const {
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   if (target == this->dispatched_target_ && !target->is_free()) {
-    if (!this->dispatched_.name.empty())
-      return this->dispatched_.name;
+    if (!this->dispatched_.name.empty()) {
+      out.assign(this->dispatched_.name);
+      return;
+    }
     format_mac_addr_upper(this->dispatched_.address, mac);
-    return mac;
+    out.assign(mac);
+    return;
   }
   const uint8_t *connected = target->connected_address();
   const PairingRecord *record = connected != nullptr ? this->find_address(connected)
@@ -725,14 +734,19 @@ std::string BTPairing::device_label(const PairingTarget *target) const {
                                                               : nullptr;
   if (record == nullptr && connected != nullptr) {
     format_mac_addr_upper(connected, mac);
-    return mac;
+    out.assign(mac);
+    return;
   }
-  if (record == nullptr)
-    return "";
-  if (record->name[0] != '\0')
-    return record->name;
+  if (record == nullptr) {
+    out.clear();
+    return;
+  }
+  if (record->name[0] != '\0') {
+    out.assign(record->name);
+    return;
+  }
   format_mac_addr_upper(record->address, mac);
-  return mac;
+  out.assign(mac);
 }
 
 void BTPairing::on_pin_request(const PairingTarget *target, const std::string &pin) {
@@ -766,7 +780,7 @@ void BTPairing::add_hid_slot(hid::HIDInput *input, PairingTarget *target) {
   this->hid_slots_.push_back(input);
   this->hid_targets_.push_back(target);
   input->add_on_key_event_callback([this, target, input](uint16_t page, uint16_t usage, bool pressed) {
-    this->event_device_ = this->device_label(target);
+    this->device_label_into_(target, this->event_device_);
 #if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
     ESP_LOGD(TAG, "[%s] %s %s", this->event_device_.c_str(), hid::key_name(page, usage).c_str(),
              pressed ? "pressed" : "released");
@@ -781,12 +795,12 @@ void BTPairing::add_hid_slot(hid::HIDInput *input, PairingTarget *target) {
     this->device_layout_ = nullptr;
   });
   input->add_on_pointer_callback([this, target](int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
-    this->event_device_ = this->device_label(target);
+    this->device_label_into_(target, this->event_device_);
     this->buttons_ = buttons;
     this->pointer_cb_.call(dx, dy, wheel, pan, buttons);
   });
   input->add_on_control_callback([this, target](uint16_t page, uint16_t usage, int32_t value) {
-    this->event_device_ = this->device_label(target);
+    this->device_label_into_(target, this->event_device_);
     this->control_cb_.call(page, usage, value);
   });
 }
