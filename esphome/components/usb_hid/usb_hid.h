@@ -74,7 +74,6 @@ class USBHIDDevice final : public hid::HIDInput {
   bool start_();
   /// Main loop: the device is gone or let go - endpoints stopped, interfaces released.
   void stop_();
-  void finish_();
   bool find_interfaces_();
   void attach_pad_();
   void fetch_descriptor_(size_t index);

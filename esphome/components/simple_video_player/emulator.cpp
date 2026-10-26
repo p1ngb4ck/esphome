@@ -40,12 +40,10 @@ static const SystemExtension SYSTEM_EXTENSIONS[] = {
 
 GameEmulator *GameEmulator::create(SimpleVideoPlayer *parent) {
   void *mem = heap_caps_calloc(1, sizeof(GameEmulator), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  GameEmulator *emu = mem != nullptr ? new (mem) GameEmulator(parent) : new GameEmulator(parent);
-  if (mem == nullptr)
-    emu->usable_ = false;
-#ifdef USE_LVGL_HID
-  hid::set_direct_key_sink(emu);
-#endif
+  if (mem != nullptr)
+    return new (mem) GameEmulator(parent);
+  auto *emu = new GameEmulator(parent);
+  emu->usable_ = false;
   return emu;
 }
 
@@ -244,10 +242,6 @@ bool GameEmulator::start_(const std::string &path, bool assign) {
   this->task_done_.store(false, std::memory_order_relaxed);
   this->pads_[0].store(0, std::memory_order_relaxed);
   this->pads_[1].store(0, std::memory_order_relaxed);
-#ifdef USE_LVGL_HID
-  for (auto &direct : this->direct_sources_)
-    direct.store(0, std::memory_order_relaxed);
-#endif
   this->assign_active_ = assign;
   this->link_mode_ = this->link_wanted_;
   this->link_wanted_ = LinkMode::OFF;
@@ -635,9 +629,6 @@ void GameEmulator::panel_ready(bool ready) {
   this->panel_ok_ = ready;
   if (!ready || this->state_ != State::WAIT_PANEL)
     return;
-#ifdef USE_LVGL_HID
-  this->direct_keyboard_ = this->core_ != nullptr && this->core_->keyboard();
-#endif
   this->task_pause_.store(false, std::memory_order_release);
   if (this->task_.is_created()) {
     xTaskNotifyGive(this->task_.get_handle());
@@ -1672,8 +1663,6 @@ bool GameEmulator::game_key_(uint16_t page, uint16_t usage, uint8_t mods, bool p
     this->core_->key(usage, pressed);
     return true;
   }
-  if (this->is_direct_source_(source))
-    return true;
   const uint16_t buttons = this->buttons_of_(page, usage);
   if (buttons == 0)
     return true;
@@ -1694,57 +1683,6 @@ bool GameEmulator::game_key_(uint16_t page, uint16_t usage, uint8_t mods, bool p
     this->pads_[pad].fetch_and(static_cast<uint16_t>(~buttons), std::memory_order_relaxed);
   }
   return true;
-}
-
-void GameEmulator::direct_key(uint32_t source, uint16_t page, uint16_t usage, bool pressed) {
-  if (this->task_pause_.load(std::memory_order_acquire) || this->task_stop_.load(std::memory_order_acquire))
-    return;
-  for (size_t i = 0; i < this->menu_key_count_; i++) {
-    if (this->menu_keys_[i].page == page && this->menu_keys_[i].usage == usage)
-      return;
-  }
-  if (page == 0x07 && this->direct_keyboard_)
-    return;
-  this->note_direct_source_(source);
-  const uint16_t buttons = this->buttons_of_(page, usage);
-  if (buttons == 0)
-    return;
-  uint8_t pad = 0;
-  if (this->assign_active_) {
-    uint8_t player = 0;
-    for (uint8_t i = 0; i < this->player_count_; i++) {
-      if (this->players_[i].source == source)
-        player = this->players_[i].player;
-    }
-    if (player == 0)
-      return;
-    pad = player - 1;
-  }
-  if (pressed) {
-    this->pads_[pad].fetch_or(buttons, std::memory_order_relaxed);
-  } else {
-    this->pads_[pad].fetch_and(static_cast<uint16_t>(~buttons), std::memory_order_relaxed);
-  }
-}
-
-bool GameEmulator::is_direct_source_(uint32_t source) const {
-  for (const auto &direct : this->direct_sources_) {
-    if (direct.load(std::memory_order_acquire) == source)
-      return true;
-  }
-  return false;
-}
-
-void GameEmulator::note_direct_source_(uint32_t source) {
-  for (auto &direct : this->direct_sources_) {
-    uint32_t seen = direct.load(std::memory_order_acquire);
-    if (seen == source)
-      return;
-    if (seen == 0 && direct.compare_exchange_strong(seen, source, std::memory_order_acq_rel))
-      return;
-    if (seen == source)
-      return;
-  }
 }
 
 uint16_t GameEmulator::buttons_of_(uint16_t page, uint16_t usage) const {

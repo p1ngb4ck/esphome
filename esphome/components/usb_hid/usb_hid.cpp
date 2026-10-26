@@ -55,8 +55,6 @@ USBHIDDevice *USBHIDClient::find_device_(uint32_t serial) const {
 }
 
 void USBHIDClient::loop() {
-  for (auto *device : this->hid_devices_)
-    device->deliver_events();
   Report *report;
   while ((report = this->reports_.pop()) != nullptr) {
     // A report of a device let go meanwhile finds none
@@ -119,10 +117,7 @@ void USBHIDClient::on_device_disconnected(usb_host::UsbDevice &dev) {
 }
 
 void USBHIDClient::free_device_context(usb_host::UsbDevice &dev) {
-  auto *device = static_cast<USBHIDDevice *>(dev.context);
-  if (device != nullptr)
-    device->finish_();
-  delete device;  // NOLINT
+  delete static_cast<USBHIDDevice *>(dev.context);  // NOLINT
   dev.context = nullptr;
 }
 
@@ -269,8 +264,6 @@ bool USBHIDDevice::start_() {
     this->set_firmware(release);
   }
   this->attach_pad_();
-  if (this->client_->raw_driver_ == nullptr)
-    this->set_deferred(true);
   this->fetch_descriptor_(0);
   return true;
 }
@@ -287,10 +280,6 @@ void USBHIDDevice::stop_() {
     usb_host_endpoint_flush(this->dev_->handle, intf.in_ep);
     this->client_->release_interface(*this->dev_, intf.number);
   }
-}
-
-void USBHIDDevice::finish_() {
-  this->set_deferred(false);
   this->interfaces_.clear();
   this->gamepad_detach_();
   this->release_all_hid();
@@ -574,11 +563,7 @@ void USBHIDDevice::read_(uint8_t index, uint8_t number, uint8_t ep, uint16_t mps
           ESP_LOGW(TAG, "Interface %u stopped (status %u)", number, status.error_code);
           return;
         }
-        if (status.data_len > 0 && this->is_deferred()) {
-          if (index < this->interfaces_.size())
-            this->report_(index, status.data, std::min(status.data_len, USBHIDClient::REPORT_MAX));
-          this->client_->enable_loop_soon_any_context();
-        } else if (status.data_len > 0) {
+        if (status.data_len > 0) {
           USBHIDClient *client = this->client_;
           USBHIDClient::Report *report = client->report_pool_.allocate();
           if (report != nullptr) {

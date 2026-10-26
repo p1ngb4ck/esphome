@@ -51,7 +51,7 @@ void HIDInput::gamepad_state(const GamepadState &state) {
   }
   for (uint8_t i = 0; i < PAD_AXIS_COUNT; i++) {
     if (state.axes[i] != this->pad_state_.axes[i])
-      this->emit_control_(PAGE_GENERIC_DESKTOP, AXIS_USAGES[i], state.axes[i]);
+      this->control_cb_.call(PAGE_GENERIC_DESKTOP, AXIS_USAGES[i], state.axes[i]);
   }
   uint8_t contacts = 0;
   uint8_t contacts_before = 0;
@@ -61,15 +61,15 @@ void HIDInput::gamepad_state(const GamepadState &state) {
     contacts += now.down;
     contacts_before += before.down;
     if (now.down != before.down)
-      this->emit_control_(PAGE_DIGITIZER, USAGE_FINGER_DOWN[i], now.down);
+      this->control_cb_.call(PAGE_DIGITIZER, USAGE_FINGER_DOWN[i], now.down);
     // Across the touchpad, 0..65535, whatever its own range.
     if (now.down && (now.x != before.x || !before.down) && state.touch_width > 1)
-      this->emit_control_(PAGE_DIGITIZER, USAGE_FINGER_X[i], now.x * 65535 / (state.touch_width - 1));
+      this->control_cb_.call(PAGE_DIGITIZER, USAGE_FINGER_X[i], now.x * 65535 / (state.touch_width - 1));
     if (now.down && (now.y != before.y || !before.down) && state.touch_height > 1)
-      this->emit_control_(PAGE_DIGITIZER, USAGE_FINGER_Y[i], now.y * 65535 / (state.touch_height - 1));
+      this->control_cb_.call(PAGE_DIGITIZER, USAGE_FINGER_Y[i], now.y * 65535 / (state.touch_height - 1));
   }
   if (contacts != contacts_before)
-    this->emit_control_(PAGE_DIGITIZER, USAGE_CONTACT_COUNT, contacts);
+    this->control_cb_.call(PAGE_DIGITIZER, USAGE_CONTACT_COUNT, contacts);
   this->pad_state_ = state;
 }
 
@@ -162,7 +162,7 @@ bool HIDInput::gamepad_axis_(const HIDReportItemValue &v) {
         this->pad_state_.axes[i] = value;
     }
   }
-  this->emit_control_(page, usage, value);
+  this->control_cb_.call(page, usage, value);
   return true;
 }
 
