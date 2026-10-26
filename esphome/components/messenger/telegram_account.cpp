@@ -601,7 +601,9 @@ void read_document(TlReader document, uint8_t kind, AccountFile &file) {
   char mime[48];
   read_text(document, "mime_type", mime, sizeof(mime));
   const char *ext = ".bin";
-  if (kind == 2 || strcmp(mime, "audio/ogg") == 0) {
+  if (kind == 2) {
+    ext = ".opus";
+  } else if (strcmp(mime, "audio/ogg") == 0) {
     ext = ".ogg";
   } else if (kind == 3 || strcmp(mime, "video/mp4") == 0) {
     ext = ".mp4";
