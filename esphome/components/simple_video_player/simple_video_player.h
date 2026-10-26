@@ -1968,16 +1968,6 @@ class SimpleVideoPlayer : public Component
   void reader_audio_chunk_(const AVIFrame &frame, const uint8_t *data, size_t size);
   void reader_passed_video_();
   void reset_audio_cursor_();
-  std::atomic<uint32_t> sound_seq_{0};
-  std::atomic<uint32_t> sound_played_{0};
-  std::atomic<uint32_t> sound_played_at_{0};
-  std::atomic<uint32_t> sound_written_{0};
-  std::atomic<bool> sound_awaited_{false};
-  uint32_t sound_base_{0};
-  uint32_t sound_feed_{0};
-  uint32_t sound_frame0_{0};
-  static constexpr int64_t SOUND_SLEW_DIV = 8;
-  bool sound_heard_us_(int64_t now, int64_t *heard);
 #endif
   uint32_t avi_fps_num_{0};
   uint32_t avi_fps_den_{0};

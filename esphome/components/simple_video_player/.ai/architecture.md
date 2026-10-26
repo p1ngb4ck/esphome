@@ -159,15 +159,6 @@ each start, clamped to `max_audio_latency_ms_`: what the pool's ring room leaves
 `bt_out.set_max_output_delay_ms()`, the BT delay slider's and number's most). The session's ring and
 sound block are sized for this lead; sound released when the cursor leads by `audio_lead_frames_`
 (the cursor peeks the ring that far ahead); picture clock anchored that much later.
-The picture clock follows the sound as it is heard: `speaker_`'s audio output callback (frames played and the time
-they were played, through the resampler / mixer / router from the I2S, USB or A2DP speaker; a2dp: frames handed to
-the stack, its own delay is `audio_latency`) counts `sound_played_`; the audio task counts `sound_written_` (PCM:
-what `play()` took; MP3 / FLAC: the decoder's `get_playback_ms()`). At a feed's start (playback start, a seek) the
-counts are taken (`sound_base_`, `sound_feed_`, `sound_frame0_`); `sound_heard_us_()` gives the feed's time heard
-now (only while some of the feed is still in the speaker chain). The first frame of a feed waits for its first
-sound to be heard (woken by the callback, at most 1 s, else the wall clock as before) and is set to it; every later
-frame's due time moves towards the sound by at most 1/8 frame (`SOUND_SLEW_DIV`): no frame dropped, no sprint.
-`sound_base_` takes the speaker chain as empty of other sound at a playback's start.
 
 ## 9. PSRAM pool and buffers (today)
 

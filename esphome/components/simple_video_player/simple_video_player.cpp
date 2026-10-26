@@ -157,14 +157,6 @@ void SimpleVideoPlayer::setup() {
     this->audio_sample_rate_ = AUDIO_SAMPLE_RATE;
     this->audio_bits_per_sample_ = AUDIO_BITS_PER_SAMPLE;
     this->audio_frame_bytes_ = AUDIO_BYTES_PER_FRAME;
-    this->speaker_->add_audio_output_callback([this](uint32_t frames, int64_t timestamp) {
-      this->sound_seq_.fetch_add(1, std::memory_order_acq_rel);
-      this->sound_played_.fetch_add(frames, std::memory_order_relaxed);
-      this->sound_played_at_.store(static_cast<uint32_t>(timestamp), std::memory_order_relaxed);
-      this->sound_seq_.fetch_add(1, std::memory_order_release);
-      if (this->sound_awaited_.load(std::memory_order_acquire))
-        this->playback_wait_.wake();
-    });
 
     this->sound_block_len_ = this->sound_bytes_(0);
     this->sound_lead_ms_ = 0;
@@ -1506,9 +1498,6 @@ void SimpleVideoPlayer::playback_loop_() {
                  !playing() || millis() - start >= 1000;
         });
   }
-  this->sound_feed_ = this->sound_written_.load(std::memory_order_acquire);
-  this->sound_base_ = this->sound_played_.load(std::memory_order_acquire) - this->sound_feed_;
-  this->sound_frame0_ = this->video_frame_index_;
 #endif
   this->av_started_.store(true, std::memory_order_release);
   this->audio_wait_.wake();
@@ -1630,21 +1619,7 @@ void SimpleVideoPlayer::playback_loop_() {
     // Anchor the wall clock on the first paced frame -- once its payload is in hand, so reader
     // cold-start latency isn't counted as the stream already running late.
     // The picture starts audio_lead_us_ after the sound, which was released at av_started_.
-    bool first = false;
     if (this->playback_start_time_us_ == 0) {
-#ifdef USE_AUDIO
-      if (this->audio_enabled_ && this->audio_busy_.load(std::memory_order_acquire)) {
-        const uint32_t start = millis();
-        int64_t heard = 0;
-        this->sound_awaited_.store(true, std::memory_order_release);
-        this->playback_wait_for_([&]() {
-          return this->sound_heard_us_(esp_timer_get_time(), &heard) || !playing() ||
-                 this->seek_pending_.load(std::memory_order_acquire) || millis() - start >= 1000;
-        });
-        this->sound_awaited_.store(false, std::memory_order_release);
-      }
-#endif
-      first = true;
       this->paused_accum_us_ = 0;
       this->playback_start_time_us_ =
           esp_timer_get_time() - static_cast<int64_t>(frame_index * frame_dur) + this->audio_lead_us_;
@@ -1663,23 +1638,6 @@ void SimpleVideoPlayer::playback_loop_() {
       target_present_time_us =
           this->playback_start_time_us_ + this->paused_accum_us_ + static_cast<int64_t>(frame_index * frame_dur);
     }
-#endif
-#ifdef USE_AUDIO
-    {
-      const int64_t now = esp_timer_get_time();
-      int64_t heard = 0;
-      if (this->audio_enabled_ && this->sound_heard_us_(now, &heard)) {
-        const int64_t media_us = static_cast<int32_t>(frame_index - this->sound_frame0_) * frame_dur;
-        const int64_t due = now + media_us - heard + static_cast<int64_t>(this->audio_lead_us_);
-        int64_t error = due - target_present_time_us;
-        if (!first)
-          error = std::clamp<int64_t>(error, -frame_dur / SOUND_SLEW_DIV, frame_dur / SOUND_SLEW_DIV);
-        this->playback_start_time_us_ += error;
-        target_present_time_us += error;
-      }
-    }
-#else
-    (void) first;
 #endif
 
     // Blocked until the frame's presentation time (pace_timer_ wakes the task then). A pause, a seek
@@ -2279,8 +2237,6 @@ void SimpleVideoPlayer::handle_seek_() {
 #ifdef USE_AUDIO
   if (audio) {
     if (ok) {
-      this->sound_feed_ = this->sound_written_.load(std::memory_order_acquire);
-      this->sound_frame0_ = this->video_frame_index_;
       // The speaker keeps running; the sound from the new place goes on audio_lead_frames_ ahead
       // of the picture, as at the start of playback.
       const uint32_t start = millis();
@@ -3387,29 +3343,6 @@ void SimpleVideoPlayer::restart_audio_feed_() {
   }
 }
 
-bool SimpleVideoPlayer::sound_heard_us_(int64_t now, int64_t *heard) {
-  const uint32_t rate = this->audio_sample_rate_;
-  if (rate == 0)
-    return false;
-  uint32_t seq;
-  uint32_t played;
-  uint32_t at;
-  do {
-    seq = this->sound_seq_.load(std::memory_order_acquire);
-    played = this->sound_played_.load(std::memory_order_relaxed);
-    at = this->sound_played_at_.load(std::memory_order_relaxed);
-  } while ((seq & 1) != 0 || seq != this->sound_seq_.load(std::memory_order_acquire));
-  const int32_t done = static_cast<int32_t>(played - this->sound_base_ - this->sound_feed_);
-  const int32_t fed =
-      static_cast<int32_t>(this->sound_written_.load(std::memory_order_acquire) - this->sound_feed_);
-  if (done <= 0 || done >= fed)
-    return false;
-  const int64_t since = static_cast<int32_t>(static_cast<uint32_t>(now) - at);
-  const int64_t us = static_cast<int64_t>(done) * 1000000 / rate + std::max<int64_t>(since, 0);
-  *heard = std::min<int64_t>(us, static_cast<int64_t>(fed) * 1000000 / rate);
-  return true;
-}
-
 // Reader task. The cursor starts where the reader is.
 void SimpleVideoPlayer::reset_audio_cursor_() {
   this->audio_cursor_pos_ = this->file_reader_ ? this->file_reader_->tell() : 0;
@@ -3518,11 +3451,6 @@ void SimpleVideoPlayer::audio_processing_loop_() {
   // only bounds how soon a stop or a seek is seen while neither comes.
   static constexpr TickType_t AUDIO_WAIT = pdMS_TO_TICKS(20);
   uint32_t audio_decode_failures = 0;
-  const uint32_t frame_bytes = this->speaker_->get_audio_stream_info().frames_to_bytes(1);
-  const uint64_t rate = this->speaker_->get_audio_stream_info().get_sample_rate();
-  size_t written_bytes = 0;
-  uint32_t ms_base = this->audio_decoder_ ? this->audio_decoder_->get_playback_ms() : 0;
-  uint32_t frames_base = this->sound_written_.load(std::memory_order_relaxed);
 
   while (!this->audio_task_stop_) {
     esp_task_wdt_reset();
@@ -3546,9 +3474,6 @@ void SimpleVideoPlayer::audio_processing_loop_() {
           },
           portMAX_DELAY);
       esp_task_wdt_add(nullptr);
-      written_bytes = 0;
-      ms_base = this->audio_decoder_ ? this->audio_decoder_->get_playback_ms() : 0;
-      frames_base = this->sound_written_.load(std::memory_order_relaxed);
       continue;
     }
 
@@ -3559,10 +3484,6 @@ void SimpleVideoPlayer::audio_processing_loop_() {
     const bool use_decoder = this->audio_use_decoder_.load(std::memory_order_acquire);
     if (use_decoder) {
       audio::AudioDecoderState decode_state = this->audio_decoder_->decode(false);
-      this->sound_written_.store(
-          frames_base + static_cast<uint32_t>(
-                            static_cast<uint64_t>(this->audio_decoder_->get_playback_ms() - ms_base) * rate / 1000),
-          std::memory_order_release);
 
       if (decode_state == audio::AudioDecoderState::FAILED) {
         if (++audio_decode_failures >= AUDIO_MAX_CONSECUTIVE_DECODE_FAILURES) {
@@ -3593,11 +3514,6 @@ void SimpleVideoPlayer::audio_processing_loop_() {
         const size_t written = this->speaker_->play(write_ptr, bytes_remaining, AUDIO_WAIT);
         bytes_remaining -= written;
         write_ptr += written;
-        written_bytes += written;
-        if (frame_bytes != 0 && written_bytes >= frame_bytes) {
-          this->sound_written_.fetch_add(written_bytes / frame_bytes, std::memory_order_release);
-          written_bytes %= frame_bytes;
-        }
         esp_task_wdt_reset();
       }
     }
