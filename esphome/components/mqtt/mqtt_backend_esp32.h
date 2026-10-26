@@ -47,8 +47,8 @@ struct Event {
 
   // Release owned resources for pool reuse (keeps allocated capacity for efficiency)
   void release() {
-    this->data.clear();
-    this->topic.clear();
+    std::vector<char>().swap(this->data);
+    std::string().swap(this->topic);
   }
 };
 
