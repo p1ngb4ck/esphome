@@ -124,6 +124,10 @@ class Messenger : public Component
     this->account_.attach(mtproto, this);
   }
   TelegramAccount *account() { return &this->account_; }
+  bool view_account_photo(int32_t message_id);
+  const uint8_t *photo_data() const { return this->photo_; }
+  size_t photo_size() const { return this->photo_len_; }
+  void photo_release();
   Trigger<uint8_t> *get_account_trigger() { return &this->account_trigger_; }
 #endif
   bool is_account(Channel channel) const;
@@ -196,11 +200,13 @@ class Messenger : public Component
   static constexpr uint32_t TASK_STACK = 10240;
   static constexpr size_t MAX_RESPONSE = 65536;
   static constexpr size_t DOWNLOAD_CHUNK = 16384;
+  static constexpr size_t VIEW_MAX_BYTES = 4 * 1024 * 1024;
 
   ChannelConfig &config_(Channel channel) const { return this->configs_[static_cast<size_t>(channel)]; }
   bool direct_(Channel channel) const;
   bool run_account_(Job *job, std::string *error);
   bool run_account_download_(Job *job, std::string *error);
+  bool run_account_view_(Job *job, std::string *error);
   static void poll_task_entry_(void *param);
   static void send_task_entry_(void *param);
   void poll_loop_();
@@ -290,6 +296,8 @@ class Messenger : public Component
   mtproto::Mtproto *mtproto_{nullptr};
   TelegramAccount account_;
   Trigger<uint8_t> account_trigger_;
+  uint8_t *photo_{nullptr};
+  size_t photo_len_{0};
 #endif
 #ifdef USE_MESSENGER_CAMERA
   camera::Camera *camera_{nullptr};

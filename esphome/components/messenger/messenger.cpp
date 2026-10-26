@@ -1422,6 +1422,8 @@ bool Messenger::stream_to_storage_(const std::string &url, const std::string &au
 
 bool Messenger::run_download_(Job *job, std::string *error) {
 #ifdef USE_MESSENGER_ACCOUNT
+  if (this->is_account(job->channel) && strncmp(job->ref, "tgview:", 7) == 0)
+    return this->run_account_view_(job, error);
   if (this->is_account(job->channel))
     return this->run_account_download_(job, error);
 #endif
@@ -1486,6 +1488,69 @@ bool Messenger::run_download_(Job *job, std::string *error) {
 }
 
 #ifdef USE_MESSENGER_ACCOUNT
+bool Messenger::view_account_photo(int32_t message_id) {
+  if (!this->is_ready(Channel::TELEGRAM) || !this->is_account(Channel::TELEGRAM))
+    return false;
+  Job *job = new_job_(JobKind::DOWNLOAD);
+  if (job == nullptr)
+    return false;
+  job->channel = Channel::TELEGRAM;
+  snprintf(job->ref, sizeof(job->ref), "tgview:%ld", static_cast<long>(message_id));
+  return this->queue_job_(job);
+}
+
+void Messenger::photo_release() {
+  heap_caps_free(this->photo_);
+  this->photo_ = nullptr;
+  this->photo_len_ = 0;
+}
+
+bool Messenger::run_account_view_(Job *job, std::string *error) {
+  AccountFile file{};
+  if (!this->account_.file_of(static_cast<int32_t>(strtol(job->ref + 7, nullptr, 10)), &file) ||
+      file.thumb[0] == '\0') {
+    *error = "picture no longer in the chat";
+    return false;
+  }
+  memcpy(file.thumb, file.view_thumb, sizeof(file.thumb));
+  file.size = file.view_size;
+  if (file.size == 0 || file.size > VIEW_MAX_BYTES) {
+    *error = "picture too large";
+    return false;
+  }
+  const size_t capacity = (file.size + TelegramAccount::DOWNLOAD_PART - 1) / TelegramAccount::DOWNLOAD_PART *
+                          TelegramAccount::DOWNLOAD_PART;
+  auto *data = static_cast<uint8_t *>(heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (data == nullptr) {
+    *error = "no PSRAM";
+    return false;
+  }
+  size_t length = 0;
+  bool ok = true;
+  while (ok && length + TelegramAccount::DOWNLOAD_PART <= capacity) {
+    size_t got = 0;
+    ok = this->account_.download_part(file, static_cast<int64_t>(length), data + length,
+                                      TelegramAccount::DOWNLOAD_PART, &got, error);
+    length += got;
+    if (got < TelegramAccount::DOWNLOAD_PART)
+      break;
+  }
+  this->account_.end_download();
+  if (!ok || length == 0) {
+    heap_caps_free(data);
+    if (ok)
+      *error = "empty picture";
+    return false;
+  }
+  post_to_loop(this, 0, [this, data, length]() {
+    this->photo_release();
+    this->photo_ = data;
+    this->photo_len_ = length;
+    this->account_trigger_.trigger(TelegramAccount::CHANGED_PHOTO);
+  });
+  return true;
+}
+
 bool Messenger::run_account_download_(Job *job, std::string *error) {
   AccountFile file{};
   if (strncmp(job->ref, "tg:", 3) != 0 ||
