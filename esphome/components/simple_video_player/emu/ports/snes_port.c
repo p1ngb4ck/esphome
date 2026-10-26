@@ -9,9 +9,6 @@ static uint8_t s_back;
 static int16_t *s_stereo;
 static int16_t *s_mix;
 static size_t s_mix_frames;
-static size_t s_next_frames;
-static size_t s_req_frames;
-static size_t s_mixed_frames;
 static uint8_t s_channels;
 static uint32_t s_rate;
 static uint32_t s_acc;
@@ -97,10 +94,6 @@ bool snes_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels)
     s_frames[1] = calloc(SNES_WIDTH * SNES_HEIGHT_EXTENDED, sizeof(uint16_t));
     s_back = 0;
     s_frame = s_frames[0];
-    s_mix_frames = 0;
-    s_next_frames = 0;
-    s_req_frames = 0;
-    s_mixed_frames = 0;
     s_stereo = calloc((rate / 50 + 1) * 2, sizeof(int16_t));
     s_mix = calloc((rate / 50 + 1) * s_channels, sizeof(int16_t));
     if (s_frames[0] == NULL || s_frames[1] == NULL || s_stereo == NULL || s_mix == NULL)
@@ -136,13 +129,14 @@ void snes_port_frame(uint16_t pad1, uint16_t pad2)
     s_back ^= 1;
     const uint32_t fps = Memory.ROMFramesPerSecond > 0 ? (uint32_t)Memory.ROMFramesPerSecond : 60;
     s_acc += s_rate;
-    s_next_frames = s_acc / fps;
+    const size_t frames = s_acc / fps;
     s_acc %= fps;
-}
-
-void snes_port_mix_begin(void)
-{
-    const size_t frames = s_mixed_frames;
+    for (size_t done = 0; done < frames;)
+    {
+        const size_t n = frames - done < SOUND_BUFFER_SIZE / 2 ? frames - done : SOUND_BUFFER_SIZE / 2;
+        S9xMixSamples(s_stereo + done * 2, (int32_t)(n * 2));
+        done += n;
+    }
     if (s_channels == 2)
     {
         memcpy(s_mix, s_stereo, frames * 2 * sizeof(int16_t));
@@ -153,19 +147,6 @@ void snes_port_mix_begin(void)
             s_mix[i] = (int16_t)(((int)s_stereo[i * 2] + (int)s_stereo[i * 2 + 1]) / 2);
     }
     s_mix_frames = frames;
-    s_req_frames = s_next_frames;
-}
-
-void snes_port_mix_run(void)
-{
-    const size_t frames = s_req_frames;
-    for (size_t done = 0; done < frames;)
-    {
-        const size_t n = frames - done < SOUND_BUFFER_SIZE / 2 ? frames - done : SOUND_BUFFER_SIZE / 2;
-        S9xMixSamples(s_stereo + done * 2, (int32_t)(n * 2));
-        done += n;
-    }
-    s_mixed_frames = frames;
 }
 
 void snes_port_video(emu_port_video_t *video)

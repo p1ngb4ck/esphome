@@ -82,8 +82,6 @@ bool lynx_port_load_state(const uint8_t *buf, size_t len);
 
 bool snes_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels);
 void snes_port_frame(uint16_t pad1, uint16_t pad2);
-void snes_port_mix_begin(void);
-void snes_port_mix_run(void);
 void snes_port_video(emu_port_video_t *video);
 const int16_t *snes_port_audio(size_t *frames);
 uint32_t snes_port_frame_us(void);
