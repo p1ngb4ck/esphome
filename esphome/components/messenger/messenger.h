@@ -146,6 +146,7 @@ class Messenger : public Component
   void set_default_channel(Channel channel) { this->default_channel_ = channel; }
   void set_api_version(const char *version) { this->api_version_ = version; }
   void set_spool_dir(const char *dir) { this->spool_dir_ = dir; }
+  void set_save_dir(const std::string &dir);
   void set_token(Channel channel, const std::string &token);
   void set_account(Channel channel, const std::string &account);
   void set_allowed_chats(Channel channel, const std::string &list);
@@ -224,6 +225,7 @@ class Messenger : public Component
   bool run_account_(Job *job, std::string *error);
   bool run_account_download_(Job *job, std::string *error);
   bool run_account_view_(Job *job, std::string *error);
+  void save_sent_(Job *job);
   static void poll_task_entry_(void *param);
   static void send_task_entry_(void *param);
   void poll_loop_();
@@ -275,6 +277,7 @@ class Messenger : public Component
   Channel default_channel_{Channel::TELEGRAM};
   const char *api_version_{"v26.0"};
   const char *spool_dir_{""};
+  char save_dir_[128]{};
   StaticQueue_t jobs_queue_{};
   uint8_t jobs_storage_[JOB_QUEUE_LEN * sizeof(Job *)]{};
   QueueHandle_t jobs_{nullptr};

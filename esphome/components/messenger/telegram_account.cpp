@@ -437,15 +437,20 @@ bool TelegramAccount::allocate_() {
     return true;
   auto *chats = alloc_psram<AccountChat>(MAX_CHATS);
   auto *contacts = alloc_psram<AccountContact>(MAX_CONTACTS);
-  if (chats == nullptr || contacts == nullptr) {
+  auto *incoming = alloc_psram<AccountIncomingFile>(MAX_INCOMING_FILES);
+  if (chats == nullptr || contacts == nullptr || incoming == nullptr) {
     heap_caps_free(chats);
     heap_caps_free(contacts);
+    heap_caps_free(incoming);
     ESP_LOGE(TAG, "No PSRAM for the chats");
     return false;
   }
   LockGuard guard(this->lock_);
   this->chats_ = chats;
   this->contacts_ = contacts;
+  this->incoming_ = incoming;
+  this->incoming_head_ = 0;
+  this->incoming_tail_ = 0;
   this->chat_count_ = 0;
   this->contact_count_ = 0;
   this->started_ = true;
@@ -461,9 +466,13 @@ void TelegramAccount::release_() {
     heap_caps_free(this->chats_);
     heap_caps_free(this->contacts_);
     heap_caps_free(this->messages_);
+    heap_caps_free(this->incoming_);
     this->chats_ = nullptr;
     this->contacts_ = nullptr;
     this->messages_ = nullptr;
+    this->incoming_ = nullptr;
+    this->incoming_head_ = 0;
+    this->incoming_tail_ = 0;
     this->chat_count_ = 0;
     this->contact_count_ = 0;
     this->message_count_ = 0;
@@ -947,6 +956,7 @@ void TelegramAccount::on_new_message_(TlReader message, TlReader users_vector, T
 void TelegramAccount::add_incoming_(const AccountPeer &peer, const char *title, int32_t id, bool out, uint32_t date,
                                     const char *from, const char *text, uint8_t media, const AccountFile *file) {
   bool open = false;
+  bool files = false;
   AccountPeer read_target{};
   {
     LockGuard guard(this->lock_);
@@ -974,6 +984,19 @@ void TelegramAccount::add_incoming_(const AccountPeer &peer, const char *title, 
     }
     copy_text(chat->last, sizeof(chat->last), text, strlen(text));
     chat->date = date;
+    if (file != nullptr && !out && this->incoming_ != nullptr) {
+      if (this->incoming_tail_ - this->incoming_head_ >= MAX_INCOMING_FILES)
+        this->incoming_head_++;
+      AccountIncomingFile &entry = this->incoming_[this->incoming_tail_ % MAX_INCOMING_FILES];
+      entry.message_id = id;
+      entry.chat_id = peer.id;
+      entry.kind = media;
+      const char *who = from != nullptr && from[0] != '\0' ? from : chat->title;
+      copy_text(entry.from, sizeof(entry.from), who, strlen(who));
+      entry.file = *file;
+      this->incoming_tail_++;
+      files = true;
+    }
     open = this->messages_ != nullptr && this->open_.kind == peer.kind && this->open_.id == peer.id;
     if (!out && !open)
       chat->unread++;
@@ -995,7 +1018,7 @@ void TelegramAccount::add_incoming_(const AccountPeer &peer, const char *title, 
       read_target = this->open_;
     }
   }
-  this->notify_(open ? (CHANGED_CHATS | CHANGED_MESSAGES) : CHANGED_CHATS);
+  this->notify_((open ? (CHANGED_CHATS | CHANGED_MESSAGES) : CHANGED_CHATS) | (files ? CHANGED_FILES : 0));
   if (open && !out)
     this->mark_read_(read_target, id);
 }
@@ -1107,7 +1130,25 @@ bool TelegramAccount::file_of(int32_t message_id, AccountFile *file) const {
       return true;
     }
   }
+  if (this->incoming_ != nullptr) {
+    for (uint32_t n = this->incoming_head_; n != this->incoming_tail_; n++) {
+      const AccountIncomingFile &entry = this->incoming_[n % MAX_INCOMING_FILES];
+      if (entry.message_id == message_id && entry.file.id != 0) {
+        *file = entry.file;
+        return true;
+      }
+    }
+  }
   return false;
+}
+
+bool TelegramAccount::take_incoming_file(AccountIncomingFile *file) {
+  LockGuard guard(this->lock_);
+  if (this->incoming_ == nullptr || this->incoming_head_ == this->incoming_tail_)
+    return false;
+  *file = this->incoming_[this->incoming_head_ % MAX_INCOMING_FILES];
+  this->incoming_head_++;
+  return true;
 }
 
 bool TelegramAccount::download_part(const AccountFile &file, int64_t offset, uint8_t *out, size_t capacity,

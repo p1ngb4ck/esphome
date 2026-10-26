@@ -7,6 +7,7 @@
 #include <cinttypes>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <new>
 
 #include <strings.h>
@@ -229,6 +230,13 @@ bool Messenger::call_open_chat() {
 }
 #endif
 
+void Messenger::set_save_dir(const std::string &dir) {
+  copy_str(this->save_dir_, sizeof(this->save_dir_), dir.c_str());
+  const size_t n = strlen(this->save_dir_);
+  if (n > 1 && this->save_dir_[n - 1] == '/')
+    this->save_dir_[n - 1] = '\0';
+}
+
 bool Messenger::run_account_(Job *job, std::string *error) {
 #ifdef USE_MESSENGER_ACCOUNT
   const char *mime = job->file_kind == FileKind::VOICE ? "audio/ogg" : mime_of(job->name, job->file_kind);
@@ -236,6 +244,10 @@ bool Messenger::run_account_(Job *job, std::string *error) {
                                             reinterpret_cast<const uint8_t *>(job->body.data()), job->body.size(),
                                             job->name[0] != '\0' ? job->name : "file", mime, job->text, job->duration,
                                             error);
+#ifdef USE_MESSENGER_STORAGE
+  if (ok)
+    this->save_sent_(job);
+#endif
   job->body.clear();
   job->body.shrink_to_fit();
   return ok;
@@ -858,6 +870,15 @@ void Messenger::loop() {
     this->call_trigger_.trigger(static_cast<uint8_t>(this->call_.state()));
 #endif
 #ifdef USE_MESSENGER_ACCOUNT
+  AccountIncomingFile incoming{};
+  while (this->account_.take_incoming_file(&incoming)) {
+    static const char *const KINDS[] = {"document", "photo", "voice", "video", "document", "document"};
+    char ref[24];
+    snprintf(ref, sizeof(ref), "tg:%ld", static_cast<long>(incoming.message_id));
+    this->file_trigger_.trigger(channel_name(Channel::TELEGRAM), incoming.chat_id, std::string(incoming.from),
+                                std::string(KINDS[incoming.kind < 6 ? incoming.kind : 0]), std::string(ref),
+                                std::string(incoming.file.name), incoming.file.size);
+  }
   const uint8_t changes = this->account_.take_changes();
   if (changes != 0)
     this->account_trigger_.trigger(changes);
@@ -1529,6 +1550,37 @@ bool Messenger::run_download_(Job *job, std::string *error) {
 }
 
 #ifdef USE_MESSENGER_ACCOUNT
+void Messenger::save_sent_(Job *job) {
+  if (this->save_dir_[0] == '\0' || job->path[0] != '\0' || job->body.empty())
+    return;
+  char stamp[24];
+  const time_t now = ::time(nullptr);
+  struct tm local {};
+  if (now > 1600000000 && localtime_r(&now, &local) != nullptr) {
+    strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &local);
+  } else {
+    snprintf(stamp, sizeof(stamp), "%" PRIu32, static_cast<uint32_t>(millis()));
+  }
+  char path[sizeof(this->save_dir_) + 48];
+  snprintf(path, sizeof(path), "%s/sent_%s%s", this->save_dir_, stamp,
+           job->file_kind == FileKind::VOICE ? ".ogg" : job->file_kind == FileKind::PHOTO ? ".jpg" : ".bin");
+  const uint8_t *data = reinterpret_cast<const uint8_t *>(job->body.data());
+  const size_t len = job->body.size();
+  std::string error;
+  bool ok = this->storage_io_(IoOp::OPEN, nullptr, 0, path, &error);
+  const bool opened = ok;
+  for (size_t at = 0; ok && at < len; at += DOWNLOAD_CHUNK)
+    ok = this->storage_io_(IoOp::WRITE, data + at, std::min(DOWNLOAD_CHUNK, len - at), nullptr, &error);
+  if (opened && !this->io_abandoned_.load(std::memory_order_acquire)) {
+    std::string close_error;
+    this->storage_io_(IoOp::CLOSE, nullptr, 0, nullptr, &close_error);
+  }
+  if (this->io_abandoned_.load(std::memory_order_acquire))
+    new std::string(std::move(job->body));
+  if (!ok)
+    ESP_LOGW(TAG, "Not saved to %s: %s", path, error.c_str());
+}
+
 bool Messenger::view_account_photo(int32_t message_id) {
   if (!this->is_ready(Channel::TELEGRAM) || !this->is_account(Channel::TELEGRAM))
     return false;

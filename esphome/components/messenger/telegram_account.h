@@ -55,6 +55,14 @@ struct AccountFile {
   char name[48];
 };
 
+struct AccountIncomingFile {
+  int32_t message_id;
+  int64_t chat_id;
+  uint8_t kind;
+  char from[48];
+  AccountFile file;
+};
+
 struct AccountMessage {
   int32_t id;
   bool out;
@@ -70,6 +78,8 @@ class TelegramAccount {
   static constexpr uint8_t CHANGED_CHATS = 1;
   static constexpr uint8_t CHANGED_CONTACTS = 2;
   static constexpr uint8_t CHANGED_MESSAGES = 4;
+  static constexpr uint8_t CHANGED_FILES = 8;
+  static constexpr size_t MAX_INCOMING_FILES = 8;
   static constexpr uint32_t VIEW_MAX_SIDE = 800;
   static constexpr size_t MAX_CHATS = 60;
   static constexpr size_t MAX_CONTACTS = 300;
@@ -98,6 +108,7 @@ class TelegramAccount {
   int32_t message_id(size_t index) const;
   std::string message_file_name(size_t index) const;
   bool file_of(int32_t message_id, AccountFile *file) const;
+  bool take_incoming_file(AccountIncomingFile *file);
   bool download_part(const AccountFile &file, int64_t offset, uint8_t *out, size_t capacity, size_t *got,
                      std::string *error);
   void end_download();
@@ -150,6 +161,9 @@ class TelegramAccount {
   size_t contact_count_{0};
   AccountMessage *messages_{nullptr};
   size_t message_count_{0};
+  AccountIncomingFile *incoming_{nullptr};
+  uint32_t incoming_head_{0};
+  uint32_t incoming_tail_{0};
   AccountPeer open_{};
   char open_title_[64]{};
   uint32_t history_serial_{0};
