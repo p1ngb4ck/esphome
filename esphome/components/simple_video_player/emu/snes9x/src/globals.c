@@ -31,8 +31,8 @@ SPM_DRAM_ATTR CMemory Memory;
 
 SPM_DRAM_ATTR uint8_t OpenBus = 0;
 
-SPPU *PPU_ptr;
-InternalPPU *IPPU_ptr;
+SPM_DRAM_ATTR SPPU PPU;
+SPM_DRAM_ATTR InternalPPU IPPU;
 
 SPM_DRAM_ATTR SDMA S9xDMA[8];
 
@@ -60,13 +60,13 @@ bool S9xInitHot(void)
    memset(&GFX, 0, sizeof(GFX));
    OpAddress = 0;
    OpenBus = 0;
-   PPU_ptr = (SPPU*)emu_calloc_hot(1, sizeof(SPPU));
-   IPPU_ptr = (InternalPPU*)emu_calloc_hot(1, sizeof(InternalPPU));
-   return PPU_ptr && IPPU_ptr
+   memset(&PPU, 0, sizeof(PPU));
+   memset(&IPPU, 0, sizeof(IPPU));
 #ifndef USE_BLARGG_APU
-      && SoundData_ptr
+   return SoundData_ptr != NULL;
+#else
+   return true;
 #endif
-      ;
 }
 
 const int32_t NoiseFreq [32] =
