@@ -211,6 +211,7 @@ void SimpleVideoPlayer::pictures_loop_() {
 #endif
     if (this->view_step_ == ViewStep::DECODING)
       return;
+    this->cancel_view_();
     this->release_view_();
 #ifdef SVP_AUDIO_COVER
     // Cover art being fetched into its buffer: dropped, or stopped after its block.
@@ -1750,8 +1751,66 @@ bool SimpleVideoPlayer::show_canvas_picture(lv_obj_t *canvas, const uint8_t *dat
   this->view_canvas_ = canvas;
   this->view_done_ = std::move(done);
   this->view_close_ = false;
+  this->view_into_ = false;
   this->view_step_ = ViewStep::WAITING;
   return true;
+}
+
+bool SimpleVideoPlayer::decode_picture_into(const uint8_t *data, size_t length, const char *name, uint8_t *target,
+                                            size_t capacity, int32_t w, int32_t h, uint32_t stride,
+                                            std::function<void(bool)> &&done) {
+  if (data == nullptr || length == 0 || name == nullptr || target == nullptr || w <= 0 || h <= 0 ||
+      stride < static_cast<uint32_t>(w) * 2 || capacity < static_cast<size_t>(stride) * h || !this->pic_ready_ ||
+      this->pic_task_ == nullptr || this->view_step_ != ViewStep::IDLE || this->pictures_held_() ||
+      this->pool_wanted_(POOL_PICTURES))
+    return false;
+  runtime_image::ImageFormat format;
+  if (!picture_format(name, &format))
+    return false;
+  PictureJob &job = this->view_job_data_;
+  job = PictureJob{};
+  job.thumbnail = true;
+  job.data = data;
+  job.length = length;
+  job.path = name;
+  job.target = target;
+  job.target_capacity = capacity;
+  job.target_w = w;
+  job.target_h = h;
+  job.target_stride = stride;
+  job.fit = ImageFitMode::SCALE_TO_FIT;
+  jpeg_decode_picture_info_t info{};
+  if (format == runtime_image::JPEG && jpeg_decoder_get_info(data, static_cast<uint32_t>(length), &info) == ESP_OK &&
+      info.width != 0 && info.height != 0) {
+    const size_t scratch = align_up(jpeg_decoded_size(info, nullptr), PsramPool::ALIGN);
+    this->view_scratch_ = this->pool_take_(scratch, POOL_USER_PICTURES);
+    if (this->view_scratch_ == nullptr)
+      return false;
+    job.scratch = this->view_scratch_;
+    job.scratch_capacity = scratch;
+  }
+  this->view_done_ = std::move(done);
+  this->view_into_ = true;
+  this->view_step_ = ViewStep::WAITING;
+  return true;
+}
+
+void SimpleVideoPlayer::cancel_view_() {
+  if (this->view_step_ != ViewStep::WAITING)
+    return;
+  this->view_step_ = ViewStep::IDLE;
+  this->pool_.free(this->view_scratch_);
+  this->view_scratch_ = nullptr;
+  if (!this->view_into_) {
+    this->pool_.free(this->view_data_);
+    this->view_data_ = nullptr;
+    this->view_capacity_ = 0;
+  }
+  this->view_into_ = false;
+  auto done = std::move(this->view_done_);
+  this->view_done_ = nullptr;
+  if (done)
+    done(false);
 }
 
 void SimpleVideoPlayer::close_canvas_picture() {
@@ -1793,7 +1852,7 @@ void SimpleVideoPlayer::view_loop_() {
       }
       return;
     case ViewStep::WAITING: {
-      if (!this->view_close_) {
+      if (!this->view_close_ || this->view_into_) {
         if (this->pic_read_.decoding || this->cam_busy_)
           return;
 #ifdef SVP_BACKGROUND
@@ -1821,6 +1880,14 @@ void SimpleVideoPlayer::view_loop_() {
   this->pool_.free(this->view_scratch_);
   this->view_scratch_ = nullptr;
   const PictureJob &job = this->view_job_data_;
+  if (this->view_into_) {
+    this->view_into_ = false;
+    auto done = std::move(this->view_done_);
+    this->view_done_ = nullptr;
+    if (done)
+      done(job.ok);
+    return;
+  }
   const bool ok = job.ok && !this->view_close_;
   if (ok) {
     const int32_t sw = job.direct ? job.width : job.target_w;

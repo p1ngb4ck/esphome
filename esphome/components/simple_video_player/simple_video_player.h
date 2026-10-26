@@ -941,6 +941,8 @@ class SimpleVideoPlayer : public Component
   bool show_canvas_picture(lv_obj_t *canvas, const uint8_t *data, size_t length, const char *name,
                            std::function<void(bool)> &&done);
   void close_canvas_picture();
+  bool decode_picture_into(const uint8_t *data, size_t length, const char *name, uint8_t *target, size_t capacity,
+                           int32_t w, int32_t h, uint32_t stride, std::function<void(bool)> &&done);
   /// A camera's frame for the camera page (a UVC camera): decoded (MJPEG, the HW JPEG decoder) or converted (YUYV /
   /// UYVY, the PPA) and fit into target (RGB565, target_w x target_h, a pool piece) by the picture task. done(ok)
   /// on the main loop once the frame is no longer read. False: the task is busy, or the format is not shown here -
@@ -2208,6 +2210,7 @@ class SimpleVideoPlayer : public Component
   lv_obj_t *view_canvas_{nullptr};
   ViewStep view_step_{ViewStep::IDLE};
   bool view_close_{false};
+  bool view_into_{false};
   bool view_attached_{false};
   bool view_detach_pending_{false};
   uint8_t *view_data_{nullptr};
@@ -2220,6 +2223,7 @@ class SimpleVideoPlayer : public Component
   std::function<void(bool)> view_done_;
   void view_loop_();
   void release_view_();
+  void cancel_view_();
 #ifdef SVP_BACKGROUND
   // The page background: its file read by the worker into a pool piece, decoded by the picture task
   // (decode_job_) into the canvas' pool piece; both pieces of the pictures' share.
