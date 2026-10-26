@@ -1447,10 +1447,19 @@ void GameEmulator::draw_frame_(const EmuVideo &video) {
     uint32_t in_w = video.stride / 2;
     if (!straight) {
       auto *out = reinterpret_cast<uint16_t *>(this->frame_);
+      const uint16_t *pal = video.palette;
+      const uint16_t quads = (video.width & 1) == 0 ? video.width / 4 : 0;
       for (uint16_t y = 0; y < video.height; y++) {
         const uint8_t *row = video.pixels + static_cast<size_t>(y) * video.stride;
-        for (uint16_t x = 0; x < video.width; x++)
-          *out++ = video.palette[row[x]];
+        auto *out32 = reinterpret_cast<uint32_t *>(out);
+        for (uint16_t q = 0; q < quads; q++) {
+          const uint8_t *r = row + q * 4;
+          out32[q * 2] = pal[r[0]] | (static_cast<uint32_t>(pal[r[1]]) << 16);
+          out32[q * 2 + 1] = pal[r[2]] | (static_cast<uint32_t>(pal[r[3]]) << 16);
+        }
+        for (uint16_t x = quads * 4; x < video.width; x++)
+          out[x] = pal[row[x]];
+        out += video.width;
       }
       in = this->frame_;
       in_w = video.width;
@@ -1479,7 +1488,7 @@ void GameEmulator::draw_frame_(const EmuVideo &video) {
     if (ppa_do_scale_rotate_mirror(this->ppa_, &cfg) == ESP_OK) {
       this->ppa_fb_ = fb;
       this->ppa_busy_ = true;
-      this->ppa_deferred_ = straight && video.double_buffered;
+      this->ppa_deferred_ = !straight || video.double_buffered;
       return;
     }
   }
