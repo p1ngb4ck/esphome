@@ -210,13 +210,6 @@ StorageError IsoImageStorage::mount() {
 
 StorageError IsoImageStorage::unmount() { return this->owner_->unmount(this); }
 
-StorageError IsoImageStorage::open(const char *path, FileHandle *&handle, OpenMode mode) {
-  if (mode != OpenMode::OPEN_MODE_READ)
-    return StorageError::STORAGE_ERROR_PERMISSION_DENIED;
-  return this->state_ == State::MOUNTED ? StorageError::STORAGE_ERROR_NOT_SUPPORTED
-                                        : StorageError::STORAGE_ERROR_NOT_READY;
-}
-
 StorageError IsoImageStorage::stat(const char *path, FileStat *st) {
   if (this->state_ != State::MOUNTED)
     return StorageError::STORAGE_ERROR_NOT_READY;
@@ -230,8 +223,8 @@ StorageError IsoImageStorage::list_dir(const char *path, bool (*callback)(const 
   return this->index_.list(path, callback, ctx);
 }
 
-StorageError IsoImageStorage::get_file_window(const char *path, FileWindow *out) {
-  if (this->state_ != State::MOUNTED || this->backing_ == nullptr)
+StorageError IsoImageStorage::get_extent(const char *path, OpticalExtent *out) {
+  if (this->state_ != State::MOUNTED)
     return StorageError::STORAGE_ERROR_NOT_READY;
   Entry e{};
   const StorageError err = this->index_.lookup(path, &e);
@@ -241,10 +234,16 @@ StorageError IsoImageStorage::get_file_window(const char *path, FileWindow *out)
     return StorageError::STORAGE_ERROR_INVALID_ARGS;
   if (!e.contiguous)
     return StorageError::STORAGE_ERROR_NOT_SUPPORTED;
-  out->storage = this->backing_;
-  out->path = this->rel_;
   out->offset = static_cast<uint64_t>(e.lba) * SECTOR_SIZE;
   out->length = e.size;
+  return StorageError::STORAGE_ERROR_OK;
+}
+
+StorageError IsoImageStorage::get_medium(OpticalMedium *out) {
+  if (this->state_ != State::MOUNTED || this->backing_ == nullptr)
+    return StorageError::STORAGE_ERROR_NOT_READY;
+  out->image_storage = this->backing_;
+  out->image_path = this->rel_;
   return StorageError::STORAGE_ERROR_OK;
 }
 

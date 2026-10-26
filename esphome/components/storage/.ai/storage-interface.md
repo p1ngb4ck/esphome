@@ -64,17 +64,25 @@ loop-sliced. Two engines share one queue. Completions ALWAYS fire on the main lo
   routing on the existing read path belongs.)
 - `global_storage_worker`.
 
-## File windows and backing media (`storage.h`, `storage_worker.cpp`)
-- `PathStorage::get_file_window(path, FileWindow *)`: a file that is a byte range of a file on another
-  storage (`FileWindow{storage, path, offset, length}`); default NOT_SUPPORTED (every driver).
-  `Storage::get_backing_storage()`: the medium a storage reads through; default nullptr.
-- The worker resolves the window when a read stream opens (`begin_read`) and when the copy engine opens a
-  source file: open / read / seek / tell / close go to the backing file, reads are clamped to the window,
-  seek / tell are window relative. Requests keep the windowed storage as their storage (its drain cancels
-  them); `data` / `src_data` name the backing side.
-- Serialization by medium: `overlaps_active_` / `stream_overlaps_active_` compare `medium_of()` (the backing
-  if any); `is_busy_with`, `has_active_task_io` and the drain match a storage directly, through its backing,
-  or as the data side of a windowed request.
+## OpticalStorage (`storage.h`, `STORAGE_TYPE_OPTICAL`) - emulated and real CD/DVD drives
+- A PathStorage subtype beside FilesystemStorage / NetworkStorage (+ MountableStorage), read-only:
+  `is_emulated()`, `has_medium()`, `get_extent(path, OpticalExtent{offset, length})` (a file's bytes on the
+  medium), `get_medium(OpticalMedium{image_storage, image_path})` (emulated: the image file on another storage;
+  real: both null), `read_medium(offset, buf, len, &got)` (real drives: blocking, byte addressed; emulated:
+  NOT_SUPPORTED - an image is read by the worker only). mkdir / rmdir / remove / rename answer PERMISSION_DENIED.
+  `as_optical()` is the no-RTTI downcast; mount = load (real) / remount (emulated), unmount = eject.
+- Registry: for_each_path_based and resolve_path include optical storages (roots of every browser).
+- Worker: a read stream or a copy source on an optical storage resolves its extent and medium when it opens:
+  emulated -> the image file on its storage (fs open + seek / network read_chunk at offset), real ->
+  `read_medium(offset)`; reads clamped to the extent, seek / tell relative to it. begin_write, a copy / move
+  destination and a raw job's file side on an optical storage are refused (PERMISSION_DENIED / NOT_SUPPORTED).
+  Requests keep the optical storage as their storage (its drain cancels them); `data` / `src_data` name the data
+  side. Serialization by medium: `Storage::get_backing_storage()` (an emulated drive's image storage) -
+  overlaps compare `medium_of()`, is_busy_with / has_active_task_io / the drain match directly, through the
+  backing, or as the data side.
+- Blocking helpers: read_file / write_file / append_file answer NOT_SUPPORTED for optical (default branch),
+  copy() refuses an optical source (NOT_SUPPORTED) or destination (PERMISSION_DENIED). web_server file_api lists
+  them as type "optical".
 
 ## ISO 9660 (`iso9660.h/.cpp`, `USE_STORAGE_ISO9660`)
 - `Index` (PSRAM, grown with RAMAllocator ALLOC_EXTERNAL, limit `INDEX_MAX` 2 MB): directory table (16 B per
@@ -90,11 +98,12 @@ loop-sliced. Two engines share one queue. Completions ALWAYS fire on the main lo
 - YAML `storage: iso_mount: {mount_path: /iso, max_images: 1}`; `IsoMounter` (component) holds the slots
   (`/iso`, `/iso2` .. `/iso9`). Actions `storage.iso_mount` (file, on_complete) and `storage.iso_unmount`
   (image file or mount path, on_complete).
-- `IsoImageStorage` (FilesystemStorage + MountableStorage, read-only, made in PSRAM per mount, freed after
-  unmount): the image is read only through worker streams (`begin_read` / `seek` / `read_chunk` /
-  `end_read`, main loop chain, buffer = 64 KB of the transfer buffer or one 2 KB PSRAM sector during the
-  mount); `stat` / `list_dir` from the index; file data through `get_file_window` (the worker reads the .iso
-  file); `open` / `read` called directly answer NOT_SUPPORTED (blocking helpers do not work on an image).
+- `IsoImageStorage` (an emulated OpticalStorage, made in PSRAM per mount, freed after unmount): the image is read
+  only through worker streams (`begin_read` / `seek` / `read_chunk` / `end_read`, main loop chain, buffer = 64 KB
+  of the transfer buffer or one 2 KB PSRAM sector during the mount); `stat` / `list_dir` from the index; file data
+  by the worker from the image (`get_extent` + `get_medium`).
+- FileManager (panel UI): tapping an .iso file asks "Mount <name>?" and mounts it (a FileManager job); the drive
+  appears among the roots with the disc icon; eject = the unmount button.
 - Unmount: the actions, `unmount()` (FileManager, file_api), and by itself when the backing storage is
   quiesced / unregistered (registry quiesce callback: detached at once, unmounted on the next loop pass).
   An image on an image is refused. Caps = the backing's IO_TASK_SAFE.
@@ -104,7 +113,7 @@ loop-sliced. Two engines share one queue. Completions ALWAYS fire on the main lo
 ## usb_cdrom (`components/usb_cdrom`, `USE_USB_CDROM`)
 - On usb_storage: its client enumerates and sends INQUIRY; peripheral type 5 (CD/DVD) is handed to usb_cdrom
   (`USBCdrom::attach`) instead of being refused - no 5 s ready check, no FAT. `CdromDrive` (PSRAM, made at
-  connect, freed at disconnect) is a friend of USBStorageDevice and uses its BOT transport under `io_lock_`:
+  connect, freed at disconnect; a real OpticalStorage) is a friend of USBStorageDevice and uses its BOT transport under `io_lock_`:
   TEST UNIT READY / REQUEST SENSE, GET EVENT STATUS NOTIFICATION (media, polled), GET CONFIGURATION (profile),
   READ TOC format 1 (last session), READ CAPACITY, READ(10) with 2048-byte sectors, PREVENT ALLOW MEDIUM REMOVAL,
   START STOP UNIT (eject / load, IMMED).
@@ -113,8 +122,8 @@ loop-sliced. Two engines share one queue. Completions ALWAYS fire on the main lo
   buffer or the 2 KB sector buffer), tray locked when media events work; a user mount on an empty drive loads
   the tray. `unmount()` (main loop) = safe eject: quiesce, index freed, tray unlocked, eject. Refused while the
   worker task is inside the drive.
-- Reads: whole sectors straight into the caller's buffer (`scsi_read`), partial sectors through the 2 KB PSRAM
-  sector buffer (also a one-sector cache); `stat` / `list_dir` from the index.
+- `read_medium`: whole sectors straight into the caller's buffer (`scsi_read`), partial sectors through the 2 KB
+  PSRAM sector buffer (also a one-sector cache); `stat` / `list_dir` from the index.
 - Media change: BOT has no interrupt endpoint and MMC media events are polled (as Linux sr does), so
   `media_check_interval` (default 2 s, 0 = off) runs only while a drive is plugged, skipped while the worker uses
   the drive or `io_lock_` is taken. New medium -> async_mount; removal -> quiesce + index freed; eject request

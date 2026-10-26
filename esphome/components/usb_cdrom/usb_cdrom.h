@@ -22,15 +22,8 @@ static constexpr uint8_t SCSI_TYPE_CDROM = 0x05;
 
 class USBCdrom;
 
-struct CdromFileHandle : public storage::FileHandle {
-  uint32_t lba{0};
-  uint64_t size{0};
-  uint64_t pos{0};
-};
-
-class CdromDrive : public storage::FilesystemStorage, public storage::MountableStorage {
+class CdromDrive : public storage::OpticalStorage {
  public:
-  static constexpr int MAX_OPEN_FILES = 4;
   static constexpr size_t MOUNT_PATH_SIZE = 32;
   static constexpr uint32_t READ_SECTORS = 32;
 
@@ -49,34 +42,20 @@ class CdromDrive : public storage::FilesystemStorage, public storage::MountableS
 
   storage::StorageError get_info(storage::StorageInfo *info) override;
   uint8_t get_capabilities() const override { return storage::StorageCaps::STORAGE_CAP_IO_TASK_SAFE; }
-  storage::MountableStorage *as_mountable() override { return this; }
   uint8_t get_mount_caps() const override {
     return storage::MountableStorage::MOUNT_CAP_MOUNT | storage::MountableStorage::MOUNT_CAP_UNMOUNT;
   }
 
   storage::StorageError mount() override;
   storage::StorageError unmount() override;
-  storage::StorageError sync() override { return storage::StorageError::STORAGE_ERROR_OK; }
-  storage::StorageError open(const char *path, storage::FileHandle *&handle, storage::OpenMode mode) override;
-  storage::StorageError close(storage::FileHandle *handle) override;
-  storage::StorageError read(storage::FileHandle *handle, uint8_t *buf, size_t len, size_t *bytes_transferred) override;
-  storage::StorageError write(storage::FileHandle *handle, const uint8_t *buf, size_t len,
-                              size_t *bytes_transferred) override {
-    return storage::StorageError::STORAGE_ERROR_PERMISSION_DENIED;
-  }
-  storage::StorageError seek(storage::FileHandle *handle, int64_t offset, storage::SeekMode mode) override;
-  storage::StorageError tell(storage::FileHandle *handle, uint64_t *position) override;
   storage::StorageError stat(const char *path, storage::FileStat *st) override;
   storage::StorageError list_dir(const char *path, bool (*callback)(const storage::FileStat *entry, void *ctx),
                                  void *ctx) override;
-  storage::StorageError mkdir(const char *path) override { return storage::StorageError::STORAGE_ERROR_PERMISSION_DENIED; }
-  storage::StorageError rmdir(const char *path) override { return storage::StorageError::STORAGE_ERROR_PERMISSION_DENIED; }
-  storage::StorageError remove(const char *path) override {
-    return storage::StorageError::STORAGE_ERROR_PERMISSION_DENIED;
-  }
-  storage::StorageError rename(const char *old_path, const char *new_path) override {
-    return storage::StorageError::STORAGE_ERROR_PERMISSION_DENIED;
-  }
+  bool is_emulated() const override { return false; }
+  bool has_medium() const override { return this->media_mounted(); }
+  storage::StorageError get_extent(const char *path, storage::OpticalExtent *out) override;
+  storage::StorageError get_medium(storage::OpticalMedium *out) override;
+  storage::StorageError read_medium(uint64_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) override;
 
  protected:
   enum class Presence : uint8_t { UNKNOWN, ABSENT, PRESENT, CHANGED, EJECT_REQUEST };
@@ -111,7 +90,6 @@ class CdromDrive : public storage::FilesystemStorage, public storage::MountableS
   uint16_t profile_{0};
   uint8_t *sector_buf_{nullptr};
   uint32_t cached_lba_{UINT32_MAX};
-  CdromFileHandle handles_[MAX_OPEN_FILES]{};
   char mount_buf_[MOUNT_PATH_SIZE]{};
 };
 

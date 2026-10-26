@@ -17,7 +17,7 @@ namespace esphome::storage::iso9660 {
 
 class IsoMounter;
 
-class IsoImageStorage : public FilesystemStorage, public MountableStorage {
+class IsoImageStorage : public OpticalStorage {
  public:
   using DoneCallback = std::function<void(StorageError)>;
   static constexpr size_t MOUNT_PATH_SIZE = 32;
@@ -37,33 +37,16 @@ class IsoImageStorage : public FilesystemStorage, public MountableStorage {
   StorageError get_info(StorageInfo *info) override;
   uint8_t get_capabilities() const override;
   const Storage *get_backing_storage() const override { return this->backing_; }
-  MountableStorage *as_mountable() override { return this; }
   uint8_t get_mount_caps() const override { return MountableStorage::MOUNT_CAP_UNMOUNT; }
 
   StorageError mount() override;
   StorageError unmount() override;
-  StorageError sync() override { return StorageError::STORAGE_ERROR_OK; }
-  StorageError open(const char *path, FileHandle *&handle, OpenMode mode) override;
-  StorageError close(FileHandle *handle) override { return StorageError::STORAGE_ERROR_INVALID_ARGS; }
-  StorageError read(FileHandle *handle, uint8_t *buf, size_t len, size_t *bytes_transferred) override {
-    return StorageError::STORAGE_ERROR_NOT_SUPPORTED;
-  }
-  StorageError write(FileHandle *handle, const uint8_t *buf, size_t len, size_t *bytes_transferred) override {
-    return StorageError::STORAGE_ERROR_PERMISSION_DENIED;
-  }
-  StorageError seek(FileHandle *handle, int64_t offset, SeekMode mode) override {
-    return StorageError::STORAGE_ERROR_NOT_SUPPORTED;
-  }
-  StorageError tell(FileHandle *handle, uint64_t *position) override { return StorageError::STORAGE_ERROR_NOT_SUPPORTED; }
   StorageError stat(const char *path, FileStat *st) override;
   StorageError list_dir(const char *path, bool (*callback)(const FileStat *entry, void *ctx), void *ctx) override;
-  StorageError mkdir(const char *path) override { return StorageError::STORAGE_ERROR_PERMISSION_DENIED; }
-  StorageError rmdir(const char *path) override { return StorageError::STORAGE_ERROR_PERMISSION_DENIED; }
-  StorageError remove(const char *path) override { return StorageError::STORAGE_ERROR_PERMISSION_DENIED; }
-  StorageError rename(const char *old_path, const char *new_path) override {
-    return StorageError::STORAGE_ERROR_PERMISSION_DENIED;
-  }
-  StorageError get_file_window(const char *path, FileWindow *out) override;
+  bool is_emulated() const override { return true; }
+  bool has_medium() const override { return this->state_ == State::MOUNTED; }
+  StorageError get_extent(const char *path, OpticalExtent *out) override;
+  StorageError get_medium(OpticalMedium *out) override;
 
  protected:
   enum class State : uint8_t { IDLE, MOUNTING, MOUNTED, DETACHED };

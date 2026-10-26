@@ -270,6 +270,8 @@ void StorageRegistry::for_each_path_based(void (*cb)(PathStorage *s, void *ctx),
       cb(static_cast<FilesystemStorage *>(entries[i]), ctx);
     } else if (type == StorageType::STORAGE_TYPE_NETWORK) {
       cb(static_cast<NetworkStorage *>(entries[i]), ctx);
+    } else if (type == StorageType::STORAGE_TYPE_OPTICAL) {
+      cb(static_cast<OpticalStorage *>(entries[i]), ctx);
     }
   }
 }
@@ -283,6 +285,8 @@ void StorageRegistry::for_each_path_based(void (*cb)(PathStorage *s, StorageType
       cb(static_cast<FilesystemStorage *>(entries[i]), type, ctx);
     } else if (type == StorageType::STORAGE_TYPE_NETWORK) {
       cb(static_cast<NetworkStorage *>(entries[i]), type, ctx);
+    } else if (type == StorageType::STORAGE_TYPE_OPTICAL) {
+      cb(static_cast<OpticalStorage *>(entries[i]), type, ctx);
     }
   }
 }
@@ -299,6 +303,8 @@ PathStorage *StorageRegistry::resolve_path(const char *vfs_path, const char **re
       ps = static_cast<FilesystemStorage *>(s);
     } else if (type == StorageType::STORAGE_TYPE_NETWORK) {
       ps = static_cast<NetworkStorage *>(s);
+    } else if (type == StorageType::STORAGE_TYPE_OPTICAL) {
+      ps = static_cast<OpticalStorage *>(s);
     } else {
       continue;
     }
@@ -724,6 +730,10 @@ StorageError append_file(PathStorage *storage, const char *path, const uint8_t *
 // walk can reuse the same buffer for every file instead of allocating one per entry.
 static StorageError copy_one_file(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage,
                                   const char *dst_path, const RamBuffer &chunk_buf, size_t chunk_size) {
+  if (dst_storage->get_storage_type() == StorageType::STORAGE_TYPE_OPTICAL)
+    return StorageError::STORAGE_ERROR_PERMISSION_DENIED;
+  if (src_storage->get_storage_type() == StorageType::STORAGE_TYPE_OPTICAL)
+    return StorageError::STORAGE_ERROR_NOT_SUPPORTED;
   bool src_is_fs = src_storage->get_storage_type() == StorageType::STORAGE_TYPE_FILESYSTEM;
   bool dst_is_fs = dst_storage->get_storage_type() == StorageType::STORAGE_TYPE_FILESYSTEM;
   auto *src_fs = src_is_fs ? static_cast<FilesystemStorage *>(src_storage) : nullptr;

@@ -231,6 +231,35 @@ static bool touches(const Storage *side, const Storage *s) {
 
 static PathStorage *stream_data(const StreamRequest &req) { return req.data != nullptr ? req.data : req.storage; }
 
+static bool is_optical_storage(const Storage *s) {
+  return s != nullptr && s->get_storage_type() == StorageType::STORAGE_TYPE_OPTICAL;
+}
+
+static StorageError optical_data_side(PathStorage *storage, const char *path, PathStorage **data,
+                                      const char **data_path, uint64_t *base, uint64_t *len, bool *device) {
+  OpticalStorage *optical = storage->as_optical();
+  OpticalExtent extent{};
+  StorageError err = optical->get_extent(path, &extent);
+  if (err != StorageError::STORAGE_ERROR_OK)
+    return err;
+  OpticalMedium medium{};
+  err = optical->get_medium(&medium);
+  if (err != StorageError::STORAGE_ERROR_OK)
+    return err;
+  if (medium.image_storage != nullptr) {
+    *data = medium.image_storage;
+    *data_path = medium.image_path;
+    *device = false;
+  } else {
+    *data = storage;
+    *data_path = path;
+    *device = true;
+  }
+  *base = extent.offset;
+  *len = extent.length;
+  return StorageError::STORAGE_ERROR_OK;
+}
+
 bool StorageWorker::overlaps_active_(const TransferRequest &candidate) const {
   for (const auto &req : this->pool_) {
     if (&req == &candidate)
@@ -353,6 +382,8 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
 
   if (strlen(src_path) >= STORAGE_WORKER_MAX_PATH || strlen(dst_path) >= STORAGE_WORKER_MAX_PATH)
     return StorageError::STORAGE_ERROR_INVALID_ARGS;
+  if (is_optical_storage(dst))
+    return StorageError::STORAGE_ERROR_PERMISSION_DENIED;
 
   // Find a free slot. Backpressure: a full pool returns NOT_READY immediately, callback not
   // invoked -- this reuses the existing "device not ready to serve calls" error rather than
@@ -629,6 +660,8 @@ StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64
   this->ensure_started_();
   if (strlen(file_path) >= STORAGE_WORKER_MAX_PATH)
     return StorageError::STORAGE_ERROR_INVALID_ARGS;
+  if (is_optical_storage(file_side))
+    return StorageError::STORAGE_ERROR_NOT_SUPPORTED;
   TransferRequest *slot = nullptr;
   for (auto &req : this->pool_) {
     RequestState expected = RequestState::FREE;
@@ -2154,23 +2187,22 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
       }
     }
 
-    FileWindow win{};
-    const StorageError werr = req.src_storage->get_file_window(req.src_path, &win);
-    if (werr == StorageError::STORAGE_ERROR_OK) {
-      req.src_data = win.storage;
-      req.src_data_path = win.path;
-      req.src_base = win.offset;
-      req.src_len = win.length;
-    } else if (werr == StorageError::STORAGE_ERROR_NOT_SUPPORTED) {
-      req.src_data = req.src_storage;
-      req.src_data_path = req.src_path;
-      req.src_base = 0;
-      req.src_len = UINT64_MAX;
-    } else {
-      finish_request(req, werr);
-      return;
+    req.src_data = req.src_storage;
+    req.src_data_path = req.src_path;
+    req.src_base = 0;
+    req.src_len = UINT64_MAX;
+    req.src_optical = false;
+    if (is_optical_storage(req.src_storage)) {
+      const StorageError oerr = optical_data_side(req.src_storage, req.src_path, &req.src_data, &req.src_data_path,
+                                                  &req.src_base, &req.src_len, &req.src_optical);
+      if (oerr != StorageError::STORAGE_ERROR_OK) {
+        req.src_data = req.src_storage;
+        finish_request(req, oerr);
+        return;
+      }
     }
-    req.src_is_fs = req.src_data->get_storage_type() == StorageType::STORAGE_TYPE_FILESYSTEM;
+    req.src_is_fs =
+        !req.src_optical && req.src_data->get_storage_type() == StorageType::STORAGE_TYPE_FILESYSTEM;
     if (req.src_is_fs) {
       StorageError err = static_cast<FilesystemStorage *>(req.src_data)
                              ->open(req.src_data_path, req.src_handle, OpenMode::OPEN_MODE_READ);
@@ -2237,6 +2269,8 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
   StorageError err = StorageError::STORAGE_ERROR_OK;
   if (want == 0) {
     bytes_read = 0;
+  } else if (req.src_optical) {
+    err = static_cast<OpticalStorage *>(req.src_data)->read_medium(req.src_base + req.offset, chunk, want, &bytes_read);
   } else if (req.src_is_fs) {
     err = fs_read_(static_cast<FilesystemStorage *>(req.src_data), req.src_handle, chunk, want, &bytes_read);
   } else {
@@ -2451,6 +2485,8 @@ static void run_stream_step(StreamRequest &req) {
       }
       if (want == 0) {
         bytes_read = 0;
+      } else if (req.is_optical) {
+        err = static_cast<OpticalStorage *>(data)->read_medium(req.offset, req.pending_read_buf, want, &bytes_read);
       } else if (req.is_fs) {
         err = fs_read_(static_cast<FilesystemStorage *>(data), req.handle, req.pending_read_buf, want, &bytes_read);
       } else {
@@ -2623,6 +2659,8 @@ StorageError StorageWorker::begin_write(PathStorage *storage, const char *path, 
   this->ensure_started_();
   if (strlen(path) >= STORAGE_WORKER_MAX_PATH)
     return StorageError::STORAGE_ERROR_INVALID_ARGS;
+  if (is_optical_storage(storage))
+    return StorageError::STORAGE_ERROR_PERMISSION_DENIED;
 
   size_t index;
   if (!find_free_stream_slot(this->stream_pool_, &index))
@@ -2637,6 +2675,7 @@ StorageError StorageWorker::begin_write(PathStorage *storage, const char *path, 
   req.data_path = req.path;
   req.window_base = 0;
   req.window_len = UINT64_MAX;
+  req.is_optical = false;
   req.is_fs = storage->get_storage_type() == StorageType::STORAGE_TYPE_FILESYSTEM;
   req.handle = nullptr;
   req.offset = 0;
@@ -2676,21 +2715,19 @@ StorageError StorageWorker::begin_read(PathStorage *storage, const char *path, S
   req.data_path = req.path;
   req.window_base = 0;
   req.window_len = UINT64_MAX;
-  FileWindow win{};
-  const StorageError werr = storage->get_file_window(req.path, &win);
-  if (werr == StorageError::STORAGE_ERROR_OK) {
-    req.data = win.storage;
-    req.data_path = win.path;
-    req.window_base = win.offset;
-    req.window_len = win.length;
-  } else if (werr != StorageError::STORAGE_ERROR_NOT_SUPPORTED) {
-    req.storage = nullptr;
-    req.data = nullptr;
-    req.data_path = nullptr;
-    req.state = StreamState::FREE;
-    return werr;
+  req.is_optical = false;
+  if (is_optical_storage(storage)) {
+    const StorageError oerr = optical_data_side(storage, req.path, &req.data, &req.data_path, &req.window_base,
+                                                &req.window_len, &req.is_optical);
+    if (oerr != StorageError::STORAGE_ERROR_OK) {
+      req.storage = nullptr;
+      req.data = nullptr;
+      req.data_path = nullptr;
+      req.state = StreamState::FREE;
+      return oerr;
+    }
   }
-  req.is_fs = req.data->get_storage_type() == StorageType::STORAGE_TYPE_FILESYSTEM;
+  req.is_fs = !req.is_optical && req.data->get_storage_type() == StorageType::STORAGE_TYPE_FILESYSTEM;
   req.handle = nullptr;
   req.offset = 0;
   req.seek_target = 0;

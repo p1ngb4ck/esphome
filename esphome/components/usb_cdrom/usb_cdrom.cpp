@@ -79,8 +79,6 @@ void CdromDrive::stop() {
     this->registered_ = false;
   }
   this->mounted_.store(false, std::memory_order_release);
-  for (auto &h : this->handles_)
-    h.in_use = false;
   this->index_.clear();
   if (this->sector_buf_ != nullptr) {
     RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::ALLOC_EXTERNAL).deallocate(this->sector_buf_, iso::SECTOR_SIZE);
@@ -309,8 +307,6 @@ void CdromDrive::release_media_() {
   if (!this->media_mounted())
     return;
   this->mounted_.store(false, std::memory_order_release);
-  for (auto &h : this->handles_)
-    h.in_use = false;
   this->index_.clear();
   this->cached_lba_ = UINT32_MAX;
   if (this->sector_buf_ != nullptr) {
@@ -429,9 +425,7 @@ StorageError CdromDrive::get_info(storage::StorageInfo *info) {
   return StorageError::STORAGE_ERROR_OK;
 }
 
-StorageError CdromDrive::open(const char *path, storage::FileHandle *&handle, storage::OpenMode mode) {
-  if (mode != storage::OpenMode::OPEN_MODE_READ)
-    return StorageError::STORAGE_ERROR_PERMISSION_DENIED;
+StorageError CdromDrive::get_extent(const char *path, storage::OpticalExtent *out) {
   if (!this->media_mounted())
     return StorageError::STORAGE_ERROR_NOT_READY;
   iso::Entry e{};
@@ -442,43 +436,28 @@ StorageError CdromDrive::open(const char *path, storage::FileHandle *&handle, st
     return StorageError::STORAGE_ERROR_INVALID_ARGS;
   if (!e.contiguous)
     return StorageError::STORAGE_ERROR_NOT_SUPPORTED;
-  for (auto &h : this->handles_) {
-    if (h.in_use)
-      continue;
-    h.in_use = true;
-    h.storage = this;
-    h.file = nullptr;
-    h.path = this->mount_buf_;
-    h.lba = e.lba;
-    h.size = e.size;
-    h.pos = 0;
-    handle = &h;
-    return StorageError::STORAGE_ERROR_OK;
-  }
-  return StorageError::STORAGE_ERROR_TOO_MANY_OPEN_FILES;
-}
-
-StorageError CdromDrive::close(storage::FileHandle *handle) {
-  if (handle == nullptr || !handle->in_use || handle->storage != this)
-    return StorageError::STORAGE_ERROR_INVALID_ARGS;
-  handle->in_use = false;
+  out->offset = static_cast<uint64_t>(e.lba) * iso::SECTOR_SIZE;
+  out->length = e.size;
   return StorageError::STORAGE_ERROR_OK;
 }
 
-StorageError CdromDrive::read(storage::FileHandle *handle, uint8_t *buf, size_t len, size_t *bytes_transferred) {
-  if (handle == nullptr || !handle->in_use || handle->storage != this)
-    return StorageError::STORAGE_ERROR_INVALID_ARGS;
+StorageError CdromDrive::get_medium(storage::OpticalMedium *out) {
+  if (!this->media_mounted())
+    return StorageError::STORAGE_ERROR_NOT_READY;
+  out->image_storage = nullptr;
+  out->image_path = nullptr;
+  return StorageError::STORAGE_ERROR_OK;
+}
+
+StorageError CdromDrive::read_medium(uint64_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) {
   if (!this->media_mounted() || this->sector_buf_ == nullptr)
     return StorageError::STORAGE_ERROR_NOT_READY;
-  auto *h = static_cast<CdromFileHandle *>(handle);
-  const uint64_t left = h->pos < h->size ? h->size - h->pos : 0;
-  const size_t want = len < left ? len : static_cast<size_t>(left);
   size_t done = 0;
-  while (done < want) {
-    const uint64_t at = static_cast<uint64_t>(h->lba) * iso::SECTOR_SIZE + h->pos;
+  while (done < len) {
+    const uint64_t at = offset + done;
     const uint32_t lba = static_cast<uint32_t>(at / iso::SECTOR_SIZE);
     const uint32_t off = static_cast<uint32_t>(at % iso::SECTOR_SIZE);
-    const size_t rest = want - done;
+    const size_t rest = len - done;
     size_t n;
     if (off == 0 && rest >= iso::SECTOR_SIZE) {
       const uint32_t count = static_cast<uint32_t>(rest / iso::SECTOR_SIZE);
@@ -497,42 +476,9 @@ StorageError CdromDrive::read(storage::FileHandle *handle, uint8_t *buf, size_t 
       memcpy(buf + done, this->sector_buf_ + off, n);
     }
     done += n;
-    h->pos += n;
   }
   if (bytes_transferred != nullptr)
     *bytes_transferred = done;
-  return StorageError::STORAGE_ERROR_OK;
-}
-
-StorageError CdromDrive::seek(storage::FileHandle *handle, int64_t offset, storage::SeekMode mode) {
-  if (handle == nullptr || !handle->in_use || handle->storage != this)
-    return StorageError::STORAGE_ERROR_INVALID_ARGS;
-  auto *h = static_cast<CdromFileHandle *>(handle);
-  int64_t base = 0;
-  switch (mode) {
-    case storage::SeekMode::SEEK_MODE_SET:
-      base = 0;
-      break;
-    case storage::SeekMode::SEEK_MODE_CUR:
-      base = static_cast<int64_t>(h->pos);
-      break;
-    case storage::SeekMode::SEEK_MODE_END:
-      base = static_cast<int64_t>(h->size);
-      break;
-    default:
-      return StorageError::STORAGE_ERROR_INVALID_ARGS;
-  }
-  const int64_t target = base + offset;
-  if (target < 0)
-    return StorageError::STORAGE_ERROR_INVALID_ARGS;
-  h->pos = static_cast<uint64_t>(target);
-  return StorageError::STORAGE_ERROR_OK;
-}
-
-StorageError CdromDrive::tell(storage::FileHandle *handle, uint64_t *position) {
-  if (handle == nullptr || !handle->in_use || handle->storage != this)
-    return StorageError::STORAGE_ERROR_INVALID_ARGS;
-  *position = static_cast<CdromFileHandle *>(handle)->pos;
   return StorageError::STORAGE_ERROR_OK;
 }
 

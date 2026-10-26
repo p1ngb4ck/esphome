@@ -244,6 +244,7 @@ struct TransferRequest {
   const char *src_data_path{nullptr};
   uint64_t src_base{0};
   uint64_t src_len{UINT64_MAX};
+  bool src_optical{false};
 
   // Set once loop()'s dispatch has already logged that this request cannot proceed because it
   // overlaps a slot stuck RUNNING/CANCELLED past the drain timeout (see
@@ -403,6 +404,7 @@ struct StreamRequest {
   const char *data_path{nullptr};
   uint64_t window_base{0};
   uint64_t window_len{UINT64_MAX};
+  bool is_optical{false};
 
   CompletionCallback callback;  // set per-call (open/chunk/close); invoked once, then cleared
   storage::StorageError result{storage::StorageError::STORAGE_ERROR_OK};

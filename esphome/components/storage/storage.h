@@ -63,6 +63,7 @@ enum class StorageType : uint8_t {
   STORAGE_TYPE_FILESYSTEM,
   STORAGE_TYPE_NETWORK,
   STORAGE_TYPE_KEY_VALUE,
+  STORAGE_TYPE_OPTICAL,
 };
 
 struct StorageInfo {
@@ -344,15 +345,7 @@ class MountableStorage {
 };
 
 class FilesystemStorage;  // forward -- PathStorage::as_filesystem() below
-
-class PathStorage;
-
-struct FileWindow {
-  PathStorage *storage{nullptr};
-  const char *path{nullptr};
-  uint64_t offset{0};
-  uint64_t length{0};
-};
+class OpticalStorage;
 
 class PathStorage : public Storage {
  public:
@@ -362,6 +355,7 @@ class PathStorage : public Storage {
   // No-RTTI downcast to the filesystem interface (format/sync/open...). nullptr for
   // path-based storages that are not filesystems.
   virtual FilesystemStorage *as_filesystem() { return nullptr; }
+  virtual OpticalStorage *as_optical() { return nullptr; }
 
   // The VFS mount point this storage is reachable under (e.g. "/sdcard"). Set once by the driver
   // (typically from YAML), invariant for the instance lifetime (unchanged across mount/unmount).
@@ -379,9 +373,6 @@ class PathStorage : public Storage {
   virtual StorageError rmdir(const char *path) = 0;
   virtual StorageError remove(const char *path) = 0;
   virtual StorageError rename(const char *old_path, const char *new_path) = 0;
-  virtual StorageError get_file_window(const char *path, FileWindow *out) {
-    return StorageError::STORAGE_ERROR_NOT_SUPPORTED;
-  }
   // No copy() here -- drivers only need to move bytes within their own device.
   // Cross-device copy (and same-device copy) is provided by the free copy() helper
   // below, built on read_file()/write_file().
@@ -446,6 +437,40 @@ class NetworkStorage : public PathStorage {
   // stateless protocol has no open() to carry it. copy() calls it with 0 before the first chunk of
   // a file whose destination is a NetworkStorage.
   virtual StorageError truncate(const char *path, uint64_t size) = 0;
+};
+
+struct OpticalExtent {
+  uint64_t offset{0};
+  uint64_t length{0};
+};
+
+struct OpticalMedium {
+  PathStorage *image_storage{nullptr};
+  const char *image_path{nullptr};
+};
+
+class OpticalStorage : public PathStorage, public MountableStorage {
+ public:
+  static constexpr uint32_t SECTOR_SIZE = 2048;
+
+  StorageType get_storage_type() const override { return StorageType::STORAGE_TYPE_OPTICAL; }
+  OpticalStorage *as_optical() override { return this; }
+  MountableStorage *as_mountable() override { return this; }
+
+  virtual bool is_emulated() const = 0;
+  virtual bool has_medium() const = 0;
+  virtual StorageError get_extent(const char *path, OpticalExtent *out) = 0;
+  virtual StorageError get_medium(OpticalMedium *out) = 0;
+  virtual StorageError read_medium(uint64_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) {
+    return StorageError::STORAGE_ERROR_NOT_SUPPORTED;
+  }
+
+  StorageError mkdir(const char *path) override { return StorageError::STORAGE_ERROR_PERMISSION_DENIED; }
+  StorageError rmdir(const char *path) override { return StorageError::STORAGE_ERROR_PERMISSION_DENIED; }
+  StorageError remove(const char *path) override { return StorageError::STORAGE_ERROR_PERMISSION_DENIED; }
+  StorageError rename(const char *old_path, const char *new_path) override {
+    return StorageError::STORAGE_ERROR_PERMISSION_DENIED;
+  }
 };
 
 // Runtime registry of all storage devices. Initializes before any driver (setup_priority::BUS);
