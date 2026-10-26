@@ -476,7 +476,7 @@ void Mtproto::run_() {
     uint32_t rx_deadline = 0;
     while (!reconnect) {
       const uint32_t now = millis();
-      if (this->target_dc_ != 0 || this->logging_out_)
+      if (this->target_dc_ != 0 || this->logging_out_ || this->api_id_ == 0)
         break;
       if (this->next_ping_ != 0 && elapsed_until(this->next_ping_, now) == 0) {
         if (!this->send_ping_())
@@ -490,7 +490,7 @@ void Mtproto::run_() {
       }
       if (this->token_deadline_ != 0 && elapsed_until(this->token_deadline_, now) == 0) {
         this->token_deadline_ = 0;
-        if (this->user_id_ == 0 && this->state_ == State::LOGIN_QR)
+        if (this->user_id_ == 0 && (this->state_ == State::LOGIN_QR || this->state_ == State::ERROR))
           this->request_login_token_();
       }
       if (rx_deadline != 0 && elapsed_until(rx_deadline, now) == 0) {
@@ -560,7 +560,8 @@ void Mtproto::handle_command_(const Command &command) {
       break;
     case CommandType::SET_API: {
       if (command.api_id <= 0 || strlen(command.text) != 32) {
-        this->fail_("API id / hash invalid");
+        this->fail_("API ID / hash invalid");
+        this->set_state_(State::NO_API);
         break;
       }
       this->api_id_ = command.api_id;
@@ -570,9 +571,12 @@ void Mtproto::handle_command_(const Command &command) {
         this->session_.version = SESSION_VERSION;
         this->session_.api_id = this->api_id_;
         copy_text(this->session_.api_hash, sizeof(this->session_.api_hash), this->api_hash_, strlen(this->api_hash_));
+        this->error_[0] = '\0';
       }
       this->post_event_(EventType::SAVE_SESSION);
       this->retry_delay_ = 0;
+      if (this->fd_ >= 0 && this->user_id_ == 0)
+        this->request_login_token_();
       break;
     }
     case CommandType::PASSWORD:
@@ -1520,6 +1524,22 @@ void Mtproto::handle_error_(Request request, int32_t code, const char *message, 
       this->request_login_token_();
       return;
     }
+    if (strncmp(text, "API_ID_", 7) == 0) {
+      this->api_id_ = 0;
+      {
+        LockGuard guard(this->lock_);
+        this->session_.api_id = 0;
+        this->session_.api_hash[0] = '\0';
+      }
+      this->post_event_(EventType::SAVE_SESSION);
+      this->fail_("Telegram refused the API ID / hash");
+      this->set_state_(State::NO_API);
+      return;
+    }
+    this->fail_(text);
+    this->token_deadline_ = millis() + RETRY_MAX_MS / 6;
+    this->set_state_(State::ERROR);
+    return;
   }
   if (request == Request::CHECK_PASSWORD) {
     this->fail_(text);
