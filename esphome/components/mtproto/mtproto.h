@@ -76,10 +76,16 @@ class Mtproto final : public Component
   void add_on_state_callback(std::function<void(State)> &&callback) {
     this->state_callbacks_.add(std::move(callback));
   }
+
+  using RpcCallback = std::function<void(const char *error, TlReader result)>;
+  bool invoke(const uint8_t *query, size_t length, RpcCallback &&callback);
+  void add_update_listener(std::function<void(TlReader updates)> &&listener) {
+    this->update_listeners_.add(std::move(listener));
+  }
   Trigger<std::string> *get_state_trigger() { return &this->state_trigger_; }
 
  protected:
-  enum class CommandType : uint8_t { WAKE, SET_API, PASSWORD, LOGOUT };
+  enum class CommandType : uint8_t { WAKE, SET_API, PASSWORD, LOGOUT, INVOKE };
   enum class EventType : uint8_t { STATE, SAVE_SESSION };
   enum class Request : uint8_t {
     NONE = 0,
@@ -90,11 +96,19 @@ class Mtproto final : public Component
     CHECK_PASSWORD,
     LOGOUT,
     GET_STATE,
+    USER,
+  };
+
+  struct Job {
+    uint8_t *body;
+    size_t length;
+    RpcCallback callback;
   };
 
   struct Command {
     CommandType type;
     int32_t api_id;
+    Job *job;
     char text[136];
   };
 
@@ -118,6 +132,7 @@ class Mtproto final : public Component
     Request request;
     uint8_t *body;
     uint32_t length;
+    Job *job;
   };
 
   struct Password {
@@ -155,7 +170,9 @@ class Mtproto final : public Component
 
   uint64_t next_msg_id_();
   bool send_message_(const uint8_t *body, size_t length, bool content, uint64_t &msg_id);
-  bool send_request_(Request request, const uint8_t *body, size_t length);
+  bool send_request_(Request request, const uint8_t *body, size_t length, Job *job = nullptr);
+  void finish_job_(Job *job, const char *error, TlReader result);
+  void request_state_();
   bool resend_(uint64_t bad_msg_id);
   bool send_acks_();
   bool send_ping_();
@@ -186,6 +203,7 @@ class Mtproto final : public Component
   bool enabled_{false};
   bool started_{false};
   CallbackManager<void(State)> state_callbacks_;
+  CallbackManager<void(TlReader)> update_listeners_;
   Trigger<std::string> state_trigger_;
   ESPPreferenceObject pref_;
 
