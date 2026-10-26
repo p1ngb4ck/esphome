@@ -47,6 +47,7 @@ CONF_ON_SENT = "on_sent"
 CONF_ON_HISTORY = "on_history"
 CONF_ON_OUTBOUND = "on_outbound"
 CONF_ON_ACCOUNT = "on_account"
+CONF_ON_PHOTO = "on_photo"
 
 CHAT_ID = cv.int_range(min=-(2**53), max=2**53)
 
@@ -167,6 +168,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_ON_DOWNLOADED): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_SENT): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_HISTORY): automation.validate_automation(single=True),
+            cv.Optional(CONF_ON_PHOTO): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_OUTBOUND): automation.validate_automation(single=True),
         }
     ).extend(cv.COMPONENT_SCHEMA),
@@ -261,6 +263,7 @@ async def to_code(config: ConfigType) -> None:
             ],
         ),
         (CONF_ON_HISTORY, var.get_history_trigger(), []),
+        (CONF_ON_PHOTO, var.get_photo_trigger(), []),
         (
             CONF_ON_OUTBOUND,
             var.get_outbound_trigger(),

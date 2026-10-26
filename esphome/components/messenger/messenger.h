@@ -125,9 +125,6 @@ class Messenger : public Component
   }
   TelegramAccount *account() { return &this->account_; }
   bool view_account_photo(int32_t message_id);
-  const uint8_t *photo_data() const { return this->photo_; }
-  size_t photo_size() const { return this->photo_len_; }
-  void photo_release();
   Trigger<uint8_t> *get_account_trigger() { return &this->account_trigger_; }
 #endif
   bool is_account(Channel channel) const;
@@ -163,6 +160,11 @@ class Messenger : public Component
   bool send_message(Channel channel, int64_t chat_id, const std::string &text);
   bool send_file(Channel channel, int64_t chat_id, const std::string &path, FileKind kind, const std::string &caption);
   bool send_camera_photo(Channel channel, int64_t chat_id, const std::string &caption);
+  bool capture_photo();
+  bool send_photo(Channel channel, int64_t chat_id, const std::string &caption);
+  const uint8_t *photo_data() const { return this->photo_; }
+  size_t photo_size() const { return this->photo_len_; }
+  void photo_release();
   bool download_file(Channel channel, const std::string &file_ref, const std::string &path);
   bool voice_start(Channel channel, int64_t chat_id);
   bool voice_stop_and_send();
@@ -188,6 +190,7 @@ class Messenger : public Component
   Trigger<std::string, std::string> *get_downloaded_trigger() { return &this->downloaded_trigger_; }
   Trigger<std::string, std::string, std::string> *get_sent_trigger() { return &this->sent_trigger_; }
   Trigger<> *get_history_trigger() { return &this->history_trigger_; }
+  Trigger<> *get_photo_trigger() { return &this->photo_trigger_; }
   Trigger<std::string, int64_t, std::string, std::string, std::string> *get_outbound_trigger() {
     return &this->outbound_trigger_;
   }
@@ -296,9 +299,11 @@ class Messenger : public Component
   mtproto::Mtproto *mtproto_{nullptr};
   TelegramAccount account_;
   Trigger<uint8_t> account_trigger_;
+#endif
   uint8_t *photo_{nullptr};
   size_t photo_len_{0};
-#endif
+  bool capture_pending_{false};
+  Trigger<> photo_trigger_;
 #ifdef USE_MESSENGER_CAMERA
   camera::Camera *camera_{nullptr};
   Job *camera_job_{nullptr};

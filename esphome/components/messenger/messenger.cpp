@@ -983,6 +983,33 @@ void Messenger::end_body_(Job *job) {
   body += "--\r\n";
 }
 
+void Messenger::photo_release() {
+  heap_caps_free(this->photo_);
+  this->photo_ = nullptr;
+  this->photo_len_ = 0;
+}
+
+bool Messenger::send_photo(Channel channel, int64_t chat_id, const std::string &caption) {
+  if (this->photo_ == nullptr || !this->is_ready(channel) || (chat_id == 0 && !this->is_account(channel)))
+    return false;
+  Job *job = new_job_(JobKind::FILE);
+  if (job == nullptr)
+    return false;
+  job->channel = channel;
+  job->spool = !this->direct_(channel);
+  job->chat_id = chat_id;
+  job->file_kind = FileKind::PHOTO;
+  copy_str(job->text, sizeof(job->text), caption.c_str());
+  copy_str(job->name, sizeof(job->name), "photo.jpg");
+  if (!this->begin_body_(job, this->photo_len_)) {
+    free_job_(job);
+    return false;
+  }
+  job->body.append(reinterpret_cast<const char *>(this->photo_), this->photo_len_);
+  this->end_body_(job);
+  return this->queue_job_(job);
+}
+
 bool Messenger::send_message(Channel channel, int64_t chat_id, const std::string &text) {
   if (this->is_account(channel)) {
 #ifdef USE_MESSENGER_ACCOUNT
@@ -1499,12 +1526,6 @@ bool Messenger::view_account_photo(int32_t message_id) {
   return this->queue_job_(job);
 }
 
-void Messenger::photo_release() {
-  heap_caps_free(this->photo_);
-  this->photo_ = nullptr;
-  this->photo_len_ = 0;
-}
-
 bool Messenger::run_account_view_(Job *job, std::string *error) {
   AccountFile file{};
   if (!this->account_.file_of(static_cast<int32_t>(strtol(job->ref + 7, nullptr, 10)), &file) ||
@@ -1546,7 +1567,7 @@ bool Messenger::run_account_view_(Job *job, std::string *error) {
     this->photo_release();
     this->photo_ = data;
     this->photo_len_ = length;
-    this->account_trigger_.trigger(TelegramAccount::CHANGED_PHOTO);
+    this->photo_trigger_.trigger();
   });
   return true;
 }
@@ -1656,7 +1677,7 @@ void Messenger::set_camera(camera::Camera *cam) {
 
 bool Messenger::send_camera_photo(Channel channel, int64_t chat_id, const std::string &caption) {
   if (!this->is_ready(channel) || (chat_id == 0 && !this->is_account(channel)) || this->camera_ == nullptr ||
-      this->camera_job_ != nullptr)
+      this->camera_job_ != nullptr || this->capture_pending_)
     return false;
   Job *job = new_job_(JobKind::FILE);
   if (job == nullptr)
@@ -1681,7 +1702,40 @@ bool Messenger::send_camera_photo(Channel channel, int64_t chat_id, const std::s
   return true;
 }
 
+bool Messenger::capture_photo() {
+  if (this->camera_ == nullptr || this->camera_job_ != nullptr || this->capture_pending_)
+    return false;
+  this->capture_pending_ = true;
+  this->camera_->request_image(camera::WEB_REQUESTER);
+  this->set_timeout("msg_camera", CAMERA_WAIT_MS, [this]() {
+    if (!this->capture_pending_)
+      return;
+    this->capture_pending_ = false;
+    ESP_LOGW(TAG, "No picture from the camera");
+    this->sent_trigger_.trigger(std::string(), std::string("photo"), std::string("no picture from the camera"));
+  });
+  return true;
+}
+
 void Messenger::on_camera_image(const std::shared_ptr<camera::CameraImage> &image) {
+  if (this->capture_pending_ && image->was_requested_by(camera::WEB_REQUESTER)) {
+    const size_t len = image->get_data_length();
+    if (len == 0)
+      return;
+    this->capture_pending_ = false;
+    this->cancel_timeout("msg_camera");
+    auto *copy = static_cast<uint8_t *>(heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (copy == nullptr) {
+      this->sent_trigger_.trigger(std::string(), std::string("photo"), std::string("no PSRAM for the picture"));
+      return;
+    }
+    memcpy(copy, image->get_data_buffer(), len);
+    this->photo_release();
+    this->photo_ = copy;
+    this->photo_len_ = len;
+    this->photo_trigger_.trigger();
+    return;
+  }
   Job *job = this->camera_job_;
   if (job == nullptr || !image->was_requested_by(camera::WEB_REQUESTER))
     return;
@@ -1702,6 +1756,7 @@ void Messenger::on_camera_image(const std::shared_ptr<camera::CameraImage> &imag
 }
 #else
 bool Messenger::send_camera_photo(Channel channel, int64_t chat_id, const std::string &caption) { return false; }
+bool Messenger::capture_photo() { return false; }
 #endif
 
 #ifdef USE_MESSENGER_MICROPHONE
