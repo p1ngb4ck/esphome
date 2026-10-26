@@ -1,3 +1,4 @@
+#define MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS
 #include "crypto.h"
 
 #include "esphome/components/sha256/sha256.h"
@@ -11,7 +12,6 @@
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
 #define MTPROTO_PSA 1
-#define MBEDTLS_ALLOW_PRIVATE_ACCESS
 #include <psa/crypto.h>
 #else
 #include <mbedtls/aes.h>

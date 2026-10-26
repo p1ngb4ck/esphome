@@ -1596,7 +1596,7 @@ void Mtproto::store_user_(TlReader user) {
   char last[48];
   read_text_field(user, "first_name", first, sizeof(first));
   read_text_field(user, "last_name", last, sizeof(last));
-  char name[64];
+  char name[100];
   snprintf(name, sizeof(name), "%s%s%s", first, last[0] != '\0' ? " " : "", last);
   this->user_id_ = user_id;
   LockGuard guard(this->lock_);
