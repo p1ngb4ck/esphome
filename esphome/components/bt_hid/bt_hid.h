@@ -210,6 +210,7 @@ class BTHIDDevice : public Component,
   uint8_t feature_id_{0};  // the feature report asked for, 0 none
   bool connected_{false};
   std::atomic<bool> decoding_{false};
+  bool decode_counted_{false};
   bool auto_connect_{true};
   bool fixed_address_{false};
   bool restored_{false};
