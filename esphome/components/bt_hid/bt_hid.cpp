@@ -563,13 +563,22 @@ void host_loop() {
       ESP_LOGE(TAG, "HID host init failed: %s", esp_err_to_name(err));
   }
 
-  std::deque<HostEvent> events;
+  size_t pending;
   {
     LockGuard guard(h.lock);
-    events.swap(h.events);
+    pending = h.events.size();
   }
-  for (auto &e : events)
+  for (; pending > 0; pending--) {
+    HostEvent e;
+    {
+      LockGuard guard(h.lock);
+      if (h.events.empty())
+        break;
+      e = std::move(h.events.front());
+      h.events.pop_front();
+    }
     handle_event(e);
+  }
 
   const uint32_t now = millis();
   if (h.pairing != nullptr && static_cast<int32_t>(now - h.pairing_until) >= 0)
