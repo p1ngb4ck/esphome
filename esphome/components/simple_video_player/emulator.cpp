@@ -17,6 +17,43 @@ namespace esphome::simple_video_player {
 
 static const char *const TAG = "simple_video_player.emulator";
 
+#ifdef SVP_EMU_SNES
+static constexpr size_t BOOT_RESERVE = 64 * 1024 + 512;
+static void *s_boot_reserve = nullptr;
+
+__attribute__((constructor(101))) static void emu_boot_reserve() {
+  struct Largest {
+    intptr_t start{0};
+    intptr_t end{0};
+  };
+  Largest largest;
+  heap_caps_walk(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT,
+                 [](walker_heap_into_t heap, walker_block_info_t block, void *user) -> bool {
+                   auto *l = static_cast<Largest *>(user);
+                   if (heap.end - heap.start > l->end - l->start) {
+                     l->start = heap.start;
+                     l->end = heap.end;
+                   }
+                   return true;
+                 },
+                 &largest);
+  void *misses[4]{};
+  for (auto &miss : misses) {
+    void *ptr = heap_caps_malloc(BOOT_RESERVE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (ptr == nullptr)
+      break;
+    const auto at = reinterpret_cast<intptr_t>(ptr);
+    if (at >= largest.start && at < largest.end) {
+      s_boot_reserve = ptr;
+      break;
+    }
+    miss = ptr;
+  }
+  for (void *miss : misses)
+    heap_caps_free(miss);
+}
+#endif
+
 static const char *const MSX_BIOS[] = {"MSX.ROM",     "MSX2.ROM",  "MSX2EXT.ROM", "MSX2P.ROM",
                                        "MSX2PEXT.ROM", "DISK.ROM",  "MSXDOS2.ROM", "FMPAC.ROM",
                                        "KANJI.ROM",   "PAINTER.ROM", "RS232.ROM",  "CMOS.ROM"};
@@ -257,6 +294,12 @@ bool GameEmulator::start_(const std::string &path, bool assign) {
 }
 
 void GameEmulator::service() {
+#ifdef SVP_EMU_SNES
+  if (s_boot_reserve != nullptr) {
+    heap_caps_free(s_boot_reserve);
+    s_boot_reserve = nullptr;
+  }
+#endif
   if (this->link_changed_.exchange(false, std::memory_order_acq_rel))
     this->parent_->status_callbacks_.call();
   if (this->players_open_)
