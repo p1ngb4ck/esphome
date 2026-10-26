@@ -28,8 +28,7 @@ static constexpr size_t FILE_API_CHUNK = 4096;
 void WebServerFileApi::setup() {
   // Async downloads (tier 1): bounded pipeline of one transfer task + small pointer queue.
   this->dl_queue_ = xQueueCreate(DL_QUEUE_DEPTH, sizeof(DownloadJob *));
-  this->dl_read_done_ = xSemaphoreCreateBinary();
-  if (this->dl_queue_ != nullptr && this->dl_read_done_ != nullptr) {
+  if (this->dl_queue_ != nullptr) {
     this->dl_task_.create(WebServerFileApi::download_task_trampoline_, "fileapi_dl", 6144, this, 3, true,
                           LOOP_TASK_CORE);
   }
@@ -1256,7 +1255,7 @@ void WebServerFileApi::pump_download_(DownloadJob *job) {
     if (pending)
       this->dl_read_start_(stream, bufs[0], &got[0], &read_err[0]);
     while (pending) {
-      xSemaphoreTake(this->dl_read_done_, portMAX_DELAY);
+      ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
       pending = false;
       err = read_err[cur];
       if (err != storage::StorageError::STORAGE_ERROR_OK) {
@@ -1276,7 +1275,7 @@ void WebServerFileApi::pump_download_(DownloadJob *job) {
       if (send_n > 0 && httpd_resp_send_chunk(req, reinterpret_cast<const char *>(bufs[cur]), send_n) != ESP_OK) {
         failed = true;
         if (pending)
-          xSemaphoreTake(this->dl_read_done_, portMAX_DELAY);
+          ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         break;
       }
       if (ranged)
@@ -1300,16 +1299,16 @@ void WebServerFileApi::pump_download_(DownloadJob *job) {
 
 void WebServerFileApi::dl_read_start_(storage::StreamHandle stream, uint8_t *buf, size_t *got,
                                       storage::StorageError *err) {
-  SemaphoreHandle_t done = this->dl_read_done_;
-  this->defer([stream, buf, got, err, done]() {
+  TaskHandle_t task = this->dl_task_.get_handle();
+  this->defer([stream, buf, got, err, task]() {
     const storage::StorageError rej = storage::global_storage_worker->read_chunk(
-        stream, buf, DL_CHUNK, got, [err, done](storage::StorageError e) {
+        stream, buf, DL_CHUNK, got, [err, task](storage::StorageError e) {
           *err = e;
-          xSemaphoreGive(done);
+          xTaskNotifyGive(task);
         });
     if (rej != storage::StorageError::STORAGE_ERROR_OK) {
       *err = rej;
-      xSemaphoreGive(done);
+      xTaskNotifyGive(task);
     }
   });
 }

@@ -227,7 +227,6 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   static void download_task_trampoline_(void *arg);
   void download_task_();
   QueueHandle_t dl_queue_{nullptr};
-  SemaphoreHandle_t dl_read_done_{nullptr};
   StaticTask dl_task_;
 
   struct UploadState {
