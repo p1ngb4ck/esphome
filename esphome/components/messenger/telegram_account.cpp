@@ -280,45 +280,78 @@ void TelegramAccount::attach(mtproto::Mtproto *mtproto, Component *owner) {
   this->owner_ = owner;
   mtproto->add_update_listener([this](TlReader updates) { this->on_updates_(updates); });
   mtproto->add_on_state_callback([this](mtproto::State state) { this->on_state(state); });
+  this->done_ = xSemaphoreCreateBinary();
 }
 
 bool TelegramAccount::allocate_() {
-  if (this->done_ == nullptr)
-    this->done_ = xSemaphoreCreateBinary();
   if (this->chats_ != nullptr)
     return true;
-  this->chats_ = alloc_psram<AccountChat>(MAX_CHATS);
-  this->contacts_ = alloc_psram<AccountContact>(MAX_CONTACTS);
-  this->messages_ = alloc_psram<AccountMessage>(MAX_MESSAGES);
-  if (this->chats_ == nullptr || this->contacts_ == nullptr || this->messages_ == nullptr) {
+  auto *chats = alloc_psram<AccountChat>(MAX_CHATS);
+  auto *contacts = alloc_psram<AccountContact>(MAX_CONTACTS);
+  if (chats == nullptr || contacts == nullptr) {
+    heap_caps_free(chats);
+    heap_caps_free(contacts);
+    ESP_LOGE(TAG, "No PSRAM for the chats");
+    return false;
+  }
+  LockGuard guard(this->lock_);
+  this->chats_ = chats;
+  this->contacts_ = contacts;
+  this->chat_count_ = 0;
+  this->contact_count_ = 0;
+  this->started_ = true;
+  return true;
+}
+
+void TelegramAccount::release_() {
+  {
+    LockGuard guard(this->lock_);
+    if (this->chats_ == nullptr)
+      return;
+    this->started_ = false;
     heap_caps_free(this->chats_);
     heap_caps_free(this->contacts_);
     heap_caps_free(this->messages_);
     this->chats_ = nullptr;
     this->contacts_ = nullptr;
     this->messages_ = nullptr;
-    ESP_LOGE(TAG, "No PSRAM for the chats");
-    return false;
-  }
-  return true;
-}
-
-void TelegramAccount::on_state(mtproto::State state) {
-  if (state == mtproto::State::LOGGED_IN) {
-    if (!this->allocate_())
-      return;
-    this->started_ = true;
-    this->refresh();
-    return;
-  }
-  if (state == mtproto::State::LOGIN_QR || state == mtproto::State::NO_API) {
-    LockGuard guard(this->lock_);
     this->chat_count_ = 0;
     this->contact_count_ = 0;
     this->message_count_ = 0;
     this->open_ = AccountPeer{};
-    this->started_ = false;
-    this->notify_(CHANGED_CHATS | CHANGED_CONTACTS | CHANGED_MESSAGES);
+    this->open_title_[0] = '\0';
+  }
+  this->notify_(CHANGED_CHATS | CHANGED_CONTACTS | CHANGED_MESSAGES);
+}
+
+void TelegramAccount::update_() {
+  if (!this->logged_in_ || !this->active_) {
+    this->release_();
+    return;
+  }
+  if (this->started_ || !this->allocate_())
+    return;
+  this->refresh();
+}
+
+void TelegramAccount::set_active(bool active) {
+  this->active_ = active;
+  this->update_();
+}
+
+void TelegramAccount::on_state(mtproto::State state) {
+  if (state == mtproto::State::LOGGED_IN) {
+    this->logged_in_ = true;
+    if (this->started_) {
+      this->refresh();
+    } else {
+      this->update_();
+    }
+    return;
+  }
+  if (state == mtproto::State::LOGIN_QR || state == mtproto::State::NO_API) {
+    this->logged_in_ = false;
+    this->update_();
   }
 }
 
@@ -411,6 +444,8 @@ void TelegramAccount::on_contacts_(TlReader result) {
   if (!field_vector(result, "users", users, count))
     return;
   LockGuard guard(this->lock_);
+  if (this->contacts_ == nullptr)
+    return;
   size_t n = 0;
   for (uint32_t i = 0; i < count && n < MAX_CONTACTS; i++) {
     TlReader user = users;
@@ -461,6 +496,8 @@ void TelegramAccount::on_dialogs_(TlReader result) {
       !field_vector(result, "chats", chats, chat_count) || !field_vector(result, "users", users, user_count))
     return;
   LockGuard guard(this->lock_);
+  if (this->chats_ == nullptr)
+    return;
   size_t n = 0;
   for (uint32_t i = 0; i < dialog_count && n < MAX_CHATS; i++) {
     TlReader dialog = dialogs;
@@ -540,7 +577,7 @@ void TelegramAccount::on_history_(const AccountPeer &peer, TlReader result) {
       !field_vector(result, "users", users, user_count))
     return;
   LockGuard guard(this->lock_);
-  if (this->open_.kind != peer.kind || this->open_.id != peer.id)
+  if (this->messages_ == nullptr || this->open_.kind != peer.kind || this->open_.id != peer.id)
     return;
   size_t n = 0;
   int32_t max_id = 0;
@@ -762,6 +799,8 @@ void TelegramAccount::add_incoming_(const AccountPeer &peer, const char *title, 
   AccountPeer read_target{};
   {
     LockGuard guard(this->lock_);
+    if (this->chats_ == nullptr)
+      return;
     AccountChat *chat = this->find_chat_(peer.kind, peer.id);
     size_t index = 0;
     if (chat == nullptr) {
@@ -784,7 +823,7 @@ void TelegramAccount::add_incoming_(const AccountPeer &peer, const char *title, 
     }
     copy_text(chat->last, sizeof(chat->last), text, strlen(text));
     chat->date = date;
-    open = this->open_.kind == peer.kind && this->open_.id == peer.id;
+    open = this->messages_ != nullptr && this->open_.kind == peer.kind && this->open_.id == peer.id;
     if (!out && !open)
       chat->unread++;
     if (open) {
@@ -896,8 +935,21 @@ uint8_t TelegramAccount::message_media(size_t index) const {
 }
 
 void TelegramAccount::open_peer_(const AccountPeer &peer, const char *title) {
+  if (!this->started_)
+    return;
+  AccountMessage *messages = this->messages_ == nullptr ? alloc_psram<AccountMessage>(MAX_MESSAGES) : nullptr;
   {
     LockGuard guard(this->lock_);
+    if (this->chats_ == nullptr) {
+      heap_caps_free(messages);
+      return;
+    }
+    if (this->messages_ == nullptr)
+      this->messages_ = messages;
+    if (this->messages_ == nullptr) {
+      ESP_LOGE(TAG, "No PSRAM for the chat");
+      return;
+    }
     this->open_ = peer;
     copy_text(this->open_title_, sizeof(this->open_title_), title, strlen(title));
     this->message_count_ = 0;
@@ -939,6 +991,8 @@ void TelegramAccount::close_chat() {
   this->open_ = AccountPeer{};
   this->open_title_[0] = '\0';
   this->message_count_ = 0;
+  heap_caps_free(this->messages_);
+  this->messages_ = nullptr;
 }
 
 bool TelegramAccount::has_open_chat() const {

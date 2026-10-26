@@ -61,6 +61,7 @@ class TelegramAccount {
 
   void attach(mtproto::Mtproto *mtproto, Component *owner);
   void on_state(mtproto::State state);
+  void set_active(bool active);
   uint8_t take_changes() { return this->changes_.exchange(0); }
 
   size_t chat_count() const;
@@ -91,6 +92,8 @@ class TelegramAccount {
 
  protected:
   bool allocate_();
+  void release_();
+  void update_();
   bool call_wait_(const uint8_t *body, size_t length, std::string *error, bool parse_updates);
   void notify_(uint8_t what);
   void request_contacts_();
@@ -112,7 +115,9 @@ class TelegramAccount {
   Component *owner_{nullptr};
   std::atomic<uint8_t> changes_{0};
   mutable Mutex lock_;
-  bool started_{false};
+  std::atomic<bool> started_{false};
+  bool logged_in_{false};
+  bool active_{false};
 
   AccountChat *chats_{nullptr};
   size_t chat_count_{0};
