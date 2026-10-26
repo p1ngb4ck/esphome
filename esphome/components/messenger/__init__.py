@@ -58,6 +58,7 @@ CONF_ON_ACCOUNT = "on_account"
 CONF_ON_PHOTO = "on_photo"
 CONF_ON_CALL = "on_call"
 CONF_ON_AVATAR = "on_avatar"
+CONF_ON_THUMB = "on_thumb"
 CONF_CALL = "call"
 
 CHAT_ID = cv.int_range(min=-(2**53), max=2**53)
@@ -194,6 +195,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_ON_PHOTO): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_CALL): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_AVATAR): automation.validate_automation(single=True),
+            cv.Optional(CONF_ON_THUMB): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_OUTBOUND): automation.validate_automation(single=True),
         }
     ).extend(cv.COMPONENT_SCHEMA),
@@ -253,6 +255,12 @@ async def to_code(config: ConfigType) -> None:
                 var.get_avatar_trigger(),
                 [(cg.int64, "peer_id"), (cg.bool_, "ok")],
                 config[CONF_ON_AVATAR],
+            )
+        if CONF_ON_THUMB in config:
+            await automation.build_automation(
+                var.get_thumb_trigger(),
+                [(cg.int32, "message_id"), (cg.bool_, "ok")],
+                config[CONF_ON_THUMB],
             )
         if call := config[CONF_TELEGRAM].get(CONF_CALL):
             cg.add_define("USE_MESSENGER_CALL")

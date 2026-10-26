@@ -499,6 +499,7 @@ void read_photo(TlReader photo, AccountFile &file) {
   uint32_t count = 0;
   int64_t best = -1;
   int64_t view_best = -1;
+  int64_t small_best = -1;
   if (field_vector(photo, "sizes", sizes, count)) {
     for (uint32_t i = 0; i < count; i++) {
       TlReader item = sizes;
@@ -515,8 +516,9 @@ void read_photo(TlReader photo, AccountFile &file) {
         const int64_t area = static_cast<int64_t>(w) * h;
         const bool fits =
             size_ctor == ID_PHOTO_SIZE && static_cast<uint32_t>(std::max(w, h)) <= TelegramAccount::VIEW_MAX_SIDE;
-        if ((area > best || (fits && area > view_best)) && read_bytes(item, "type", type, type_len) && type_len > 0 &&
-            type_len < sizeof(file.thumb)) {
+        const bool small = size_ctor == ID_PHOTO_SIZE && area > 0 && (small_best < 0 || area < small_best);
+        if ((area > best || (fits && area > view_best) || small) && read_bytes(item, "type", type, type_len) &&
+            type_len > 0 && type_len < sizeof(file.thumb)) {
           int32_t size = 0;
           if (size_ctor == ID_PHOTO_SIZE) {
             read_int(item, "size", size);
@@ -541,6 +543,12 @@ void read_photo(TlReader photo, AccountFile &file) {
             file.view_thumb[type_len] = '\0';
             file.view_size = bytes;
           }
+          if (small) {
+            small_best = area;
+            memcpy(file.small_thumb, type, type_len);
+            file.small_thumb[type_len] = '\0';
+            file.small_size = bytes;
+          }
         }
       }
       if (!tl_skip_object(sizes))
@@ -554,6 +562,10 @@ void read_photo(TlReader photo, AccountFile &file) {
   if (view_best < 0) {
     memcpy(file.view_thumb, file.thumb, sizeof(file.thumb));
     file.view_size = file.size;
+  }
+  if (small_best < 0) {
+    memcpy(file.small_thumb, file.view_thumb, sizeof(file.small_thumb));
+    file.small_size = file.view_size;
   }
   snprintf(file.name, sizeof(file.name), "photo_%lld.jpg", static_cast<long long>(file.id));
 }

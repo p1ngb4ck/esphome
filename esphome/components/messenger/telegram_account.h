@@ -60,6 +60,8 @@ struct AccountFile {
   char thumb[4];
   char view_thumb[4];
   uint32_t view_size;
+  char small_thumb[4];
+  uint32_t small_size;
   char name[48];
 };
 

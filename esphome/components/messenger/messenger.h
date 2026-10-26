@@ -131,6 +131,11 @@ class Messenger : public Component
   }
   TelegramAccount *account() { return &this->account_; }
   bool view_account_photo(int32_t message_id);
+  bool load_thumb(int32_t message_id);
+  const uint8_t *thumb_data() const { return this->thumb_; }
+  size_t thumb_size() const { return this->thumb_len_; }
+  void thumb_release();
+  Trigger<int32_t, bool> *get_thumb_trigger() { return &this->thumb_trigger_; }
   bool load_avatar(int64_t peer_id);
   const uint8_t *avatar_data() const { return this->avatar_; }
   size_t avatar_size() const { return this->avatar_len_; }
@@ -224,12 +229,17 @@ class Messenger : public Component
   static constexpr size_t VIEW_MAX_BYTES = 4 * 1024 * 1024;
   static constexpr size_t JPEG_STREAM_SLACK = 16;
   static constexpr size_t AVATAR_MAX_BYTES = 64 * 1024;
+  static constexpr size_t THUMB_MAX_BYTES = 64 * 1024;
 
   ChannelConfig &config_(Channel channel) const { return this->configs_[static_cast<size_t>(channel)]; }
   bool direct_(Channel channel) const;
   bool run_account_(Job *job, std::string *error);
   bool run_account_download_(Job *job, std::string *error);
   bool run_account_view_(Job *job, std::string *error);
+  bool run_account_thumb_(Job *job, std::string *error);
+#ifdef USE_MESSENGER_ACCOUNT
+  bool fetch_photo_size_(AccountFile &file, size_t max_bytes, uint8_t **data, size_t *length, std::string *error);
+#endif
   bool run_account_avatar_(Job *job, std::string *error);
   void save_sent_(Job *job);
   static void poll_task_entry_(void *param);
@@ -323,6 +333,9 @@ class Messenger : public Component
   TelegramAccount account_;
   Trigger<uint8_t> account_trigger_;
   Trigger<int64_t, bool> avatar_trigger_;
+  Trigger<int32_t, bool> thumb_trigger_;
+  uint8_t *thumb_{nullptr};
+  size_t thumb_len_{0};
   uint8_t *avatar_{nullptr};
   size_t avatar_len_{0};
 #endif

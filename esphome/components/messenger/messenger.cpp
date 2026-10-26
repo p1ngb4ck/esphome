@@ -1488,6 +1488,8 @@ bool Messenger::run_download_(Job *job, std::string *error) {
     return this->run_account_view_(job, error);
   if (this->is_account(job->channel) && strncmp(job->ref, "tgavatar:", 9) == 0)
     return this->run_account_avatar_(job, error);
+  if (this->is_account(job->channel) && strncmp(job->ref, "tgthumb:", 8) == 0)
+    return this->run_account_thumb_(job, error);
   if (this->is_account(job->channel))
     return this->run_account_download_(job, error);
 #endif
@@ -1656,39 +1658,92 @@ bool Messenger::run_account_view_(Job *job, std::string *error) {
   }
   memcpy(file.thumb, file.view_thumb, sizeof(file.thumb));
   file.size = file.view_size;
-  if (file.size == 0 || file.size > VIEW_MAX_BYTES) {
-    *error = "picture too large";
-    return false;
-  }
-  const size_t capacity = (file.size + JPEG_STREAM_SLACK + TelegramAccount::DOWNLOAD_PART - 1) /
-                          TelegramAccount::DOWNLOAD_PART * TelegramAccount::DOWNLOAD_PART;
-  auto *data = static_cast<uint8_t *>(heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (data == nullptr) {
-    *error = "no PSRAM";
-    return false;
-  }
+  uint8_t *data = nullptr;
   size_t length = 0;
-  bool ok = true;
-  while (ok && length + TelegramAccount::DOWNLOAD_PART <= capacity) {
-    size_t got = 0;
-    ok = this->account_.download_part(file, static_cast<int64_t>(length), data + length,
-                                      TelegramAccount::DOWNLOAD_PART, &got, error);
-    length += got;
-    if (got < TelegramAccount::DOWNLOAD_PART)
-      break;
-  }
-  this->account_.end_download();
-  if (!ok || length == 0) {
-    heap_caps_free(data);
-    if (ok)
-      *error = "empty picture";
+  if (!this->fetch_photo_size_(file, VIEW_MAX_BYTES, &data, &length, error))
     return false;
-  }
   post_to_loop(this, 0, [this, data, length]() {
     this->photo_release();
     this->photo_ = data;
     this->photo_len_ = length;
     this->photo_trigger_.trigger();
+  });
+  return true;
+}
+
+bool Messenger::fetch_photo_size_(AccountFile &file, size_t max_bytes, uint8_t **data, size_t *length,
+                                  std::string *error) {
+  if (file.size == 0 || file.size > max_bytes) {
+    *error = "picture too large";
+    return false;
+  }
+  const size_t capacity = (file.size + JPEG_STREAM_SLACK + TelegramAccount::DOWNLOAD_PART - 1) /
+                          TelegramAccount::DOWNLOAD_PART * TelegramAccount::DOWNLOAD_PART;
+  auto *buffer = static_cast<uint8_t *>(heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (buffer == nullptr) {
+    *error = "no PSRAM";
+    return false;
+  }
+  size_t got_total = 0;
+  bool ok = true;
+  while (ok && got_total + TelegramAccount::DOWNLOAD_PART <= capacity) {
+    size_t got = 0;
+    ok = this->account_.download_part(file, static_cast<int64_t>(got_total), buffer + got_total,
+                                      TelegramAccount::DOWNLOAD_PART, &got, error);
+    got_total += got;
+    if (got < TelegramAccount::DOWNLOAD_PART)
+      break;
+  }
+  this->account_.end_download();
+  if (!ok || got_total == 0) {
+    heap_caps_free(buffer);
+    if (ok)
+      *error = "empty picture";
+    return false;
+  }
+  *data = buffer;
+  *length = got_total;
+  return true;
+}
+
+bool Messenger::load_thumb(int32_t message_id) {
+  if (!this->is_ready(Channel::TELEGRAM) || !this->is_account(Channel::TELEGRAM))
+    return false;
+  Job *job = new_job_(JobKind::DOWNLOAD);
+  if (job == nullptr)
+    return false;
+  job->channel = Channel::TELEGRAM;
+  snprintf(job->ref, sizeof(job->ref), "tgthumb:%ld", static_cast<long>(message_id));
+  return this->queue_job_(job);
+}
+
+void Messenger::thumb_release() {
+  heap_caps_free(this->thumb_);
+  this->thumb_ = nullptr;
+  this->thumb_len_ = 0;
+}
+
+bool Messenger::run_account_thumb_(Job *job, std::string *error) {
+  const int32_t message_id = static_cast<int32_t>(strtol(job->ref + 8, nullptr, 10));
+  AccountFile file{};
+  uint8_t *data = nullptr;
+  size_t length = 0;
+  bool ok = this->account_.file_of(message_id, &file) && file.small_thumb[0] != '\0';
+  if (ok) {
+    memcpy(file.thumb, file.small_thumb, sizeof(file.thumb));
+    file.size = file.small_size;
+    ok = this->fetch_photo_size_(file, THUMB_MAX_BYTES, &data, &length, error);
+  }
+  error->clear();
+  if (!ok) {
+    post_to_loop(this, 0, [this, message_id]() { this->thumb_trigger_.trigger(message_id, false); });
+    return true;
+  }
+  post_to_loop(this, 0, [this, data, length, message_id]() {
+    this->thumb_release();
+    this->thumb_ = data;
+    this->thumb_len_ = length;
+    this->thumb_trigger_.trigger(message_id, true);
   });
   return true;
 }
