@@ -11,6 +11,7 @@
 #include "esphome/components/storage/storage_worker.h"
 #include "esphome/components/web_server_base/web_server_base.h"
 #include "esphome/core/component.h"
+#include "esphome/core/static_task.h"
 #ifdef USE_WEBSERVER_FILE_EXPLORER
 #include "file_explorer.h"
 #endif
@@ -213,7 +214,9 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     bool gzip{false};
   };
   static constexpr size_t DL_QUEUE_DEPTH = 4;
+  static constexpr size_t DL_CHUNK = 64 * 1024;
   void pump_download_(DownloadJob *job);
+  void dl_read_start_(storage::StreamHandle stream, uint8_t *buf, size_t *got, storage::StorageError *err);
   // Issues one worker stream call (begin_read/read_chunk/end_read) on the main loop and blocks the
   // transfer task until its completion callback fires. All download file I/O goes through the
   // worker this way -- never a direct storage call.
@@ -224,7 +227,8 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   static void download_task_trampoline_(void *arg);
   void download_task_();
   QueueHandle_t dl_queue_{nullptr};
-  TaskHandle_t dl_task_{nullptr};
+  SemaphoreHandle_t dl_read_done_{nullptr};
+  StaticTask dl_task_;
 
   struct UploadState {
     bool active{false};

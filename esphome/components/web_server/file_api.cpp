@@ -28,9 +28,10 @@ static constexpr size_t FILE_API_CHUNK = 4096;
 void WebServerFileApi::setup() {
   // Async downloads (tier 1): bounded pipeline of one transfer task + small pointer queue.
   this->dl_queue_ = xQueueCreate(DL_QUEUE_DEPTH, sizeof(DownloadJob *));
-  if (this->dl_queue_ != nullptr) {
-    xTaskCreatePinnedToCore(WebServerFileApi::download_task_trampoline_, "fileapi_dl", 6144, this, 3, &this->dl_task_,
-                            LOOP_TASK_CORE);
+  this->dl_read_done_ = xSemaphoreCreateBinary();
+  if (this->dl_queue_ != nullptr && this->dl_read_done_ != nullptr) {
+    this->dl_task_.create(WebServerFileApi::download_task_trampoline_, "fileapi_dl", 6144, this, 3, true,
+                          LOOP_TASK_CORE);
   }
   this->op_done_ = xSemaphoreCreateBinary();
   this->base_->add_handler(this);
@@ -97,7 +98,7 @@ void WebServerFileApi::handleRequest(AsyncWebServerRequest *request) {
 
         httpd_req_t *areq = *request;
         httpd_req_t *async_req = nullptr;
-        if (this->dl_task_ == nullptr || httpd_req_async_handler_begin(areq, &async_req) != ESP_OK) {
+        if (!this->dl_task_.is_created() || httpd_req_async_handler_begin(areq, &async_req) != ESP_OK) {
           // No async slot -- degrade to a synchronous chunked pump (still not a single-shot send).
           job->req = areq;
           this->pump_download_(job);
@@ -1142,7 +1143,7 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
 
   httpd_req_t *req = *request;
   httpd_req_t *async_req = nullptr;
-  if (this->dl_task_ == nullptr || httpd_req_async_handler_begin(req, &async_req) != ESP_OK) {
+  if (!this->dl_task_.is_created() || httpd_req_async_handler_begin(req, &async_req) != ESP_OK) {
     // No async slot (or no pipeline) -- degrade gracefully to the old synchronous pump.
     // The server blocks for this one transfer, but the download still succeeds.
     job->req = req;
@@ -1242,33 +1243,50 @@ void WebServerFileApi::pump_download_(DownloadJob *job) {
       if (err != storage::StorageError::STORAGE_ERROR_OK)
         failed = true;
     }
-    auto *buf = new uint8_t[FILE_API_CHUNK];  // NOLINT(cppcoreguidelines-owning-memory)
-    while (!failed) {
-      size_t got = 0;
-      err = this->worker_await_([&stream, buf, &got](storage::CompletionCallback cb) {
-        return storage::global_storage_worker->read_chunk(stream, buf, FILE_API_CHUNK, &got, std::move(cb));
-      });
+    RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
+    uint8_t *bufs[2] = {failed ? nullptr : allocator.allocate(DL_CHUNK), failed ? nullptr : allocator.allocate(DL_CHUNK)};
+    if (!failed && (bufs[0] == nullptr || bufs[1] == nullptr)) {
+      ESP_LOGE(TAG, "download '%s': no PSRAM for its buffers", job->rel);
+      failed = true;
+    }
+    size_t got[2]{};
+    storage::StorageError read_err[2]{};
+    uint8_t cur = 0;
+    bool pending = !failed;
+    if (pending)
+      this->dl_read_start_(stream, bufs[0], &got[0], &read_err[0]);
+    while (pending) {
+      xSemaphoreTake(this->dl_read_done_, portMAX_DELAY);
+      pending = false;
+      err = read_err[cur];
       if (err != storage::StorageError::STORAGE_ERROR_OK) {
         failed = true;
         break;
       }
-      if (got == 0)
-        break;  // EOF
-      size_t send_n = got;
+      if (got[cur] == 0)
+        break;
+      size_t send_n = got[cur];
       if (ranged && send_n > remaining)
         send_n = static_cast<size_t>(remaining);
-      if (send_n > 0 &&
-          httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buf), send_n) != ESP_OK) {
-        failed = true;  // client went away
+      const uint8_t next = cur ^ 1;
+      if (!ranged || remaining > send_n) {
+        this->dl_read_start_(stream, bufs[next], &got[next], &read_err[next]);
+        pending = true;
+      }
+      if (send_n > 0 && httpd_resp_send_chunk(req, reinterpret_cast<const char *>(bufs[cur]), send_n) != ESP_OK) {
+        failed = true;
+        if (pending)
+          xSemaphoreTake(this->dl_read_done_, portMAX_DELAY);
         break;
       }
-      if (ranged) {
+      if (ranged)
         remaining -= send_n;
-        if (remaining == 0)
-          break;
-      }
+      cur = next;
     }
-    delete[] buf;  // NOLINT(cppcoreguidelines-owning-memory)
+    for (uint8_t *b : bufs) {
+      if (b != nullptr)
+        allocator.deallocate(b, DL_CHUNK);
+    }
     this->worker_await_([&stream](storage::CompletionCallback cb) {
       return storage::global_storage_worker->end_read(stream, std::move(cb));
     });
@@ -1278,6 +1296,22 @@ void WebServerFileApi::pump_download_(DownloadJob *job) {
     ESP_LOGW(TAG, "download '%s' aborted (%s)", job->rel, storage::error_to_string(err));
   }
   httpd_resp_send_chunk(req, nullptr, 0);  // finish chunked response (also on abort)
+}
+
+void WebServerFileApi::dl_read_start_(storage::StreamHandle stream, uint8_t *buf, size_t *got,
+                                      storage::StorageError *err) {
+  SemaphoreHandle_t done = this->dl_read_done_;
+  this->defer([stream, buf, got, err, done]() {
+    const storage::StorageError rej = storage::global_storage_worker->read_chunk(
+        stream, buf, DL_CHUNK, got, [err, done](storage::StorageError e) {
+          *err = e;
+          xSemaphoreGive(done);
+        });
+    if (rej != storage::StorageError::STORAGE_ERROR_OK) {
+      *err = rej;
+      xSemaphoreGive(done);
+    }
+  });
 }
 
 void WebServerFileApi::download_task_trampoline_(void *arg) { static_cast<WebServerFileApi *>(arg)->download_task_(); }
