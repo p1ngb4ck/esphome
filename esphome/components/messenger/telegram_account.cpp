@@ -76,6 +76,43 @@ static constexpr uint32_t ID_BOOL_TRUE = 0x997275b5;
 static constexpr uint32_t ID_PHOTO = 0xfb197a65;
 static constexpr uint32_t ID_PHOTO_SIZE = 0x75c78e60;
 static constexpr uint32_t ID_PHOTO_SIZE_PROGRESSIVE = 0xfa3efb95;
+static constexpr uint32_t ID_ACTION_CHAT_CREATE = 0xbd47cbad;
+static constexpr uint32_t ID_ACTION_CHAT_EDIT_TITLE = 0xb5a1ce5a;
+static constexpr uint32_t ID_ACTION_CHAT_EDIT_PHOTO = 0x7fcb13a8;
+static constexpr uint32_t ID_ACTION_CHAT_DELETE_PHOTO = 0x95e3fbef;
+static constexpr uint32_t ID_ACTION_CHAT_ADD_USER = 0x15cefd00;
+static constexpr uint32_t ID_ACTION_CHAT_DELETE_USER = 0xa43f30cc;
+static constexpr uint32_t ID_ACTION_CHAT_JOINED_BY_LINK = 0x031224c3;
+static constexpr uint32_t ID_ACTION_CHAT_JOINED_BY_REQUEST = 0xebbca3cb;
+static constexpr uint32_t ID_ACTION_CHANNEL_CREATE = 0x95d2ac92;
+static constexpr uint32_t ID_ACTION_CHAT_MIGRATE_TO = 0xe1037f92;
+static constexpr uint32_t ID_ACTION_CHANNEL_MIGRATE_FROM = 0xea3948e9;
+static constexpr uint32_t ID_ACTION_PIN_MESSAGE = 0x94bd38ed;
+static constexpr uint32_t ID_ACTION_HISTORY_CLEAR = 0x9fbab604;
+static constexpr uint32_t ID_ACTION_PHONE_CALL = 0x80e11a7f;
+static constexpr uint32_t ID_ACTION_SCREENSHOT_TAKEN = 0x4792929b;
+static constexpr uint32_t ID_ACTION_CUSTOM = 0xfae69f56;
+static constexpr uint32_t ID_ACTION_CONTACT_SIGN_UP = 0xf3f25f76;
+static constexpr uint32_t ID_ACTION_GROUP_CALL = 0x7a0d7f42;
+static constexpr uint32_t ID_ACTION_CONFERENCE_CALL = 0x2ffe2f7a;
+static constexpr uint32_t ID_ACTION_SET_MESSAGES_TTL = 0x3c134d7b;
+static constexpr uint32_t ID_ACTION_SET_CHAT_THEME = 0xb91bbd3a;
+static constexpr uint32_t ID_ACTION_SET_CHAT_WALLPAPER = 0x5060a3f4;
+static constexpr uint32_t ID_ACTION_TOPIC_CREATE = 0x0d999256;
+static constexpr uint32_t ID_ACTION_BOT_ALLOWED = 0xc516d679;
+static constexpr uint32_t ID_ACTION_PAYMENT_SENT = 0xc624b16e;
+static constexpr uint32_t ID_ACTION_PAYMENT_SENT_ME = 0xffa00ccc;
+static constexpr uint32_t ID_ACTION_GIFT_PREMIUM = 0x48e91302;
+static constexpr uint32_t ID_ACTION_GIFT_CODE = 0x31c48347;
+static constexpr uint32_t ID_ACTION_GIFT_STARS = 0x45d5b021;
+static constexpr uint32_t ID_ACTION_GIFT_TON = 0xa8a3c699;
+static constexpr uint32_t ID_ACTION_STAR_GIFT = 0xea2c31d3;
+static constexpr uint32_t ID_ACTION_STAR_GIFT_UNIQUE = 0xe6c31522;
+static constexpr uint32_t ID_ACTION_SUGGEST_PROFILE_PHOTO = 0x57de635e;
+static constexpr uint32_t ID_ACTION_SUGGEST_BIRTHDAY = 0x2c8f2a25;
+static constexpr uint32_t ID_ACTION_GEO_PROXIMITY = 0x98e0d697;
+static constexpr uint32_t ID_REASON_MISSED = 0x85e42301;
+static constexpr uint32_t ID_REASON_BUSY = 0xfaf7e8c9;
 static constexpr uint32_t ID_DOCUMENT = 0x8fd4c4d8;
 static constexpr uint32_t ID_UPLOAD_GET_FILE = 0xbe5335be;
 static constexpr uint32_t ID_UPLOAD_FILE = 0x096a18d5;
@@ -240,6 +277,183 @@ bool find_user(TlReader users, uint32_t count, int64_t id, TlReader &user) {
       return false;
   }
   return false;
+}
+
+void user_label(TlReader users, uint32_t count, int64_t id, char *out, size_t size) {
+  TlReader user;
+  if (count != 0 && find_user(users, count, id, user)) {
+    user_name(user, out, size);
+    return;
+  }
+  copy_text(out, size, "a member", 8);
+}
+
+void service_text(TlReader message, bool out, TlReader users, uint32_t user_count, char *text, size_t size) {
+  TlReader action;
+  uint32_t ctor = 0;
+  text[0] = '\0';
+  if (!tl_field(message, tl_hash("action"), action) || !action.peek_u32(ctor))
+    return;
+  char value[64];
+  int32_t number = 0;
+  auto duration = [&](const char *what) {
+    if (read_int(action, "duration", number) && number > 0) {
+      snprintf(text, size, "%s (%d:%02d)", what, static_cast<int>(number / 60), static_cast<int>(number % 60));
+    } else {
+      snprintf(text, size, "%s", what);
+    }
+  };
+  switch (ctor) {
+    case ID_ACTION_PHONE_CALL: {
+      uint32_t flags = 0;
+      TlReader field;
+      if (tl_field(action, tl_hash("flags"), field))
+        field.u32(flags);
+      const bool video = (flags & (1u << 2)) != 0;
+      uint32_t reason = 0;
+      if (tl_field(action, tl_hash("reason"), field))
+        field.peek_u32(reason);
+      if (read_int(action, "duration", number) && number > 0) {
+        snprintf(text, size, "%s %s (%d:%02d)", out ? "Outgoing" : "Incoming", video ? "video call" : "call",
+                 static_cast<int>(number / 60), static_cast<int>(number % 60));
+      } else if (reason == ID_REASON_BUSY) {
+        snprintf(text, size, "Declined %s", video ? "video call" : "call");
+      } else {
+        snprintf(text, size, "%s %s", out ? "Cancelled" : "Missed", video ? "video call" : "call");
+      }
+      return;
+    }
+    case ID_ACTION_CHAT_CREATE:
+      read_text(action, "title", value, sizeof(value));
+      snprintf(text, size, "Created the group \"%s\"", value);
+      return;
+    case ID_ACTION_CHANNEL_CREATE:
+      read_text(action, "title", value, sizeof(value));
+      snprintf(text, size, "Created the channel \"%s\"", value);
+      return;
+    case ID_ACTION_TOPIC_CREATE:
+      read_text(action, "title", value, sizeof(value));
+      snprintf(text, size, "Created the topic \"%s\"", value);
+      return;
+    case ID_ACTION_CHAT_EDIT_TITLE:
+      read_text(action, "title", value, sizeof(value));
+      snprintf(text, size, "Changed the name to \"%s\"", value);
+      return;
+    case ID_ACTION_CHAT_EDIT_PHOTO:
+      snprintf(text, size, "%s", "Changed the group photo");
+      return;
+    case ID_ACTION_CHAT_DELETE_PHOTO:
+      snprintf(text, size, "%s", "Removed the group photo");
+      return;
+    case ID_ACTION_CHAT_ADD_USER: {
+      TlReader list;
+      uint32_t n = 0;
+      int64_t user = 0;
+      if (field_vector(action, "users", list, n) && n > 0 && list.i64(user)) {
+        user_label(users, user_count, user, value, sizeof(value));
+        snprintf(text, size, "Added %s", value);
+      } else {
+        snprintf(text, size, "%s", "Added members");
+      }
+      return;
+    }
+    case ID_ACTION_CHAT_DELETE_USER: {
+      int64_t user = 0;
+      read_long(action, "user_id", user);
+      TlReader from_field;
+      PeerKind kind = PeerKind::NONE;
+      int64_t from = 0;
+      const bool self = tl_field(message, tl_hash("from_id"), from_field) && read_peer(from_field, kind, from) &&
+                        kind == PeerKind::USER && from == user;
+      user_label(users, user_count, user, value, sizeof(value));
+      if (self) {
+        snprintf(text, size, "%s left the group", value);
+      } else {
+        snprintf(text, size, "Removed %s", value);
+      }
+      return;
+    }
+    case ID_ACTION_CHAT_JOINED_BY_LINK:
+      snprintf(text, size, "%s", "Joined the group via invite link");
+      return;
+    case ID_ACTION_CHAT_JOINED_BY_REQUEST:
+      snprintf(text, size, "%s", "Joined the group");
+      return;
+    case ID_ACTION_CHAT_MIGRATE_TO:
+    case ID_ACTION_CHANNEL_MIGRATE_FROM:
+      snprintf(text, size, "%s", "Group upgraded to a supergroup");
+      return;
+    case ID_ACTION_PIN_MESSAGE:
+      snprintf(text, size, "%s", "Pinned a message");
+      return;
+    case ID_ACTION_HISTORY_CLEAR:
+      snprintf(text, size, "%s", "Cleared the history");
+      return;
+    case ID_ACTION_SCREENSHOT_TAKEN:
+      snprintf(text, size, "%s", "Took a screenshot");
+      return;
+    case ID_ACTION_CUSTOM:
+      read_text(action, "message", text, size);
+      return;
+    case ID_ACTION_CONTACT_SIGN_UP:
+      snprintf(text, size, "%s", "Joined Telegram");
+      return;
+    case ID_ACTION_GROUP_CALL:
+      if (read_int(action, "duration", number) && number > 0) {
+        duration("Video chat ended");
+      } else {
+        snprintf(text, size, "%s", "Started a video chat");
+      }
+      return;
+    case ID_ACTION_CONFERENCE_CALL: {
+      uint32_t flags = 0;
+      TlReader field;
+      if (tl_field(action, tl_hash("flags"), field))
+        field.u32(flags);
+      if ((flags & 1u) != 0) {
+        snprintf(text, size, "%s", "Missed group call");
+      } else {
+        duration("Group call");
+      }
+      return;
+    }
+    case ID_ACTION_SET_MESSAGES_TTL:
+      read_int(action, "period", number);
+      snprintf(text, size, "%s", number > 0 ? "Set the auto-delete timer" : "Turned off auto-delete");
+      return;
+    case ID_ACTION_SET_CHAT_THEME:
+      snprintf(text, size, "%s", "Changed the chat theme");
+      return;
+    case ID_ACTION_SET_CHAT_WALLPAPER:
+      snprintf(text, size, "%s", "Changed the chat wallpaper");
+      return;
+    case ID_ACTION_BOT_ALLOWED:
+      snprintf(text, size, "%s", "Allowed the bot to message");
+      return;
+    case ID_ACTION_PAYMENT_SENT:
+    case ID_ACTION_PAYMENT_SENT_ME:
+      snprintf(text, size, "%s", "Payment");
+      return;
+    case ID_ACTION_GIFT_PREMIUM:
+    case ID_ACTION_GIFT_CODE:
+    case ID_ACTION_GIFT_STARS:
+    case ID_ACTION_GIFT_TON:
+    case ID_ACTION_STAR_GIFT:
+    case ID_ACTION_STAR_GIFT_UNIQUE:
+      snprintf(text, size, "%s", out ? "Sent a gift" : "Received a gift");
+      return;
+    case ID_ACTION_SUGGEST_PROFILE_PHOTO:
+      snprintf(text, size, "%s", "Suggested a profile photo");
+      return;
+    case ID_ACTION_SUGGEST_BIRTHDAY:
+      snprintf(text, size, "%s", "Suggested a birthday");
+      return;
+    case ID_ACTION_GEO_PROXIMITY:
+      snprintf(text, size, "%s", "Is nearby");
+      return;
+    default:
+      return;
+  }
 }
 
 bool find_chat(TlReader chats, uint32_t count, PeerKind kind, int64_t id, TlReader &chat) {
@@ -806,7 +1020,7 @@ void TelegramAccount::on_history_(const AccountPeer &peer, TlReader result) {
           copy_text(entry.text, sizeof(entry.text), combined, strlen(combined));
         }
       } else {
-        snprintf(entry.text, sizeof(entry.text), "%s", "[Service message]");
+        service_text(message, entry.out, users, user_count, entry.text, sizeof(entry.text));
       }
       if (!entry.out) {
         TlReader from_field;
@@ -821,7 +1035,8 @@ void TelegramAccount::on_history_(const AccountPeer &peer, TlReader result) {
       }
       if (entry.id > max_id)
         max_id = entry.id;
-      n++;
+      if (ctor == ID_MESSAGE || entry.text[0] != '\0')
+        n++;
     }
     if (!tl_skip_object(messages))
       break;
@@ -971,7 +1186,7 @@ void TelegramAccount::on_update_item_(TlReader update, TlReader users, TlReader 
 
 void TelegramAccount::on_new_message_(TlReader message, TlReader users_vector, TlReader chats_vector) {
   uint32_t ctor = 0;
-  if (!message.peek_u32(ctor) || ctor != ID_MESSAGE)
+  if (!message.peek_u32(ctor) || (ctor != ID_MESSAGE && ctor != ID_MESSAGE_SERVICE))
     return;
   TlReader flags_field;
   uint32_t flags = 0;
@@ -989,12 +1204,16 @@ void TelegramAccount::on_new_message_(TlReader message, TlReader users_vector, T
   char text[512];
   char label[24];
   AccountFile file{};
-  const uint8_t media = read_media(message, label, sizeof(label), &file);
-  read_text(message, "message", text, sizeof(text));
-  if (media != 0) {
-    char combined[sizeof(text)];
-    tl_read::join(combined, sizeof(combined), label, text);
-    copy_text(text, sizeof(text), combined, strlen(combined));
+  uint8_t media = 0;
+  text[0] = '\0';
+  if (ctor == ID_MESSAGE) {
+    media = read_media(message, label, sizeof(label), &file);
+    read_text(message, "message", text, sizeof(text));
+    if (media != 0) {
+      char combined[sizeof(text)];
+      tl_read::join(combined, sizeof(combined), label, text);
+      copy_text(text, sizeof(text), combined, strlen(combined));
+    }
   }
   char title[64] = "";
   char from[48] = "";
@@ -1004,6 +1223,11 @@ void TelegramAccount::on_new_message_(TlReader message, TlReader users_vector, T
   uint32_t chat_count = 0;
   const bool have_users = users_vector.valid() && vector_items(users_vector, users, user_count);
   const bool have_chats = chats_vector.valid() && vector_items(chats_vector, chats, chat_count);
+  if (ctor == ID_MESSAGE_SERVICE) {
+    service_text(message, out, users, have_users ? user_count : 0, text, sizeof(text));
+    if (text[0] == '\0')
+      return;
+  }
   if (peer.kind == PeerKind::USER && have_users) {
     TlReader user;
     if (find_user(users, user_count, peer.id, user)) {
