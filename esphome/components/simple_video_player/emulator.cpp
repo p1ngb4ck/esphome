@@ -685,7 +685,7 @@ void GameEmulator::pace_() {
   const int64_t now = esp_timer_get_time();
   this->pace_next_us_ = this->pace_anchored_ ? this->pace_next_us_ + frame_us : now;
   this->pace_anchored_ = true;
-  if (this->pace_next_us_ < now)
+  if (this->pace_next_us_ < now - frame_us * PACE_CATCH_UP_FRAMES)
     this->pace_next_us_ = now;
   const int64_t wait = this->pace_next_us_ - now;
   if (wait <= 0)
