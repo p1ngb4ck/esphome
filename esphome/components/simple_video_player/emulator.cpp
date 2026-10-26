@@ -640,7 +640,7 @@ void GameEmulator::panel_ready(bool ready) {
 }
 
 bool GameEmulator::create_task_() {
-  if (this->task_.create(&GameEmulator::task_entry_, "svp_game", TASK_STACK, this, 2, false, 0))
+  if (this->task_.create(&GameEmulator::task_entry_, "svp_game", TASK_STACK, this, TASK_PRIORITY, false, 0))
     return true;
   ESP_LOGE(TAG, "No task for the game");
   this->task_stop_.store(true, std::memory_order_release);
@@ -1385,8 +1385,8 @@ void GameEmulator::task_loop_() {
       return;
     this->draw_frame_(this->core_->video());
     this->play_audio_();
-    this->finish_ppa_();
     this->pace_();
+    this->finish_ppa_();
   }
 }
 
@@ -1397,8 +1397,8 @@ bool GameEmulator::host_frame_cb_(void *ctx, uint16_t *pad1, uint16_t *pad2) {
 bool GameEmulator::host_frame_(uint16_t *pad1, uint16_t *pad2) {
   this->draw_frame_(this->core_->video());
   this->play_audio_();
-  this->finish_ppa_();
   this->pace_();
+  this->finish_ppa_();
   if (!this->park_())
     return false;
   uint16_t pads[2];
