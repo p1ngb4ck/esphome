@@ -650,7 +650,7 @@ bool GameEmulator::create_task_() {
     this->mix_split_ = this->mix_done_ != nullptr &&
                        (this->mix_task_.is_created() ||
                         this->mix_task_.create(&GameEmulator::mix_entry_, "svp_game_mix", MIX_STACK, this,
-                                               TASK_PRIORITY, false, 1));
+                                               MIX_PRIORITY, false, 1));
   }
   if (this->task_.create(&GameEmulator::task_entry_, "svp_game", TASK_STACK, this, TASK_PRIORITY, false, 0))
     return true;

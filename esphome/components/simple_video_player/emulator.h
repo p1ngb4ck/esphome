@@ -152,6 +152,7 @@ class GameEmulator
   static constexpr uint32_t TASK_STACK = 8192;
   static constexpr UBaseType_t TASK_PRIORITY = 11;
   static constexpr uint32_t MIX_STACK = 4096;
+  static constexpr UBaseType_t MIX_PRIORITY = 1;
   static constexpr uint32_t INTERNAL_PIECE_MAX = 16 * 1024;
   static constexpr size_t FRAME_MIN_BYTES = 256 * 240 * 2;
 
