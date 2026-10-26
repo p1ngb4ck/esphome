@@ -60,16 +60,6 @@ void A2DPSource::connection_state_(esp_a2d_connection_state_t state, void *self)
   } else if (!connected && was) {
     component->disconnect_pending_.store(true);
   }
-  if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED)
-    component->reported_delay_ms_.store(0, std::memory_order_relaxed);
-}
-
-void A2DPSource::delay_report_(uint16_t delay, void *self) {
-  auto *component = static_cast<A2DPSource *>(self);
-  if (component == nullptr)
-    return;
-  component->reported_delay_ms_.store(std::min<uint32_t>((delay + 5u) / 10u, MAX_OUTPUT_DELAY_MS),
-                                      std::memory_order_relaxed);
 }
 
 void A2DPSource::audio_state_(esp_a2d_audio_state_t state, void *self) {
@@ -165,7 +155,6 @@ void A2DPSource::setup() {
   this->source_.set_ssid_callback(A2DPSource::device_filter_);
   this->source_.set_on_connection_state_changed(A2DPSource::connection_state_, this);
   this->source_.set_on_audio_state_changed(A2DPSource::audio_state_, this);
-  this->source_.set_on_delay_report(A2DPSource::delay_report_, this);
   this->source_.set_on_authentication_complete(A2DPSource::authentication_complete_);
 
   this->media_wanted_ = this->idle_timeout_ms_ == 0;
@@ -555,14 +544,7 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
 
   const bool feeding = this->speaker_active_.load() && !this->speaker_finishing_.load();
   if (this->priming_.load()) {
-    const uint32_t delay = this->output_delay_ms();
-    size_t target = this->ring_bytes_;
-    if (delay != 0) {
-      target = std::min<size_t>(target, (size_t) SAMPLE_RATE * BYTES_PER_FRAME * delay / 1000);
-      target -= target % BYTES_PER_FRAME;
-    }
-    const size_t used = this->ring_bytes_ - xRingbufferGetCurFreeSize(this->ring_);
-    if (feeding && used < target) {
+    if (feeding && xRingbufferGetCurFreeSize(this->ring_) >= BYTES_PER_FRAME) {
       memset(out, 0, wanted);
       return frame_count;
     }

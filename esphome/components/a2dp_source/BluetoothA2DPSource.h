@@ -112,10 +112,6 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   bool handle_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
   /// ESPHome: a pairing request no other component claimed (bt_classic fallback).
   bool handle_unclaimed_pairing(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
-  void set_on_delay_report(void (*callback)(uint16_t delay, void *obj), void *obj) {
-    delay_report_callback = callback;
-    delay_report_obj = obj;
-  }
   /// ESPHome: discovery only while this returns true; nullptr allows it always.
   void set_discovery_gate(bool (*gate)()) { discovery_gate = gate; }
   /// ESPHome: start discovery now, unless connected or already discovering.
@@ -321,8 +317,6 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   const char* dev_name = "ESP32_A2DP_SRC";
   bool ssp_enabled = false;
   std::atomic<bool> media_wanted{true};  // ESPHome
-  void (*delay_report_callback)(uint16_t delay, void *obj) = nullptr;
-  void *delay_report_obj = nullptr;
   std::atomic<bool> paging_enabled{false};
   std::atomic<uint32_t> paging_interval_ms{30000};
   std::atomic<bool> reconnect_paused{false};
