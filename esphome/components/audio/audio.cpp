@@ -115,7 +115,7 @@ AudioFileType detect_audio_file_type(const char *content_type, const char *url) 
     }
 #endif
 #ifdef USE_AUDIO_OPUS_SUPPORT
-    if (str_endswith_ignore_case(url, ".opus")) {
+    if (str_endswith_ignore_case(url, ".opus") || str_endswith_ignore_case(url, ".ogg")) {
       return AudioFileType::OPUS;
     }
 #endif
