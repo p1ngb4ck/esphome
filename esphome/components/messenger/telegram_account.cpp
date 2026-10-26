@@ -71,6 +71,15 @@ static constexpr uint32_t ID_DOCUMENT_ATTRIBUTE_AUDIO = 0x9852f9c6;
 static constexpr uint32_t ID_DOCUMENT_ATTRIBUTE_FILENAME = 0x15590068;
 static constexpr uint32_t ID_MESSAGES_SEND_MEDIA = 0x0330e77f;
 static constexpr uint32_t ID_BOOL_TRUE = 0x997275b5;
+static constexpr uint32_t ID_PHOTO = 0xfb197a65;
+static constexpr uint32_t ID_PHOTO_SIZE = 0x75c78e60;
+static constexpr uint32_t ID_PHOTO_SIZE_PROGRESSIVE = 0xfa3efb95;
+static constexpr uint32_t ID_DOCUMENT = 0x8fd4c4d8;
+static constexpr uint32_t ID_UPLOAD_GET_FILE = 0xbe5335be;
+static constexpr uint32_t ID_UPLOAD_FILE = 0x096a18d5;
+static constexpr uint32_t ID_INPUT_PHOTO_FILE_LOCATION = 0x40181ffe;
+static constexpr uint32_t ID_INPUT_DOCUMENT_FILE_LOCATION = 0xbad07584;
+static constexpr uint32_t ID_UPDATE_SHORT_SENT_MESSAGE = 0x9015e101;
 static constexpr size_t UPLOAD_PART = 16384;
 static constexpr size_t UPLOAD_MAX = 10 * 1024 * 1024;
 static constexpr uint32_t UPLOAD_WAIT_MS = 60000;
@@ -103,6 +112,11 @@ bool read_text(TlReader object, const char *name, char *out, size_t size) {
   }
   copy_text(out, size, reinterpret_cast<const char *>(data), length);
   return true;
+}
+
+bool read_bytes(TlReader object, const char *name, const uint8_t *&data, size_t &length) {
+  TlReader field;
+  return tl_field(object, tl_hash(name), field) && field.bytes(data, length);
 }
 
 bool read_peer(TlReader peer, PeerKind &kind, int64_t &id) {
@@ -217,7 +231,119 @@ bool find_chat(TlReader chats, uint32_t count, PeerKind kind, int64_t id, TlRead
   return false;
 }
 
-uint8_t media_label(TlReader message, char *label, size_t size) {
+bool read_location(TlReader object, AccountFile &file) {
+  const uint8_t *ref = nullptr;
+  size_t ref_len = 0;
+  if (!read_long(object, "id", file.id) || !read_long(object, "access_hash", file.access_hash) ||
+      !read_bytes(object, "file_reference", ref, ref_len) || ref_len > sizeof(file.ref) ||
+      !read_int(object, "dc_id", file.dc)) {
+    file.id = 0;
+    return false;
+  }
+  memcpy(file.ref, ref, ref_len);
+  file.ref_len = static_cast<uint8_t>(ref_len);
+  return true;
+}
+
+void read_photo(TlReader photo, AccountFile &file) {
+  uint32_t ctor = 0;
+  if (!photo.peek_u32(ctor) || ctor != ID_PHOTO || !read_location(photo, file))
+    return;
+  TlReader sizes;
+  uint32_t count = 0;
+  int64_t best = -1;
+  if (field_vector(photo, "sizes", sizes, count)) {
+    for (uint32_t i = 0; i < count; i++) {
+      TlReader item = sizes;
+      uint32_t size_ctor = 0;
+      if (!sizes.peek_u32(size_ctor))
+        break;
+      if (size_ctor == ID_PHOTO_SIZE || size_ctor == ID_PHOTO_SIZE_PROGRESSIVE) {
+        int32_t w = 0;
+        int32_t h = 0;
+        const uint8_t *type = nullptr;
+        size_t type_len = 0;
+        read_int(item, "w", w);
+        read_int(item, "h", h);
+        const int64_t area = static_cast<int64_t>(w) * h;
+        if (area > best && read_bytes(item, "type", type, type_len) && type_len > 0 && type_len < sizeof(file.thumb)) {
+          best = area;
+          memcpy(file.thumb, type, type_len);
+          file.thumb[type_len] = '\0';
+          int32_t size = 0;
+          if (size_ctor == ID_PHOTO_SIZE) {
+            read_int(item, "size", size);
+          } else {
+            TlReader list;
+            uint32_t n = 0;
+            if (field_vector(item, "sizes", list, n)) {
+              for (uint32_t j = 0; j < n; j++)
+                list.i32(size);
+            }
+          }
+          file.size = size > 0 ? static_cast<uint32_t>(size) : 0;
+        }
+      }
+      if (!tl_skip_object(sizes))
+        break;
+    }
+  }
+  if (best < 0) {
+    file.id = 0;
+    return;
+  }
+  snprintf(file.name, sizeof(file.name), "photo_%lld.jpg", static_cast<long long>(file.id));
+}
+
+void read_document(TlReader document, uint8_t kind, AccountFile &file) {
+  uint32_t ctor = 0;
+  if (!document.peek_u32(ctor) || ctor != ID_DOCUMENT || !read_location(document, file))
+    return;
+  int64_t size = 0;
+  read_long(document, "size", size);
+  file.size = size > 0xFFFFFFFFLL ? 0xFFFFFFFFu : static_cast<uint32_t>(size > 0 ? size : 0);
+  file.thumb[0] = '\0';
+  TlReader attributes;
+  uint32_t count = 0;
+  if (field_vector(document, "attributes", attributes, count)) {
+    for (uint32_t i = 0; i < count; i++) {
+      TlReader item = attributes;
+      uint32_t attribute = 0;
+      if (!attributes.peek_u32(attribute))
+        break;
+      if (attribute == ID_DOCUMENT_ATTRIBUTE_FILENAME)
+        read_text(item, "file_name", file.name, sizeof(file.name));
+      if (!tl_skip_object(attributes))
+        break;
+    }
+  }
+  for (char *c = file.name; *c != '\0'; c++) {
+    if (*c == '/' || *c == '\\' || *c == ':')
+      *c = '_';
+  }
+  if (file.name[0] != '\0')
+    return;
+  char mime[48];
+  read_text(document, "mime_type", mime, sizeof(mime));
+  const char *ext = ".bin";
+  if (kind == 2 || strcmp(mime, "audio/ogg") == 0) {
+    ext = ".ogg";
+  } else if (kind == 3 || strcmp(mime, "video/mp4") == 0) {
+    ext = ".mp4";
+  } else if (strcmp(mime, "image/jpeg") == 0) {
+    ext = ".jpg";
+  } else if (strcmp(mime, "image/png") == 0) {
+    ext = ".png";
+  } else if (strcmp(mime, "audio/mpeg") == 0) {
+    ext = ".mp3";
+  } else if (strcmp(mime, "application/pdf") == 0) {
+    ext = ".pdf";
+  }
+  snprintf(file.name, sizeof(file.name), "%s_%lld%s", kind == 2 ? "voice" : kind == 3 ? "video" : "file",
+           static_cast<long long>(file.id), ext);
+}
+
+uint8_t read_media(TlReader message, char *label, size_t size, AccountFile *file) {
   TlReader media;
   uint32_t ctor = 0;
   label[0] = '\0';
@@ -225,6 +351,9 @@ uint8_t media_label(TlReader message, char *label, size_t size) {
     return 0;
   if (ctor == ID_MEDIA_PHOTO) {
     snprintf(label, size, "%s", "[Photo]");
+    TlReader photo;
+    if (file != nullptr && tl_field(media, tl_hash("photo"), photo))
+      read_photo(photo, *file);
     return 1;
   }
   if (ctor == ID_MEDIA_DOCUMENT) {
@@ -232,16 +361,20 @@ uint8_t media_label(TlReader message, char *label, size_t size) {
     uint32_t flags = 0;
     if (tl_field(media, tl_hash("flags"), flags_field))
       flags_field.u32(flags);
+    uint8_t kind = 4;
     if (flags & (1u << 8)) {
       snprintf(label, size, "%s", "[Voice message]");
-      return 2;
-    }
-    if (flags & (1u << 6)) {
+      kind = 2;
+    } else if (flags & (1u << 6)) {
       snprintf(label, size, "%s", "[Video]");
-      return 3;
+      kind = 3;
+    } else {
+      snprintf(label, size, "%s", "[File]");
     }
-    snprintf(label, size, "%s", "[File]");
-    return 4;
+    TlReader document;
+    if (file != nullptr && tl_field(media, tl_hash("document"), document))
+      read_document(document, kind, *file);
+    return kind;
   }
   snprintf(label, size, "%s", "[Media]");
   return 5;
@@ -544,7 +677,7 @@ void TelegramAccount::on_dialogs_(TlReader result) {
             chat.date = static_cast<uint32_t>(date);
             if (message_ctor == ID_MESSAGE) {
               char label[24];
-              const uint8_t media = media_label(message, label, sizeof(label));
+              const uint8_t media = read_media(message, label, sizeof(label), nullptr);
               if (!read_text(message, "message", chat.last, sizeof(chat.last)) || chat.last[0] == '\0') {
                 if (media != 0)
                   copy_text(chat.last, sizeof(chat.last), label, strlen(label));
@@ -600,7 +733,7 @@ void TelegramAccount::on_history_(const AccountPeer &peer, TlReader result) {
       entry.date = static_cast<uint32_t>(date);
       if (ctor == ID_MESSAGE) {
         char label[24];
-        entry.media = media_label(message, label, sizeof(label));
+        entry.media = read_media(message, label, sizeof(label), &entry.file);
         read_text(message, "message", entry.text, sizeof(entry.text));
         if (entry.media != 0) {
           char combined[sizeof(entry.text)];
@@ -681,7 +814,8 @@ void TelegramAccount::on_updates_(TlReader updates) {
       this->request_dialogs_();
       return;
     }
-    this->add_incoming_(peer, nullptr, id, (flags & (1u << 1)) != 0, static_cast<uint32_t>(date), "", text, 0);
+    this->add_incoming_(peer, nullptr, id, (flags & (1u << 1)) != 0, static_cast<uint32_t>(date), "", text, 0,
+                        nullptr);
     return;
   }
   TlReader update;
@@ -741,7 +875,8 @@ void TelegramAccount::on_new_message_(TlReader message, TlReader users_vector, T
     return;
   char text[512];
   char label[24];
-  const uint8_t media = media_label(message, label, sizeof(label));
+  AccountFile file{};
+  const uint8_t media = read_media(message, label, sizeof(label), &file);
   read_text(message, "message", text, sizeof(text));
   if (media != 0) {
     char combined[sizeof(text)];
@@ -789,11 +924,11 @@ void TelegramAccount::on_new_message_(TlReader message, TlReader users_vector, T
     return;
   }
   this->add_incoming_(peer, title[0] != '\0' ? title : nullptr, id, out, static_cast<uint32_t>(date), from, text,
-                      media);
+                      media, file.id != 0 ? &file : nullptr);
 }
 
 void TelegramAccount::add_incoming_(const AccountPeer &peer, const char *title, int32_t id, bool out, uint32_t date,
-                                    const char *from, const char *text, uint8_t media) {
+                                    const char *from, const char *text, uint8_t media, const AccountFile *file) {
   bool open = false;
   AccountPeer read_target{};
   {
@@ -838,6 +973,8 @@ void TelegramAccount::add_incoming_(const AccountPeer &peer, const char *title, 
       entry.date = date;
       copy_text(entry.from, sizeof(entry.from), from, strlen(from));
       copy_text(entry.text, sizeof(entry.text), text, strlen(text));
+      if (file != nullptr)
+        entry.file = *file;
       read_target = this->open_;
     }
   }
@@ -931,6 +1068,69 @@ uint32_t TelegramAccount::message_date(size_t index) const {
 uint8_t TelegramAccount::message_media(size_t index) const {
   LockGuard guard(this->lock_);
   return index < this->message_count_ ? this->messages_[index].media : 0;
+}
+
+int32_t TelegramAccount::message_id(size_t index) const {
+  LockGuard guard(this->lock_);
+  return index < this->message_count_ ? this->messages_[index].id : 0;
+}
+
+std::string TelegramAccount::message_file_name(size_t index) const {
+  LockGuard guard(this->lock_);
+  if (index >= this->message_count_ || this->messages_[index].file.id == 0)
+    return "";
+  return this->messages_[index].file.name;
+}
+
+bool TelegramAccount::file_of(int32_t message_id, AccountFile *file) const {
+  LockGuard guard(this->lock_);
+  for (size_t i = 0; i < this->message_count_; i++) {
+    if (this->messages_[i].id == message_id && this->messages_[i].file.id != 0) {
+      *file = this->messages_[i].file;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool TelegramAccount::download_part(const AccountFile &file, int64_t offset, uint8_t *out, size_t capacity,
+                                    size_t *got, std::string *error) {
+  if (!this->logged_in_) {
+    *error = "Telegram not logged in";
+    return false;
+  }
+  uint8_t body[192];
+  TlWriter w(body, sizeof(body));
+  w.u32(ID_UPLOAD_GET_FILE);
+  w.u32(0);
+  w.u32(file.thumb[0] != '\0' ? ID_INPUT_PHOTO_FILE_LOCATION : ID_INPUT_DOCUMENT_FILE_LOCATION);
+  w.i64(file.id);
+  w.i64(file.access_hash);
+  w.bytes(file.ref, file.ref_len);
+  w.string(file.thumb);
+  w.i64(offset);
+  w.i32(static_cast<int32_t>(capacity));
+  *got = 0;
+  if (!w.ok()) {
+    *error = "request too large";
+    return false;
+  }
+  return this->call_wait_(file.dc, w.data(), w.size(), error, [out, capacity, got](TlReader result) {
+    uint32_t ctor = 0;
+    const uint8_t *data = nullptr;
+    size_t length = 0;
+    if (!result.peek_u32(ctor) || ctor != ID_UPLOAD_FILE || !read_bytes(result, "bytes", data, length) ||
+        length > capacity)
+      return false;
+    memcpy(out, data, length);
+    *got = length;
+    return true;
+  });
+}
+
+void TelegramAccount::end_download() {
+  if (this->mtproto_ != nullptr)
+    this->mtproto_->close_dc();
 }
 
 void TelegramAccount::open_peer_(const AccountPeer &peer, const char *title) {
@@ -1040,38 +1240,38 @@ bool TelegramAccount::send_text(const std::string &text) {
     int32_t id = 0;
     int32_t date = 0;
     uint32_t ctor = 0;
-    if (result.peek_u32(ctor) && ctor == 0x9015e101) {
+    if (result.peek_u32(ctor) && ctor == ID_UPDATE_SHORT_SENT_MESSAGE) {
       read_int(result, "id", id);
       read_int(result, "date", date);
-      this->add_incoming_(peer, nullptr, id, true, static_cast<uint32_t>(date), "", copy.c_str(), 0);
+      this->add_incoming_(peer, nullptr, id, true, static_cast<uint32_t>(date), "", copy.c_str(), 0, nullptr);
     }
   });
   heap_caps_free(body);
   return ok;
 }
 
-bool TelegramAccount::call_wait_(const uint8_t *body, size_t length, std::string *error, bool parse_updates) {
-  const uint32_t serial = this->wait_serial_.fetch_add(1) + 1;
-  this->waiter_ = xTaskGetCurrentTaskHandle();
-  this->done_ok_ = false;
-  this->done_error_[0] = '\0';
+bool TelegramAccount::call_wait_(int dc, const uint8_t *body, size_t length, std::string *error,
+                                 std::function<bool(TlReader)> &&on_result) {
+  uint32_t serial = 0;
+  {
+    LockGuard guard(this->wait_lock_);
+    serial = ++this->wait_serial_;
+    this->waiter_ = xTaskGetCurrentTaskHandle();
+    this->done_ok_ = false;
+    this->done_error_[0] = '\0';
+  }
   ulTaskNotifyTake(pdTRUE, 0);
-  const bool queued =
-      this->mtproto_->invoke(body, length, [this, parse_updates, serial](const char *err, TlReader result) {
-        if (serial != this->wait_serial_.load())
+  const bool queued = this->mtproto_->invoke_dc(
+      dc, body, length, [this, serial, handler = std::move(on_result)](const char *err, TlReader result) {
+        LockGuard guard(this->wait_lock_);
+        if (serial != this->wait_serial_)
           return;
         if (err != nullptr) {
           copy_text(this->done_error_, sizeof(this->done_error_), err, strlen(err));
         } else {
-          uint32_t ctor = 0;
-          if (parse_updates) {
-            this->on_updates_(result);
-            this->done_ok_ = true;
-          } else {
-            this->done_ok_ = result.peek_u32(ctor) && ctor == ID_BOOL_TRUE;
-            if (!this->done_ok_)
-              copy_text(this->done_error_, sizeof(this->done_error_), "refused", 7);
-          }
+          this->done_ok_ = handler(result);
+          if (!this->done_ok_)
+            copy_text(this->done_error_, sizeof(this->done_error_), "refused", 7);
         }
         xTaskNotifyGive(this->waiter_);
       });
@@ -1080,10 +1280,12 @@ bool TelegramAccount::call_wait_(const uint8_t *body, size_t length, std::string
     return false;
   }
   if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(UPLOAD_WAIT_MS)) == 0) {
-    this->wait_serial_.fetch_add(1);
+    LockGuard guard(this->wait_lock_);
+    this->wait_serial_++;
     *error = "no answer from Telegram";
     return false;
   }
+  LockGuard guard(this->wait_lock_);
   if (!this->done_ok_)
     *error = this->done_error_;
   return this->done_ok_;
@@ -1126,7 +1328,10 @@ bool TelegramAccount::send_media(uint8_t kind, const uint8_t *data, size_t lengt
     w.i64(file_id);
     w.i32(static_cast<int32_t>(part));
     w.bytes(data + offset, chunk);
-    ok = w.ok() && this->call_wait_(w.data(), w.size(), error, false);
+    ok = w.ok() && this->call_wait_(0, w.data(), w.size(), error, [](TlReader result) {
+      uint32_t ctor = 0;
+      return result.peek_u32(ctor) && ctor == ID_BOOL_TRUE;
+    });
   }
   if (ok) {
     TlWriter w(body, capacity + 1024);
@@ -1161,7 +1366,10 @@ bool TelegramAccount::send_media(uint8_t kind, const uint8_t *data, size_t lengt
     uint64_t random_id = 0;
     esp_fill_random(&random_id, sizeof(random_id));
     w.u64(random_id);
-    ok = w.ok() && this->call_wait_(w.data(), w.size(), error, true);
+    ok = w.ok() && this->call_wait_(0, w.data(), w.size(), error, [this](TlReader result) {
+      this->on_updates_(result);
+      return true;
+    });
   }
   heap_caps_free(body);
   return ok;

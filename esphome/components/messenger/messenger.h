@@ -200,6 +200,7 @@ class Messenger : public Component
   ChannelConfig &config_(Channel channel) const { return this->configs_[static_cast<size_t>(channel)]; }
   bool direct_(Channel channel) const;
   bool run_account_(Job *job, std::string *error);
+  bool run_account_download_(Job *job, std::string *error);
   static void poll_task_entry_(void *param);
   static void send_task_entry_(void *param);
   void poll_loop_();

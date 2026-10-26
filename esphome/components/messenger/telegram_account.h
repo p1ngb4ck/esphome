@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace esphome::messenger {
@@ -41,6 +42,17 @@ struct AccountContact {
   char status[32];
 };
 
+struct AccountFile {
+  int64_t id;
+  int64_t access_hash;
+  int32_t dc;
+  uint32_t size;
+  uint8_t ref_len;
+  uint8_t ref[80];
+  char thumb[4];
+  char name[48];
+};
+
 struct AccountMessage {
   int32_t id;
   bool out;
@@ -48,6 +60,7 @@ struct AccountMessage {
   uint32_t date;
   char from[48];
   char text[512];
+  AccountFile file;
 };
 
 class TelegramAccount {
@@ -58,6 +71,7 @@ class TelegramAccount {
   static constexpr size_t MAX_CHATS = 60;
   static constexpr size_t MAX_CONTACTS = 300;
   static constexpr size_t MAX_MESSAGES = 60;
+  static constexpr size_t DOWNLOAD_PART = 32768;
 
   void attach(mtproto::Mtproto *mtproto, Component *owner);
   void on_state(mtproto::State state);
@@ -78,6 +92,12 @@ class TelegramAccount {
   bool message_out(size_t index) const;
   uint32_t message_date(size_t index) const;
   uint8_t message_media(size_t index) const;
+  int32_t message_id(size_t index) const;
+  std::string message_file_name(size_t index) const;
+  bool file_of(int32_t message_id, AccountFile *file) const;
+  bool download_part(const AccountFile &file, int64_t offset, uint8_t *out, size_t capacity, size_t *got,
+                     std::string *error);
+  void end_download();
 
   bool open_chat(size_t index);
   bool open_contact(size_t index);
@@ -94,7 +114,8 @@ class TelegramAccount {
   bool allocate_();
   void release_();
   void update_();
-  bool call_wait_(const uint8_t *body, size_t length, std::string *error, bool parse_updates);
+  bool call_wait_(int dc, const uint8_t *body, size_t length, std::string *error,
+                  std::function<bool(mtproto::TlReader)> &&on_result);
   void notify_(uint8_t what);
   void request_contacts_();
   void request_dialogs_();
@@ -107,7 +128,7 @@ class TelegramAccount {
   void on_updates_(mtproto::TlReader updates);
   void on_new_message_(mtproto::TlReader message, mtproto::TlReader users, mtproto::TlReader chats);
   void add_incoming_(const AccountPeer &peer, const char *title, int32_t id, bool out, uint32_t date, const char *from,
-                     const char *text, uint8_t media);
+                     const char *text, uint8_t media, const AccountFile *file);
   AccountChat *find_chat_(PeerKind kind, int64_t id);
   void move_to_top_(size_t index);
 
@@ -128,8 +149,9 @@ class TelegramAccount {
   AccountPeer open_{};
   char open_title_[64]{};
   uint32_t history_serial_{0};
+  Mutex wait_lock_;
   TaskHandle_t waiter_{nullptr};
-  std::atomic<uint32_t> wait_serial_{0};
+  uint32_t wait_serial_{0};
   bool done_ok_{false};
   char done_error_[64]{};
 };

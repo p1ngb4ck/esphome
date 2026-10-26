@@ -1421,6 +1421,10 @@ bool Messenger::stream_to_storage_(const std::string &url, const std::string &au
 }
 
 bool Messenger::run_download_(Job *job, std::string *error) {
+#ifdef USE_MESSENGER_ACCOUNT
+  if (this->is_account(job->channel))
+    return this->run_account_download_(job, error);
+#endif
   const std::string ref = job->ref;
   if (ref.rfind("http://", 0) == 0 || ref.rfind("https://", 0) == 0)
     return this->stream_to_storage_(ref, "", job->path, error);
@@ -1480,6 +1484,46 @@ bool Messenger::run_download_(Job *job, std::string *error) {
   *error = "no URL for the file";
   return false;
 }
+
+#ifdef USE_MESSENGER_ACCOUNT
+bool Messenger::run_account_download_(Job *job, std::string *error) {
+  AccountFile file{};
+  if (strncmp(job->ref, "tg:", 3) != 0 ||
+      !this->account_.file_of(static_cast<int32_t>(strtol(job->ref + 3, nullptr, 10)), &file)) {
+    *error = "file no longer in the chat";
+    return false;
+  }
+  RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
+  uint8_t *part = allocator.allocate(TelegramAccount::DOWNLOAD_PART);
+  if (part == nullptr) {
+    *error = "no PSRAM";
+    return false;
+  }
+  bool ok = this->storage_io_(IoOp::OPEN, nullptr, 0, job->path, error);
+  const bool opened = ok;
+  int64_t offset = 0;
+  while (ok) {
+    size_t got = 0;
+    ok = this->account_.download_part(file, offset, part, TelegramAccount::DOWNLOAD_PART, &got, error);
+    for (size_t at = 0; ok && at < got; at += DOWNLOAD_CHUNK)
+      ok = this->storage_io_(IoOp::WRITE, part + at, std::min(DOWNLOAD_CHUNK, got - at), nullptr, error);
+    if (!ok || got < TelegramAccount::DOWNLOAD_PART)
+      break;
+    offset += static_cast<int64_t>(got);
+  }
+  this->account_.end_download();
+  if (opened && !this->io_abandoned_.load(std::memory_order_acquire)) {
+    std::string close_error;
+    if (!this->storage_io_(IoOp::CLOSE, nullptr, 0, nullptr, &close_error) && ok) {
+      *error = close_error;
+      ok = false;
+    }
+  }
+  if (!this->io_abandoned_.load(std::memory_order_acquire))
+    allocator.deallocate(part, TelegramAccount::DOWNLOAD_PART);
+  return ok;
+}
+#endif
 
 bool Messenger::run_spool_(Job *job, std::string *error) {
   if (this->spool_dir_[0] == '\0') {
