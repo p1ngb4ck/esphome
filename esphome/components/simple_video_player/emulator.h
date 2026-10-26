@@ -53,6 +53,9 @@ class EmuCore {
   virtual uint8_t *sram(size_t *size) { return nullptr; }
   virtual size_t save_state(uint8_t *buf, size_t cap) { return 0; }
   virtual bool load_state(const uint8_t *buf, size_t len) { return false; }
+  virtual bool split_mix() const { return false; }
+  virtual void mix_begin() {}
+  virtual void mix_run() {}
 };
 
 static constexpr size_t EMU_CORE_STORE = 768;
@@ -148,6 +151,7 @@ class GameEmulator
   static constexpr size_t READ_CHUNK = 64 * 1024;
   static constexpr uint32_t TASK_STACK = 8192;
   static constexpr UBaseType_t TASK_PRIORITY = 11;
+  static constexpr uint32_t MIX_STACK = 4096;
   static constexpr uint32_t INTERNAL_PIECE_MAX = 16 * 1024;
   static constexpr size_t FRAME_MIN_BYTES = 256 * 240 * 2;
 
@@ -267,6 +271,9 @@ class GameEmulator
   void draw_frame_(const EmuVideo &video);
   bool draw_cpu_(const EmuVideo &video, uint8_t *fb);
   void finish_ppa_(bool wait = true);
+  static void mix_entry_(void *arg);
+  void mix_step_();
+  void mix_sync_();
   static bool ppa_done_cb_(ppa_client_handle_t client, ppa_event_data_t *event, void *arg);
   void play_audio_();
 
@@ -327,6 +334,9 @@ class GameEmulator
   size_t frame_size_{0};
   ppa_client_handle_t ppa_{nullptr};
   SemaphoreHandle_t ppa_done_{nullptr};
+  SemaphoreHandle_t mix_done_{nullptr};
+  bool mix_split_{false};
+  bool mix_pending_{false};
   uint8_t *ppa_fb_{nullptr};
   bool ppa_deferred_{false};
   bool ppa_busy_{false};
@@ -368,6 +378,7 @@ class GameEmulator
   bool resume_pending_{false};
 
   StaticTask task_;
+  StaticTask mix_task_;
   std::atomic<bool> task_stop_{false};
   std::atomic<bool> task_pause_{false};
   std::atomic<bool> task_parked_{false};

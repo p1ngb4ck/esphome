@@ -27,6 +27,8 @@ struct PortApi {
   uint8_t *(*sram)(size_t *size);
   size_t (*save_state)(uint8_t *buf, size_t cap);
   bool (*load_state)(const uint8_t *buf, size_t len);
+  void (*mix_begin)();
+  void (*mix_run)();
 };
 
 class PortCore final : public EmuCore {
@@ -63,6 +65,15 @@ class PortCore final : public EmuCore {
   }
   bool load_state(const uint8_t *buf, size_t len) override {
     return this->api_->load_state != nullptr && this->api_->load_state(buf, len);
+  }
+  bool split_mix() const override { return this->api_->mix_run != nullptr; }
+  void mix_begin() override {
+    if (this->api_->mix_begin != nullptr)
+      this->api_->mix_begin();
+  }
+  void mix_run() override {
+    if (this->api_->mix_run != nullptr)
+      this->api_->mix_run();
   }
 
  protected:
@@ -179,6 +190,8 @@ static const PortApi SNES_API = {
     .sram = snes_port_sram,
     .save_state = snes_port_save_state,
     .load_state = snes_port_load_state,
+    .mix_begin = snes_port_mix_begin,
+    .mix_run = snes_port_mix_run,
 };
 #endif
 

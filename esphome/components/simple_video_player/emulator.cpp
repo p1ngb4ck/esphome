@@ -301,6 +301,8 @@ void GameEmulator::service() {
         return;
       if (this->task_.is_created() && !this->task_.deallocate())
         return;
+      if (this->mix_task_.is_created() && !this->mix_task_.deallocate())
+        return;
       if (this->busy())
         return;
       if (!this->sram_stored_ && this->sram_changed_()) {
@@ -640,6 +642,16 @@ void GameEmulator::panel_ready(bool ready) {
 }
 
 bool GameEmulator::create_task_() {
+  this->mix_split_ = false;
+  this->mix_pending_ = false;
+  if (this->core_->split_mix()) {
+    if (this->mix_done_ == nullptr)
+      this->mix_done_ = xSemaphoreCreateBinary();
+    this->mix_split_ = this->mix_done_ != nullptr &&
+                       (this->mix_task_.is_created() ||
+                        this->mix_task_.create(&GameEmulator::mix_entry_, "svp_game_mix", MIX_STACK, this,
+                                               TASK_PRIORITY, false, 1));
+  }
   if (this->task_.create(&GameEmulator::task_entry_, "svp_game", TASK_STACK, this, TASK_PRIORITY, false, 0))
     return true;
   ESP_LOGE(TAG, "No task for the game");
@@ -698,6 +710,11 @@ void GameEmulator::end_() {
   this->job_wanted_ = Job::NONE;
   this->resume_pending_ = false;
   this->release_output_();
+  if (this->mix_done_ != nullptr)
+    vSemaphoreDelete(this->mix_done_);
+  this->mix_done_ = nullptr;
+  this->mix_split_ = false;
+  this->mix_pending_ = false;
   if (this->silence_ != nullptr)
     this->parent_->pool_.free(this->silence_);
   this->silence_ = nullptr;
@@ -1263,6 +1280,36 @@ bool GameEmulator::ppa_done_cb_(ppa_client_handle_t client, ppa_event_data_t *ev
   return woken == pdTRUE;
 }
 
+void GameEmulator::mix_entry_(void *arg) {
+  auto *emu = static_cast<GameEmulator *>(arg);
+  while (true) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    emu->core_->mix_run();
+    xSemaphoreGive(emu->mix_done_);
+  }
+}
+
+void GameEmulator::mix_step_() {
+  if (!this->core_->split_mix())
+    return;
+  if (!this->mix_split_) {
+    this->core_->mix_begin();
+    this->core_->mix_run();
+    return;
+  }
+  this->mix_sync_();
+  this->core_->mix_begin();
+  this->mix_pending_ = true;
+  xTaskNotifyGive(this->mix_task_.get_handle());
+}
+
+void GameEmulator::mix_sync_() {
+  if (!this->mix_pending_)
+    return;
+  xSemaphoreTake(this->mix_done_, portMAX_DELAY);
+  this->mix_pending_ = false;
+}
+
 void GameEmulator::finish_ppa_(bool wait) {
   if (!this->ppa_busy_)
     return;
@@ -1340,6 +1387,7 @@ void GameEmulator::release_output_() {
 void GameEmulator::task_entry_(void *arg) {
   auto *emu = static_cast<GameEmulator *>(arg);
   emu->task_loop_();
+  emu->mix_sync_();
   emu->finish_ppa_();
   emu->link_note_(LINK_BYE);
   emu->task_done_.store(true, std::memory_order_release);
@@ -1350,6 +1398,7 @@ void GameEmulator::task_entry_(void *arg) {
 
 bool GameEmulator::park_() {
   if (this->task_pause_.load(std::memory_order_acquire)) {
+    this->mix_sync_();
     this->finish_ppa_();
     this->pace_reset_();
     this->link_note_(LINK_PAUSE);
@@ -1394,6 +1443,7 @@ void GameEmulator::task_loop_() {
     this->core_->run_frame(pads);
     if (this->core_->owns_loop())
       return;
+    this->mix_step_();
     this->draw_frame_(this->core_->video());
     this->play_audio_();
     this->pace_();
