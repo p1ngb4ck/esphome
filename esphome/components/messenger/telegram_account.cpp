@@ -283,6 +283,7 @@ void read_photo(TlReader photo, AccountFile &file) {
   TlReader sizes;
   uint32_t count = 0;
   int64_t best = -1;
+  int64_t view_best = -1;
   if (field_vector(photo, "sizes", sizes, count)) {
     for (uint32_t i = 0; i < count; i++) {
       TlReader item = sizes;
@@ -297,10 +298,9 @@ void read_photo(TlReader photo, AccountFile &file) {
         read_int(item, "w", w);
         read_int(item, "h", h);
         const int64_t area = static_cast<int64_t>(w) * h;
-        if (area > best && read_bytes(item, "type", type, type_len) && type_len > 0 && type_len < sizeof(file.thumb)) {
-          best = area;
-          memcpy(file.thumb, type, type_len);
-          file.thumb[type_len] = '\0';
+        const bool fits = static_cast<uint32_t>(std::max(w, h)) <= TelegramAccount::VIEW_MAX_SIDE;
+        if ((area > best || (fits && area > view_best)) && read_bytes(item, "type", type, type_len) && type_len > 0 &&
+            type_len < sizeof(file.thumb)) {
           int32_t size = 0;
           if (size_ctor == ID_PHOTO_SIZE) {
             read_int(item, "size", size);
@@ -312,7 +312,19 @@ void read_photo(TlReader photo, AccountFile &file) {
                 list.i32(size);
             }
           }
-          file.size = size > 0 ? static_cast<uint32_t>(size) : 0;
+          const uint32_t bytes = size > 0 ? static_cast<uint32_t>(size) : 0;
+          if (area > best) {
+            best = area;
+            memcpy(file.thumb, type, type_len);
+            file.thumb[type_len] = '\0';
+            file.size = bytes;
+          }
+          if (fits && area > view_best) {
+            view_best = area;
+            memcpy(file.view_thumb, type, type_len);
+            file.view_thumb[type_len] = '\0';
+            file.view_size = bytes;
+          }
         }
       }
       if (!tl_skip_object(sizes))
@@ -322,6 +334,10 @@ void read_photo(TlReader photo, AccountFile &file) {
   if (best < 0) {
     file.id = 0;
     return;
+  }
+  if (view_best < 0) {
+    memcpy(file.view_thumb, file.thumb, sizeof(file.thumb));
+    file.view_size = file.size;
   }
   snprintf(file.name, sizeof(file.name), "photo_%lld.jpg", static_cast<long long>(file.id));
 }
