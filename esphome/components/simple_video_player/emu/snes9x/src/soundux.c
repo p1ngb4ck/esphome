@@ -21,7 +21,7 @@
 
 static struct {
    int32_t wave[SOUND_BUFFER_SIZE];
-   int32_t Echo [24000];
+   int32_t *Echo;
    int32_t MixBuffer [SOUND_BUFFER_SIZE];
    int32_t EchoBuffer [SOUND_BUFFER_SIZE];
    int32_t FilterTaps [8];
@@ -209,7 +209,7 @@ void S9xSetEchoEnable(uint8_t byte)
       byte = 0;
    if (byte && !SoundData.echo_enable)
    {
-      memset(Echo, 0, sizeof(Echo));
+      memset(Echo, 0, 24000 * sizeof(int32_t));
       memset(Loop, 0, sizeof(Loop));
    }
 
@@ -1027,8 +1027,11 @@ void S9xSetPlaybackRate(uint32_t playback_rate)
 
 bool S9xInitSound(int32_t buffer_ms, int32_t lag_ms)
 {
-   LocalState = calloc(1, sizeof(*LocalState));
+   LocalState = emu_calloc_hot(1, sizeof(*LocalState));
    if (!LocalState)
+      return false;
+   Echo = calloc(24000, sizeof(int32_t));
+   if (!Echo)
       return false;
    so.playback_rate = 0;
    S9xResetSound(true);
