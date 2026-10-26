@@ -14,6 +14,9 @@
 #include "esphome/core/string_ref.h"
 #include "usb/usb_helpers.h"
 #include "usb/usb_types_ch9.h"
+#ifdef USE_USB_CDROM
+#include "esphome/components/usb_cdrom/usb_cdrom.h"
+#endif
 
 #include <esp_heap_caps.h>
 
@@ -267,6 +270,11 @@ bool USBStorageDevice::scsi_inquiry_() {
   memcpy(product, resp.product_id, 16);
   ESP_LOGD(TAG, "SCSI INQUIRY: vendor='%s' product='%s' type=0x%02X", vendor, product,
            resp.peripheral_qualifier_type & 0x1F);
+#ifdef USE_USB_CDROM
+  this->device_type_ = resp.peripheral_qualifier_type & 0x1F;
+  if (this->device_type_ == usb_cdrom::SCSI_TYPE_CDROM && this->client_->cdrom_ != nullptr)
+    return true;
+#endif
   return (resp.peripheral_qualifier_type & 0x1F) == 0x00;
 }
 
@@ -688,6 +696,15 @@ void USBStorageDevice::start_() {
     return;
   }
 
+#ifdef USE_USB_CDROM
+  if (this->device_type_ == usb_cdrom::SCSI_TYPE_CDROM) {
+    this->cdrom_ = this->client_->cdrom_->attach(this);
+    if (this->cdrom_ == nullptr)
+      this->client_->close_device(*this->dev_);
+    return;
+  }
+#endif
+
   this->ready_tries_ = 0;
   this->check_ready_();
 }
@@ -831,6 +848,12 @@ void USBStorageDevice::stop_() {
   }
   App.scheduler.cancel_timeout(this);
   this->unmount_pending_.store(false, std::memory_order_release);
+#ifdef USE_USB_CDROM
+  if (this->cdrom_ != nullptr) {
+    this->client_->cdrom_->detach(this->cdrom_);
+    this->cdrom_ = nullptr;
+  }
+#endif
   if (this->fs_mounted_) {
     ESP_LOGI(TAG, "USB Storage Device disconnected (mount_path='%s')", this->mount_buf_);
     this->fs_mounted_ = false;

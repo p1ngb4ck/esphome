@@ -21,6 +21,13 @@
 #include <atomic>
 #include <vector>
 
+#ifdef USE_USB_CDROM
+namespace esphome::usb_cdrom {
+class CdromDrive;
+class USBCdrom;
+}
+#endif
+
 namespace esphome::usb_storage {
 
 static constexpr const char *TAG = "usb_storage";
@@ -60,6 +67,9 @@ class USBStorageClient : public usb_host::USBClient {
     this->entry_count_ = count;
   }
   void set_max_devices(uint8_t max_devices) { this->max_devices_ = max_devices; }
+#ifdef USE_USB_CDROM
+  void set_cdrom(usb_cdrom::USBCdrom *cdrom) { this->cdrom_ = cdrom; }
+#endif
 
   void loop() override;
 
@@ -93,6 +103,9 @@ class USBStorageClient : public usb_host::USBClient {
 #endif
   std::vector<USBStorageDevice *> sticks_{};
   LazyCallbackManager<void(int, const char *)> on_mounted_;
+#ifdef USE_USB_CDROM
+  usb_cdrom::USBCdrom *cdrom_{nullptr};
+#endif
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -117,6 +130,9 @@ struct USBFileHandle : public esphome::storage::FileHandle {
 // ─────────────────────────────────────────────────────────────────────────────
 class USBStorageDevice : public esphome::storage::FilesystemStorage, public esphome::storage::MountableStorage {
   friend class USBStorageClient;
+#ifdef USE_USB_CDROM
+  friend class usb_cdrom::CdromDrive;
+#endif
 
  public:
   static constexpr int MAX_OPEN_FILES = 4;
@@ -282,6 +298,10 @@ class USBStorageDevice : public esphome::storage::FilesystemStorage, public esph
   SemaphoreHandle_t io_lock_{nullptr};  // SCSI commands of the storage worker against the transfers' lifetime
 
   USBFileHandle handle_pool_[MAX_OPEN_FILES]{};
+#ifdef USE_USB_CDROM
+  uint8_t device_type_{0};
+  usb_cdrom::CdromDrive *cdrom_{nullptr};
+#endif
 };
 
 }  // namespace esphome::usb_storage

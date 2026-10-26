@@ -99,6 +99,26 @@ loop-sliced. Two engines share one queue. Completions ALWAYS fire on the main lo
   quiesced / unregistered (registry quiesce callback: detached at once, unmounted on the next loop pass).
   An image on an image is refused. Caps = the backing's IO_TASK_SAFE.
 
+## usb_cdrom (`components/usb_cdrom`, `USE_USB_CDROM`)
+- On usb_storage: its client enumerates and sends INQUIRY; peripheral type 5 (CD/DVD) is handed to usb_cdrom
+  (`USBCdrom::attach`) instead of being refused - no 5 s ready check, no FAT. `CdromDrive` (PSRAM, made at
+  connect, freed at disconnect) is a friend of USBStorageDevice and uses its BOT transport under `io_lock_`:
+  TEST UNIT READY / REQUEST SENSE, GET EVENT STATUS NOTIFICATION (media, polled), GET CONFIGURATION (profile),
+  READ TOC format 1 (last session), READ CAPACITY, READ(10) with 2048-byte sectors, PREVENT ALLOW MEDIUM REMOVAL,
+  START STOP UNIT (eject / load, IMMED).
+- Registered at connect (unmounted) under `/cdrom` (`/cdrom2` ..), caps MOUNT | UNMOUNT, IO_TASK_SAFE.
+  `mount()` (worker task via async_mount): TEST UNIT READY, index built with SCSI reads (64 KB of the transfer
+  buffer or the 2 KB sector buffer), tray locked when media events work; a user mount on an empty drive loads
+  the tray. `unmount()` (main loop) = safe eject: quiesce, index freed, tray unlocked, eject. Refused while the
+  worker task is inside the drive.
+- Reads: whole sectors straight into the caller's buffer (`scsi_read`), partial sectors through the 2 KB PSRAM
+  sector buffer (also a one-sector cache); `stat` / `list_dir` from the index.
+- Media change: BOT has no interrupt endpoint and MMC media events are polled (as Linux sr does), so
+  `media_check_interval` (default 2 s, 0 = off) runs only while a drive is plugged, skipped while the worker uses
+  the drive or `io_lock_` is taken. New medium -> async_mount; removal -> quiesce + index freed; eject request
+  (button with the tray locked) -> safe eject. Triggers `on_media_mounted` / `on_media_removed` (mount path) from
+  the component's loop, enabled from the task. Actions `usb_cdrom.eject` / `usb_cdrom.load` (mount_path optional).
+
 ## TransferBuffer (`transfer_buffer.h`) — optional, `USE_STORAGE_TRANSFER_BUFFER`
 - Single-owner PSRAM staging arena; `try_acquire(need)`/`release()`; `capacity()`; `is_dma_capable()`.
 - DMA-capable ONLY on S3/P4 (`MALLOC_CAP_SPIRAM|MALLOC_CAP_DMA`), else plain external RAM
