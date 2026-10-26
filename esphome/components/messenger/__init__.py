@@ -1,7 +1,12 @@
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import audio, microphone, network, speaker
-from esphome.components.esp32 import add_idf_component, add_idf_sdkconfig_option
+from esphome.components.esp32 import (
+    add_idf_component,
+    add_idf_sdkconfig_option,
+    request_tls,
+    require_mbedtls_tls_server,
+)
 from esphome.components.resampler.microphone import ResamplerMicrophone
 from esphome.components.mtproto import CONF_MTPROTO_ID, Mtproto
 from esphome.components.http_request import CONF_HTTP_REQUEST_ID, HttpRequestComponent
@@ -248,6 +253,8 @@ async def to_code(config: ConfigType) -> None:
             call_spk = await cg.get_variable(call[CONF_SPEAKER])
             cg.add(var.set_call_audio(call_mic, call_spk))
             add_idf_component(name="espressif/esp_peer", ref="1.5.7")
+            request_tls()
+            require_mbedtls_tls_server()
             add_idf_sdkconfig_option("CONFIG_MBEDTLS_SSL_PROTO_DTLS", True)
             add_idf_sdkconfig_option("CONFIG_MBEDTLS_SSL_DTLS_SRTP", True)
             add_idf_sdkconfig_option("CONFIG_MBEDTLS_X509_CREATE_C", True)
