@@ -558,7 +558,7 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
     const uint32_t delay = this->output_delay_ms();
     size_t target = this->ring_bytes_;
     if (delay != 0) {
-      target = std::min(target, (size_t) SAMPLE_RATE * BYTES_PER_FRAME * delay / 1000);
+      target = std::min<size_t>(target, (size_t) SAMPLE_RATE * BYTES_PER_FRAME * delay / 1000);
       target -= target % BYTES_PER_FRAME;
     }
     const size_t used = this->ring_bytes_ - xRingbufferGetCurFreeSize(this->ring_);
