@@ -1151,7 +1151,8 @@ void TelegramCall::handle_signaling_(CallSession *s, const std::string &json) {
           s->remote_ssrc = s->pending_offer_ssrc;
         } else if (strcmp(media, "video") == 0 && s->video) {
           JsonObject h264;
-          for (JsonObject type : content["payloadTypes"].as<JsonArray>()) {
+          JsonArray payload_types = content["payloadTypes"].as<JsonArray>();
+          for (JsonObject type : payload_types) {
             const char *name = type["name"] | "";
             const char *mode = type["parameters"]["packetization-mode"] | "0";
             const char *profile = type["parameters"]["profile-level-id"] | "";
@@ -1164,7 +1165,8 @@ void TelegramCall::handle_signaling_(CallSession *s, const std::string &json) {
           if (h264.isNull() || ssrc == 0)
             continue;
           s->video_param_count = 0;
-          for (JsonPair param : h264["parameters"].as<JsonObject>()) {
+          JsonObject parameters = h264["parameters"].as<JsonObject>();
+          for (JsonPair param : parameters) {
             if (s->video_param_count >= MAX_VIDEO_PARAMS)
               break;
             const char *key = param.key().c_str();
@@ -1176,7 +1178,8 @@ void TelegramCall::handle_signaling_(CallSession *s, const std::string &json) {
             s->video_param_count++;
           }
           s->video_group_count = 0;
-          for (JsonObject group : content["ssrcGroups"].as<JsonArray>()) {
+          JsonArray groups = content["ssrcGroups"].as<JsonArray>();
+          for (JsonObject group : groups) {
             if (s->video_group_count >= MAX_VIDEO_GROUPS)
               break;
             const uint8_t g = s->video_group_count;
@@ -1184,7 +1187,8 @@ void TelegramCall::handle_signaling_(CallSession *s, const std::string &json) {
             tl_read::copy(s->video_group_semantics[g], sizeof(s->video_group_semantics[0]), semantics,
                           strlen(semantics));
             s->video_group_size[g] = 0;
-            for (JsonVariant member : group["ssrcs"].as<JsonArray>()) {
+            JsonArray members = group["ssrcs"].as<JsonArray>();
+            for (JsonVariant member : members) {
               if (s->video_group_size[g] >= MAX_GROUP_SSRCS)
                 break;
               s->video_groups[g][s->video_group_size[g]++] = json_u32(member);
