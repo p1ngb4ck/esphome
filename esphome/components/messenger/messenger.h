@@ -131,6 +131,11 @@ class Messenger : public Component
   }
   TelegramAccount *account() { return &this->account_; }
   bool view_account_photo(int32_t message_id);
+  bool load_avatar(int64_t peer_id);
+  const uint8_t *avatar_data() const { return this->avatar_; }
+  size_t avatar_size() const { return this->avatar_len_; }
+  void avatar_release();
+  Trigger<int64_t, bool> *get_avatar_trigger() { return &this->avatar_trigger_; }
   Trigger<uint8_t> *get_account_trigger() { return &this->account_trigger_; }
 #endif
 #ifdef USE_MESSENGER_CALL
@@ -219,12 +224,14 @@ class Messenger : public Component
   static constexpr size_t MAX_RESPONSE = 65536;
   static constexpr size_t DOWNLOAD_CHUNK = 16384;
   static constexpr size_t VIEW_MAX_BYTES = 4 * 1024 * 1024;
+  static constexpr size_t AVATAR_MAX_BYTES = 64 * 1024;
 
   ChannelConfig &config_(Channel channel) const { return this->configs_[static_cast<size_t>(channel)]; }
   bool direct_(Channel channel) const;
   bool run_account_(Job *job, std::string *error);
   bool run_account_download_(Job *job, std::string *error);
   bool run_account_view_(Job *job, std::string *error);
+  bool run_account_avatar_(Job *job, std::string *error);
   void save_sent_(Job *job);
   static void poll_task_entry_(void *param);
   static void send_task_entry_(void *param);
@@ -316,6 +323,9 @@ class Messenger : public Component
   mtproto::Mtproto *mtproto_{nullptr};
   TelegramAccount account_;
   Trigger<uint8_t> account_trigger_;
+  Trigger<int64_t, bool> avatar_trigger_;
+  uint8_t *avatar_{nullptr};
+  size_t avatar_len_{0};
 #endif
 #ifdef USE_MESSENGER_CALL
   TelegramCall call_;

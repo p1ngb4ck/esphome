@@ -31,15 +31,23 @@ struct AccountChat {
   AccountPeer peer;
   char title[64];
   char last[96];
+  char status[32];
   uint32_t date;
   int32_t unread;
   int32_t read_max;
+  int32_t read_out;
+  int64_t photo_id;
+  int32_t photo_dc;
 };
 
 struct AccountContact {
   AccountPeer peer;
   char name[64];
   char status[32];
+  char phone[20];
+  char username[33];
+  int64_t photo_id;
+  int32_t photo_dc;
 };
 
 struct AccountFile {
@@ -79,6 +87,7 @@ class TelegramAccount {
   static constexpr uint8_t CHANGED_CONTACTS = 2;
   static constexpr uint8_t CHANGED_MESSAGES = 4;
   static constexpr uint8_t CHANGED_FILES = 8;
+  static constexpr uint8_t CHANGED_RESULT = 16;
   static constexpr size_t MAX_INCOMING_FILES = 8;
   static constexpr uint32_t VIEW_MAX_SIDE = 800;
   static constexpr size_t MAX_CHATS = 60;
@@ -99,6 +108,24 @@ class TelegramAccount {
   size_t contact_count() const;
   std::string contact_name(size_t index) const;
   std::string contact_status(size_t index) const;
+  std::string contact_phone(size_t index) const;
+  std::string contact_username(size_t index) const;
+  int64_t contact_user_id(size_t index) const;
+  bool contact_has_photo(size_t index) const;
+  int64_t chat_peer_id(size_t index) const;
+  bool chat_has_photo(size_t index) const;
+  std::string chat_status(size_t index) const;
+  int64_t open_peer_id() const;
+  std::string open_status() const;
+  bool message_read(size_t index) const;
+  bool add_contact(const std::string &first_name, const std::string &last_name, const std::string &phone);
+  bool delete_contact(size_t index);
+  bool request_about(size_t index);
+  std::string about() const;
+  std::string result() const;
+  bool photo_location(int64_t peer_id, AccountPeer *peer, int64_t *photo_id, int32_t *dc) const;
+  bool download_peer_photo_part(const AccountPeer &peer, int64_t photo_id, int32_t dc, int64_t offset, uint8_t *out,
+                                size_t capacity, size_t *got, std::string *error);
   size_t message_count() const;
   std::string message_text(size_t index) const;
   std::string message_from(size_t index) const;
@@ -142,6 +169,10 @@ class TelegramAccount {
   void on_history_(const AccountPeer &peer, mtproto::TlReader result);
   void on_updates_(mtproto::TlReader updates);
   void on_new_message_(mtproto::TlReader message, mtproto::TlReader users, mtproto::TlReader chats);
+  void on_update_item_(mtproto::TlReader update, mtproto::TlReader users, mtproto::TlReader chats);
+  bool get_file_part_(int dc, const uint8_t *location, size_t location_len, int64_t offset, uint8_t *out,
+                      size_t capacity, size_t *got, std::string *error);
+  void set_result_(const char *text);
   void add_incoming_(const AccountPeer &peer, const char *title, int32_t id, bool out, uint32_t date, const char *from,
                      const char *text, uint8_t media, const AccountFile *file);
   AccountChat *find_chat_(PeerKind kind, int64_t id);
@@ -166,6 +197,8 @@ class TelegramAccount {
   uint32_t incoming_tail_{0};
   AccountPeer open_{};
   char open_title_[64]{};
+  char about_[160]{};
+  char result_[64]{};
   uint32_t history_serial_{0};
   Mutex wait_lock_;
   TaskHandle_t waiter_{nullptr};

@@ -1486,6 +1486,8 @@ bool Messenger::run_download_(Job *job, std::string *error) {
 #ifdef USE_MESSENGER_ACCOUNT
   if (this->is_account(job->channel) && strncmp(job->ref, "tgview:", 7) == 0)
     return this->run_account_view_(job, error);
+  if (this->is_account(job->channel) && strncmp(job->ref, "tgavatar:", 9) == 0)
+    return this->run_account_avatar_(job, error);
   if (this->is_account(job->channel))
     return this->run_account_download_(job, error);
 #endif
@@ -1579,6 +1581,59 @@ void Messenger::save_sent_(Job *job) {
     new std::string(std::move(job->body));
   if (!ok)
     ESP_LOGW(TAG, "Not saved to %s: %s", path, error.c_str());
+}
+
+bool Messenger::load_avatar(int64_t peer_id) {
+  if (!this->is_ready(Channel::TELEGRAM) || !this->is_account(Channel::TELEGRAM) || peer_id == 0)
+    return false;
+  Job *job = new_job_(JobKind::DOWNLOAD);
+  if (job == nullptr)
+    return false;
+  job->channel = Channel::TELEGRAM;
+  snprintf(job->ref, sizeof(job->ref), "tgavatar:%lld", static_cast<long long>(peer_id));
+  return this->queue_job_(job);
+}
+
+void Messenger::avatar_release() {
+  heap_caps_free(this->avatar_);
+  this->avatar_ = nullptr;
+  this->avatar_len_ = 0;
+}
+
+bool Messenger::run_account_avatar_(Job *job, std::string *error) {
+  const int64_t peer_id = static_cast<int64_t>(strtoll(job->ref + 9, nullptr, 10));
+  AccountPeer peer{};
+  int64_t photo_id = 0;
+  int32_t dc = 0;
+  uint8_t *data = nullptr;
+  size_t length = 0;
+  bool ok = this->account_.photo_location(peer_id, &peer, &photo_id, &dc);
+  if (ok) {
+    data = static_cast<uint8_t *>(heap_caps_malloc(AVATAR_MAX_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    ok = data != nullptr;
+  }
+  while (ok && length + TelegramAccount::DOWNLOAD_PART <= AVATAR_MAX_BYTES) {
+    size_t got = 0;
+    ok = this->account_.download_peer_photo_part(peer, photo_id, dc, static_cast<int64_t>(length), data + length,
+                                                 TelegramAccount::DOWNLOAD_PART, &got, error);
+    length += got;
+    if (got < TelegramAccount::DOWNLOAD_PART)
+      break;
+  }
+  this->account_.end_download();
+  if (!ok || length == 0) {
+    heap_caps_free(data);
+    post_to_loop(this, 0, [this, peer_id]() { this->avatar_trigger_.trigger(peer_id, false); });
+    error->clear();
+    return true;
+  }
+  post_to_loop(this, 0, [this, data, length, peer_id]() {
+    this->avatar_release();
+    this->avatar_ = data;
+    this->avatar_len_ = length;
+    this->avatar_trigger_.trigger(peer_id, true);
+  });
+  return true;
 }
 
 bool Messenger::view_account_photo(int32_t message_id) {

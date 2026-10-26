@@ -81,6 +81,18 @@ static constexpr uint32_t ID_UPLOAD_FILE = 0x096a18d5;
 static constexpr uint32_t ID_INPUT_PHOTO_FILE_LOCATION = 0x40181ffe;
 static constexpr uint32_t ID_INPUT_DOCUMENT_FILE_LOCATION = 0xbad07584;
 static constexpr uint32_t ID_UPDATE_SHORT_SENT_MESSAGE = 0x9015e101;
+static constexpr uint32_t ID_USER_PROFILE_PHOTO = 0x82d1f706;
+static constexpr uint32_t ID_CHAT_PHOTO = 0x1c6e1c11;
+static constexpr uint32_t ID_INPUT_PEER_PHOTO_FILE_LOCATION = 0x37257e99;
+static constexpr uint32_t ID_CONTACTS_IMPORT = 0x2c800be5;
+static constexpr uint32_t ID_CONTACTS_IMPORTED = 0x77d01c3b;
+static constexpr uint32_t ID_INPUT_PHONE_CONTACT = 0x6a1dc4be;
+static constexpr uint32_t ID_CONTACTS_DELETE = 0x096a0e00;
+static constexpr uint32_t ID_INPUT_USER = 0xf21158c6;
+static constexpr uint32_t ID_USERS_GET_FULL_USER = 0xb60f5918;
+static constexpr uint32_t ID_USERS_USER_FULL = 0x3b6d152e;
+static constexpr uint32_t ID_UPDATE_READ_OUTBOX = 0x2f2f21bf;
+static constexpr uint32_t ID_UPDATE_USER_STATUS = 0xe5bdf8de;
 static constexpr size_t UPLOAD_PART = 16384;
 static constexpr size_t UPLOAD_MAX = 10 * 1024 * 1024;
 static constexpr uint32_t UPLOAD_WAIT_MS = 60000;
@@ -160,11 +172,10 @@ void user_name(TlReader user, char *out, size_t size) {
   snprintf(out, size, "%s%s%s", first, (first[0] != '\0' && last[0] != '\0') ? " " : "", last);
 }
 
-void user_status(TlReader user, char *out, size_t size) {
-  TlReader status;
+void status_text(TlReader status, char *out, size_t size) {
   uint32_t ctor = 0;
   out[0] = '\0';
-  if (!tl_field(user, tl_hash("status"), status) || !status.peek_u32(ctor))
+  if (!status.peek_u32(ctor))
     return;
   switch (ctor) {
     case ID_STATUS_ONLINE:
@@ -190,6 +201,25 @@ void user_status(TlReader user, char *out, size_t size) {
     default:
       break;
   }
+}
+
+void user_status(TlReader user, char *out, size_t size) {
+  TlReader status;
+  out[0] = '\0';
+  if (tl_field(user, tl_hash("status"), status))
+    status_text(status, out, size);
+}
+
+void photo_ref(TlReader object, int64_t &photo_id, int32_t &dc) {
+  TlReader photo;
+  uint32_t ctor = 0;
+  photo_id = 0;
+  dc = 0;
+  if (!tl_field(object, tl_hash("photo"), photo) || !photo.peek_u32(ctor) ||
+      (ctor != ID_USER_PROFILE_PHOTO && ctor != ID_CHAT_PHOTO))
+    return;
+  read_long(photo, "photo_id", photo_id);
+  read_int(photo, "dc_id", dc);
 }
 
 bool find_user(TlReader users, uint32_t count, int64_t id, TlReader &user) {
@@ -618,6 +648,9 @@ void TelegramAccount::on_contacts_(TlReader result) {
         read_long(user, "access_hash", contact.peer.access_hash);
         user_name(user, contact.name, sizeof(contact.name));
         user_status(user, contact.status, sizeof(contact.status));
+        read_text(user, "phone", contact.phone, sizeof(contact.phone));
+        read_text(user, "username", contact.username, sizeof(contact.username));
+        photo_ref(user, contact.photo_id, contact.photo_dc);
         n++;
       }
     }
@@ -671,16 +704,20 @@ void TelegramAccount::on_dialogs_(TlReader result) {
         read_int(dialog, "top_message", top);
         read_int(dialog, "unread_count", chat.unread);
         read_int(dialog, "read_inbox_max_id", chat.read_max);
+        read_int(dialog, "read_outbox_max_id", chat.read_out);
         if (chat.peer.kind == PeerKind::USER) {
           TlReader user;
           if (find_user(users, user_count, chat.peer.id, user)) {
             read_long(user, "access_hash", chat.peer.access_hash);
             user_name(user, chat.title, sizeof(chat.title));
+            user_status(user, chat.status, sizeof(chat.status));
+            photo_ref(user, chat.photo_id, chat.photo_dc);
           }
         } else {
           TlReader group;
           if (find_chat(chats, chat_count, chat.peer.kind, chat.peer.id, group)) {
             read_text(group, "title", chat.title, sizeof(chat.title));
+            photo_ref(group, chat.photo_id, chat.photo_dc);
             if (chat.peer.kind == PeerKind::CHANNEL)
               read_long(group, "access_hash", chat.peer.access_hash);
           }
@@ -846,15 +883,8 @@ void TelegramAccount::on_updates_(TlReader updates) {
   }
   TlReader update;
   if (ctor == ID_UPDATE_SHORT) {
-    if (tl_field(updates, tl_hash("update"), update)) {
-      uint32_t update_ctor = 0;
-      if (update.peek_u32(update_ctor) &&
-          (update_ctor == ID_UPDATE_NEW_MESSAGE || update_ctor == ID_UPDATE_NEW_CHANNEL_MESSAGE)) {
-        TlReader message;
-        if (tl_field(update, tl_hash("message"), message))
-          this->on_new_message_(message, TlReader(), TlReader());
-      }
-    }
+    if (tl_field(updates, tl_hash("update"), update))
+      this->on_update_item_(update, TlReader(), TlReader());
     return;
   }
   if (ctor != ID_UPDATES && ctor != ID_UPDATES_COMBINED)
@@ -872,13 +902,68 @@ void TelegramAccount::on_updates_(TlReader updates) {
     uint32_t update_ctor = 0;
     if (!list.peek_u32(update_ctor))
       return;
-    if (update_ctor == ID_UPDATE_NEW_MESSAGE || update_ctor == ID_UPDATE_NEW_CHANNEL_MESSAGE) {
-      TlReader message;
-      if (tl_field(item, tl_hash("message"), message))
-        this->on_new_message_(message, users_vector, chats_vector);
-    }
+    this->on_update_item_(item, users_vector, chats_vector);
     if (!tl_skip_object(list))
       return;
+  }
+}
+
+void TelegramAccount::on_update_item_(TlReader update, TlReader users, TlReader chats) {
+  uint32_t ctor = 0;
+  if (!update.peek_u32(ctor))
+    return;
+  if (ctor == ID_UPDATE_NEW_MESSAGE || ctor == ID_UPDATE_NEW_CHANNEL_MESSAGE) {
+    TlReader message;
+    if (tl_field(update, tl_hash("message"), message))
+      this->on_new_message_(message, users, chats);
+    return;
+  }
+  if (ctor == ID_UPDATE_READ_OUTBOX) {
+    TlReader peer_field;
+    PeerKind kind = PeerKind::NONE;
+    int64_t peer_id = 0;
+    int32_t max_id = 0;
+    if (!tl_field(update, tl_hash("peer"), peer_field) || !read_peer(peer_field, kind, peer_id) ||
+        !read_int(update, "max_id", max_id))
+      return;
+    bool open = false;
+    {
+      LockGuard guard(this->lock_);
+      AccountChat *chat = this->find_chat_(kind, peer_id);
+      if (chat == nullptr)
+        return;
+      chat->read_out = std::max(chat->read_out, max_id);
+      open = this->open_.kind == kind && this->open_.id == peer_id;
+    }
+    this->notify_(open ? CHANGED_MESSAGES : CHANGED_CHATS);
+    return;
+  }
+  if (ctor == ID_UPDATE_USER_STATUS) {
+    int64_t user_id = 0;
+    TlReader status;
+    char text[32];
+    if (!read_long(update, "user_id", user_id) || !tl_field(update, tl_hash("status"), status))
+      return;
+    status_text(status, text, sizeof(text));
+    uint8_t what = 0;
+    {
+      LockGuard guard(this->lock_);
+      AccountChat *chat = this->find_chat_(PeerKind::USER, user_id);
+      if (chat != nullptr) {
+        copy_text(chat->status, sizeof(chat->status), text, strlen(text));
+        what |= CHANGED_CHATS;
+        if (this->open_.kind == PeerKind::USER && this->open_.id == user_id)
+          what |= CHANGED_MESSAGES;
+      }
+      for (size_t i = 0; this->contacts_ != nullptr && i < this->contact_count_; i++) {
+        if (this->contacts_[i].peer.id == user_id) {
+          copy_text(this->contacts_[i].status, sizeof(this->contacts_[i].status), text, strlen(text));
+          what |= CHANGED_CONTACTS;
+        }
+      }
+    }
+    if (what != 0)
+      this->notify_(what);
   }
 }
 
@@ -1080,6 +1165,201 @@ std::string TelegramAccount::contact_status(size_t index) const {
   return index < this->contact_count_ ? this->contacts_[index].status : "";
 }
 
+std::string TelegramAccount::contact_phone(size_t index) const {
+  LockGuard guard(this->lock_);
+  return index < this->contact_count_ ? this->contacts_[index].phone : "";
+}
+
+std::string TelegramAccount::contact_username(size_t index) const {
+  LockGuard guard(this->lock_);
+  return index < this->contact_count_ ? this->contacts_[index].username : "";
+}
+
+int64_t TelegramAccount::contact_user_id(size_t index) const {
+  LockGuard guard(this->lock_);
+  return index < this->contact_count_ ? this->contacts_[index].peer.id : 0;
+}
+
+bool TelegramAccount::contact_has_photo(size_t index) const {
+  LockGuard guard(this->lock_);
+  return index < this->contact_count_ && this->contacts_[index].photo_id != 0;
+}
+
+int64_t TelegramAccount::chat_peer_id(size_t index) const {
+  LockGuard guard(this->lock_);
+  return index < this->chat_count_ ? this->chats_[index].peer.id : 0;
+}
+
+bool TelegramAccount::chat_has_photo(size_t index) const {
+  LockGuard guard(this->lock_);
+  return index < this->chat_count_ && this->chats_[index].photo_id != 0;
+}
+
+std::string TelegramAccount::chat_status(size_t index) const {
+  LockGuard guard(this->lock_);
+  return index < this->chat_count_ ? this->chats_[index].status : "";
+}
+
+int64_t TelegramAccount::open_peer_id() const {
+  LockGuard guard(this->lock_);
+  return this->open_.kind != PeerKind::NONE ? this->open_.id : 0;
+}
+
+std::string TelegramAccount::open_status() const {
+  LockGuard guard(this->lock_);
+  if (this->open_.kind != PeerKind::USER)
+    return "";
+  for (size_t i = 0; this->chats_ != nullptr && i < this->chat_count_; i++) {
+    if (this->chats_[i].peer.kind == PeerKind::USER && this->chats_[i].peer.id == this->open_.id)
+      return this->chats_[i].status;
+  }
+  for (size_t i = 0; this->contacts_ != nullptr && i < this->contact_count_; i++) {
+    if (this->contacts_[i].peer.id == this->open_.id)
+      return this->contacts_[i].status;
+  }
+  return "";
+}
+
+bool TelegramAccount::message_read(size_t index) const {
+  LockGuard guard(this->lock_);
+  if (index >= this->message_count_ || !this->messages_[index].out)
+    return false;
+  for (size_t i = 0; this->chats_ != nullptr && i < this->chat_count_; i++) {
+    if (this->chats_[i].peer.kind == this->open_.kind && this->chats_[i].peer.id == this->open_.id)
+      return this->messages_[index].id <= this->chats_[i].read_out;
+  }
+  return false;
+}
+
+bool TelegramAccount::photo_location(int64_t peer_id, AccountPeer *peer, int64_t *photo_id, int32_t *dc) const {
+  LockGuard guard(this->lock_);
+  for (size_t i = 0; this->chats_ != nullptr && i < this->chat_count_; i++) {
+    const AccountChat &chat = this->chats_[i];
+    if (chat.peer.id == peer_id && chat.photo_id != 0) {
+      *peer = chat.peer;
+      *photo_id = chat.photo_id;
+      *dc = chat.photo_dc;
+      return true;
+    }
+  }
+  for (size_t i = 0; this->contacts_ != nullptr && i < this->contact_count_; i++) {
+    const AccountContact &contact = this->contacts_[i];
+    if (contact.peer.id == peer_id && contact.photo_id != 0) {
+      *peer = contact.peer;
+      *photo_id = contact.photo_id;
+      *dc = contact.photo_dc;
+      return true;
+    }
+  }
+  return false;
+}
+
+void TelegramAccount::set_result_(const char *text) {
+  {
+    LockGuard guard(this->lock_);
+    copy_text(this->result_, sizeof(this->result_), text, strlen(text));
+  }
+  this->notify_(CHANGED_RESULT);
+}
+
+std::string TelegramAccount::result() const {
+  LockGuard guard(this->lock_);
+  return this->result_;
+}
+
+std::string TelegramAccount::about() const {
+  LockGuard guard(this->lock_);
+  return this->about_;
+}
+
+bool TelegramAccount::add_contact(const std::string &first_name, const std::string &last_name,
+                                  const std::string &phone) {
+  if (!this->started_ || phone.empty() || (first_name.empty() && last_name.empty()))
+    return false;
+  uint8_t body[256];
+  TlWriter w(body, sizeof(body));
+  w.u32(ID_CONTACTS_IMPORT);
+  w.vector(1);
+  w.u32(ID_INPUT_PHONE_CONTACT);
+  w.u32(0);
+  int64_t client_id = 0;
+  esp_fill_random(&client_id, sizeof(client_id));
+  w.i64(client_id);
+  w.string(phone.c_str());
+  w.string(first_name.c_str());
+  w.string(last_name.c_str());
+  if (!w.ok())
+    return false;
+  return this->mtproto_->invoke(w.data(), w.size(), [this](const char *error, TlReader result) {
+    if (error != nullptr) {
+      this->set_result_(error);
+      return;
+    }
+    uint32_t ctor = 0;
+    TlReader imported;
+    uint32_t count = 0;
+    if (!result.peek_u32(ctor) || ctor != ID_CONTACTS_IMPORTED || !field_vector(result, "imported", imported, count) ||
+        count == 0) {
+      this->set_result_("No Telegram account for this number");
+      return;
+    }
+    this->set_result_("Contact added");
+    this->request_contacts_();
+  });
+}
+
+bool TelegramAccount::delete_contact(size_t index) {
+  AccountPeer peer;
+  {
+    LockGuard guard(this->lock_);
+    if (index >= this->contact_count_)
+      return false;
+    peer = this->contacts_[index].peer;
+  }
+  uint8_t body[40];
+  TlWriter w(body, sizeof(body));
+  w.u32(ID_CONTACTS_DELETE);
+  w.vector(1);
+  w.u32(ID_INPUT_USER);
+  w.i64(peer.id);
+  w.i64(peer.access_hash);
+  return this->mtproto_->invoke(w.data(), w.size(), [this](const char *error, TlReader result) {
+    this->set_result_(error != nullptr ? error : "Contact deleted");
+    if (error == nullptr)
+      this->request_contacts_();
+  });
+}
+
+bool TelegramAccount::request_about(size_t index) {
+  AccountPeer peer;
+  {
+    LockGuard guard(this->lock_);
+    if (index >= this->contact_count_)
+      return false;
+    peer = this->contacts_[index].peer;
+    this->about_[0] = '\0';
+  }
+  uint8_t body[24];
+  TlWriter w(body, sizeof(body));
+  w.u32(ID_USERS_GET_FULL_USER);
+  w.u32(ID_INPUT_USER);
+  w.i64(peer.id);
+  w.i64(peer.access_hash);
+  return this->mtproto_->invoke(w.data(), w.size(), [this](const char *error, TlReader result) {
+    uint32_t ctor = 0;
+    TlReader full;
+    char about[160];
+    if (error != nullptr || !result.peek_u32(ctor) || ctor != ID_USERS_USER_FULL ||
+        !tl_field(result, tl_hash("full_user"), full) || !read_text(full, "about", about, sizeof(about)))
+      return;
+    {
+      LockGuard guard(this->lock_);
+      copy_text(this->about_, sizeof(this->about_), about, strlen(about));
+    }
+    this->notify_(CHANGED_RESULT);
+  });
+}
+
 size_t TelegramAccount::message_count() const {
   LockGuard guard(this->lock_);
   return this->message_count_;
@@ -1153,6 +1433,37 @@ bool TelegramAccount::take_incoming_file(AccountIncomingFile *file) {
 
 bool TelegramAccount::download_part(const AccountFile &file, int64_t offset, uint8_t *out, size_t capacity,
                                     size_t *got, std::string *error) {
+  uint8_t location[128];
+  TlWriter l(location, sizeof(location));
+  l.u32(file.thumb[0] != '\0' ? ID_INPUT_PHOTO_FILE_LOCATION : ID_INPUT_DOCUMENT_FILE_LOCATION);
+  l.i64(file.id);
+  l.i64(file.access_hash);
+  l.bytes(file.ref, file.ref_len);
+  l.string(file.thumb);
+  if (!l.ok()) {
+    *error = "request too large";
+    return false;
+  }
+  return this->get_file_part_(file.dc, l.data(), l.size(), offset, out, capacity, got, error);
+}
+
+bool TelegramAccount::download_peer_photo_part(const AccountPeer &peer, int64_t photo_id, int32_t dc, int64_t offset,
+                                               uint8_t *out, size_t capacity, size_t *got, std::string *error) {
+  uint8_t location[48];
+  TlWriter l(location, sizeof(location));
+  l.u32(ID_INPUT_PEER_PHOTO_FILE_LOCATION);
+  l.u32(0);
+  write_input_peer(l, peer);
+  l.i64(photo_id);
+  if (!l.ok()) {
+    *error = "request too large";
+    return false;
+  }
+  return this->get_file_part_(dc, l.data(), l.size(), offset, out, capacity, got, error);
+}
+
+bool TelegramAccount::get_file_part_(int dc, const uint8_t *location, size_t location_len, int64_t offset,
+                                     uint8_t *out, size_t capacity, size_t *got, std::string *error) {
   if (!this->logged_in_) {
     *error = "Telegram not logged in";
     return false;
@@ -1161,11 +1472,7 @@ bool TelegramAccount::download_part(const AccountFile &file, int64_t offset, uin
   TlWriter w(body, sizeof(body));
   w.u32(ID_UPLOAD_GET_FILE);
   w.u32(0);
-  w.u32(file.thumb[0] != '\0' ? ID_INPUT_PHOTO_FILE_LOCATION : ID_INPUT_DOCUMENT_FILE_LOCATION);
-  w.i64(file.id);
-  w.i64(file.access_hash);
-  w.bytes(file.ref, file.ref_len);
-  w.string(file.thumb);
+  w.raw(location, location_len);
   w.i64(offset);
   w.i32(static_cast<int32_t>(capacity));
   *got = 0;
@@ -1173,7 +1480,7 @@ bool TelegramAccount::download_part(const AccountFile &file, int64_t offset, uin
     *error = "request too large";
     return false;
   }
-  return this->call_wait_(file.dc, w.data(), w.size(), error, [out, capacity, got](TlReader result) {
+  return this->call_wait_(dc, w.data(), w.size(), error, [out, capacity, got](TlReader result) {
     uint32_t ctor = 0;
     const uint8_t *data = nullptr;
     size_t length = 0;
