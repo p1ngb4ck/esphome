@@ -145,8 +145,9 @@ class Messenger : public Component
 #endif
 #ifdef USE_MESSENGER_CALL
   void set_call_phone(sip_phone::SipPhone *phone) { this->call_.set_phone(phone); }
+  void set_call_video_relay(const char *host, uint16_t port) { this->call_.set_video_relay(host, port); }
   TelegramCall *call() { return &this->call_; }
-  bool call_open_chat();
+  bool call_open_chat(bool video);
   Trigger<uint8_t> *get_call_trigger() { return &this->call_trigger_; }
 #endif
   bool is_account(Channel channel) const;

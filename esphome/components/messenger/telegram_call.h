@@ -32,8 +32,12 @@ class TelegramCall : public sip_phone::MediaTransport {
 
   void attach(mtproto::Mtproto *mtproto, Component *owner);
   void set_phone(sip_phone::SipPhone *phone) { this->phone_ = phone; }
+  void set_video_relay(const char *host, uint16_t port) {
+    this->video_host_ = host;
+    this->video_port_ = port;
+  }
 
-  bool start(int64_t user_id, int64_t access_hash, const std::string &name);
+  bool start(int64_t user_id, int64_t access_hash, const std::string &name, bool video);
   void accept();
   void hangup();
   void set_mute(bool mute);
@@ -72,11 +76,18 @@ class TelegramCall : public sip_phone::MediaTransport {
   void answer_offer_(CallSession *s);
   void send_candidate_(CallSession *s, const char *candidate);
   void set_remote_sdp_(CallSession *s);
+  bool write_remote_sdp_(CallSession *s);
   void send_frames_(CallSession *s);
+  void open_video_relay_(CallSession *s);
+  void close_video_relay_(CallSession *s);
+  void on_video_frame_(CallSession *s, const uint8_t *data, size_t size);
+  void pump_video_relay_(CallSession *s);
 
   mtproto::Mtproto *mtproto_{nullptr};
   Component *owner_{nullptr};
   sip_phone::SipPhone *phone_{nullptr};
+  const char *video_host_{nullptr};
+  uint16_t video_port_{0};
 
   std::atomic<CallState> state_{CallState::IDLE};
   std::atomic<bool> changed_{false};

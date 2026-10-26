@@ -221,12 +221,12 @@ bool Messenger::direct_(Channel channel) const {
 }
 
 #ifdef USE_MESSENGER_CALL
-bool Messenger::call_open_chat() {
+bool Messenger::call_open_chat(bool video) {
   int64_t id = 0;
   int64_t access_hash = 0;
   if (!this->is_ready(Channel::TELEGRAM) || !this->account_.open_user(&id, &access_hash))
     return false;
-  return this->call_.start(id, access_hash, this->account_.open_title());
+  return this->call_.start(id, access_hash, this->account_.open_title(), video);
 }
 #endif
 

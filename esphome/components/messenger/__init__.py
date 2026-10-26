@@ -1,6 +1,6 @@
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components import audio, microphone, network
+from esphome.components import audio, microphone, network, socket
 from esphome.components.esp32 import (
     add_idf_component,
     add_idf_sdkconfig_option,
@@ -13,11 +13,13 @@ from esphome.components.sip_phone import SipPhone
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_CHANNEL,
+    CONF_HOST,
     CONF_ID,
     CONF_MICROPHONE,
     CONF_ON_MESSAGE,
     CONF_PATH,
     CONF_PAYLOAD,
+    CONF_PORT,
     CONF_SIZE,
     CONF_TEXT,
     PLATFORM_ESP32,
@@ -60,6 +62,7 @@ CONF_ON_CALL = "on_call"
 CONF_ON_AVATAR = "on_avatar"
 CONF_ON_THUMB = "on_thumb"
 CONF_CALL = "call"
+CONF_VIDEO_RELAY = "video_relay"
 
 CHAT_ID = cv.int_range(min=-(2**53), max=2**53)
 
@@ -104,9 +107,17 @@ CHANNEL_BASE = {
     cv.Optional(CONF_DEFAULT_CHAT, default=0): CHAT_ID,
 }
 
+VIDEO_RELAY_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_HOST): cv.string_strict,
+        cv.Optional(CONF_PORT, default=5063): cv.port,
+    }
+)
+
 CALL_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_PHONE): cv.use_id(SipPhone),
+        cv.Optional(CONF_VIDEO_RELAY): VIDEO_RELAY_SCHEMA,
     }
 )
 
@@ -134,6 +145,8 @@ def _request_opus(config: ConfigType) -> ConfigType:
         audio.request_opus_support()
     if CONF_CALL in config.get(CONF_TELEGRAM, {}):
         network.require_ipv6("messenger")(config)
+        if CONF_VIDEO_RELAY in config[CONF_TELEGRAM][CONF_CALL]:
+            socket.consume_sockets(1, "messenger")(config)
     return config
 
 
@@ -266,6 +279,8 @@ async def to_code(config: ConfigType) -> None:
             cg.add_define("USE_MESSENGER_CALL")
             phone = await cg.get_variable(call[CONF_PHONE])
             cg.add(var.set_call_phone(phone))
+            if relay := call.get(CONF_VIDEO_RELAY):
+                cg.add(var.set_call_video_relay(relay[CONF_HOST], relay[CONF_PORT]))
             add_idf_component(name="espressif/esp_peer", ref="1.5.7")
             request_tls()
             require_mbedtls_tls_server()
