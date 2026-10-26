@@ -205,6 +205,8 @@ class Storage : public Component {
   // capabilities -- a driver that never considered task-safety is never treated as such.
   virtual uint8_t get_capabilities() const { return 0; }
 
+  virtual const Storage *get_backing_storage() const { return nullptr; }
+
   // Reformat the medium to an empty state. The default rejects it: only RawStorage,
   // KeyValueStorage and FilesystemStorage override this. NetworkStorage (and anything that models
   // no on-device format) inherits NOT_SUPPORTED, so a format target can be resolved through the
@@ -343,6 +345,15 @@ class MountableStorage {
 
 class FilesystemStorage;  // forward -- PathStorage::as_filesystem() below
 
+class PathStorage;
+
+struct FileWindow {
+  PathStorage *storage{nullptr};
+  const char *path{nullptr};
+  uint64_t offset{0};
+  uint64_t length{0};
+};
+
 class PathStorage : public Storage {
  public:
   // No-RTTI downcast hook to the optional MountableStorage interface (dynamic_cast is unavailable,
@@ -368,6 +379,9 @@ class PathStorage : public Storage {
   virtual StorageError rmdir(const char *path) = 0;
   virtual StorageError remove(const char *path) = 0;
   virtual StorageError rename(const char *old_path, const char *new_path) = 0;
+  virtual StorageError get_file_window(const char *path, FileWindow *out) {
+    return StorageError::STORAGE_ERROR_NOT_SUPPORTED;
+  }
   // No copy() here -- drivers only need to move bytes within their own device.
   // Cross-device copy (and same-device copy) is provided by the free copy() helper
   // below, built on read_file()/write_file().

@@ -22,6 +22,7 @@ from esphome.const import (
     CONF_ALL,
     CONF_ARGS,
     CONF_DATA,
+    CONF_FILE,
     CONF_FORMAT,
     CONF_FROM,
     CONF_GROUP,
@@ -67,6 +68,8 @@ CONF_ON_EXISTS = "on_exists"
 CONF_ON_MISSING = "on_missing"
 CONF_ON_ENTRY = "on_entry"
 CONF_MAX_ENTRIES = "max_entries"
+CONF_ISO_MOUNT = "iso_mount"
+CONF_MAX_IMAGES = "max_images"
 
 # No AUTO_LOAD of json: ArduinoJson is gated behind USE_STORAGE_JSON_EXTRACT, so the json component
 # enters the build only when a config uses a `json:` extract step -- enforced by
@@ -84,6 +87,10 @@ RawStorage = storage_ns.class_("RawStorage", Storage)
 MountableStorage = storage_ns.class_("MountableStorage")
 StorageRegistry = storage_ns.class_("StorageRegistry", cg.Component)
 StorageWorker = storage_ns.class_("StorageWorker", cg.PollingComponent)
+iso9660_ns = storage_ns.namespace("iso9660")
+IsoMounter = iso9660_ns.class_("IsoMounter", cg.Component)
+IsoMountAction = iso9660_ns.class_("IsoMountAction", automation.Action)
+IsoUnmountAction = iso9660_ns.class_("IsoUnmountAction", automation.Action)
 
 
 def validate_sector_multiple(value: int) -> int:
@@ -171,6 +178,15 @@ CONFIG_SCHEMA = cv.Schema(
         # storage.h.
         cv.Optional(CONF_ON_REGISTERED): automation.validate_automation({}),
         cv.Optional(CONF_ON_UNREGISTERED): automation.validate_automation({}),
+        cv.Optional(CONF_ISO_MOUNT): cv.Schema(
+            {
+                cv.GenerateID(): cv.declare_id(IsoMounter),
+                cv.Optional(CONF_MOUNT_PATH, default="/iso"): cv.All(
+                    lambda value: validate_mount_path(value), cv.Length(max=29)
+                ),
+                cv.Optional(CONF_MAX_IMAGES, default=1): cv.int_range(min=1, max=9),
+            }
+        ),
     }
 )
 
@@ -367,6 +383,10 @@ def register_mount_path(path: str) -> None:
     data.mount_path_max = max(data.mount_path_max, len(path))
 
 
+def request_iso9660() -> None:
+    cg.add_define("USE_STORAGE_ISO9660")
+
+
 def request_storage_worker(task_safe: bool = False) -> None:
     """Called by drivers that need the async worker; path-based ones always do.
 
@@ -522,6 +542,18 @@ async def to_code(config: ConfigType) -> None:
         cg.add(tb.set_override_limit(config["psram_transfer_buffer_override_limit"]))
     var = cg.new_Pvariable(config[cv.GenerateID()])
     await cg.register_component(var, config)
+
+    if (iso := config.get(CONF_ISO_MOUNT)) is not None:
+        request_iso9660()
+        cg.add_define("USE_STORAGE_ISO_MOUNT")
+        for _ in range(iso[CONF_MAX_IMAGES]):
+            request_storage_device()
+        register_mount_path(iso[CONF_MOUNT_PATH] + "9")
+        request_storage_worker()
+        mounter = cg.new_Pvariable(iso[CONF_ID])
+        await cg.register_component(mounter, {})
+        cg.add(mounter.set_mount_path(iso[CONF_MOUNT_PATH]))
+        cg.add(mounter.set_max_images(iso[CONF_MAX_IMAGES]))
 
     device_count = _get_data().device_count
     cg.add(var.set_device_count(device_count))
@@ -1527,3 +1559,58 @@ async def file_system_to_code(var, config) -> None:
     fs = config.get(CONF_FILE_SYSTEM, FILE_SYSTEM_AUTO)
     value = {FILE_SYSTEM_AUTO: 0, FILE_SYSTEM_FAT32: 1, FILE_SYSTEM_EXFAT: 2}[fs]
     cg.add(var.set_requested_file_system(value))
+
+
+_ISO_MOUNT_ACTION_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.use_id(IsoMounter),
+        cv.Required(CONF_FILE): cv.templatable(cv.string),
+        cv.Optional(CONF_ON_COMPLETE): automation.validate_automation(single=True),
+    }
+)
+
+_ISO_UNMOUNT_ACTION_SCHEMA = cv.maybe_simple_value(
+    {
+        cv.GenerateID(): cv.use_id(IsoMounter),
+        cv.Required(CONF_PATH): cv.templatable(cv.string),
+        cv.Optional(CONF_ON_COMPLETE): automation.validate_automation(single=True),
+    },
+    key=CONF_PATH,
+)
+
+
+@automation.register_action(
+    "storage.iso_mount", IsoMountAction, _ISO_MOUNT_ACTION_SCHEMA, synchronous=True
+)
+async def iso_mount_action_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
+    mounter = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, mounter)
+    file_ = await cg.templatable(config[CONF_FILE], args, cg.std_string)
+    cg.add(var.set_file(file_))
+    if (on_complete := config.get(CONF_ON_COMPLETE)) is not None:
+        await automation.build_automation(
+            var.get_complete_trigger(), [(cg.std_string, "x")], on_complete
+        )
+    return var
+
+
+@automation.register_action(
+    "storage.iso_unmount",
+    IsoUnmountAction,
+    _ISO_UNMOUNT_ACTION_SCHEMA,
+    synchronous=True,
+)
+async def iso_unmount_action_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
+    mounter = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, mounter)
+    path = await cg.templatable(config[CONF_PATH], args, cg.std_string)
+    cg.add(var.set_path(path))
+    if (on_complete := config.get(CONF_ON_COMPLETE)) is not None:
+        await automation.build_automation(
+            var.get_complete_trigger(), [(cg.std_string, "x")], on_complete
+        )
+    return var

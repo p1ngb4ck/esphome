@@ -240,6 +240,10 @@ struct TransferRequest {
   bool src_is_fs{false};
   bool dst_is_fs{false};
   bool handles_open{false};
+  storage::PathStorage *src_data{nullptr};
+  const char *src_data_path{nullptr};
+  uint64_t src_base{0};
+  uint64_t src_len{UINT64_MAX};
 
   // Set once loop()'s dispatch has already logged that this request cannot proceed because it
   // overlaps a slot stuck RUNNING/CANCELLED past the drain timeout (see
@@ -395,6 +399,10 @@ struct StreamRequest {
   storage::PathStorage *storage{nullptr};
   char path[STORAGE_WORKER_MAX_PATH]{};
   bool is_fs{false};
+  storage::PathStorage *data{nullptr};
+  const char *data_path{nullptr};
+  uint64_t window_base{0};
+  uint64_t window_len{UINT64_MAX};
 
   CompletionCallback callback;  // set per-call (open/chunk/close); invoked once, then cleared
   storage::StorageError result{storage::StorageError::STORAGE_ERROR_OK};

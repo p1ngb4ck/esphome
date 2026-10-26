@@ -64,6 +64,41 @@ loop-sliced. Two engines share one queue. Completions ALWAYS fire on the main lo
   routing on the existing read path belongs.)
 - `global_storage_worker`.
 
+## File windows and backing media (`storage.h`, `storage_worker.cpp`)
+- `PathStorage::get_file_window(path, FileWindow *)`: a file that is a byte range of a file on another
+  storage (`FileWindow{storage, path, offset, length}`); default NOT_SUPPORTED (every driver).
+  `Storage::get_backing_storage()`: the medium a storage reads through; default nullptr.
+- The worker resolves the window when a read stream opens (`begin_read`) and when the copy engine opens a
+  source file: open / read / seek / tell / close go to the backing file, reads are clamped to the window,
+  seek / tell are window relative. Requests keep the windowed storage as their storage (its drain cancels
+  them); `data` / `src_data` name the backing side.
+- Serialization by medium: `overlaps_active_` / `stream_overlaps_active_` compare `medium_of()` (the backing
+  if any); `is_busy_with`, `has_active_task_io` and the drain match a storage directly, through its backing,
+  or as the data side of a windowed request.
+
+## ISO 9660 (`iso9660.h/.cpp`, `USE_STORAGE_ISO9660`)
+- `Index` (PSRAM, grown with RAMAllocator ALLOC_EXTERNAL, limit `INDEX_MAX` 2 MB): directory table (16 B per
+  directory) + entries (18 B + UTF-8 name); `lookup` / `stat` / `list` (ASCII case-insensitive), volume label
+  and size. No I/O.
+- `Builder`: `start(index, session_lba, max_sectors)`, `next(&lba, &count)` -> READ / DONE / FAILED,
+  `feed(data, count)`. Volume descriptors from session + 16, Joliet SVD preferred over the PVD, 2048-byte
+  logical blocks only, directories breadth first; multi-extent files merged when contiguous (else open ->
+  NOT_SUPPORTED), interleaved files the same. No Rock Ridge, no UDF.
+- Used by the ISO mount (below) and by usb_cdrom.
+
+## ISO mount (`iso_image.h/.cpp`, `USE_STORAGE_ISO_MOUNT`)
+- YAML `storage: iso_mount: {mount_path: /iso, max_images: 1}`; `IsoMounter` (component) holds the slots
+  (`/iso`, `/iso2` .. `/iso9`). Actions `storage.iso_mount` (file, on_complete) and `storage.iso_unmount`
+  (image file or mount path, on_complete).
+- `IsoImageStorage` (FilesystemStorage + MountableStorage, read-only, made in PSRAM per mount, freed after
+  unmount): the image is read only through worker streams (`begin_read` / `seek` / `read_chunk` /
+  `end_read`, main loop chain, buffer = 64 KB of the transfer buffer or one 2 KB PSRAM sector during the
+  mount); `stat` / `list_dir` from the index; file data through `get_file_window` (the worker reads the .iso
+  file); `open` / `read` called directly answer NOT_SUPPORTED (blocking helpers do not work on an image).
+- Unmount: the actions, `unmount()` (FileManager, file_api), and by itself when the backing storage is
+  quiesced / unregistered (registry quiesce callback: detached at once, unmounted on the next loop pass).
+  An image on an image is refused. Caps = the backing's IO_TASK_SAFE.
+
 ## TransferBuffer (`transfer_buffer.h`) — optional, `USE_STORAGE_TRANSFER_BUFFER`
 - Single-owner PSRAM staging arena; `try_acquire(need)`/`release()`; `capacity()`; `is_dma_capable()`.
 - DMA-capable ONLY on S3/P4 (`MALLOC_CAP_SPIRAM|MALLOC_CAP_DMA`), else plain external RAM
