@@ -129,7 +129,6 @@ void SpiceUsbSlot::setup() {
   this->usb_ = usb_host::get_usb_host();
   this->labels_ = static_cast<char(*)[LABEL_BYTES]>(
       heap_caps_calloc(MAX_DEVICES + 1, LABEL_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  this->stage_ = static_cast<uint8_t *>(heap_caps_malloc(STAGE_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   this->dev_lock_ = xSemaphoreCreateMutex();
   this->done_q_ = xQueueCreate(GEN_XFERS + INT_XFERS + ISO_STREAMS * ISO_URBS + USBIP_ISO_XFERS, sizeof(Xfer *));
   this->usbip_lock_ = xSemaphoreCreateMutex();
@@ -142,7 +141,7 @@ void SpiceUsbSlot::setup() {
   this->pool_bufs_ =
       static_cast<PoolBuf *>(heap_caps_calloc(POOL_BUFS, sizeof(PoolBuf), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   // The transfers come with a session (link_open()), their buffers from the player's pool.
-  const bool ok = this->labels_ != nullptr && this->stage_ != nullptr && this->dev_lock_ != nullptr &&
+  const bool ok = this->labels_ != nullptr && this->dev_lock_ != nullptr &&
                   this->done_q_ != nullptr && this->usbip_lock_ != nullptr && this->usbip_offsets_ != nullptr &&
                   this->usbip_entry_ != nullptr && this->usbip_iso_ != nullptr && this->pool_bufs_ != nullptr;
   if (!ok) {
@@ -429,6 +428,7 @@ bool SpiceUsbSlot::release_buffers() {
     this->xs_->~Session();
     heap_caps_free(this->xs_);
     this->xs_ = nullptr;
+    this->stage_ = nullptr;
   }
   return released;
 }
@@ -443,6 +443,7 @@ bool SpiceUsbSlot::link_open(SpiceVmcLink *link, Proto proto) {
     this->xs_ = new (mem) Session();
     for (auto &x : this->xs_->intr)
       x.kind = Kind::INTERRUPT_IN;
+    this->stage_ = this->xs_->stage;
   }
   // What came back after the last channel ended is for no one.
   Xfer *x;

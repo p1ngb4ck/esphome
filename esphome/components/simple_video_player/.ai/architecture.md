@@ -252,8 +252,8 @@ the codec libraries' own working buffers (FLAC_MALLOC etc.) -- ESPHome's audio
 codecs as they are, in PSRAM.
 Pool, per desktop session: `spice_scratch_` 64 KiB PSRAM, taken by the svp_spice task when a connection is
 asked for (before the SPICE / VNC probe) and given back when the session ends.
-Outside the pool (svp): per USB slot 4 KiB internal `stage_` +
-bookkeeping; task stacks 48 KiB PSRAM; the configuration's PsramVector lists (above); `channel_http_` response buffer PSRAM 16-256 KiB per request; AudioDecoder internals;
+Outside the pool (svp): per USB slot bookkeeping; the slot's 4 KiB internal `stage_` is part of its session block
+(internal, made at the redirection's `link_open()`, freed with the session's transfers); task stacks 48 KiB PSRAM; the configuration's PsramVector lists (above); `channel_http_` response buffer PSRAM 16-256 KiB per request; AudioDecoder internals;
 PNG/BMP decode (RAMAllocator); LVGL objects; mbedtls per SPICE connect.
 
 ## 10. Home Assistant / relay interface (summary; details in protocol.md)

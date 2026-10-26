@@ -247,6 +247,7 @@ class SpiceUsbSlot : public select::Select, public usb_host::USBClient {
     Xfer intr[INT_XFERS];
     IntIn int_in[MAX_INT_IN];
     IsoStream iso[ISO_STREAMS];
+    uint8_t stage[STAGE_BYTES];
   };
   Session *xs_{nullptr};
   uint8_t *stage_{nullptr};  // STAGE_BYTES, internal RAM
