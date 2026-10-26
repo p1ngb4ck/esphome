@@ -6,6 +6,7 @@
 
 #include "esphome/components/json/json_util.h"
 #include "esphome/components/mtproto/crypto.h"
+#include "esphome/components/ring_buffer/ring_buffer.h"
 #include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
@@ -81,6 +82,8 @@ constexpr size_t MAX_SERVERS = 8;
 constexpr size_t MAX_CANDIDATES = 16;
 constexpr size_t SDP_SIZE = 2048;
 constexpr int DEFAULT_PT = 111;
+constexpr size_t TX_RING_BYTES = 4096;
+constexpr size_t MAX_FRAME = 1280;
 
 struct Event {
   uint8_t type;
@@ -120,6 +123,9 @@ struct CallSession {
   uint8_t packet[MAX_PACKET];
   uint32_t ts_base;
   bool ts_set;
+  ring_buffer::RingBuffer *tx;
+  uint16_t tx_pending;
+  uint8_t frame[MAX_FRAME];
   char local_ufrag[64];
   char local_pwd[128];
   char local_hash[16];
@@ -653,7 +659,7 @@ void TelegramCall::run_() {
   while (ok) {
     Event *event = nullptr;
     const TickType_t wait = s->peer != nullptr ? pdMS_TO_TICKS(PUMP_MS) : portMAX_DELAY;
-    if (xQueueReceive(s->events, &event, wait) == pdTRUE) {
+    if (xQueueReceive(s->events, &event, wait) == pdTRUE && event != nullptr) {
       const uint8_t type = event->type;
       if (type == EVENT_HANGUP || type == EVENT_DECLINE) {
         ok = false;
@@ -673,8 +679,10 @@ void TelegramCall::run_() {
       }
       heap_caps_free(event);
     }
-    if (s->peer != nullptr)
+    if (s->peer != nullptr) {
       esp_peer_main_loop(s->peer);
+      this->send_frames_(s);
+    }
     if (s->ended) {
       ok = false;
       reason = ID_REASON_DISCONNECT;
@@ -800,6 +808,13 @@ bool TelegramCall::start_media_(CallSession *s, TlReader call) {
         break;
     }
   }
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) >= TX_RING_BYTES)
+    s->tx = ring_buffer::RingBuffer::create(TX_RING_BYTES).release();
+  if (s->tx == nullptr) {
+    this->fail_("No memory for the call's audio");
+    return false;
+  }
+  s->tx_pending = 0;
   esp_peer_default_cfg_t &extra = s->peer_extra;
   extra.agent_recv_timeout = 100;
   extra.rtp_cfg.audio_recv_jitter.cache_size = 16384;
@@ -884,6 +899,8 @@ void TelegramCall::stop_media_(CallSession *s) {
     esp_peer_close(s->peer);
     s->peer = nullptr;
   }
+  delete s->tx;
+  s->tx = nullptr;
   if (s->media) {
     s->media = false;
     App.scheduler.set_timeout(this->owner_, static_cast<const char *>(nullptr), 0, [this]() {
@@ -1186,21 +1203,53 @@ void TelegramCall::send_candidate_(CallSession *s, const char *candidate) {
 }
 
 void TelegramCall::on_media_payload(const uint8_t *payload, size_t len, uint32_t timestamp) {
+  if (len == 0 || len > MAX_FRAME)
+    return;
   peer_users.fetch_add(1);
   CallSession *s = this->session_;
-  if (this->media_on_.load(std::memory_order_acquire) && s != nullptr && s->peer != nullptr &&
-      this->state_.load() == CallState::ACTIVE) {
+  if (this->media_on_.load(std::memory_order_acquire) && s != nullptr && s->tx != nullptr &&
+      this->state_.load() == CallState::ACTIVE &&
+      s->tx->free() >= sizeof(uint16_t) + sizeof(uint32_t) + len) {
+    const bool idle = s->tx->available() == 0;
+    const uint16_t length = static_cast<uint16_t>(len);
+    s->tx->write_without_replacement(&length, sizeof(length), 0);
+    s->tx->write_without_replacement(&timestamp, sizeof(timestamp), 0);
+    s->tx->write_without_replacement(payload, len, 0);
+    if (idle) {
+      Event *wake = nullptr;
+      xQueueSend(s->events, &wake, 0);
+    }
+  }
+  peer_users.fetch_sub(1);
+}
+
+void TelegramCall::send_frames_(CallSession *s) {
+  if (s->tx == nullptr)
+    return;
+  for (;;) {
+    if (s->tx_pending == 0) {
+      if (s->tx->available() < sizeof(uint16_t))
+        return;
+      uint16_t length = 0;
+      s->tx->read(&length, sizeof(length), 0);
+      s->tx_pending = length;
+    }
+    if (s->tx->available() < sizeof(uint32_t) + s->tx_pending)
+      return;
+    uint32_t timestamp = 0;
+    s->tx->read(&timestamp, sizeof(timestamp), 0);
+    const size_t len = s->tx->read(s->frame, s->tx_pending, 0);
+    s->tx_pending = 0;
     if (!s->ts_set) {
       s->ts_base = timestamp;
       s->ts_set = true;
     }
     esp_peer_audio_frame_t frame{};
     frame.pts = (timestamp - s->ts_base) / (SAMPLE_RATE / 1000);
-    frame.data = const_cast<uint8_t *>(payload);
+    frame.data = s->frame;
     frame.size = static_cast<int>(len);
     esp_peer_send_audio(s->peer, &frame);
   }
-  peer_users.fetch_sub(1);
 }
 
 }

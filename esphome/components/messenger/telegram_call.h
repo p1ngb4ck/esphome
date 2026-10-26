@@ -72,6 +72,7 @@ class TelegramCall : public sip_phone::MediaTransport {
   void answer_offer_(CallSession *s);
   void send_candidate_(CallSession *s, const char *candidate);
   void set_remote_sdp_(CallSession *s);
+  void send_frames_(CallSession *s);
 
   mtproto::Mtproto *mtproto_{nullptr};
   Component *owner_{nullptr};
