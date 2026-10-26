@@ -163,6 +163,7 @@ class GameEmulator
     void *ptr;
     size_t size;
     bool internal;
+    bool fast;
   };
   struct PlayerDevice {
     uint32_t source;
@@ -246,10 +247,10 @@ class GameEmulator
   void job_finished_(bool ok);
   void job_release_();
 
-  static void *alloc_cb_(void *ctx, size_t size, bool zero, bool hot);
+  static void *alloc_cb_(void *ctx, size_t size, bool zero, uint8_t tier);
   static void *realloc_cb_(void *ctx, void *ptr, size_t size);
   static void free_cb_(void *ctx, void *ptr);
-  void *alloc_(size_t size, bool zero, bool hot);
+  void *alloc_(size_t size, bool zero, uint8_t tier);
   void *realloc_(void *ptr, size_t size);
   void free_(void *ptr);
   Piece *piece_(void *ptr);

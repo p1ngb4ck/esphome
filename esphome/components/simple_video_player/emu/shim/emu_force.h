@@ -14,6 +14,7 @@ extern "C" {
 void *emu_malloc(size_t size);
 void *emu_calloc(size_t count, size_t size);
 void *emu_calloc_hot(size_t count, size_t size);
+void *emu_calloc_fast(size_t count, size_t size);
 void *emu_realloc(void *ptr, size_t size);
 void emu_free(void *ptr);
 

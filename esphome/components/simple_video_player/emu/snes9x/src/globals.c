@@ -42,20 +42,20 @@ SGFX *GFX_ptr;
 
 bool S9xInitHot(void)
 {
-   ICPU_ptr = (SICPU*)emu_calloc_hot(1, sizeof(SICPU));
-   CPU_ptr = (SCPUState*)emu_calloc_hot(1, sizeof(SCPUState));
+   ICPU_ptr = (SICPU*)emu_calloc_fast(1, sizeof(SICPU));
+   CPU_ptr = (SCPUState*)emu_calloc_fast(1, sizeof(SCPUState));
 #ifndef USE_BLARGG_APU
-   APU_ptr = (SAPU*)emu_calloc_hot(1, sizeof(SAPU));
-   IAPU_ptr = (SIAPU*)emu_calloc_hot(1, sizeof(SIAPU));
+   APU_ptr = (SAPU*)emu_calloc_fast(1, sizeof(SAPU));
+   IAPU_ptr = (SIAPU*)emu_calloc_fast(1, sizeof(SIAPU));
    SoundData_ptr = (SSoundData*)emu_calloc_hot(1, sizeof(SSoundData));
 #endif
-   Settings_ptr = (SSettings*)emu_calloc_hot(1, sizeof(SSettings));
-   Memory_ptr = (CMemory*)emu_calloc_hot(1, sizeof(CMemory));
+   Settings_ptr = (SSettings*)emu_calloc_fast(1, sizeof(SSettings));
+   Memory_ptr = (CMemory*)emu_calloc_fast(1, sizeof(CMemory));
    PPU_ptr = (SPPU*)emu_calloc_hot(1, sizeof(SPPU));
    IPPU_ptr = (InternalPPU*)emu_calloc_hot(1, sizeof(InternalPPU));
-   S9xDMA_ptr = (SDMA (*)[8])emu_calloc_hot(1, sizeof(SDMA[8]));
-   S9xBG_ptr = (SBG*)emu_calloc_hot(1, sizeof(SBG));
-   GFX_ptr = (SGFX*)emu_calloc_hot(1, sizeof(SGFX));
+   S9xDMA_ptr = (SDMA (*)[8])emu_calloc_fast(1, sizeof(SDMA[8]));
+   S9xBG_ptr = (SBG*)emu_calloc_fast(1, sizeof(SBG));
+   GFX_ptr = (SGFX*)emu_calloc_fast(1, sizeof(SGFX));
    return ICPU_ptr && CPU_ptr &&
 #ifndef USE_BLARGG_APU
       APU_ptr && IAPU_ptr && SoundData_ptr &&

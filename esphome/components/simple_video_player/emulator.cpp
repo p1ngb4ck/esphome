@@ -1124,8 +1124,8 @@ void GameEmulator::job_release_() {
   this->job_data_ = nullptr;
 }
 
-void *GameEmulator::alloc_cb_(void *ctx, size_t size, bool zero, bool hot) {
-  return static_cast<GameEmulator *>(ctx)->alloc_(size, zero, hot);
+void *GameEmulator::alloc_cb_(void *ctx, size_t size, bool zero, uint8_t tier) {
+  return static_cast<GameEmulator *>(ctx)->alloc_(size, zero, tier);
 }
 
 void *GameEmulator::realloc_cb_(void *ctx, void *ptr, size_t size) {
@@ -1142,7 +1142,7 @@ GameEmulator::Piece *GameEmulator::piece_(void *ptr) {
   return nullptr;
 }
 
-void *GameEmulator::alloc_(size_t size, bool zero, bool hot) {
+void *GameEmulator::alloc_(size_t size, bool zero, uint8_t tier) {
   if (size == 0)
     size = 1;
   Piece *slot = this->piece_(nullptr);
@@ -1150,7 +1150,13 @@ void *GameEmulator::alloc_(size_t size, bool zero, bool hot) {
     return nullptr;
   void *ptr = nullptr;
   bool internal = false;
-  if ((hot || (!this->hot_only_now_ && size <= INTERNAL_PIECE_MAX)) &&
+  bool fast = false;
+  const bool hot = tier != 0;
+  if (tier == 2) {
+    ptr = heap_caps_malloc(size, MALLOC_CAP_SPM | MALLOC_CAP_8BIT);
+    fast = ptr != nullptr;
+  }
+  if (ptr == nullptr && (hot || (!this->hot_only_now_ && size <= INTERNAL_PIECE_MAX)) &&
       this->internal_used_ + size <= this->internal_budget_now_) {
     ptr = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT | MALLOC_CAP_SIMD);
     internal = ptr != nullptr;
@@ -1163,7 +1169,7 @@ void *GameEmulator::alloc_(size_t size, bool zero, bool hot) {
     return nullptr;
   if (zero)
     memset(ptr, 0, size);
-  *slot = {ptr, size, internal};
+  *slot = {ptr, size, internal || fast, fast};
   if (internal)
     this->internal_used_ += size;
   return ptr;
@@ -1175,7 +1181,7 @@ void *GameEmulator::realloc_(void *ptr, size_t size) {
     return nullptr;
   if (size <= piece->size)
     return ptr;
-  void *grown = this->alloc_(size, false, piece->internal);
+  void *grown = this->alloc_(size, false, piece->fast ? 2 : (piece->internal ? 1 : 0));
   if (grown == nullptr)
     return nullptr;
   piece = this->piece_(ptr);
@@ -1189,12 +1195,13 @@ void GameEmulator::free_(void *ptr) {
   if (piece == nullptr)
     return;
   if (piece->internal) {
-    this->internal_used_ -= piece->size;
+    if (!piece->fast)
+      this->internal_used_ -= piece->size;
     heap_caps_free(piece->ptr);
   } else {
     this->parent_->pool_.free(static_cast<uint8_t *>(piece->ptr));
   }
-  *piece = {nullptr, 0, false};
+  *piece = {nullptr, 0, false, false};
 }
 
 void GameEmulator::release_all_() {
