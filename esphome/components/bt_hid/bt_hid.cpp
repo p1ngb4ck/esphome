@@ -8,7 +8,6 @@
 #endif
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
-#include "esphome/core/static_task.h"
 
 #include <esp_bt_device.h>
 #include <esp_bt_main.h>
@@ -65,23 +64,7 @@ struct HostEvent {
 // The HID host and Classic GAP callbacks are global to Bluedroid, so one host serves every
 // configured device. The device list is complete before Bluedroid comes up and never changes
 // after; device addresses do change (pairing), so they are read and written under the lock.
-struct ReportSlot {
-  HostEvent *barrier;
-  uint8_t handle;
-  bool feature;
-  uint16_t len;
-  uint8_t data[128];
-};
-static constexpr uint8_t REPORT_SLOTS = 16;
-static constexpr uint32_t DECODE_STACK = 4096;
-static constexpr UBaseType_t DECODE_PRIORITY = 10;
-
 struct Host {
-  StaticTask decode_task;
-  ReportSlot *slots{nullptr};
-  std::atomic<uint8_t> slot_head{0};
-  std::atomic<uint8_t> slot_tail{0};
-  uint8_t decoders{0};
   Mutex lock;
   std::deque<HostEvent> events;
   std::vector<BTHIDDevice *> devices;
@@ -340,97 +323,9 @@ bool gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void * /*
   return false;
 }
 
-ReportSlot *slot_reserve() {
-  Host &h = host();
-  const uint8_t tail = h.slot_tail.load(std::memory_order_relaxed);
-  if (h.slots == nullptr || static_cast<uint8_t>(tail - h.slot_head.load(std::memory_order_acquire)) >= REPORT_SLOTS)
-    return nullptr;
-  return &h.slots[tail % REPORT_SLOTS];
-}
-
-void slot_commit() {
-  Host &h = host();
-  h.slot_tail.store(static_cast<uint8_t>(h.slot_tail.load(std::memory_order_relaxed) + 1), std::memory_order_release);
-  xTaskNotifyGive(h.decode_task.get_handle());
-}
-
-bool slot_report(uint8_t handle, bool feature, const uint8_t *data, size_t len) {
-  ReportSlot *slot = slot_reserve();
-  if (slot == nullptr || len > sizeof(slot->data))
-    return false;
-  slot->barrier = nullptr;
-  slot->handle = handle;
-  slot->feature = feature;
-  slot->len = static_cast<uint16_t>(len);
-  if (len != 0)
-    memcpy(slot->data, data, len);
-  slot_commit();
-  return true;
-}
-
-void decode_task_fn(void * /*arg*/) {
-  Host &h = host();
-  while (true) {
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    uint8_t head = h.slot_head.load(std::memory_order_relaxed);
-    while (head != h.slot_tail.load(std::memory_order_acquire)) {
-      ReportSlot &slot = h.slots[head % REPORT_SLOTS];
-      BTHIDDevice *dev = find_by_handle(slot.handle);
-      if (slot.barrier != nullptr) {
-        if (dev != nullptr)
-          dev->set_decoding(false);
-        push(std::move(*slot.barrier));
-        delete slot.barrier;
-        slot.barrier = nullptr;
-      } else if (dev != nullptr && dev->decoding()) {
-        if (slot.feature) {
-          dev->on_feature_data(slot.len != 0 ? slot.data : nullptr, slot.len);
-        } else {
-          dev->on_report_data(slot.data, slot.len);
-        }
-      }
-      head++;
-      h.slot_head.store(head, std::memory_order_release);
-    }
-  }
-}
-
-bool decode_start() {
-  Host &h = host();
-  if (h.decode_task.is_created())
-    return true;
-  RAMAllocator<ReportSlot> allocator(RAMAllocator<ReportSlot>::ALLOC_EXTERNAL);
-  h.slots = allocator.allocate(REPORT_SLOTS);
-  if (h.slots == nullptr)
-    return false;
-  memset(h.slots, 0, REPORT_SLOTS * sizeof(ReportSlot));
-  h.slot_head.store(0, std::memory_order_relaxed);
-  h.slot_tail.store(0, std::memory_order_relaxed);
-  if (!h.decode_task.create(decode_task_fn, "bt_hid_dec", DECODE_STACK, nullptr, DECODE_PRIORITY, false, 1)) {
-    allocator.deallocate(h.slots, REPORT_SLOTS);
-    h.slots = nullptr;
-    return false;
-  }
-  return true;
-}
-
-void decode_stop() {
-  Host &h = host();
-  if (h.decoders != 0 || !h.decode_task.is_created())
-    return;
-  if (!h.decode_task.deallocate())
-    return;
-  RAMAllocator<ReportSlot> allocator(RAMAllocator<ReportSlot>::ALLOC_EXTERNAL);
-  for (uint8_t i = 0; i < REPORT_SLOTS; i++)
-    delete h.slots[i].barrier;
-  allocator.deallocate(h.slots, REPORT_SLOTS);
-  h.slots = nullptr;
-}
-
 // BTC task. Descriptor and report buffers are freed once this returns, so they are copied.
 void hh_cb(esp_hidh_cb_event_t event, esp_hidh_cb_param_t *param) {
   HostEvent e;
-  BTHIDDevice *barrier = nullptr;
   switch (event) {
     case ESP_HIDH_INIT_EVT:
       e.type = HostEvent::INIT;
@@ -444,20 +339,23 @@ void hh_cb(esp_hidh_cb_event_t event, esp_hidh_cb_param_t *param) {
       memcpy(e.bda, param->open.bd_addr, ESP_BD_ADDR_LEN);
       break;
     case ESP_HIDH_CLOSE_EVT:
-      barrier = find_by_handle(param->close.handle);
+      if (BTHIDDevice *dev = find_by_handle(param->close.handle))
+        dev->set_decoding(false);
       e.type = HostEvent::CLOSE;
       e.handle = param->close.handle;
       e.status = param->close.reason;
       break;
     case ESP_HIDH_VC_UNPLUG_EVT:
-      barrier = find_by_handle(param->unplug.handle);
+      if (BTHIDDevice *dev = find_by_handle(param->unplug.handle))
+        dev->set_decoding(false);
       e.type = HostEvent::CLOSE;
       e.handle = param->unplug.handle;
       break;
     case ESP_HIDH_GET_DSCP_EVT:
       if (param->dscp.status != ESP_HIDH_OK || param->dscp.dsc_list == nullptr || param->dscp.dl_len == 0)
         return;
-      barrier = find_by_handle(param->dscp.handle);
+      if (BTHIDDevice *dev = find_by_handle(param->dscp.handle))
+        dev->set_decoding(false);
       e.type = HostEvent::DESCRIPTOR;
       e.handle = param->dscp.handle;
       e.value = static_cast<uint32_t>(param->dscp.vendor_id) << 16 | param->dscp.product_id;
@@ -468,7 +366,7 @@ void hh_cb(esp_hidh_cb_event_t event, esp_hidh_cb_param_t *param) {
         return;
       if (BTHIDDevice *dev = find_by_handle(param->data_ind.handle)) {
         if (dev->decoding()) {
-          slot_report(param->data_ind.handle, false, param->data_ind.data, param->data_ind.len);
+          dev->on_report_data(param->data_ind.data, param->data_ind.len);
           return;
         }
       }
@@ -480,7 +378,7 @@ void hh_cb(esp_hidh_cb_event_t event, esp_hidh_cb_param_t *param) {
       if (BTHIDDevice *dev = find_by_handle(param->get_rpt.handle)) {
         if (dev->decoding()) {
           const bool ok = param->get_rpt.status == ESP_HIDH_OK && param->get_rpt.data != nullptr;
-          slot_report(param->get_rpt.handle, true, ok ? param->get_rpt.data : nullptr, ok ? param->get_rpt.len : 0);
+          dev->on_feature_data(ok ? param->get_rpt.data : nullptr, ok ? param->get_rpt.len : 0);
           return;
         }
       }
@@ -492,16 +390,6 @@ void hh_cb(esp_hidh_cb_event_t event, esp_hidh_cb_param_t *param) {
       break;
     default:
       return;
-  }
-  if (barrier != nullptr && barrier->decoding()) {
-    ReportSlot *slot = slot_reserve();
-    if (slot != nullptr) {
-      slot->handle = e.handle;
-      slot->barrier = new HostEvent(std::move(e));
-      slot_commit();
-      return;
-    }
-    barrier->set_decoding(false);
   }
   push(std::move(e));
 }
@@ -1294,11 +1182,6 @@ void BTHIDDevice::on_open(uint8_t handle, bool success, int status) {
 void BTHIDDevice::on_close() {
   this->set_decoding(false);
   this->set_deferred(false);
-  if (this->decode_counted_) {
-    this->decode_counted_ = false;
-    host().decoders--;
-    decode_stop();
-  }
   const bool was_connected = this->connected_;
   if (was_connected) {
     char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
@@ -1325,11 +1208,7 @@ void BTHIDDevice::on_descriptor(const std::vector<uint8_t> &descriptor, uint16_t
   this->map_.reset(hid::HIDReportMap::parse_report_map_data(descriptor.data(), descriptor.size()));
   this->gamepad_attach_(hid::HIDBus::BT_CLASSIC, vid, pid, 0);
   this->gamepad_start_();
-  if (!this->decode_counted_ && decode_start()) {
-    this->decode_counted_ = true;
-    host().decoders++;
-  }
-  if (this->decode_counted_ && this->set_deferred(true))
+  if (this->set_deferred(true))
     this->set_decoding(true);
   if (this->map_ == nullptr) {
     ESP_LOGW(TAG, "Report descriptor (%u bytes) not understood", static_cast<unsigned>(descriptor.size()));
