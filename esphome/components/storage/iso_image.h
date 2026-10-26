@@ -122,6 +122,8 @@ class IsoMounter : public Component {
   IsoImageStorage *slots_[MAX_IMAGES]{};
 };
 
+extern IsoMounter *global_iso_mounter;
+
 inline void iso_fire(Trigger<std::string> *trigger, StorageError err) {
   trigger->trigger(err == StorageError::STORAGE_ERROR_OK ? std::string() : std::string(error_to_string(err)));
 }

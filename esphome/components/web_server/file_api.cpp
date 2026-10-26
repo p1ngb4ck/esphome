@@ -6,6 +6,9 @@
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
+#ifdef USE_STORAGE_ISO_MOUNT
+#include "esphome/components/storage/iso_image.h"
+#endif
 
 #include <esp_http_server.h>
 
@@ -636,6 +639,12 @@ void WebServerFileApi::handle_mount_(AsyncWebServerRequest *request, bool mount)
     const char *rel = nullptr;
     storage::PathStorage *ps = this->resolve_(path.c_str(), &rel);
     if (ps == nullptr || rel[0] != '\0') {  // must target a mount path exactly, not a file
+#if defined(USE_STORAGE_ISO_MOUNT) && defined(USE_STORAGE_WORKER)
+      if (mount && ps != nullptr && storage::iso9660::global_iso_mounter != nullptr) {
+        err = storage::iso9660::global_iso_mounter->mount(path.c_str(), nullptr);
+        return;
+      }
+#endif
       err = storage::StorageError::STORAGE_ERROR_NOT_FOUND;
       return;
     }

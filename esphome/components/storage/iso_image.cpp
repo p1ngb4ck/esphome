@@ -13,6 +13,8 @@ namespace esphome::storage::iso9660 {
 
 static const char *const TAG = "storage.iso";
 
+IsoMounter *global_iso_mounter = nullptr;
+
 StorageError IsoImageStorage::begin(const char *mount_path, const char *image_vfs, DoneCallback &&done) {
   if (global_storage_registry == nullptr || global_storage_worker == nullptr)
     return StorageError::STORAGE_ERROR_NOT_READY;
@@ -252,6 +254,7 @@ void IsoMounter::setup() {
     return;
   }
   global_storage_registry->add_on_quiesce_callback([this](Storage *s) { this->on_quiesce_(s); });
+  global_iso_mounter = this;
 }
 
 void IsoMounter::dump_config() {

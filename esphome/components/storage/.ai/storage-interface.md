@@ -98,6 +98,8 @@ loop-sliced. Two engines share one queue. Completions ALWAYS fire on the main lo
 - Unmount: the actions, `unmount()` (FileManager, file_api), and by itself when the backing storage is
   quiesced / unregistered (registry quiesce callback: detached at once, unmounted on the next loop pass).
   An image on an image is refused. Caps = the backing's IO_TASK_SAFE.
+- web_server file_api: `/files/mount?path=<image file>` mounts the image (`global_iso_mounter`), the reply
+  acknowledges the start like any async mount; `/files/unmount?path=/iso` unmounts it.
 
 ## usb_cdrom (`components/usb_cdrom`, `USE_USB_CDROM`)
 - On usb_storage: its client enumerates and sends INQUIRY; peripheral type 5 (CD/DVD) is handed to usb_cdrom
