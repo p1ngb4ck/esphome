@@ -998,7 +998,8 @@ void TelegramCall::handle_signaling_(CallSession *s, const std::string &json) {
       }
       if (strcmp(id, s->offer_id) == 0)
         return true;
-      for (JsonObject content : root["contents"].as<JsonArray>()) {
+      JsonArray contents = root["contents"].as<JsonArray>();
+      for (JsonObject content : contents) {
         const char *media = content["type"] | "";
         if (strcmp(media, "audio") == 0) {
           s->pending_offer_ssrc = json_u32(content["ssrc"]);
@@ -1009,7 +1010,8 @@ void TelegramCall::handle_signaling_(CallSession *s, const std::string &json) {
       s->pending_offer = true;
       this->answer_offer_(s);
     } else if (strcmp(type, "Candidates") == 0) {
-      for (JsonObject candidate : root["candidates"].as<JsonArray>()) {
+      JsonArray candidates = root["candidates"].as<JsonArray>();
+      for (JsonObject candidate : candidates) {
         const char *line = candidate["sdpString"] | "";
         if (line[0] == '\0')
           continue;

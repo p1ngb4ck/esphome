@@ -20,6 +20,17 @@ inline void copy(char *dest, size_t size, const char *src, size_t length) {
   dest[n] = '\0';
 }
 
+inline void join(char *dest, size_t size, const char *first, const char *second) {
+  size_t at = 0;
+  for (const char *c = first; *c != '\0' && at + 1 < size; c++)
+    dest[at++] = *c;
+  if (first[0] != '\0' && second[0] != '\0' && at + 1 < size)
+    dest[at++] = ' ';
+  for (const char *c = second; *c != '\0' && at + 1 < size; c++)
+    dest[at++] = *c;
+  dest[at] = '\0';
+}
+
 inline bool i32(mtproto::TlReader object, const char *name, int32_t &value) {
   mtproto::TlReader field;
   return mtproto::tl_field(object, mtproto::tl_hash(name), field) && field.i32(value);
@@ -85,7 +96,7 @@ inline bool user_name(mtproto::TlReader users, uint32_t count, int64_t id, char 
       char last[48];
       text(user, "first_name", first, sizeof(first));
       text(user, "last_name", last, sizeof(last));
-      snprintf(out, size, "%s%s%s", first, (first[0] != '\0' && last[0] != '\0') ? " " : "", last);
+      join(out, size, first, last);
       return out[0] != '\0';
     }
     if (!mtproto::tl_skip_object(users))

@@ -1,4 +1,5 @@
 #include "telegram_account.h"
+#include "tl_read.h"
 
 #ifdef USE_MESSENGER_ACCOUNT
 
@@ -169,7 +170,7 @@ void user_name(TlReader user, char *out, size_t size) {
     snprintf(out, size, "%s", "Deleted account");
     return;
   }
-  snprintf(out, size, "%s%s%s", first, (first[0] != '\0' && last[0] != '\0') ? " " : "", last);
+  tl_read::join(out, size, first, last);
 }
 
 void status_text(TlReader status, char *out, size_t size) {
@@ -800,7 +801,7 @@ void TelegramAccount::on_history_(const AccountPeer &peer, TlReader result) {
         read_text(message, "message", entry.text, sizeof(entry.text));
         if (entry.media != 0) {
           char combined[sizeof(entry.text)];
-          snprintf(combined, sizeof(combined), "%s%s%s", label, entry.text[0] != '\0' ? " " : "", entry.text);
+          tl_read::join(combined, sizeof(combined), label, entry.text);
           copy_text(entry.text, sizeof(entry.text), combined, strlen(combined));
         }
       } else {
@@ -991,7 +992,7 @@ void TelegramAccount::on_new_message_(TlReader message, TlReader users_vector, T
   read_text(message, "message", text, sizeof(text));
   if (media != 0) {
     char combined[sizeof(text)];
-    snprintf(combined, sizeof(combined), "%s%s%s", label, text[0] != '\0' ? " " : "", text);
+    tl_read::join(combined, sizeof(combined), label, text);
     copy_text(text, sizeof(text), combined, strlen(combined));
   }
   char title[64] = "";
