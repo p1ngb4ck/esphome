@@ -280,7 +280,6 @@ void TelegramAccount::attach(mtproto::Mtproto *mtproto, Component *owner) {
   this->owner_ = owner;
   mtproto->add_update_listener([this](TlReader updates) { this->on_updates_(updates); });
   mtproto->add_on_state_callback([this](mtproto::State state) { this->on_state(state); });
-  this->done_ = xSemaphoreCreateBinary();
 }
 
 bool TelegramAccount::allocate_() {
@@ -1052,34 +1051,36 @@ bool TelegramAccount::send_text(const std::string &text) {
 }
 
 bool TelegramAccount::call_wait_(const uint8_t *body, size_t length, std::string *error, bool parse_updates) {
-  if (this->done_ == nullptr) {
-    *error = "not ready";
-    return false;
-  }
-  xSemaphoreTake(this->done_, 0);
+  const uint32_t serial = this->wait_serial_.fetch_add(1) + 1;
+  this->waiter_ = xTaskGetCurrentTaskHandle();
   this->done_ok_ = false;
   this->done_error_[0] = '\0';
-  const bool queued = this->mtproto_->invoke(body, length, [this, parse_updates](const char *err, TlReader result) {
-    if (err != nullptr) {
-      copy_text(this->done_error_, sizeof(this->done_error_), err, strlen(err));
-    } else {
-      uint32_t ctor = 0;
-      if (parse_updates) {
-        this->on_updates_(result);
-        this->done_ok_ = true;
-      } else {
-        this->done_ok_ = result.peek_u32(ctor) && ctor == ID_BOOL_TRUE;
-        if (!this->done_ok_)
-          copy_text(this->done_error_, sizeof(this->done_error_), "refused", 7);
-      }
-    }
-    xSemaphoreGive(this->done_);
-  });
+  ulTaskNotifyTake(pdTRUE, 0);
+  const bool queued =
+      this->mtproto_->invoke(body, length, [this, parse_updates, serial](const char *err, TlReader result) {
+        if (serial != this->wait_serial_.load())
+          return;
+        if (err != nullptr) {
+          copy_text(this->done_error_, sizeof(this->done_error_), err, strlen(err));
+        } else {
+          uint32_t ctor = 0;
+          if (parse_updates) {
+            this->on_updates_(result);
+            this->done_ok_ = true;
+          } else {
+            this->done_ok_ = result.peek_u32(ctor) && ctor == ID_BOOL_TRUE;
+            if (!this->done_ok_)
+              copy_text(this->done_error_, sizeof(this->done_error_), "refused", 7);
+          }
+        }
+        xTaskNotifyGive(this->waiter_);
+      });
   if (!queued) {
     *error = "no memory";
     return false;
   }
-  if (xSemaphoreTake(this->done_, pdMS_TO_TICKS(UPLOAD_WAIT_MS)) != pdTRUE) {
+  if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(UPLOAD_WAIT_MS)) == 0) {
+    this->wait_serial_.fetch_add(1);
     *error = "no answer from Telegram";
     return false;
   }

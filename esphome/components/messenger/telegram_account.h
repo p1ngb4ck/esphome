@@ -9,7 +9,7 @@
 #include "esphome/core/helpers.h"
 
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include <freertos/task.h>
 
 #include <atomic>
 #include <cstddef>
@@ -128,7 +128,8 @@ class TelegramAccount {
   AccountPeer open_{};
   char open_title_[64]{};
   uint32_t history_serial_{0};
-  SemaphoreHandle_t done_{nullptr};
+  TaskHandle_t waiter_{nullptr};
+  std::atomic<uint32_t> wait_serial_{0};
   bool done_ok_{false};
   char done_error_[64]{};
 };
