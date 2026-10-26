@@ -28,7 +28,7 @@ struct CallSession;
 class TelegramCall : public sip_phone::MediaTransport {
  public:
   static constexpr uint32_t TASK_STACK = 16384;
-  static constexpr UBaseType_t TASK_PRIORITY = 5;
+  static constexpr UBaseType_t TASK_PRIORITY = 18;
 
   void attach(mtproto::Mtproto *mtproto, Component *owner);
   void set_phone(sip_phone::SipPhone *phone) { this->phone_ = phone; }
