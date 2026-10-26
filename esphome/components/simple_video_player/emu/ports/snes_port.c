@@ -102,7 +102,7 @@ bool snes_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels)
     Settings.SoundPlaybackRate = rate;
     Settings.SoundInputRate = rate;
     Settings.DisableSoundEcho = false;
-    Settings.InterpolatedSound = true;
+    Settings.InterpolatedSound = false;
     Memory.ROM = rom;
     Memory.ROM_AllocSize = size;
     if (!S9xInitDisplay() || !S9xInitMemory() || !S9xInitAPU() || !S9xInitSound(0, 0) || !S9xInitGFX())
