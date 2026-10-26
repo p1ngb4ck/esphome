@@ -13,7 +13,6 @@ from esphome.components.sip_phone import SipPhone
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_CHANNEL,
-    CONF_HOST,
     CONF_ID,
     CONF_MICROPHONE,
     CONF_ON_MESSAGE,
@@ -63,6 +62,7 @@ CONF_ON_AVATAR = "on_avatar"
 CONF_ON_THUMB = "on_thumb"
 CONF_CALL = "call"
 CONF_VIDEO_RELAY = "video_relay"
+CONF_HOST = "host"
 
 CHAT_ID = cv.int_range(min=-(2**53), max=2**53)
 
