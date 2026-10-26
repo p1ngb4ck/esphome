@@ -572,7 +572,6 @@ class USBClient : public Component {
   /// still draining); its memory waits, the stream's close wakes the loop.
   virtual bool device_busy_(const UsbDevice &dev) const { return false; }
   virtual bool starting_() const { return false; }
-  bool settled_() const;
   bool reap_devices_();
   void bind_device_(uint8_t addr, uint32_t interfaces);
   bool open_devices_();
@@ -804,7 +803,6 @@ class USBHost final : public Component {
   /// it go. The taker is bound (bind_) once they have. false: not there, being switched, or taken by
   /// another.
   bool take_device(USBClient *taker, uint8_t addr);
-  bool settled() const;
 
   // -- Mode switching (mode_switch option) ---------------------------------------
   void add_mode_switch_control(uint16_t vid, uint16_t pid, uint8_t request_type, uint8_t request, uint16_t value,
@@ -854,16 +852,6 @@ class USBHost final : public Component {
   uint8_t port_fifo_bias_[SOC_USB_OTG_PERIPH_NUM]{};
   bool full_speed_only_{false};
 #endif
-};
-
-class USBBootGate : public Component {
- public:
-  explicit USBBootGate(USBHost *host) : host_(host) {}
-  float get_setup_priority() const override { return 0.0f; }
-  bool can_proceed() override { return this->host_->settled(); }
-
- protected:
-  USBHost *host_;
 };
 
 // Returns the global USBHost singleton, set during USBHost::setup().

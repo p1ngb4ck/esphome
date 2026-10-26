@@ -472,21 +472,6 @@ bool USBHost::take_device(USBClient *taker, uint8_t addr) {
   return true;
 }
 
-bool USBHost::settled() const {
-  if (this->reroute_)
-    return false;
-  for (const auto &dev : this->devices_) {
-    if (dev.mode_switch != nullptr || dev.taking ||
-        (dev.switched_ms != 0 && millis() - dev.switched_ms < MODE_SWITCH_SETTLE_MS))
-      return false;
-  }
-  for (auto *client : this->clients_) {
-    if (!client->settled_())
-      return false;
-  }
-  return true;
-}
-
 // Main loop: each holder is told the device is gone (its own unplug path) once its transfers are back;
 // the taker gets the device when all have let go.
 void USBHost::continue_take_(RoutedDevice &dev) {

@@ -34,7 +34,6 @@ DEPENDENCIES = ["esp32"]
 usb_host_ns = cg.esphome_ns.namespace("usb_host")
 USBHost = usb_host_ns.class_("USBHost", Component)
 USBClient = usb_host_ns.class_("USBClient", Component)
-USBBootGate = usb_host_ns.class_("USBBootGate", Component)
 DOMAIN = "usb_host"
 CONF_VID = "vid"
 CONF_PID = "pid"
@@ -57,7 +56,6 @@ _PERIPHERAL_MAPS = {
 CONF_FS_PINS = "fs_pins"
 CONF_FULL_SPEED_ONLY = "full_speed_only"
 CONF_MODE_SWITCH = "mode_switch"
-CONF_BOOT_GATE_ID = "boot_gate_id"
 CONF_HID2HCI = "hid2hci"
 CONF_BULK_MESSAGES = "bulk_messages"
 CONF_NEED_RESPONSE = "need_response"
@@ -550,7 +548,6 @@ CONFIG_SCHEMA = cv.All(
     cv.COMPONENT_SCHEMA.extend(
         {
             cv.GenerateID(): cv.declare_id(USBHost),
-            cv.GenerateID(CONF_BOOT_GATE_ID): cv.declare_id(USBBootGate),
             cv.Optional(CONF_ENABLE_HUBS, default=False): cv.boolean,
             cv.Optional(CONF_MAX_TRANSFER_REQUESTS, default=16): cv.int_range(
                 min=1, max=32
@@ -695,8 +692,6 @@ async def to_code(config: ConfigType) -> None:
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
-    gate = cg.new_Pvariable(config[CONF_BOOT_GATE_ID], var)
-    await cg.register_component(gate, {})
     CORE.add_job(_usb_match_guards)
 
     if (controllers := config.get(CONF_CONTROLLERS)) not in (

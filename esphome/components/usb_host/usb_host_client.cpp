@@ -516,21 +516,6 @@ void USBClient::handle_open_state_() {
   }
 }
 
-bool USBClient::settled_() const {
-  if (this->accepts_more_devices_()) {
-    for (const auto &dev : this->devices_) {
-      if (!dev->opened)
-        return false;
-    }
-  } else if (this->state_ == USB_CLIENT_CONNECTED) {
-    if (this->reports_connection_itself() && !this->connection_reported_)
-      return false;
-  } else if (this->state_ != USB_CLIENT_INIT) {
-    return false;
-  }
-  return !this->starting_();
-}
-
 void USBClient::report_connected_() {
   if (this->state_ != USB_CLIENT_CONNECTED || this->connection_reported_) {
     return;
