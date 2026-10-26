@@ -938,6 +938,9 @@ class SimpleVideoPlayer : public Component
   /// No picture shown any more: the slideshow stops, the canvas empties, the pictures' buffers go back
   /// to the pool (once nothing is read or decoded).
   void close_picture();
+  bool show_canvas_picture(lv_obj_t *canvas, const uint8_t *data, size_t length, const char *name,
+                           std::function<void(bool)> &&done);
+  void close_canvas_picture();
   /// A camera's frame for the camera page (a UVC camera): decoded (MJPEG, the HW JPEG decoder) or converted (YUYV /
   /// UYVY, the PPA) and fit into target (RGB565, target_w x target_h, a pool piece) by the picture task. done(ok)
   /// on the main loop once the frame is no longer read. False: the task is busy, or the format is not shown here -
@@ -2200,6 +2203,22 @@ class SimpleVideoPlayer : public Component
   };
 
   bool pic_ready_{false};
+  enum class ViewStep : uint8_t { IDLE, WAITING, DECODING };
+  lv_obj_t *view_canvas_{nullptr};
+  ViewStep view_step_{ViewStep::IDLE};
+  bool view_close_{false};
+  bool view_attached_{false};
+  bool view_detach_pending_{false};
+  uint8_t *view_data_{nullptr};
+  size_t view_capacity_{0};
+  uint8_t *view_scratch_{nullptr};
+  lv_draw_buf_t view_buf_{};
+  PictureJob view_job_data_;
+  std::atomic<bool> view_job_{false};
+  std::atomic<bool> view_decoded_{false};
+  std::function<void(bool)> view_done_;
+  void view_loop_();
+  void release_view_();
 #ifdef SVP_BACKGROUND
   // The page background: its file read by the worker into a pool piece, decoded by the picture task
   // (decode_job_) into the canvas' pool piece; both pieces of the pictures' share.

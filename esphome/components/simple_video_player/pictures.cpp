@@ -157,6 +157,7 @@ void SimpleVideoPlayer::pictures_loop_() {
     this->hide_overlay_icon_();
   // The strip's hide changes LVGL objects: not while LVGL is paused (a video or a sender has the
   // panel); it follows once LVGL runs again.
+  this->view_loop_();
   bool lvgl_runs = true;
 #ifdef SVP_USE_LVGL
   lvgl_runs = this->lvgl_component_ == nullptr || !this->lvgl_component_->is_paused();
@@ -208,6 +209,9 @@ void SimpleVideoPlayer::pictures_loop_() {
       return;
     this->release_background_();
 #endif
+    if (this->view_step_ == ViewStep::DECODING)
+      return;
+    this->release_view_();
 #ifdef SVP_AUDIO_COVER
     // Cover art being fetched into its buffer: dropped, or stopped after its block.
     if (this->cover_step_ == CoverStep::FETCHING && !this->fetch_drop_(this->cover_fetch_))
@@ -1070,6 +1074,11 @@ void SimpleVideoPlayer::picture_task_entry_(void *arg) {
   auto *self = static_cast<SimpleVideoPlayer *>(arg);
   while (true) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    if (self->view_job_.exchange(false, std::memory_order_acq_rel)) {
+      self->decode_job_(self->view_job_data_);
+      self->view_decoded_.store(true, std::memory_order_release);
+      continue;
+    }
 #ifdef SVP_BACKGROUND
     if (self->bg_job_.exchange(false, std::memory_order_acq_rel)) {
       self->decode_job_(self->bg_job_data_);
@@ -1679,6 +1688,157 @@ void SimpleVideoPlayer::decode_job_(PictureJob &job) {
     ESP_LOGW(TAG, "%s: incomplete picture, or not in PSRAM", job.path.c_str());
   }
   image->release();
+}
+
+bool SimpleVideoPlayer::show_canvas_picture(lv_obj_t *canvas, const uint8_t *data, size_t length, const char *name,
+                                            std::function<void(bool)> &&done) {
+  if (canvas == nullptr || data == nullptr || length == 0 || name == nullptr || !this->pic_ready_ ||
+      this->pic_task_ == nullptr || this->view_step_ != ViewStep::IDLE || this->lvgl_component_ == nullptr ||
+      this->lvgl_component_->is_paused() || this->pictures_held_() || this->pool_wanted_(POOL_PICTURES))
+    return false;
+  runtime_image::ImageFormat format;
+  if (!picture_format(name, &format))
+    return false;
+  this->release_view_();
+  int32_t w = lv_obj_get_style_width(canvas, LV_PART_MAIN);
+  int32_t h = lv_obj_get_style_height(canvas, LV_PART_MAIN);
+  if (LV_COORD_IS_SPEC(w) || LV_COORD_IS_SPEC(h)) {
+    lv_obj_update_layout(canvas);
+    w = lv_obj_get_width(canvas);
+    h = lv_obj_get_height(canvas);
+  }
+  if (w <= 0 || h <= 0)
+    return false;
+  PictureJob &job = this->view_job_data_;
+  job = PictureJob{};
+  job.data = data;
+  job.length = length;
+  job.path = name;
+  job.target_w = w;
+  job.target_h = h;
+  job.target_stride = static_cast<uint32_t>(align_up(w, 16) * 2);
+  job.fit = this->fit_mode_;
+  job.background = true;
+  this->view_capacity_ = align_up(align_up(w, 16) * align_up(h, 16) * 2, PsramPool::ALIGN);
+  this->view_data_ = this->pool_take_(this->view_capacity_, POOL_USER_PICTURES);
+  if (this->view_data_ == nullptr) {
+    ESP_LOGW(TAG, "%s: no room in the PSRAM pool", name);
+    this->view_capacity_ = 0;
+    return false;
+  }
+  job.target = this->view_data_;
+  job.target_capacity = this->view_capacity_;
+  jpeg_decode_picture_info_t info{};
+  if (format == runtime_image::JPEG && jpeg_decoder_get_info(data, static_cast<uint32_t>(length), &info) == ESP_OK &&
+      info.width != 0 && info.height != 0) {
+    const size_t bytes = jpeg_decoded_size(info, nullptr);
+    const bool straight = static_cast<int32_t>(info.width) <= w && static_cast<int32_t>(info.height) <= h &&
+                          bytes <= dma_usable(this->view_capacity_);
+    if (!straight) {
+      const size_t scratch = align_up(bytes, PsramPool::ALIGN);
+      this->view_scratch_ = this->pool_take_(scratch, POOL_USER_PICTURES);
+      if (this->view_scratch_ == nullptr) {
+        ESP_LOGW(TAG, "%s: %ux%u needs %u bytes of the PSRAM pool to decode", name, static_cast<unsigned>(info.width),
+                 static_cast<unsigned>(info.height), static_cast<unsigned>(bytes));
+        this->release_view_();
+        return false;
+      }
+      job.scratch = this->view_scratch_;
+      job.scratch_capacity = scratch;
+    }
+  }
+  this->view_canvas_ = canvas;
+  this->view_done_ = std::move(done);
+  this->view_close_ = false;
+  this->view_step_ = ViewStep::WAITING;
+  return true;
+}
+
+void SimpleVideoPlayer::close_canvas_picture() {
+  this->view_close_ = true;
+  if (this->view_step_ == ViewStep::IDLE && this->lvgl_component_ != nullptr && !this->lvgl_component_->is_paused()) {
+    this->view_close_ = false;
+    this->release_view_();
+  }
+}
+
+void SimpleVideoPlayer::release_view_() {
+  if (this->view_attached_ && this->view_canvas_ != nullptr) {
+    if (this->lvgl_component_ == nullptr || this->lvgl_component_->is_paused()) {
+      this->view_detach_pending_ = true;
+    } else {
+      lv_image_set_src(this->view_canvas_, nullptr);
+    }
+  }
+  this->view_attached_ = false;
+  this->pool_.free(this->view_data_);
+  this->view_data_ = nullptr;
+  this->view_capacity_ = 0;
+  this->pool_.free(this->view_scratch_);
+  this->view_scratch_ = nullptr;
+}
+
+void SimpleVideoPlayer::view_loop_() {
+  if (this->lvgl_component_ == nullptr || this->lvgl_component_->is_paused())
+    return;
+  if (this->view_detach_pending_) {
+    this->view_detach_pending_ = false;
+    lv_image_set_src(this->view_canvas_, nullptr);
+  }
+  switch (this->view_step_) {
+    case ViewStep::IDLE:
+      if (this->view_close_) {
+        this->view_close_ = false;
+        this->release_view_();
+      }
+      return;
+    case ViewStep::WAITING: {
+      if (!this->view_close_) {
+        if (this->pic_read_.decoding || this->cam_busy_)
+          return;
+#ifdef SVP_BACKGROUND
+        if (this->bg_step_ == BgStep::DECODING)
+          return;
+#endif
+#ifdef SVP_AUDIO_COVER
+        if (this->cover_step_ == CoverStep::DECODING)
+          return;
+#endif
+        this->view_decoded_.store(false, std::memory_order_relaxed);
+        this->view_job_.store(true, std::memory_order_release);
+        this->view_step_ = ViewStep::DECODING;
+        xTaskNotifyGive(this->pic_task_);
+        return;
+      }
+      break;
+    }
+    case ViewStep::DECODING:
+      if (!this->view_decoded_.load(std::memory_order_acquire))
+        return;
+      break;
+  }
+  this->view_step_ = ViewStep::IDLE;
+  this->pool_.free(this->view_scratch_);
+  this->view_scratch_ = nullptr;
+  const PictureJob &job = this->view_job_data_;
+  const bool ok = job.ok && !this->view_close_;
+  if (ok) {
+    const int32_t sw = job.direct ? job.width : job.target_w;
+    const int32_t sh = job.direct ? job.height : job.target_h;
+    const uint32_t stride = job.direct ? job.stride : job.target_stride;
+    this->view_detach_pending_ = false;
+    lv_draw_buf_init(&this->view_buf_, sw, sh, LV_COLOR_FORMAT_RGB565, stride, this->view_data_, this->view_capacity_);
+    lv_canvas_set_draw_buf(this->view_canvas_, &this->view_buf_);
+    lv_obj_invalidate(this->view_canvas_);
+    this->view_attached_ = true;
+  } else {
+    this->release_view_();
+  }
+  this->view_close_ = false;
+  auto done = std::move(this->view_done_);
+  this->view_done_ = nullptr;
+  if (done)
+    done(ok);
 }
 
 void SimpleVideoPlayer::picture_decoded_() {
