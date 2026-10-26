@@ -175,6 +175,7 @@ class AVIParser {
   uint64_t data_end() const {
     return this->movi_size_ == UINT64_MAX ? UINT64_MAX : this->movi_offset_ + this->movi_size_;
   }
+  bool plausible_chunk(const uint8_t *hdr, uint64_t at) const;
 
  protected:
   /**

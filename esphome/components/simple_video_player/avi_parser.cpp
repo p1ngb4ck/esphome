@@ -497,6 +497,11 @@ static ChunkKind chunk_kind(const uint8_t *hdr, uint64_t remaining) {
   return ChunkKind::INVALID;
 }
 
+bool AVIParser::plausible_chunk(const uint8_t *hdr, uint64_t at) const {
+  const uint64_t end = this->data_end();
+  return chunk_kind(hdr, end == UINT64_MAX ? UINT64_MAX : (end > at ? end - at : 0)) != ChunkKind::INVALID;
+}
+
 bool AVIParser::plausible_header_(const uint8_t *hdr, size_t max_frame) const {
   const uint64_t end = this->data_end();
   const uint64_t at = this->reader_->tell();

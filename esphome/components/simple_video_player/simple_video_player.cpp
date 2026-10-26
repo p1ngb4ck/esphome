@@ -3407,7 +3407,7 @@ void SimpleVideoPlayer::advance_audio_cursor_() {
       return;
     const size_t offset = static_cast<size_t>(at - reader->tell());
     uint8_t hdr[8];
-    if (!reader->peek(offset, hdr, sizeof(hdr)))
+    if (!reader->peek(offset, hdr, sizeof(hdr)) || !this->avi_parser_->plausible_chunk(hdr, at))
       return;
     const uint32_t id = hdr[0] | (hdr[1] << 8) | (hdr[2] << 16) | (static_cast<uint32_t>(hdr[3]) << 24);
     const uint32_t size = hdr[4] | (hdr[5] << 8) | (hdr[6] << 16) | (static_cast<uint32_t>(hdr[7]) << 24);
