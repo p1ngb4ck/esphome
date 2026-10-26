@@ -67,7 +67,7 @@ int  VRAMPages   = 2;              /* Number of VRAM pages   */
 byte ExitNow     = 0;              /* 1 = Exit the emulator  */
 
 /** Main hardware: CPU, RAM, VRAM, mappers *******************/
-Z80 *CPU_ptr;
+Z80 *msx_cpu_ptr;
 
 byte *VRAM,*VPAGE;                 /* Video RAM              */
 
