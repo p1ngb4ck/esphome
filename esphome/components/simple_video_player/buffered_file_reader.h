@@ -82,6 +82,7 @@ class BufferedFileReader {
   /// LOAD-time: block (bounded) until the read-ahead ring is full, so the first frame reads in
   /// streaming mode already have their bytes. Uses the existing kick_fill_ -> on_fill_done_ chain.
   bool prefill_cache();
+  bool wait_data(size_t bytes);
 
   /// Main loop, every pass: the storage worker's stream calls are main-loop-only, so the calls the
   /// tasks ask for (open, seek, tell, close, the next fill) are made from here.

@@ -1438,8 +1438,16 @@ void SimpleVideoPlayer::playback_loop_() {
 
   // Load is done (headers, dimensions, audio init all read their bytes). The read-ahead ring is
   // filled before the first frame read.
-  if (this->file_reader_)
-    this->file_reader_->prefill_cache();
+  if (this->file_reader_) {
+#ifdef SVP_STREAM
+    if (this->net_session_ && this->video_format_ == VideoFormat::AVI_MJPEG && this->avi_parser_) {
+      this->prefill_stream_();
+    } else
+#endif
+    {
+      this->file_reader_->prefill_cache();
+    }
+  }
 
   // Reset the slot queues to a clean start: every slot free in empty_queue_, filled_queue_ empty,
   // regardless of how a prior session ended.
@@ -2163,6 +2171,38 @@ void SimpleVideoPlayer::close_file_() {
 }
 
 #ifdef SVP_STREAM
+void SimpleVideoPlayer::prefill_stream_() {
+  BufferedFileReader *reader = this->file_reader_.get();
+  const float frame_us = this->frame_duration_us_;
+  const uint32_t prebuffer_ms = this->prebuffer_ms_.load(std::memory_order_relaxed);
+  const uint32_t wanted =
+      frame_us > 0 ? std::max<uint32_t>(1, static_cast<uint32_t>(prebuffer_ms * 1000.0f / frame_us)) : 1;
+  uint64_t at = reader->tell();
+  uint32_t frames = 0;
+  while (frames < wanted) {
+    const size_t offset = static_cast<size_t>(at - reader->tell());
+    uint8_t hdr[8];
+    if (!reader->peek(offset, hdr, sizeof(hdr))) {
+      if (!reader->wait_data(offset + sizeof(hdr)))
+        return;
+      continue;
+    }
+    if (!this->avi_parser_->plausible_chunk(hdr, at))
+      return;
+    if (std::memcmp(hdr, "LIST", 4) == 0) {
+      at += 12;
+      continue;
+    }
+    const uint32_t size = hdr[4] | (hdr[5] << 8) | (hdr[6] << 16) | (static_cast<uint32_t>(hdr[7]) << 24);
+    const uint64_t next = at + 8 + size + (size & 1);
+    if (!reader->wait_data(static_cast<size_t>(next - reader->tell())))
+      return;
+    if (std::memcmp(hdr, "00dc", 4) == 0 || std::memcmp(hdr, "00db", 4) == 0)
+      frames++;
+    at = next;
+  }
+}
+
 bool SimpleVideoPlayer::open_stream_source_() {
   // An AVI arriving on the stream port (svp_relay): read through the same reader and ring as a
   // file, which the network task fills instead of the storage worker.

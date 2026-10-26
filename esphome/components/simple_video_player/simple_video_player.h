@@ -1563,6 +1563,7 @@ class SimpleVideoPlayer : public Component
 #ifdef SVP_STREAM
   /// open_file_() for the network stream: an AVI pushed into file_reader_ by the network task.
   bool open_stream_source_();
+  void prefill_stream_();
 #endif
 
   /// Read data from file (handles both local and network)

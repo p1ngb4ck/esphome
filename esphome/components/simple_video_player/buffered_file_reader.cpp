@@ -305,6 +305,24 @@ bool BufferedFileReader::prefill_cache() {
   return true;
 }
 
+bool BufferedFileReader::wait_data(size_t bytes) {
+  uint32_t waited = 0;
+  while (this->ring_.available() < bytes) {
+    if (!this->open_ || !this->network_ || bytes > this->ring_.size || this->ring_.free() == 0 ||
+        this->eof_.load(std::memory_order_acquire) || (this->abort_flag_ != nullptr && *this->abort_flag_))
+      return false;
+    this->waiting_task_ = xTaskGetCurrentTaskHandle();
+    this->data_waiter_.store(this->waiting_task_, std::memory_order_release);
+    bool idle = false;
+    if (this->ring_.available() < bytes && !this->eof_.load(std::memory_order_acquire))
+      idle = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAIT_SLICE_MS)) == 0;
+    this->data_waiter_.store(nullptr, std::memory_order_release);
+    if (idle && (waited += WAIT_SLICE_MS) >= WAIT_CAP_MS)
+      return false;
+  }
+  return true;
+}
+
 // From the reader task (or a LOAD-time probe): what the ring has, and for the rest a wait for the
 // fill chain (woken by each completion) until it is there, the file ends, a read fails, playback
 // stops or WAIT_CAP_MS pass. A slow storage then delays frames instead of ending the video.

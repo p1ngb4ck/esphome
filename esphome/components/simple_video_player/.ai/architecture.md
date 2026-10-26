@@ -174,7 +174,9 @@ Pool: `psram_pool_size` (default 12 MiB, 6-28; device 15 MB = 15,000,000). Plan 
 ring's and the sound block's. A video takes the ring for `prebuffer` + its lead at `MAX_MEDIA_RATE`
 (4 MiB/s, whole 256 KiB chunks, at least two) and the sound block for its lead; both are kept and taken
 anew only when a session needs another size (`acquire_session_buffers_()`, `sound_block_for_()`). The
-start fills the whole ring (`prefill_cache()`), so its size is also the start's wait. `prebuffer`
+start of a file fills the whole ring (`prefill_cache()`), so its size is also the start's wait; a network stream's start fills
+only `prebuffer`'s worth of video frames (`prefill_stream_()`: chunk headers walked in the ring, a frame counted once it is
+whole; the ring full, the stream's end or 5 s without data end it too). `prebuffer`
 (YAML, default 500 ms, min 100 ms; device: number "Video prebuffer", Settings > Outputs) is kept within
 what the room leaves (`max_prebuffer()`).
 
