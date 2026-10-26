@@ -7,10 +7,7 @@ static uint16_t *s_frame;
 static uint16_t *s_frames[2];
 static uint8_t s_back;
 static int16_t *s_stereo;
-static int16_t *s_stereo_bufs[2];
-static uint8_t s_mix_target;
 static int16_t *s_mix;
-static const int16_t *s_out;
 static size_t s_mix_frames;
 static size_t s_next_frames;
 static size_t s_req_frames;
@@ -104,14 +101,9 @@ bool snes_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels)
     s_next_frames = 0;
     s_req_frames = 0;
     s_mixed_frames = 0;
-    s_stereo_bufs[0] = calloc((rate / 50 + 1) * 2, sizeof(int16_t));
-    s_stereo_bufs[1] = calloc((rate / 50 + 1) * 2, sizeof(int16_t));
-    s_mix_target = 0;
-    s_stereo = s_stereo_bufs[0];
-    s_mix = s_channels == 2 ? NULL : calloc((rate / 50 + 1), sizeof(int16_t));
-    s_out = s_stereo_bufs[1];
-    if (s_frames[0] == NULL || s_frames[1] == NULL || s_stereo_bufs[0] == NULL || s_stereo_bufs[1] == NULL ||
-        (s_channels != 2 && s_mix == NULL))
+    s_stereo = calloc((rate / 50 + 1) * 2, sizeof(int16_t));
+    s_mix = calloc((rate / 50 + 1) * s_channels, sizeof(int16_t));
+    if (s_frames[0] == NULL || s_frames[1] == NULL || s_stereo == NULL || s_mix == NULL)
         return false;
     Settings.CyclesPercentage = 100;
     Settings.H_Max = SNES_CYCLES_PER_SCANLINE;
@@ -151,20 +143,16 @@ void snes_port_frame(uint16_t pad1, uint16_t pad2)
 void snes_port_mix_begin(void)
 {
     const size_t frames = s_mixed_frames;
-    const int16_t *mixed = s_stereo_bufs[s_mix_target];
     if (s_channels == 2)
     {
-        s_out = mixed;
+        memcpy(s_mix, s_stereo, frames * 2 * sizeof(int16_t));
     }
     else
     {
         for (size_t i = 0; i < frames; i++)
-            s_mix[i] = (int16_t)(((int)mixed[i * 2] + (int)mixed[i * 2 + 1]) / 2);
-        s_out = s_mix;
+            s_mix[i] = (int16_t)(((int)s_stereo[i * 2] + (int)s_stereo[i * 2 + 1]) / 2);
     }
     s_mix_frames = frames;
-    s_mix_target ^= 1;
-    s_stereo = s_stereo_bufs[s_mix_target];
     s_req_frames = s_next_frames;
 }
 
@@ -195,7 +183,7 @@ void snes_port_video(emu_port_video_t *video)
 const int16_t *snes_port_audio(size_t *frames)
 {
     *frames = s_mix_frames;
-    return s_out;
+    return s_mix;
 }
 
 uint32_t snes_port_frame_us(void)
