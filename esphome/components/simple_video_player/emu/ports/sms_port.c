@@ -31,7 +31,7 @@ bool sms_port_load(uint8_t *rom, size_t size, uint32_t rate, uint8_t channels, i
 {
     sms_ptr = calloc(1, sizeof(sms_t));
     vdp_ptr = calloc(1, sizeof(vdp_t));
-    z80_ptr = calloc(1, sizeof(Z80_Regs));
+    z80_ptr = emu_calloc_fast(1, sizeof(Z80_Regs));
     if (sms_ptr == NULL || vdp_ptr == NULL || z80_ptr == NULL)
         return false;
     system_reset_config();

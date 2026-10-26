@@ -34,7 +34,7 @@ static unsigned char m68ki_cycles[0x10000];
 
 static int irq_latency;
 
-m68ki_cpu_core m68k;
+m68ki_cpu_core *m68k_ptr;
 
 
 /* ======================================================================== */

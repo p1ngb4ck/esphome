@@ -1534,7 +1534,7 @@ void nes6502_reset(void)
 /* Create a nes6502 object */
 nes6502_t *nes6502_init(uint8 **memmap)
 {
-   cpu_ptr = calloc(1, sizeof(nes6502_t));
+   cpu_ptr = emu_calloc_fast(1, sizeof(nes6502_t));
    if (!cpu_ptr)
       return NULL;
    cpu.pages = memmap;

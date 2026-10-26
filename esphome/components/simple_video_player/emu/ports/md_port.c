@@ -124,6 +124,9 @@ void gwenesis_io_get_buttons()
 bool md_port_load(uint8_t *rom, size_t size, uint8_t channels)
 {
     s_channels = channels > 1 ? 2 : 1;
+    m68k_ptr = emu_calloc_fast(1, sizeof(m68ki_cpu_core));
+    if (m68k_ptr == NULL)
+        return false;
     ZRAM = emu_calloc_hot(1, MAX_Z80_RAM_SIZE);
     sin_tab = emu_calloc_hot(1024, sizeof(unsigned int));
     SAT_CACHE = emu_calloc_hot(1, SAT_CACHE_MAX_SIZE);
