@@ -596,7 +596,7 @@ void Messenger::parse_updates_(const std::string &body) {
       } else if (msg["voice"].is<JsonObject>()) {
         file = msg["voice"];
         in->kind = FileKind::VOICE;
-        default_name = "voice.opus";
+        default_name = "voice.ogg";
       } else if (msg["audio"].is<JsonObject>()) {
         file = msg["audio"];
         in->kind = FileKind::AUDIO;
@@ -688,7 +688,7 @@ bool Messenger::receive_webhook(const std::string &json) {
               copy_str(in->text, sizeof(in->text), media["caption"] | "");
               copy_str(in->file_ref, sizeof(in->file_ref), media["id"] | "");
               const char *fallback = in->kind == FileKind::PHOTO   ? "photo.jpg"
-                                     : in->kind == FileKind::VOICE ? "voice.opus"
+                                     : in->kind == FileKind::VOICE ? "voice.ogg"
                                      : in->kind == FileKind::VIDEO ? "video.mp4"
                                                                    : "file";
               copy_str(in->file_name, sizeof(in->file_name), media["filename"] | fallback);
@@ -1567,7 +1567,7 @@ void Messenger::save_sent_(Job *job) {
   }
   char path[sizeof(this->save_dir_) + 48];
   snprintf(path, sizeof(path), "%s/sent_%s%s", this->save_dir_, stamp,
-           job->file_kind == FileKind::VOICE ? ".opus" : job->file_kind == FileKind::PHOTO ? ".jpg" : ".bin");
+           job->file_kind == FileKind::VOICE ? ".ogg" : job->file_kind == FileKind::PHOTO ? ".jpg" : ".bin");
   const uint8_t *data = reinterpret_cast<const uint8_t *>(job->body.data());
   const size_t len = job->body.size();
   std::string error;
