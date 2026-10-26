@@ -45,11 +45,15 @@ class IsoImageStorage : public OpticalStorage {
   StorageError list_dir(const char *path, bool (*callback)(const FileStat *entry, void *ctx), void *ctx) override;
   bool is_emulated() const override { return true; }
   bool has_medium() const override { return this->state_ == State::MOUNTED; }
-  StorageError get_extent(const char *path, OpticalExtent *out) override;
-  StorageError get_medium(OpticalMedium *out) override;
 
  protected:
   enum class State : uint8_t { IDLE, MOUNTING, MOUNTED, DETACHED };
+
+  StorageError find_extent_(const char *path, uint64_t *offset, uint64_t *length) override;
+  StorageError open_medium_(OpticalFileHandle *file) override;
+  void close_medium_(OpticalFileHandle *file) override;
+  StorageError read_medium_(OpticalFileHandle *file, uint64_t offset, uint8_t *buf, size_t len,
+                            size_t *bytes_transferred) override;
 
   bool borrow_buffer_();
   void release_buffer_();

@@ -173,12 +173,16 @@ bool IsoImageStorage::names(const char *path) const {
 }
 
 void IsoImageStorage::detach() {
-  if (this->state_ == State::MOUNTED)
+  if (this->state_ == State::MOUNTED) {
+    global_storage_registry->quiesce_storage(this);
     this->state_ = State::DETACHED;
+  }
+  this->close_all_files_();
   this->backing_ = nullptr;
 }
 
 void IsoImageStorage::release() {
+  this->close_all_files_();
   this->state_ = State::IDLE;
   this->index_.clear();
   this->backing_ = nullptr;
@@ -223,8 +227,8 @@ StorageError IsoImageStorage::list_dir(const char *path, bool (*callback)(const 
   return this->index_.list(path, callback, ctx);
 }
 
-StorageError IsoImageStorage::get_extent(const char *path, OpticalExtent *out) {
-  if (this->state_ != State::MOUNTED)
+StorageError IsoImageStorage::find_extent_(const char *path, uint64_t *offset, uint64_t *length) {
+  if (this->state_ != State::MOUNTED || this->backing_ == nullptr)
     return StorageError::STORAGE_ERROR_NOT_READY;
   Entry e{};
   const StorageError err = this->index_.lookup(path, &e);
@@ -234,17 +238,54 @@ StorageError IsoImageStorage::get_extent(const char *path, OpticalExtent *out) {
     return StorageError::STORAGE_ERROR_INVALID_ARGS;
   if (!e.contiguous)
     return StorageError::STORAGE_ERROR_NOT_SUPPORTED;
-  out->offset = static_cast<uint64_t>(e.lba) * SECTOR_SIZE;
-  out->length = e.size;
+  *offset = static_cast<uint64_t>(e.lba) * SECTOR_SIZE;
+  *length = e.size;
   return StorageError::STORAGE_ERROR_OK;
 }
 
-StorageError IsoImageStorage::get_medium(OpticalMedium *out) {
-  if (this->state_ != State::MOUNTED || this->backing_ == nullptr)
+StorageError IsoImageStorage::open_medium_(OpticalFileHandle *file) {
+  if (this->backing_ == nullptr)
     return StorageError::STORAGE_ERROR_NOT_READY;
-  out->image_storage = this->backing_;
-  out->image_path = this->rel_;
-  return StorageError::STORAGE_ERROR_OK;
+  FilesystemStorage *fs = this->backing_->as_filesystem();
+  if (fs == nullptr)
+    return this->backing_->get_storage_type() == StorageType::STORAGE_TYPE_NETWORK
+               ? StorageError::STORAGE_ERROR_OK
+               : StorageError::STORAGE_ERROR_NOT_SUPPORTED;
+  return fs->open(this->rel_, file->medium, OpenMode::OPEN_MODE_READ);
+}
+
+void IsoImageStorage::close_medium_(OpticalFileHandle *file) {
+  if (file->medium == nullptr || this->backing_ == nullptr)
+    return;
+  FilesystemStorage *fs = this->backing_->as_filesystem();
+  if (fs != nullptr)
+    fs->close(file->medium);
+  file->medium = nullptr;
+}
+
+StorageError IsoImageStorage::read_medium_(OpticalFileHandle *file, uint64_t offset, uint8_t *buf, size_t len,
+                                           size_t *bytes_transferred) {
+  if (this->backing_ == nullptr)
+    return StorageError::STORAGE_ERROR_NOT_READY;
+  FilesystemStorage *fs = this->backing_->as_filesystem();
+  if (fs == nullptr)
+    return static_cast<NetworkStorage *>(this->backing_)->read_chunk(this->rel_, buf, offset, len, bytes_transferred);
+  if (file->medium == nullptr)
+    return StorageError::STORAGE_ERROR_NOT_READY;
+  if (file->medium_pos != offset) {
+    const StorageError err = fs->seek(file->medium, static_cast<int64_t>(offset), SeekMode::SEEK_MODE_SET);
+    if (err != StorageError::STORAGE_ERROR_OK) {
+      file->medium_pos = UINT64_MAX;
+      return err;
+    }
+    file->medium_pos = offset;
+  }
+  size_t got = 0;
+  const StorageError err = fs->read(file->medium, buf, len, &got);
+  file->medium_pos = err == StorageError::STORAGE_ERROR_OK ? offset + got : UINT64_MAX;
+  if (bytes_transferred != nullptr)
+    *bytes_transferred = err == StorageError::STORAGE_ERROR_OK ? got : 0;
+  return err;
 }
 
 void IsoMounter::setup() {

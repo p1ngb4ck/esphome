@@ -229,37 +229,6 @@ static bool touches(const Storage *side, const Storage *s) {
   return side != nullptr && s != nullptr && (side == s || side->get_backing_storage() == s);
 }
 
-static PathStorage *stream_data(const StreamRequest &req) { return req.data != nullptr ? req.data : req.storage; }
-
-static bool is_optical_storage(const Storage *s) {
-  return s != nullptr && s->get_storage_type() == StorageType::STORAGE_TYPE_OPTICAL;
-}
-
-static StorageError optical_data_side(PathStorage *storage, const char *path, PathStorage **data,
-                                      const char **data_path, uint64_t *base, uint64_t *len, bool *device) {
-  OpticalStorage *optical = storage->as_optical();
-  OpticalExtent extent{};
-  StorageError err = optical->get_extent(path, &extent);
-  if (err != StorageError::STORAGE_ERROR_OK)
-    return err;
-  OpticalMedium medium{};
-  err = optical->get_medium(&medium);
-  if (err != StorageError::STORAGE_ERROR_OK)
-    return err;
-  if (medium.image_storage != nullptr) {
-    *data = medium.image_storage;
-    *data_path = medium.image_path;
-    *device = false;
-  } else {
-    *data = storage;
-    *data_path = path;
-    *device = true;
-  }
-  *base = extent.offset;
-  *len = extent.length;
-  return StorageError::STORAGE_ERROR_OK;
-}
-
 bool StorageWorker::overlaps_active_(const TransferRequest &candidate) const {
   for (const auto &req : this->pool_) {
     if (&req == &candidate)
@@ -322,7 +291,7 @@ bool StorageWorker::is_busy_with(const storage::Storage *storage) const {
     RequestState state = req.state.load();
     if (state == RequestState::FREE || state == RequestState::DONE)
       continue;
-    if (touches(req.src_storage, storage) || touches(req.dst_storage, storage) || req.src_data == storage)
+    if (touches(req.src_storage, storage) || touches(req.dst_storage, storage))
       return true;
   }
   // A stream counts whatever it is doing, IDLE included: unlike the contention question above,
@@ -332,7 +301,7 @@ bool StorageWorker::is_busy_with(const storage::Storage *storage) const {
     StreamState state = sreq.state.load();
     if (state == StreamState::FREE || state == StreamState::DONE)
       continue;
-    if (touches(sreq.storage, storage) || sreq.data == storage)
+    if (touches(sreq.storage, storage))
       return true;
   }
   return false;
@@ -354,12 +323,11 @@ bool StorageWorker::has_active_task_io(const storage::Storage *storage) const {
     // The loop engine's current request is the one RUNNING slot that is NOT task-owned.
     if (i == this->loop_active_index_)
       continue;
-    if (touches(req.src_storage, storage) || touches(req.dst_storage, storage) || req.src_data == storage ||
-        req.raw_device == storage)
+    if (touches(req.src_storage, storage) || touches(req.dst_storage, storage) || req.raw_device == storage)
       return true;
   }
   for (const auto &sreq : this->stream_pool_) {
-    if (!touches(sreq.storage, storage) && sreq.data != storage)
+    if (!touches(sreq.storage, storage))
       continue;
     // A step queued to or running on the worker task; pending_step_ marks the loop-sliced route
     // (same thread as the caller), and IDLE holds only a handle, not an in-flight call.
@@ -382,8 +350,6 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
 
   if (strlen(src_path) >= STORAGE_WORKER_MAX_PATH || strlen(dst_path) >= STORAGE_WORKER_MAX_PATH)
     return StorageError::STORAGE_ERROR_INVALID_ARGS;
-  if (is_optical_storage(dst))
-    return StorageError::STORAGE_ERROR_PERMISSION_DENIED;
 
   // Find a free slot. Backpressure: a full pool returns NOT_READY immediately, callback not
   // invoked -- this reuses the existing "device not ready to serve calls" error rather than
@@ -426,7 +392,6 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
   slot->result = StorageError::STORAGE_ERROR_OK;
   slot->offset = 0;
   slot->src_handle = nullptr;
-  slot->src_data = nullptr;
   slot->dst_handle = nullptr;
   slot->handles_open = false;
   slot->submitted_ms = millis();
@@ -578,7 +543,6 @@ StorageError StorageWorker::submit_control_op_(RequestOp op, Storage *target, Co
   slot->result = StorageError::STORAGE_ERROR_OK;
   slot->offset = 0;
   slot->src_handle = nullptr;
-  slot->src_data = nullptr;
   slot->dst_handle = nullptr;
   slot->handles_open = false;
   slot->src_is_fs = false;
@@ -660,8 +624,6 @@ StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64
   this->ensure_started_();
   if (strlen(file_path) >= STORAGE_WORKER_MAX_PATH)
     return StorageError::STORAGE_ERROR_INVALID_ARGS;
-  if (is_optical_storage(file_side))
-    return StorageError::STORAGE_ERROR_NOT_SUPPORTED;
   TransferRequest *slot = nullptr;
   for (auto &req : this->pool_) {
     RequestState expected = RequestState::FREE;
@@ -696,7 +658,6 @@ StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64
   slot->result = StorageError::STORAGE_ERROR_OK;
   slot->offset = 0;
   slot->src_handle = nullptr;
-  slot->src_data = nullptr;
   slot->dst_handle = nullptr;
   slot->handles_open = false;
   slot->bytes_done = 0;
@@ -831,7 +792,7 @@ void StorageWorker::on_storage_unregistered_(Storage *s) {
   // to unmount/tear down the driver right afterward.
   for (size_t i = 0; i < this->pool_.size(); i++) {
     TransferRequest &req = this->pool_[i];
-    if (!touches(req.src_storage, s) && !touches(req.dst_storage, s) && req.src_data != s && req.raw_device != s &&
+    if (!touches(req.src_storage, s) && !touches(req.dst_storage, s) && req.raw_device != s &&
         (req.op != RequestOp::FORMAT || req.format_target != s))
       continue;
 
@@ -889,7 +850,6 @@ void StorageWorker::on_storage_unregistered_(Storage *s) {
             // forever. close_handles() null-guards on these pointers, so clearing them only makes the
             // eventual close a no-op (the medium is gone; the handle is dead anyway).
             req.src_storage = nullptr;
-            req.src_data = nullptr;
             req.dst_storage = nullptr;
             req.raw_device = nullptr;
             break;
@@ -907,7 +867,7 @@ void StorageWorker::on_storage_unregistered_(Storage *s) {
   // Same drain contract for streams: by the time this returns, no data-plane call into `s` is
   // still in flight and any handle it held is closed.
   for (auto &req : this->stream_pool_) {
-    if (!touches(req.storage, s) && req.data != s)
+    if (!touches(req.storage, s))
       continue;
     StreamState state = req.state.load();
     if (state == StreamState::FREE || state == StreamState::DONE)
@@ -918,7 +878,7 @@ void StorageWorker::on_storage_unregistered_(Storage *s) {
       // flush is not lost and the slot does not carry a dangling pointer until the next begin_*().
       StorageError close_err = StorageError::STORAGE_ERROR_OK;
       if (req.is_fs && req.handle != nullptr)
-        close_err = static_cast<FilesystemStorage *>(stream_data(req))->close(req.handle);
+        close_err = static_cast<FilesystemStorage *>(req.storage)->close(req.handle);
       req.handle = nullptr;
       // Only fall back to NOT_READY (this drain's "storage went away" answer) when the close was clean.
       req.result = close_err != StorageError::STORAGE_ERROR_OK ? close_err : StorageError::STORAGE_ERROR_NOT_READY;
@@ -951,7 +911,6 @@ void StorageWorker::on_storage_unregistered_(Storage *s) {
           // task waking later closes nothing rather than dereferencing null; the medium is gone, so
           // the handle is dead regardless. The slot stays CANCELLED and is never recycled.
           req.storage = nullptr;
-          req.data = nullptr;
           break;
         }
         vTaskDelay(1);
@@ -1027,7 +986,6 @@ void StorageWorker::deliver_completions_() {
       StorageError result = req.result;
       req.callback = nullptr;
       req.src_storage = nullptr;
-      req.src_data = nullptr;
       req.dst_storage = nullptr;
       req.raw_device = nullptr;
       req.stuck_warned = false;
@@ -1168,8 +1126,6 @@ void StorageWorker::update() {
     bool freed = state == StreamState::DONE;
     if (freed) {
       req.storage = nullptr;
-      req.data = nullptr;
-      req.data_path = nullptr;
       req.state = StreamState::FREE;
     }
     if (cb)
@@ -1256,9 +1212,8 @@ static bool walk_entry_cb(const FileStat *entry, void *ctx_raw) {
 static void close_handles(TransferRequest &req, StorageError *result) {
   if (!req.handles_open)
     return;
-  PathStorage *src = req.src_data != nullptr ? req.src_data : req.src_storage;
-  if (req.src_is_fs && req.src_handle != nullptr && src != nullptr)
-    static_cast<FilesystemStorage *>(src)->close(req.src_handle);
+  if (req.src_is_fs && req.src_handle != nullptr && req.src_storage != nullptr)
+    static_cast<FilesystemStorage *>(req.src_storage)->close(req.src_handle);
   if (req.dst_is_fs && req.dst_handle != nullptr && req.dst_storage != nullptr) {
     StorageError close_err = static_cast<FilesystemStorage *>(req.dst_storage)->close(req.dst_handle);
     if (*result == StorageError::STORAGE_ERROR_OK)
@@ -1976,7 +1931,7 @@ void StorageWorker::check_stalled_() {
       // an abandoned write stream that failed to flush is not reported to the waiter as a timeout.
       StorageError close_err = StorageError::STORAGE_ERROR_OK;
       if (sreq.is_fs && sreq.handle != nullptr)
-        close_err = static_cast<FilesystemStorage *>(stream_data(sreq))->close(sreq.handle);
+        close_err = static_cast<FilesystemStorage *>(sreq.storage)->close(sreq.handle);
       sreq.handle = nullptr;
       sreq.result = close_err != StorageError::STORAGE_ERROR_OK ? close_err : StorageError::STORAGE_ERROR_TIMEOUT;
       sreq.state = StreamState::DONE;
@@ -2187,36 +2142,12 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
       }
     }
 
-    req.src_data = req.src_storage;
-    req.src_data_path = req.src_path;
-    req.src_base = 0;
-    req.src_len = UINT64_MAX;
-    req.src_optical = false;
-    if (is_optical_storage(req.src_storage)) {
-      const StorageError oerr = optical_data_side(req.src_storage, req.src_path, &req.src_data, &req.src_data_path,
-                                                  &req.src_base, &req.src_len, &req.src_optical);
-      if (oerr != StorageError::STORAGE_ERROR_OK) {
-        req.src_data = req.src_storage;
-        finish_request(req, oerr);
-        return;
-      }
-    }
-    req.src_is_fs =
-        !req.src_optical && req.src_data->get_storage_type() == StorageType::STORAGE_TYPE_FILESYSTEM;
     if (req.src_is_fs) {
-      StorageError err = static_cast<FilesystemStorage *>(req.src_data)
-                             ->open(req.src_data_path, req.src_handle, OpenMode::OPEN_MODE_READ);
+      StorageError err = static_cast<FilesystemStorage *>(req.src_storage)
+                             ->open(req.src_path, req.src_handle, OpenMode::OPEN_MODE_READ);
       if (err != StorageError::STORAGE_ERROR_OK) {
         finish_request(req, err);
         return;
-      }
-      if (req.src_base != 0) {
-        err = static_cast<FilesystemStorage *>(req.src_data)->seek(req.src_handle, static_cast<int64_t>(req.src_base));
-        if (err != StorageError::STORAGE_ERROR_OK) {
-          req.handles_open = true;
-          finish_request(req, err);
-          return;
-        }
       }
     }
     if (req.dst_is_fs) {
@@ -2236,7 +2167,7 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
         // retry would re-enter this block and reopen it, leaking one handle per retry until
         // the pool is exhausted. Close it here; the next pass reopens cleanly.
         if (req.src_is_fs && req.src_handle != nullptr) {
-          static_cast<FilesystemStorage *>(req.src_data)->close(req.src_handle);
+          static_cast<FilesystemStorage *>(req.src_storage)->close(req.src_handle);
           req.src_handle = nullptr;
         }
         return;
@@ -2260,25 +2191,15 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
     return;
   }
   size_t bytes_read = 0;
-  size_t want = chunk_size;
-  if (req.src_len != UINT64_MAX) {
-    const uint64_t left = req.src_len > req.offset ? req.src_len - req.offset : 0;
-    if (left < want)
-      want = static_cast<size_t>(left);
-  }
-  StorageError err = StorageError::STORAGE_ERROR_OK;
-  if (want == 0) {
-    bytes_read = 0;
-  } else if (req.src_optical) {
-    err = static_cast<OpticalStorage *>(req.src_data)->read_medium(req.src_base + req.offset, chunk, want, &bytes_read);
-  } else if (req.src_is_fs) {
-    err = fs_read_(static_cast<FilesystemStorage *>(req.src_data), req.src_handle, chunk, want, &bytes_read);
+  StorageError err;
+  if (req.src_is_fs) {
+    err = fs_read_(static_cast<FilesystemStorage *>(req.src_storage), req.src_handle, chunk, chunk_size, &bytes_read);
   } else {
-    err = static_cast<NetworkStorage *>(req.src_data)
-              ->read_chunk(req.src_data_path, chunk, req.src_base + req.offset, want, &bytes_read);
+    err = static_cast<NetworkStorage *>(req.src_storage)
+              ->read_chunk(req.src_path, chunk, req.offset, chunk_size, &bytes_read);
   }
   if (err != StorageError::STORAGE_ERROR_OK) {
-    if (this->wait_for_network_ready_(req, err, req.src_data))
+    if (this->wait_for_network_ready_(req, err, req.src_storage))
       return;
     finish_request(req, err);
     return;
@@ -2332,8 +2253,8 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
         // instead of silently dropping this chunk. A network source is read by absolute offset
         // (read_chunk at req.offset), so it needs no rewind.
         if (req.src_is_fs && req.src_handle != nullptr) {
-          StorageError serr = static_cast<FilesystemStorage *>(req.src_data)
-                                  ->seek(req.src_handle, static_cast<int64_t>(req.src_base + req.offset));
+          StorageError serr =
+              static_cast<FilesystemStorage *>(req.src_storage)->seek(req.src_handle, static_cast<int64_t>(req.offset));
           if (serr != StorageError::STORAGE_ERROR_OK) {
             finish_request(req, serr);
             return;
@@ -2386,16 +2307,13 @@ bool StorageWorker::is_task_safe_(const StreamRequest &req) const {
 // run_chunk_(), this never decides what to do next on its own: state is set by the caller's
 // begin_*()/write_chunk()/read_chunk()/end_*() call, this function just executes it once.
 static void run_stream_step(StreamRequest &req) {
-  PathStorage *data = stream_data(req);
-  const char *dpath = req.data_path != nullptr ? req.data_path : req.path;
-  const bool windowed = req.window_len != UINT64_MAX;
   if (req.state.load() == StreamState::CANCELLED) {
     // Same close-result-and-handle handling as the IDLE quiesce drain: a flush failure on a
     // cancelled write stream is the real outcome, and the handle must not be left dangling. A clean
     // close keeps NOT_READY (the cancel answer); only a failing close overrides it.
     StorageError close_err = StorageError::STORAGE_ERROR_OK;
-    if (req.is_fs && req.handle != nullptr && data != nullptr)
-      close_err = static_cast<FilesystemStorage *>(data)->close(req.handle);
+    if (req.is_fs && req.handle != nullptr && req.storage != nullptr)
+      close_err = static_cast<FilesystemStorage *>(req.storage)->close(req.handle);
     req.handle = nullptr;
     req.result = close_err != StorageError::STORAGE_ERROR_OK ? close_err : StorageError::STORAGE_ERROR_NOT_READY;
     req.state = StreamState::DONE;
@@ -2409,22 +2327,13 @@ static void run_stream_step(StreamRequest &req) {
     case StreamState::OPENING: {
       if (req.is_fs) {
         OpenMode mode = req.op == StreamOp::WRITE ? OpenMode::OPEN_MODE_WRITE : OpenMode::OPEN_MODE_READ;
-        err = static_cast<FilesystemStorage *>(data)->open(dpath, req.handle, mode);
-        if (err == StorageError::STORAGE_ERROR_OK && windowed) {
-          err = static_cast<FilesystemStorage *>(data)->seek(req.handle, static_cast<int64_t>(req.window_base));
-          if (err != StorageError::STORAGE_ERROR_OK) {
-            static_cast<FilesystemStorage *>(data)->close(req.handle);
-            req.handle = nullptr;
-          }
-        }
+        err = static_cast<FilesystemStorage *>(req.storage)->open(req.path, req.handle, mode);
       } else if (req.op == StreamOp::WRITE) {
         // Same reason as the copy path: a write stream to a NetworkStorage has no open() to
         // truncate for it, so an upload shorter than the file it replaces would leave the old
         // tail in place. A read stream changes nothing and needs none of this.
-        err = static_cast<NetworkStorage *>(data)->truncate(dpath, 0);
+        err = static_cast<NetworkStorage *>(req.storage)->truncate(req.path, 0);
       }
-      if (err == StorageError::STORAGE_ERROR_OK && windowed)
-        req.offset = req.window_base;
       // NetworkStorage has no open() -- write_chunk()/read_chunk() below address by offset
       // directly, so OPENING is a no-op for it beyond the state transition itself.
       req.state = (err == StorageError::STORAGE_ERROR_OK) ? StreamState::IDLE : StreamState::DONE;
@@ -2435,11 +2344,11 @@ static void run_stream_step(StreamRequest &req) {
     case StreamState::WRITING: {
       size_t bytes_written = 0;
       if (req.is_fs) {
-        err = static_cast<FilesystemStorage *>(data)
+        err = static_cast<FilesystemStorage *>(req.storage)
                   ->write(req.handle, req.pending_write_data, req.pending_len, &bytes_written);
       } else {
-        err = static_cast<NetworkStorage *>(data)
-                  ->write_chunk(dpath, req.pending_write_data, req.offset, req.pending_len, &bytes_written);
+        err = static_cast<NetworkStorage *>(req.storage)
+                  ->write_chunk(req.path, req.pending_write_data, req.offset, req.pending_len, &bytes_written);
       }
       if (err == StorageError::STORAGE_ERROR_OK && bytes_written < req.pending_len && bytes_written > 0) {
         // Partial write -- keep going within this same call rather than surfacing a short
@@ -2448,11 +2357,11 @@ static void run_stream_step(StreamRequest &req) {
         while (err == StorageError::STORAGE_ERROR_OK && total < req.pending_len) {
           size_t chunk_written = 0;
           if (req.is_fs) {
-            err = static_cast<FilesystemStorage *>(data)
+            err = static_cast<FilesystemStorage *>(req.storage)
                       ->write(req.handle, req.pending_write_data + total, req.pending_len - total, &chunk_written);
           } else {
-            err = static_cast<NetworkStorage *>(data)
-                      ->write_chunk(dpath, req.pending_write_data + total, req.offset + total,
+            err = static_cast<NetworkStorage *>(req.storage)
+                      ->write_chunk(req.path, req.pending_write_data + total, req.offset + total,
                                     req.pending_len - total, &chunk_written);
           }
           if (chunk_written == 0)
@@ -2476,21 +2385,12 @@ static void run_stream_step(StreamRequest &req) {
 
     case StreamState::READING: {
       size_t bytes_read = 0;
-      size_t want = req.pending_len;
-      if (windowed) {
-        const uint64_t end = req.window_base + req.window_len;
-        const uint64_t left = end > req.offset ? end - req.offset : 0;
-        if (left < want)
-          want = static_cast<size_t>(left);
-      }
-      if (want == 0) {
-        bytes_read = 0;
-      } else if (req.is_optical) {
-        err = static_cast<OpticalStorage *>(data)->read_medium(req.offset, req.pending_read_buf, want, &bytes_read);
-      } else if (req.is_fs) {
-        err = fs_read_(static_cast<FilesystemStorage *>(data), req.handle, req.pending_read_buf, want, &bytes_read);
+      if (req.is_fs) {
+        err = fs_read_(static_cast<FilesystemStorage *>(req.storage), req.handle, req.pending_read_buf, req.pending_len,
+                       &bytes_read);
       } else {
-        err = static_cast<NetworkStorage *>(data)->read_chunk(dpath, req.pending_read_buf, req.offset, want, &bytes_read);
+        err = static_cast<NetworkStorage *>(req.storage)
+                  ->read_chunk(req.path, req.pending_read_buf, req.offset, req.pending_len, &bytes_read);
       }
       if (err == StorageError::STORAGE_ERROR_OK)
         req.offset += bytes_read;
@@ -2506,36 +2406,12 @@ static void run_stream_step(StreamRequest &req) {
     }
 
     case StreamState::SEEKING: {
-      if (windowed) {
-        int64_t base = 0;
-        switch (req.seek_mode) {
-          case storage::SeekMode::SEEK_MODE_SET:
-            base = 0;
-            break;
-          case storage::SeekMode::SEEK_MODE_CUR:
-            base = static_cast<int64_t>(req.offset - req.window_base);
-            break;
-          case storage::SeekMode::SEEK_MODE_END:
-            base = static_cast<int64_t>(req.window_len);
-            break;
-        }
-        const int64_t target = base + req.seek_target;
-        if (target < 0) {
-          err = StorageError::STORAGE_ERROR_INVALID_ARGS;
-        } else {
-          const uint64_t pos = req.window_base + static_cast<uint64_t>(target);
-          if (req.is_fs)
-            err = static_cast<FilesystemStorage *>(data)->seek(req.handle, static_cast<int64_t>(pos),
-                                                               storage::SeekMode::SEEK_MODE_SET);
-          if (err == StorageError::STORAGE_ERROR_OK)
-            req.offset = pos;
-        }
-      } else if (req.is_fs) {
+      if (req.is_fs) {
         // The driver's seek() handles SET/CUR/END natively; sync req.offset from it afterwards so
         // tell() and any later network-style bookkeeping agree.
-        err = static_cast<FilesystemStorage *>(data)->seek(req.handle, req.seek_target, req.seek_mode);
+        err = static_cast<FilesystemStorage *>(req.storage)->seek(req.handle, req.seek_target, req.seek_mode);
         if (err == StorageError::STORAGE_ERROR_OK)
-          err = static_cast<FilesystemStorage *>(data)->tell(req.handle, &req.offset);
+          err = static_cast<FilesystemStorage *>(req.storage)->tell(req.handle, &req.offset);
       } else {
         // NetworkStorage has no handle -- read_chunk()/write_chunk() address by req.offset, so a
         // seek is arithmetic on it. END needs the file size.
@@ -2549,7 +2425,7 @@ static void run_stream_step(StreamRequest &req) {
             break;
           case storage::SeekMode::SEEK_MODE_END: {
             uint64_t sz = 0;
-            err = storage::file_size(data, dpath, &sz);
+            err = storage::file_size(req.storage, req.path, &sz);
             base = static_cast<int64_t>(sz);
             break;
           }
@@ -2569,12 +2445,12 @@ static void run_stream_step(StreamRequest &req) {
     }
 
     case StreamState::TELLING: {
-      if (req.is_fs && !windowed) {
-        err = static_cast<FilesystemStorage *>(data)->tell(req.handle, &req.offset);
+      if (req.is_fs) {
+        err = static_cast<FilesystemStorage *>(req.storage)->tell(req.handle, &req.offset);
       }
       // NetworkStorage: the tracked offset already IS the position.
       if (err == StorageError::STORAGE_ERROR_OK && req.tell_out != nullptr)
-        *req.tell_out = req.offset - req.window_base;
+        *req.tell_out = req.offset;
       req.tell_out = nullptr;
       req.result = err;
       req.state = StreamState::IDLE;
@@ -2583,7 +2459,7 @@ static void run_stream_step(StreamRequest &req) {
 
     case StreamState::CLOSING: {
       if (req.is_fs && req.handle != nullptr)
-        err = static_cast<FilesystemStorage *>(data)->close(req.handle);
+        err = static_cast<FilesystemStorage *>(req.storage)->close(req.handle);
       req.handle = nullptr;
       req.result = err;
       req.state = StreamState::DONE;
@@ -2659,8 +2535,6 @@ StorageError StorageWorker::begin_write(PathStorage *storage, const char *path, 
   this->ensure_started_();
   if (strlen(path) >= STORAGE_WORKER_MAX_PATH)
     return StorageError::STORAGE_ERROR_INVALID_ARGS;
-  if (is_optical_storage(storage))
-    return StorageError::STORAGE_ERROR_PERMISSION_DENIED;
 
   size_t index;
   if (!find_free_stream_slot(this->stream_pool_, &index))
@@ -2671,11 +2545,6 @@ StorageError StorageWorker::begin_write(PathStorage *storage, const char *path, 
   req.storage = storage;
   strncpy(req.path, path, STORAGE_WORKER_MAX_PATH - 1);
   req.path[STORAGE_WORKER_MAX_PATH - 1] = '\0';
-  req.data = storage;
-  req.data_path = req.path;
-  req.window_base = 0;
-  req.window_len = UINT64_MAX;
-  req.is_optical = false;
   req.is_fs = storage->get_storage_type() == StorageType::STORAGE_TYPE_FILESYSTEM;
   req.handle = nullptr;
   req.offset = 0;
@@ -2711,23 +2580,7 @@ StorageError StorageWorker::begin_read(PathStorage *storage, const char *path, S
   req.storage = storage;
   strncpy(req.path, path, STORAGE_WORKER_MAX_PATH - 1);
   req.path[STORAGE_WORKER_MAX_PATH - 1] = '\0';
-  req.data = storage;
-  req.data_path = req.path;
-  req.window_base = 0;
-  req.window_len = UINT64_MAX;
-  req.is_optical = false;
-  if (is_optical_storage(storage)) {
-    const StorageError oerr = optical_data_side(storage, req.path, &req.data, &req.data_path, &req.window_base,
-                                                &req.window_len, &req.is_optical);
-    if (oerr != StorageError::STORAGE_ERROR_OK) {
-      req.storage = nullptr;
-      req.data = nullptr;
-      req.data_path = nullptr;
-      req.state = StreamState::FREE;
-      return oerr;
-    }
-  }
-  req.is_fs = !req.is_optical && req.data->get_storage_type() == StorageType::STORAGE_TYPE_FILESYSTEM;
+  req.is_fs = storage->get_storage_type() == StorageType::STORAGE_TYPE_FILESYSTEM;
   req.handle = nullptr;
   req.offset = 0;
   req.seek_target = 0;

@@ -53,12 +53,13 @@ class CdromDrive : public storage::OpticalStorage {
                                  void *ctx) override;
   bool is_emulated() const override { return false; }
   bool has_medium() const override { return this->media_mounted(); }
-  storage::StorageError get_extent(const char *path, storage::OpticalExtent *out) override;
-  storage::StorageError get_medium(storage::OpticalMedium *out) override;
-  storage::StorageError read_medium(uint64_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) override;
 
  protected:
   enum class Presence : uint8_t { UNKNOWN, ABSENT, PRESENT, CHANGED, EJECT_REQUEST };
+
+  storage::StorageError find_extent_(const char *path, uint64_t *offset, uint64_t *length) override;
+  storage::StorageError read_medium_(storage::OpticalFileHandle *file, uint64_t offset, uint8_t *buf, size_t len,
+                                     size_t *bytes_transferred) override;
 
   bool lock_(bool wait);
   void unlock_();

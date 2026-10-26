@@ -79,6 +79,7 @@ void CdromDrive::stop() {
     this->registered_ = false;
   }
   this->mounted_.store(false, std::memory_order_release);
+  this->close_all_files_();
   this->index_.clear();
   if (this->sector_buf_ != nullptr) {
     RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::ALLOC_EXTERNAL).deallocate(this->sector_buf_, iso::SECTOR_SIZE);
@@ -307,6 +308,7 @@ void CdromDrive::release_media_() {
   if (!this->media_mounted())
     return;
   this->mounted_.store(false, std::memory_order_release);
+  this->close_all_files_();
   this->index_.clear();
   this->cached_lba_ = UINT32_MAX;
   if (this->sector_buf_ != nullptr) {
@@ -425,7 +427,7 @@ StorageError CdromDrive::get_info(storage::StorageInfo *info) {
   return StorageError::STORAGE_ERROR_OK;
 }
 
-StorageError CdromDrive::get_extent(const char *path, storage::OpticalExtent *out) {
+StorageError CdromDrive::find_extent_(const char *path, uint64_t *offset, uint64_t *length) {
   if (!this->media_mounted())
     return StorageError::STORAGE_ERROR_NOT_READY;
   iso::Entry e{};
@@ -436,20 +438,13 @@ StorageError CdromDrive::get_extent(const char *path, storage::OpticalExtent *ou
     return StorageError::STORAGE_ERROR_INVALID_ARGS;
   if (!e.contiguous)
     return StorageError::STORAGE_ERROR_NOT_SUPPORTED;
-  out->offset = static_cast<uint64_t>(e.lba) * iso::SECTOR_SIZE;
-  out->length = e.size;
+  *offset = static_cast<uint64_t>(e.lba) * iso::SECTOR_SIZE;
+  *length = e.size;
   return StorageError::STORAGE_ERROR_OK;
 }
 
-StorageError CdromDrive::get_medium(storage::OpticalMedium *out) {
-  if (!this->media_mounted())
-    return StorageError::STORAGE_ERROR_NOT_READY;
-  out->image_storage = nullptr;
-  out->image_path = nullptr;
-  return StorageError::STORAGE_ERROR_OK;
-}
-
-StorageError CdromDrive::read_medium(uint64_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) {
+StorageError CdromDrive::read_medium_(storage::OpticalFileHandle *file, uint64_t offset, uint8_t *buf, size_t len,
+                                      size_t *bytes_transferred) {
   if (!this->media_mounted() || this->sector_buf_ == nullptr)
     return StorageError::STORAGE_ERROR_NOT_READY;
   size_t done = 0;

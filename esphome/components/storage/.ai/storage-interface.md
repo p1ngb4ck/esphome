@@ -64,25 +64,21 @@ loop-sliced. Two engines share one queue. Completions ALWAYS fire on the main lo
   routing on the existing read path belongs.)
 - `global_storage_worker`.
 
-## OpticalStorage (`storage.h`, `STORAGE_TYPE_OPTICAL`) - emulated and real CD/DVD drives
-- A PathStorage subtype beside FilesystemStorage / NetworkStorage (+ MountableStorage), read-only:
-  `is_emulated()`, `has_medium()`, `get_extent(path, OpticalExtent{offset, length})` (a file's bytes on the
-  medium), `get_medium(OpticalMedium{image_storage, image_path})` (emulated: the image file on another storage;
-  real: both null), `read_medium(offset, buf, len, &got)` (real drives: blocking, byte addressed; emulated:
-  NOT_SUPPORTED - an image is read by the worker only). mkdir / rmdir / remove / rename answer PERMISSION_DENIED.
-  `as_optical()` is the no-RTTI downcast; mount = load (real) / remount (emulated), unmount = eject.
-- Registry: for_each_path_based and resolve_path include optical storages (roots of every browser).
-- Worker: a read stream or a copy source on an optical storage resolves its extent and medium when it opens:
-  emulated -> the image file on its storage (fs open + seek / network read_chunk at offset), real ->
-  `read_medium(offset)`; reads clamped to the extent, seek / tell relative to it. begin_write, a copy / move
-  destination and a raw job's file side on an optical storage are refused (PERMISSION_DENIED / NOT_SUPPORTED).
-  Requests keep the optical storage as their storage (its drain cancels them); `data` / `src_data` name the data
-  side. Serialization by medium: `Storage::get_backing_storage()` (an emulated drive's image storage) -
-  overlaps compare `medium_of()`, is_busy_with / has_active_task_io / the drain match directly, through the
-  backing, or as the data side.
-- Blocking helpers: read_file / write_file / append_file answer NOT_SUPPORTED for optical (default branch),
-  copy() refuses an optical source (NOT_SUPPORTED) or destination (PERMISSION_DENIED). web_server file_api lists
-  them as type "optical".
+## OpticalStorage (`storage.h`, `storage.cpp`) - emulated and real CD/DVD drives
+- `OpticalStorage : FilesystemStorage, MountableStorage`: a FilesystemStorage (STORAGE_TYPE_FILESYSTEM), so every
+  consumer of the interface and the worker use it like any filesystem; `as_optical()` is the no-RTTI downcast for
+  what only optical drives have: `is_emulated()`, `has_medium()`. Read-only: write / mkdir / rmdir / remove /
+  rename PERMISSION_DENIED, open other than READ PERMISSION_DENIED, sync OK.
+- The base implements open / close / read / seek / tell on up to MAX_OPEN_FILES (4) handles
+  (`OpticalFileHandle`: start, size, pos on the medium, the medium's own handle); a driver supplies
+  `find_extent_(path)` (where the file lies on the medium), `read_medium_(file, offset, ...)` and optionally
+  `open_medium_` / `close_medium_`.
+- Emulated (ISO image): the medium is the image file - `open_medium_` opens it on its storage (FilesystemStorage) or
+  nothing (NetworkStorage), `read_medium_` seeks + reads it (or read_chunk at the offset) on the caller's thread,
+  i.e. on the worker when the consumer reads through the worker. `get_backing_storage()` = the image's storage.
+- Real (usb_cdrom): `read_medium_` reads sectors by SCSI.
+- Worker: serialization by medium - overlaps compare `medium_of()` (the backing if any), is_busy_with /
+  has_active_task_io / the drain match a storage directly or through its backing.
 
 ## ISO 9660 (`iso9660.h/.cpp`, `USE_STORAGE_ISO9660`)
 - `Index` (PSRAM, grown with RAMAllocator ALLOC_EXTERNAL, limit `INDEX_MAX` 2 MB): directory table (16 B per
@@ -101,7 +97,7 @@ loop-sliced. Two engines share one queue. Completions ALWAYS fire on the main lo
 - `IsoImageStorage` (an emulated OpticalStorage, made in PSRAM per mount, freed after unmount): the image is read
   only through worker streams (`begin_read` / `seek` / `read_chunk` / `end_read`, main loop chain, buffer = 64 KB
   of the transfer buffer or one 2 KB PSRAM sector during the mount); `stat` / `list_dir` from the index; file data
-  by the worker from the image (`get_extent` + `get_medium`).
+  through the OpticalStorage handles (the image read on the caller's thread through its storage).
 - FileManager (panel UI): tapping an .iso file asks "Mount <name>?" and mounts it (a FileManager job); the drive
   appears among the roots with the disc icon; eject = the unmount button.
 - Unmount: the actions, `unmount()` (FileManager, file_api), and by itself when the backing storage is
@@ -122,7 +118,7 @@ loop-sliced. Two engines share one queue. Completions ALWAYS fire on the main lo
   buffer or the 2 KB sector buffer), tray locked when media events work; a user mount on an empty drive loads
   the tray. `unmount()` (main loop) = safe eject: quiesce, index freed, tray unlocked, eject. Refused while the
   worker task is inside the drive.
-- `read_medium`: whole sectors straight into the caller's buffer (`scsi_read`), partial sectors through the 2 KB
+- `read_medium_`: whole sectors straight into the caller's buffer (`scsi_read`), partial sectors through the 2 KB
   PSRAM sector buffer (also a one-sector cache); `stat` / `list_dir` from the index.
 - Media change: BOT has no interrupt endpoint and MMC media events are polled (as Linux sr does), so
   `media_check_interval` (default 2 s, 0 = off) runs only while a drive is plugged, skipped while the worker uses

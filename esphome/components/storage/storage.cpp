@@ -270,8 +270,6 @@ void StorageRegistry::for_each_path_based(void (*cb)(PathStorage *s, void *ctx),
       cb(static_cast<FilesystemStorage *>(entries[i]), ctx);
     } else if (type == StorageType::STORAGE_TYPE_NETWORK) {
       cb(static_cast<NetworkStorage *>(entries[i]), ctx);
-    } else if (type == StorageType::STORAGE_TYPE_OPTICAL) {
-      cb(static_cast<OpticalStorage *>(entries[i]), ctx);
     }
   }
 }
@@ -285,8 +283,6 @@ void StorageRegistry::for_each_path_based(void (*cb)(PathStorage *s, StorageType
       cb(static_cast<FilesystemStorage *>(entries[i]), type, ctx);
     } else if (type == StorageType::STORAGE_TYPE_NETWORK) {
       cb(static_cast<NetworkStorage *>(entries[i]), type, ctx);
-    } else if (type == StorageType::STORAGE_TYPE_OPTICAL) {
-      cb(static_cast<OpticalStorage *>(entries[i]), type, ctx);
     }
   }
 }
@@ -303,8 +299,6 @@ PathStorage *StorageRegistry::resolve_path(const char *vfs_path, const char **re
       ps = static_cast<FilesystemStorage *>(s);
     } else if (type == StorageType::STORAGE_TYPE_NETWORK) {
       ps = static_cast<NetworkStorage *>(s);
-    } else if (type == StorageType::STORAGE_TYPE_OPTICAL) {
-      ps = static_cast<OpticalStorage *>(s);
     } else {
       continue;
     }
@@ -730,10 +724,6 @@ StorageError append_file(PathStorage *storage, const char *path, const uint8_t *
 // walk can reuse the same buffer for every file instead of allocating one per entry.
 static StorageError copy_one_file(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage,
                                   const char *dst_path, const RamBuffer &chunk_buf, size_t chunk_size) {
-  if (dst_storage->get_storage_type() == StorageType::STORAGE_TYPE_OPTICAL)
-    return StorageError::STORAGE_ERROR_PERMISSION_DENIED;
-  if (src_storage->get_storage_type() == StorageType::STORAGE_TYPE_OPTICAL)
-    return StorageError::STORAGE_ERROR_NOT_SUPPORTED;
   bool src_is_fs = src_storage->get_storage_type() == StorageType::STORAGE_TYPE_FILESYSTEM;
   bool dst_is_fs = dst_storage->get_storage_type() == StorageType::STORAGE_TYPE_FILESYSTEM;
   auto *src_fs = src_is_fs ? static_cast<FilesystemStorage *>(src_storage) : nullptr;
@@ -1133,5 +1123,118 @@ void fatfs_log_format_done(const char *tag, bool want_exfat) {
   ESP_LOGI(tag, "file_system: medium formatted as %s", want_exfat ? "exFAT" : "FAT32");
 }
 #endif  // USE_STORAGE_FILE_SYSTEM_SELECT
+
+OpticalFileHandle *OpticalStorage::file_of_(FileHandle *handle) {
+  for (auto &f : this->files_) {
+    if (handle == &f)
+      return f.in_use ? &f : nullptr;
+  }
+  return nullptr;
+}
+
+StorageError OpticalStorage::open(const char *path, FileHandle *&handle, OpenMode mode) {
+  if (mode != OpenMode::OPEN_MODE_READ)
+    return StorageError::STORAGE_ERROR_PERMISSION_DENIED;
+  if (!this->has_medium())
+    return StorageError::STORAGE_ERROR_NOT_READY;
+  uint64_t offset = 0;
+  uint64_t length = 0;
+  StorageError err = this->find_extent_(path, &offset, &length);
+  if (err != StorageError::STORAGE_ERROR_OK)
+    return err;
+  for (auto &f : this->files_) {
+    if (f.in_use)
+      continue;
+    f.in_use = true;
+    f.storage = this;
+    f.file = nullptr;
+    f.path = this->get_mount_path();
+    f.start = offset;
+    f.size = length;
+    f.pos = 0;
+    f.medium = nullptr;
+    f.medium_pos = UINT64_MAX;
+    err = this->open_medium_(&f);
+    if (err != StorageError::STORAGE_ERROR_OK) {
+      f.in_use = false;
+      return err;
+    }
+    handle = &f;
+    return StorageError::STORAGE_ERROR_OK;
+  }
+  return StorageError::STORAGE_ERROR_TOO_MANY_OPEN_FILES;
+}
+
+StorageError OpticalStorage::close(FileHandle *handle) {
+  OpticalFileHandle *f = this->file_of_(handle);
+  if (f == nullptr)
+    return StorageError::STORAGE_ERROR_INVALID_ARGS;
+  this->close_medium_(f);
+  f->medium = nullptr;
+  f->in_use = false;
+  return StorageError::STORAGE_ERROR_OK;
+}
+
+StorageError OpticalStorage::read(FileHandle *handle, uint8_t *buf, size_t len, size_t *bytes_transferred) {
+  OpticalFileHandle *f = this->file_of_(handle);
+  if (f == nullptr)
+    return StorageError::STORAGE_ERROR_INVALID_ARGS;
+  if (!this->has_medium())
+    return StorageError::STORAGE_ERROR_NOT_READY;
+  const uint64_t left = f->pos < f->size ? f->size - f->pos : 0;
+  const size_t want = len < left ? len : static_cast<size_t>(left);
+  size_t got = 0;
+  StorageError err = StorageError::STORAGE_ERROR_OK;
+  if (want > 0)
+    err = this->read_medium_(f, f->start + f->pos, buf, want, &got);
+  if (err == StorageError::STORAGE_ERROR_OK)
+    f->pos += got;
+  if (bytes_transferred != nullptr)
+    *bytes_transferred = err == StorageError::STORAGE_ERROR_OK ? got : 0;
+  return err;
+}
+
+StorageError OpticalStorage::seek(FileHandle *handle, int64_t offset, SeekMode mode) {
+  OpticalFileHandle *f = this->file_of_(handle);
+  if (f == nullptr)
+    return StorageError::STORAGE_ERROR_INVALID_ARGS;
+  int64_t base = 0;
+  switch (mode) {
+    case SeekMode::SEEK_MODE_SET:
+      base = 0;
+      break;
+    case SeekMode::SEEK_MODE_CUR:
+      base = static_cast<int64_t>(f->pos);
+      break;
+    case SeekMode::SEEK_MODE_END:
+      base = static_cast<int64_t>(f->size);
+      break;
+    default:
+      return StorageError::STORAGE_ERROR_INVALID_ARGS;
+  }
+  const int64_t target = base + offset;
+  if (target < 0)
+    return StorageError::STORAGE_ERROR_INVALID_ARGS;
+  f->pos = static_cast<uint64_t>(target);
+  return StorageError::STORAGE_ERROR_OK;
+}
+
+StorageError OpticalStorage::tell(FileHandle *handle, uint64_t *position) {
+  OpticalFileHandle *f = this->file_of_(handle);
+  if (f == nullptr)
+    return StorageError::STORAGE_ERROR_INVALID_ARGS;
+  *position = f->pos;
+  return StorageError::STORAGE_ERROR_OK;
+}
+
+void OpticalStorage::close_all_files_() {
+  for (auto &f : this->files_) {
+    if (!f.in_use)
+      continue;
+    this->close_medium_(&f);
+    f.medium = nullptr;
+    f.in_use = false;
+  }
+}
 
 }  // namespace esphome::storage

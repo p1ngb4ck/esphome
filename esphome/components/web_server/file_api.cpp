@@ -354,9 +354,7 @@ void WebServerFileApi::handle_storages_(AsyncWebServerRequest *request) {
           *ctx->out += "{\"mount_path\":\"";
           append_json_escaped(*ctx->out, s->get_mount_path());
           *ctx->out += "\",\"type\":\"";
-          *ctx->out += type == storage::StorageType::STORAGE_TYPE_NETWORK   ? "network"
-                       : type == storage::StorageType::STORAGE_TYPE_OPTICAL ? "optical"
-                                                                             : "filesystem";
+          *ctx->out += type == storage::StorageType::STORAGE_TYPE_NETWORK ? "network" : "filesystem";
           // Close the type string value, then per-direction capabilities: a plain "mountable"
           // bool cannot express drivers whose medium mounts itself (USB hotplug) and only
           // supports safe-eject -- the UI must gate each button separately (see

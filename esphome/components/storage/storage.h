@@ -63,7 +63,6 @@ enum class StorageType : uint8_t {
   STORAGE_TYPE_FILESYSTEM,
   STORAGE_TYPE_NETWORK,
   STORAGE_TYPE_KEY_VALUE,
-  STORAGE_TYPE_OPTICAL,
 };
 
 struct StorageInfo {
@@ -439,38 +438,52 @@ class NetworkStorage : public PathStorage {
   virtual StorageError truncate(const char *path, uint64_t size) = 0;
 };
 
-struct OpticalExtent {
-  uint64_t offset{0};
-  uint64_t length{0};
+struct OpticalFileHandle : public FileHandle {
+  uint64_t start{0};
+  uint64_t size{0};
+  uint64_t pos{0};
+  uint64_t medium_pos{0};
+  FileHandle *medium{nullptr};
 };
 
-struct OpticalMedium {
-  PathStorage *image_storage{nullptr};
-  const char *image_path{nullptr};
-};
-
-class OpticalStorage : public PathStorage, public MountableStorage {
+class OpticalStorage : public FilesystemStorage, public MountableStorage {
  public:
   static constexpr uint32_t SECTOR_SIZE = 2048;
+  static constexpr size_t MAX_OPEN_FILES = 4;
 
-  StorageType get_storage_type() const override { return StorageType::STORAGE_TYPE_OPTICAL; }
   OpticalStorage *as_optical() override { return this; }
   MountableStorage *as_mountable() override { return this; }
 
   virtual bool is_emulated() const = 0;
   virtual bool has_medium() const = 0;
-  virtual StorageError get_extent(const char *path, OpticalExtent *out) = 0;
-  virtual StorageError get_medium(OpticalMedium *out) = 0;
-  virtual StorageError read_medium(uint64_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) {
-    return StorageError::STORAGE_ERROR_NOT_SUPPORTED;
-  }
 
+  StorageError sync() override { return StorageError::STORAGE_ERROR_OK; }
+  StorageError open(const char *path, FileHandle *&handle, OpenMode mode) override;
+  StorageError close(FileHandle *handle) override;
+  StorageError read(FileHandle *handle, uint8_t *buf, size_t len, size_t *bytes_transferred) override;
+  StorageError write(FileHandle *handle, const uint8_t *buf, size_t len, size_t *bytes_transferred) override {
+    return StorageError::STORAGE_ERROR_PERMISSION_DENIED;
+  }
+  using FilesystemStorage::seek;
+  StorageError seek(FileHandle *handle, int64_t offset, SeekMode mode) override;
+  StorageError tell(FileHandle *handle, uint64_t *position) override;
   StorageError mkdir(const char *path) override { return StorageError::STORAGE_ERROR_PERMISSION_DENIED; }
   StorageError rmdir(const char *path) override { return StorageError::STORAGE_ERROR_PERMISSION_DENIED; }
   StorageError remove(const char *path) override { return StorageError::STORAGE_ERROR_PERMISSION_DENIED; }
   StorageError rename(const char *old_path, const char *new_path) override {
     return StorageError::STORAGE_ERROR_PERMISSION_DENIED;
   }
+
+ protected:
+  virtual StorageError find_extent_(const char *path, uint64_t *offset, uint64_t *length) = 0;
+  virtual StorageError open_medium_(OpticalFileHandle *file) { return StorageError::STORAGE_ERROR_OK; }
+  virtual void close_medium_(OpticalFileHandle *file) {}
+  virtual StorageError read_medium_(OpticalFileHandle *file, uint64_t offset, uint8_t *buf, size_t len,
+                                    size_t *bytes_transferred) = 0;
+  OpticalFileHandle *file_of_(FileHandle *handle);
+  void close_all_files_();
+
+  OpticalFileHandle files_[MAX_OPEN_FILES]{};
 };
 
 // Runtime registry of all storage devices. Initializes before any driver (setup_priority::BUS);
