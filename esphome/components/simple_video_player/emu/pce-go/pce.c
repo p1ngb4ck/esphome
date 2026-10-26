@@ -7,7 +7,7 @@
 #include "gfx.h"
 
 // Global struct containing our emulated hardware status
-PCE_t *PCE_ptr;
+PCE_t PCE;
 
 // Memory Mapping
 uint8_t *PageR[8];

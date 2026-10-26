@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <esp_attr.h>
 #include <ctype.h>
 #include <unistd.h>
 #include <time.h>
@@ -67,7 +68,7 @@ int  VRAMPages   = 2;              /* Number of VRAM pages   */
 byte ExitNow     = 0;              /* 1 = Exit the emulator  */
 
 /** Main hardware: CPU, RAM, VRAM, mappers *******************/
-Z80 *msx_cpu_ptr;
+SPM_DRAM_ATTR Z80 msx_cpu;
 
 byte *VRAM,*VPAGE;                 /* Video RAM              */
 

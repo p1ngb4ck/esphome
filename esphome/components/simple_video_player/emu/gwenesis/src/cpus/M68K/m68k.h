@@ -361,8 +361,7 @@ typedef struct
 } m68ki_cpu_core;
 
 /* CPU cores */
-extern m68ki_cpu_core *m68k_ptr;
-#define m68k (*m68k_ptr)
+extern m68ki_cpu_core m68k;
 
 /* ======================================================================== */
 /* ============================== CALLBACKS =============================== */

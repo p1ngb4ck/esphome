@@ -12,13 +12,13 @@
 /**
  * Save state file description.
  */
-#define SVAR_1(k, v) { {k, 1, 1}, (uintptr_t)&v }
-#define SVAR_2(k, v) { {k, 2, 2}, (uintptr_t)&v }
-#define SVAR_4(k, v) { {k, 4, 4}, (uintptr_t)&v }
-#define SVAR_A(k, v) { {k, 0, sizeof(v)}, (uintptr_t)&v }
-#define SVAR_N(k, v, n) { {k, 0, n}, (uintptr_t)&v }
-#define SVAR_P(k, v, n) { {k, 5, n}, (uintptr_t)&v }
-#define SVAR_END { {"END", 0, 0}, 0 }
+#define SVAR_1(k, v) { {k, 1, 1}, &v }
+#define SVAR_2(k, v) { {k, 2, 2}, &v }
+#define SVAR_4(k, v) { {k, 4, 4}, &v }
+#define SVAR_A(k, v) { {k, 0, sizeof(v)}, &v }
+#define SVAR_N(k, v, n) { {k, 0, n}, &v }
+#define SVAR_P(k, v, n) { {k, 5, n}, &v }
+#define SVAR_END { {"END", 0, 0}, NULL }
 
 typedef struct __attribute__((packed))
 {
@@ -30,12 +30,10 @@ typedef struct __attribute__((packed))
 typedef const struct
 {
 	block_hdr_t desc;
-	uintptr_t off;
+	void *ptr;
 } save_var_t;
 
 static const char SAVESTATE_HEADER[8] = "PCE_V010";
-#undef PCE
-#define PCE (*(PCE_t *)0)
 static save_var_t SaveStateVars[] =
 {
 	// Arrays
@@ -77,14 +75,6 @@ static save_var_t SaveStateVars[] =
 
 	SVAR_END
 };
-#undef PCE
-#define PCE (*PCE_ptr)
-
-static void *svar_ptr(save_var_t *var)
-{
-	void *ptr = (uint8_t *)PCE_ptr + var->off;
-	return var->desc.type == 5 ? *((void **)ptr) : ptr;
-}
 
 #define TWO_PART_ROM 0x0001
 #define ONBOARD_RAM  0x0100
@@ -369,11 +359,11 @@ LoadState(const char *name)
 	{
 		size_t block_end = ftell(fp) + block.len;
 
-		for (save_var_t *var = SaveStateVars; var->desc.len != 0; var++)
+		for (save_var_t *var = SaveStateVars; var->ptr; var++)
 		{
 			if (strncmp(var->desc.key, block.key, 12) == 0)
 			{
-				void *ptr = svar_ptr(var);
+				void *ptr = var->desc.type == 5 ? *((void**)var->ptr) : var->ptr;
 				size_t len = MIN((size_t)var->desc.len, (size_t)block.len);
 				if (!fread(ptr, len, 1, fp))
 				{
@@ -421,9 +411,9 @@ SaveState(const char *name)
 
 	fwrite(SAVESTATE_HEADER, sizeof(SAVESTATE_HEADER), 1, fp);
 
-	for (save_var_t *var = SaveStateVars; var->desc.len != 0; var++)
+	for (save_var_t *var = SaveStateVars; var->ptr; var++)
 	{
-		void *ptr = svar_ptr(var);
+		void *ptr = var->desc.type == 5 ? *((void**)var->ptr) : var->ptr;
 		size_t len = var->desc.len;
 		if (!fwrite(&var->desc, sizeof(var->desc), 1, fp))
 		{
