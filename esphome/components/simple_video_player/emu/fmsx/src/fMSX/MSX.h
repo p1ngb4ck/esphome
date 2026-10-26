@@ -241,7 +241,8 @@ extern byte UPeriod;                  /* % of frames to draw */
 extern void (*RefreshLine[MAXSCREEN+2])(byte Y);
 /*************************************************************/
 
-extern Z80  CPU;                      /* CPU state/registers */
+extern Z80 *CPU_ptr;
+#define CPU (*CPU_ptr)
 extern byte *VRAM;                    /* Video RAM           */
 extern byte VDP[64];                  /* VDP control reg-ers */
 extern byte VDPStatus[16];            /* VDP status reg-ers  */

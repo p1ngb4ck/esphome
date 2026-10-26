@@ -338,6 +338,9 @@ bool msx_port_load(uint8_t *rom, size_t size, const char *path, uint32_t rate, u
     s_channels = channels > 1 ? 2 : 1;
     s_rate = rate;
     s_mix_cap = rate / 25 + 1;
+    CPU_ptr = emu_calloc_fast(1, sizeof(Z80));
+    if (CPU_ptr == NULL)
+        return false;
     s_frame = calloc(WIDTH * HEIGHT, sizeof(uint16_t));
     s_mix = calloc(s_mix_cap * s_channels, sizeof(int16_t));
     if (s_frame == NULL || s_mix == NULL)
