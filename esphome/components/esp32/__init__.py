@@ -3441,6 +3441,9 @@ async def to_code(config):
         # (espressif/esp-idf#19171). restart_fix.cpp stalls it and waits for the sync engine first.
         cg.add_build_flag("-Wl,--wrap=esp_restart_noos")
         cg.add_define("USE_ESP32_P4_RESTART_FIX")
+        cg.add_build_flag("-Wl,--wrap=heap_caps_malloc_default")
+        cg.add_build_flag("-Wl,--undefined=__wrap_heap_caps_malloc_default")
+        cg.add_define("USE_ESP32_P4_SMALL_ALLOC_RETENTION")
     conf = config[CONF_FRAMEWORK]
 
     # Check if using ESP-IDF toolchain
