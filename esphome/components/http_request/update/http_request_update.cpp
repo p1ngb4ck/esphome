@@ -108,6 +108,7 @@ void HttpRequestUpdate::update() {
 #endif
   // Allocated once per check; every path in the task returns via its single defer, which frees it.
   auto *result = new TaskResult();
+  result->flash_frequency_mhz = this->flash_frequency_mhz_;
   this->begin_check_(result);
 #ifdef USE_ESP32
   this->task_result_ = result;
@@ -170,7 +171,8 @@ void HttpRequestUpdate::update_task(void *params) {
 
     bool valid = false;
     {  // Scope to ensure JsonDocument is destroyed before deallocating buffer
-      valid = json::parse_json(data, read_index, [info](JsonObject root) -> bool {
+      const uint8_t wanted_mhz = result->flash_frequency_mhz;
+      valid = json::parse_json(data, read_index, [info, wanted_mhz](JsonObject root) -> bool {
         if (!root[ESPHOME_F("name")].is<const char *>() || !root[ESPHOME_F("version")].is<const char *>() ||
             !root[ESPHOME_F("builds")].is<JsonArray>()) {
           ESP_LOGE(TAG, "Manifest does not contain required fields");
@@ -180,33 +182,43 @@ void HttpRequestUpdate::update_task(void *params) {
         info->latest_version = root[ESPHOME_F("version")].as<std::string>();
 
         auto builds_array = root[ESPHOME_F("builds")].as<JsonArray>();
+        JsonObject chosen;
         for (auto build : builds_array) {
           if (!build[ESPHOME_F("chipFamily")].is<const char *>()) {
             ESP_LOGE(TAG, "Manifest does not contain required fields");
             return false;
           }
-          if (build[ESPHOME_F("chipFamily")] == ESPHOME_VARIANT) {
-            if (!build[ESPHOME_F("ota")].is<JsonObject>()) {
-              ESP_LOGE(TAG, "Manifest does not contain required fields");
-              return false;
-            }
-            JsonObject ota = build[ESPHOME_F("ota")].as<JsonObject>();
-            if (!ota[ESPHOME_F("path")].is<const char *>() || !ota[ESPHOME_F("md5")].is<const char *>()) {
-              ESP_LOGE(TAG, "Manifest does not contain required fields");
-              return false;
-            }
-            info->firmware_url = ota[ESPHOME_F("path")].as<std::string>();
-            info->md5 = ota[ESPHOME_F("md5")].as<std::string>();
-
-            if (ota[ESPHOME_F("summary")].is<const char *>())
-              info->summary = ota[ESPHOME_F("summary")].as<std::string>();
-            if (ota[ESPHOME_F("release_url")].is<const char *>())
-              info->release_url = ota[ESPHOME_F("release_url")].as<std::string>();
-
-            return true;
+          if (build[ESPHOME_F("chipFamily")] != ESPHOME_VARIANT)
+            continue;
+          const int build_mhz =
+              build[ESPHOME_F("flash_frequency_mhz")].is<int>() ? build[ESPHOME_F("flash_frequency_mhz")].as<int>() : 0;
+          if (chosen.isNull())
+            chosen = build.as<JsonObject>();
+          if (wanted_mhz == 0 || build_mhz == wanted_mhz) {
+            chosen = build.as<JsonObject>();
+            break;
           }
         }
-        return false;
+        if (chosen.isNull())
+          return false;
+        if (!chosen[ESPHOME_F("ota")].is<JsonObject>()) {
+          ESP_LOGE(TAG, "Manifest does not contain required fields");
+          return false;
+        }
+        JsonObject ota = chosen[ESPHOME_F("ota")].as<JsonObject>();
+        if (!ota[ESPHOME_F("path")].is<const char *>() || !ota[ESPHOME_F("md5")].is<const char *>()) {
+          ESP_LOGE(TAG, "Manifest does not contain required fields");
+          return false;
+        }
+        info->firmware_url = ota[ESPHOME_F("path")].as<std::string>();
+        info->md5 = ota[ESPHOME_F("md5")].as<std::string>();
+
+        if (ota[ESPHOME_F("summary")].is<const char *>())
+          info->summary = ota[ESPHOME_F("summary")].as<std::string>();
+        if (ota[ESPHOME_F("release_url")].is<const char *>())
+          info->release_url = ota[ESPHOME_F("release_url")].as<std::string>();
+
+        return true;
       });
     }
     allocator.deallocate(data, content_length);
