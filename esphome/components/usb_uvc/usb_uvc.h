@@ -9,6 +9,7 @@
 #include "uvc_types.h"
 #ifdef USE_CAMERA
 #include "esphome/components/camera/camera.h"
+#include "esphome/components/camera/encoder.h"
 #endif
 
 #include <atomic>
@@ -206,14 +207,23 @@ class UVCClient : public usb_host::USBClient {
 /// A held MJPEG frame of a UVC camera as a camera image; the frame is released when the last reference goes.
 class UvcImage : public camera::CameraImage {
  public:
-  UvcImage(UVCClient *client, uint32_t token, uint8_t *data, size_t length, uint8_t requesters)
-      : client_(client), token_(token), data_(data), length_(length), requesters_(requesters) {}
+  UvcImage(UVCClient *client, uint32_t token, uint8_t *data, size_t length, uint8_t requesters,
+           camera::ImageFormat format = camera::IMAGE_FORMAT_JPEG, bool key = true)
+      : client_(client),
+        token_(token),
+        data_(data),
+        length_(length),
+        requesters_(requesters),
+        format_(format),
+        key_(key) {}
   ~UvcImage() override { this->client_->release_frame(this->token_); }
   uint8_t *get_data_buffer() override { return this->data_; }
   size_t get_data_length() override { return this->length_; }
   bool was_requested_by(camera::CameraRequester requester) const override {
     return (this->requesters_ & (1U << requester)) != 0;
   }
+  camera::ImageFormat get_format() const override { return this->format_; }
+  bool is_key_frame() const override { return this->key_; }
 
  protected:
   UVCClient *client_;
@@ -221,6 +231,31 @@ class UvcImage : public camera::CameraImage {
   uint8_t *data_;
   size_t length_;
   uint8_t requesters_;
+  camera::ImageFormat format_;
+  bool key_;
+};
+
+class UvcCamera;
+
+class UvcEncodedImage : public camera::CameraImage {
+ public:
+  UvcEncodedImage(UvcCamera *camera, uint8_t *data, size_t length, uint8_t requesters, bool key)
+      : camera_(camera), data_(data), length_(length), requesters_(requesters), key_(key) {}
+  ~UvcEncodedImage() override;
+  uint8_t *get_data_buffer() override { return this->data_; }
+  size_t get_data_length() override { return this->length_; }
+  bool was_requested_by(camera::CameraRequester requester) const override {
+    return (this->requesters_ & (1U << requester)) != 0;
+  }
+  camera::ImageFormat get_format() const override { return camera::IMAGE_FORMAT_H264; }
+  bool is_key_frame() const override { return this->key_; }
+
+ protected:
+  UvcCamera *camera_;
+  uint8_t *data_;
+  size_t length_;
+  uint8_t requesters_;
+  bool key_;
 };
 
 class UvcImageReader : public camera::CameraImageReader {
@@ -246,6 +281,12 @@ class UvcImageReader : public camera::CameraImageReader {
 class UvcCamera : public camera::Camera {
  public:
   void set_client(UVCClient *client) { this->client_ = client; }
+  void set_h264_encoder(camera::Encoder *encoder) { this->h264_encoder_ = encoder; }
+  bool supports_format(camera::ImageFormat) const override { return true; }
+  void start_stream_as(camera::CameraRequester requester, camera::ImageFormat format) override;
+  void stop_stream_as(camera::CameraRequester requester, camera::ImageFormat format) override;
+  void request_key_frame() override;
+  void on_encoded_released();
   void setup() override;
   void add_listener(camera::CameraListener *listener) override { this->listeners_.push_back(listener); }
   camera::CameraImageReader *create_image_reader() override { return new UvcImageReader(); }  // NOLINT
@@ -256,8 +297,18 @@ class UvcCamera : public camera::Camera {
  protected:
   void on_frame_(uint8_t camera, const uint8_t *data, size_t length, const UvcFrameInfo &info);
   void update_stream_();
+  void pick_format_();
+  void on_h264_frame_(uint8_t camera, const uint8_t *data, size_t length, const UvcFrameInfo &info);
+  void stop_encoder_();
 
   UVCClient *client_{nullptr};
+  camera::Encoder *h264_encoder_{nullptr};
+  uint8_t h264_{0};
+  int16_t jpeg_pick_{-1};
+  bool h264_picked_{false};
+  bool encoder_started_{false};
+  std::atomic<bool> encoded_held_{false};
+  bool h264_warned_{false};
   std::vector<camera::CameraListener *> listeners_{};
   uint8_t single_{0};     // requesters waiting for one image
   uint8_t streaming_{0};  // requesters streaming

@@ -5,6 +5,7 @@ import re
 from esphome import automation, pins
 import esphome.codegen as cg
 from esphome.components import esp32, i2c
+from esphome.components.camera_encoder import H264Encoder
 from esphome.components.esp32 import add_idf_component, add_idf_sdkconfig_option
 from esphome.components.esp32.const import VARIANT_ESP32P4
 import esphome.config_validation as cv
@@ -41,6 +42,8 @@ from .const import (
     CONF_VERTICAL_FLIP,
 )
 from .sensors import SENSOR_FORMATS
+
+CONF_H264_ENCODER = "h264_encoder"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -114,6 +117,14 @@ def validate_resolution(value: str) -> tuple[int, int]:
     return width, height
 
 
+def _validate_h264_format(config: ConfigType) -> ConfigType:
+    if CONF_H264_ENCODER in config and config[CONF_PIXEL_FORMAT] not in ("RGB565", "YUV422"):
+        raise cv.Invalid(
+            f"{CONF_H264_ENCODER} needs {CONF_PIXEL_FORMAT} RGB565 or YUV422, not {config[CONF_PIXEL_FORMAT]}"
+        )
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.ENTITY_BASE_SCHEMA.extend(
         {
@@ -124,6 +135,7 @@ CONFIG_SCHEMA = cv.All(
                 PIXEL_FORMATS, upper=True
             ),
             cv.Optional(CONF_JPEG_QUALITY, default=40): cv.int_range(min=10, max=100),
+            cv.Optional(CONF_H264_ENCODER): cv.use_id(H264Encoder),
             cv.Optional(CONF_FRAMERATE, default="10 fps"): cv.All(
                 cv.framerate, cv.Range(min=1, max=60)
             ),
@@ -174,6 +186,7 @@ CONFIG_SCHEMA = cv.All(
     ).extend(cv.COMPONENT_SCHEMA),
     cv.only_with_framework(Framework.ESP_IDF),
     esp32.only_on_variant(supported=[VARIANT_ESP32P4]),
+    _validate_h264_format,
 )
 
 SETTERS = {
@@ -203,6 +216,8 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_init_ldo(config.get(CONF_INIT_LDO)))
     cg.add(var.set_framerate(int(config[CONF_FRAMERATE])))
     cg.add(var.set_sccb_frequency(int(config[CONF_SCCB_FREQUENCY])))
+    if (h264 := config.get(CONF_H264_ENCODER)) is not None:
+        cg.add(var.set_h264_encoder(await cg.get_variable(h264)))
 
     i2c_bus = await cg.get_variable(config[CONF_I2C_ID])
     cg.add(var.set_i2c_bus(i2c_bus))

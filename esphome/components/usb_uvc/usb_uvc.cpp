@@ -715,6 +715,148 @@ void UvcCamera::start_stream(camera::CameraRequester requester) {
   this->update_stream_();
 }
 
+void UvcCamera::start_stream_as(camera::CameraRequester requester, camera::ImageFormat format) {
+  if (format == camera::IMAGE_FORMAT_JPEG) {
+    this->start_stream(requester);
+    return;
+  }
+  this->h264_ |= static_cast<uint8_t>(1U << requester);
+  this->request_key_frame();
+  this->update_stream_();
+}
+
+void UvcCamera::stop_stream_as(camera::CameraRequester requester, camera::ImageFormat format) {
+  if (format == camera::IMAGE_FORMAT_JPEG) {
+    this->stop_stream(requester);
+    return;
+  }
+  this->h264_ &= static_cast<uint8_t>(~(1U << requester));
+  this->update_stream_();
+}
+
+void UvcCamera::request_key_frame() {
+  if (this->h264_encoder_ != nullptr)
+    this->h264_encoder_->request_key_frame();
+}
+
+void UvcCamera::on_encoded_released() {
+  this->encoded_held_.store(false);
+  this->defer([this]() {
+    if (this->h264_ == 0)
+      this->stop_encoder_();
+  });
+}
+
+void UvcCamera::stop_encoder_() {
+  if (this->encoder_started_ && !this->encoded_held_.load()) {
+    this->h264_encoder_->stop();
+    this->encoder_started_ = false;
+  }
+}
+
+UvcEncodedImage::~UvcEncodedImage() { this->camera_->on_encoded_released(); }
+
+static constexpr uint32_t FOURCC_H264 = 0x34363248;
+static constexpr uint32_t FOURCC_YUY2 = 0x32595559;
+
+void UvcCamera::pick_format_() {
+  if (this->camera_ == 0)
+    return;
+  const bool h264 = this->h264_ != 0 && this->single_ == 0 && this->streaming_ == 0;
+  if (h264 && !this->h264_picked_) {
+    int native = -1;
+    int raw = -1;
+    for (size_t i = 0; i < this->client_->frame_count(this->camera_); i++) {
+      const UvcFrameInfo *f = this->client_->frame_info(this->camera_, i);
+      const uint32_t area = static_cast<uint32_t>(f->width) * f->height;
+      if (f->format == UvcFormat::FRAME_BASED && f->fourcc == FOURCC_H264 && f->width <= 1920 &&
+          (native < 0 || area > static_cast<uint32_t>(this->client_->frame_info(this->camera_, native)->width) *
+                                    this->client_->frame_info(this->camera_, native)->height))
+        native = static_cast<int>(i);
+      if (this->h264_encoder_ != nullptr && f->format == UvcFormat::UNCOMPRESSED && f->fourcc == FOURCC_YUY2 &&
+          f->width % 16 == 0 && f->height % 16 == 0 && area <= 1280u * 720u &&
+          (raw < 0 || area > static_cast<uint32_t>(this->client_->frame_info(this->camera_, raw)->width) *
+                                 this->client_->frame_info(this->camera_, raw)->height))
+        raw = static_cast<int>(i);
+    }
+    const int pick = native >= 0 ? native : raw;
+    if (pick < 0) {
+      if (!this->h264_warned_)
+        ESP_LOGW(TAG, "The camera offers neither H.264 nor YUY2 (with an h264_encoder): no H.264 stream");
+      this->h264_warned_ = true;
+      return;
+    }
+    this->jpeg_pick_ = static_cast<int16_t>(this->client_->selected(this->camera_));
+    this->h264_picked_ = true;
+    if (pick != this->jpeg_pick_)
+      this->client_->select(this->camera_, static_cast<size_t>(pick));
+  } else if (!h264 && this->h264_picked_) {
+    this->h264_picked_ = false;
+    if (this->jpeg_pick_ >= 0 && this->jpeg_pick_ != this->client_->selected(this->camera_))
+      this->client_->select(this->camera_, static_cast<size_t>(this->jpeg_pick_));
+    this->jpeg_pick_ = -1;
+  }
+  if (this->h264_ == 0)
+    this->stop_encoder_();
+}
+
+static bool access_unit_has_key(const uint8_t *data, size_t size) {
+  for (size_t i = 0; i + 3 < size; i++) {
+    if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) {
+      const uint8_t type = data[i + 3] & 0x1F;
+      if (type == 5 || type == 7)
+        return true;
+      i += 2;
+    }
+  }
+  return false;
+}
+
+void UvcCamera::on_h264_frame_(uint8_t camera, const uint8_t *data, size_t length, const UvcFrameInfo &info) {
+  if (info.format == UvcFormat::FRAME_BASED && info.fourcc == FOURCC_H264) {
+    const uint32_t token = this->client_->hold_frame(camera);
+    if (token == 0)
+      return;
+    auto image = std::make_shared<UvcImage>(this->client_, token, const_cast<uint8_t *>(data), length, this->h264_,
+                                            camera::IMAGE_FORMAT_H264, access_unit_has_key(data, length));
+    for (auto *listener : this->listeners_)
+      listener->on_camera_image(image);
+    return;
+  }
+  if (this->h264_encoder_ == nullptr || info.format != UvcFormat::UNCOMPRESSED || info.fourcc != FOURCC_YUY2 ||
+      this->encoded_held_.load())
+    return;
+  camera::CameraImageSpec spec{info.width, info.height, camera::PIXEL_FORMAT_YUYV};
+  if (!this->encoder_started_) {
+    if (!this->h264_encoder_->start(spec)) {
+      this->h264_ = 0;
+      this->pick_format_();
+      this->update_stream_();
+      return;
+    }
+    this->encoder_started_ = true;
+  }
+  class Frame : public camera::Buffer {
+   public:
+    Frame(const uint8_t *data, size_t length) : data_(const_cast<uint8_t *>(data)), length_(length) {}
+    uint8_t *get_data_buffer() override { return this->data_; }
+    size_t get_data_length() override { return this->length_; }
+
+   protected:
+    uint8_t *data_;
+    size_t length_;
+  };
+  Frame frame(data, length);
+  if (this->h264_encoder_->encode_pixels(&spec, &frame) != camera::ENCODER_ERROR_SUCCESS)
+    return;
+  camera::EncoderBuffer *out = this->h264_encoder_->get_output_buffer();
+  this->encoded_held_.store(true);
+  auto image = std::make_shared<UvcEncodedImage>(this, out->get_data(), out->get_size(), this->h264_,
+                                                 this->h264_encoder_->is_key_frame());
+  for (auto *listener : this->listeners_)
+    listener->on_camera_image(image);
+}
+
 void UvcCamera::stop_stream(camera::CameraRequester requester) {
   this->streaming_ &= static_cast<uint8_t>(~(1U << requester));
   this->update_stream_();
@@ -722,20 +864,28 @@ void UvcCamera::stop_stream(camera::CameraRequester requester) {
 
 // Started on the first plugged camera while anything is asked for, stopped (its start counted off) after
 void UvcCamera::update_stream_() {
-  const bool wanted = this->single_ != 0 || this->streaming_ != 0;
+  const bool wanted = this->single_ != 0 || this->streaming_ != 0 || this->h264_ != 0;
   if (wanted && this->camera_ == 0) {
     const uint8_t camera = this->client_->camera_at(0);
     if (camera != 0) {
       this->camera_ = camera;
+      this->pick_format_();
       this->client_->start(camera);
     }
   } else if (!wanted && this->camera_ != 0) {
+    this->pick_format_();
     this->client_->stop(this->camera_);
     this->camera_ = 0;
+  } else {
+    this->pick_format_();
   }
 }
 
 void UvcCamera::on_frame_(uint8_t camera, const uint8_t *data, size_t length, const UvcFrameInfo &info) {
+  if (camera == this->camera_ && this->h264_ != 0 && info.format != UvcFormat::MJPEG) {
+    this->on_h264_frame_(camera, data, length, info);
+    return;
+  }
   const uint8_t requesters = this->single_ | this->streaming_;
   if (camera != this->camera_ || requesters == 0)
     return;

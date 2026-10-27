@@ -1190,6 +1190,8 @@ void APIConnection::set_camera_state(std::shared_ptr<camera::CameraImage> image)
     return;
   if (this->image_reader_ && this->image_reader_->available())
     return;
+  if (image->get_format() != esphome::camera::IMAGE_FORMAT_JPEG)
+    return;
   if (!image->was_requested_by(esphome::camera::API_REQUESTER) && !image->was_requested_by(esphome::camera::IDLE))
     return;
   if (!this->image_reader_) {

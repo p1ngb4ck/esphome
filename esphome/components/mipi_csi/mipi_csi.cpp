@@ -498,6 +498,12 @@ void MipiCsiCamera::finish_stop_() {
     this->fd_ = -1;
   }
   this->close_jpeg_();
+  this->h264_on_.store(false);
+  this->h264_ready_.store(false);
+  if (this->h264_started_ && this->h264_free_.load()) {
+    this->h264_encoder_->stop();
+    this->h264_started_ = false;
+  }
   if (this->capture_tcb_ != nullptr) {
     heap_caps_free(this->capture_tcb_);
     this->capture_tcb_ = nullptr;
@@ -588,6 +594,9 @@ void MipiCsiCamera::capture_task(void *param) {
       self->enable_loop_soon_any_context();
       App.wake_loop_threadsafe();
     }
+
+    if (settled && self->h264_on_.load() && self->h264_free_.load())
+      self->encode_h264_(self->buffers_[buffer.index]);
 
     // Busy first, then the buffer read: a buffer ended meanwhile is either seen as gone or waited for (loop)
     self->preview_busy_.store(true);
@@ -683,6 +692,8 @@ void MipiCsiCamera::loop() {
     }
   }
 
+  this->h264_step_();
+
   // Release the previous image once every consumer has finished reading it, which frees the
   // encoder's output buffer for the next frame.
   if (this->current_image_ && this->current_image_.use_count() == 1) {
@@ -715,8 +726,8 @@ void MipiCsiCamera::loop() {
     this->disable_loop();
     return;
   }
-  if ((this->preview_buffer_.load() != nullptr || this->direct_.load()) && this->single_requesters_ == 0 &&
-      this->stream_requesters_ == 0) {
+  if ((this->preview_buffer_.load() != nullptr || this->direct_.load() || this->h264_started_) &&
+      this->single_requesters_ == 0 && this->stream_requesters_ == 0) {
     this->close_jpeg_();   // no API image wanted: the JPEG output back to the pool
     this->disable_loop();  // only the preview / direct frames: the task wakes the loop with each frame
     return;
@@ -853,6 +864,97 @@ void MipiCsiCamera::stop_stream(camera::CameraRequester requester) {
   this->stream_requesters_ &= ~(1U << requester);
   this->enable_loop_soon_any_context();
 }
+
+bool MipiCsiCamera::h264_spec_(camera::CameraImageSpec *spec) const {
+  spec->width = this->width_;
+  spec->height = this->height_;
+  if (this->pixel_format_ == PixelFormat::PIXEL_FORMAT_RGB565) {
+    spec->format = camera::PIXEL_FORMAT_RGB565;
+    return true;
+  }
+  if (this->pixel_format_ == PixelFormat::PIXEL_FORMAT_YUV422) {
+    spec->format = camera::PIXEL_FORMAT_UYVY;
+    return true;
+  }
+  return false;
+}
+
+void MipiCsiCamera::encode_h264_(const FrameBuffer &frame) {
+  this->h264_encoding_.store(true);
+  if (this->h264_on_.load()) {
+    camera::CameraImageSpec spec{};
+    this->h264_spec_(&spec);
+    FrameView view(frame.data, this->expected_frame_size_);
+    if (this->h264_encoder_->encode_pixels(&spec, &view) == camera::ENCODER_ERROR_SUCCESS) {
+      this->h264_length_.store(this->h264_encoder_->get_output_buffer()->get_size());
+      this->h264_key_.store(this->h264_encoder_->is_key_frame());
+      this->h264_free_.store(false);
+      this->h264_ready_.store(true);
+    }
+  }
+  this->h264_encoding_.store(false);
+  this->enable_loop_soon_any_context();
+  App.wake_loop_threadsafe();
+}
+
+void MipiCsiCamera::h264_step_() {
+  if (this->h264_encoder_ == nullptr)
+    return;
+  const uint8_t requesters = this->h264_requesters_.load();
+  if (requesters != 0 && !this->h264_started_ && this->state_ == State::RUNNING) {
+    camera::CameraImageSpec spec{};
+    if (!this->h264_spec_(&spec) || !this->h264_encoder_->start(spec)) {
+      ESP_LOGE(TAG, "No H.264 stream for this camera format; the H.264 requests are dropped");
+      this->h264_requesters_.store(0);
+      return;
+    }
+    this->h264_started_ = true;
+    this->h264_free_.store(true);
+    this->h264_ready_.store(false);
+    this->h264_on_.store(true);
+  }
+  if (this->h264_ready_.exchange(false)) {
+    auto image = std::make_shared<MipiCsiH264Image>(this, this->h264_encoder_->get_output_buffer()->get_data(),
+                                                    this->h264_length_.load(), requesters, this->h264_key_.load());
+    for (auto *listener : this->listeners_)
+      listener->on_camera_image(image);
+  }
+  if (requesters == 0 && this->h264_started_) {
+    this->h264_on_.store(false);
+    if (!this->h264_encoding_.load() && this->h264_free_.load()) {
+      this->h264_encoder_->stop();
+      this->h264_started_ = false;
+    }
+  }
+}
+
+void MipiCsiCamera::start_stream_as(camera::CameraRequester requester, camera::ImageFormat format) {
+  if (format == camera::IMAGE_FORMAT_JPEG) {
+    this->start_stream(requester);
+    return;
+  }
+  if (this->h264_encoder_ == nullptr)
+    return;
+  this->h264_requesters_.fetch_or(static_cast<uint8_t>(1U << requester));
+  this->h264_encoder_->request_key_frame();
+  this->enable_loop_soon_any_context();
+}
+
+void MipiCsiCamera::stop_stream_as(camera::CameraRequester requester, camera::ImageFormat format) {
+  if (format == camera::IMAGE_FORMAT_JPEG) {
+    this->stop_stream(requester);
+    return;
+  }
+  this->h264_requesters_.fetch_and(static_cast<uint8_t>(~(1U << requester)));
+  this->enable_loop_soon_any_context();
+}
+
+void MipiCsiCamera::request_key_frame() {
+  if (this->h264_encoder_ != nullptr)
+    this->h264_encoder_->request_key_frame();
+}
+
+MipiCsiH264Image::~MipiCsiH264Image() { this->camera_->on_h264_released(); }
 
 /* ---------------- MipiCsiImageReader ---------------- */
 

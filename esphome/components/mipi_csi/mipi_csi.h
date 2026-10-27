@@ -14,6 +14,7 @@
 #include <esp_cam_sensor_types.h>
 
 #include "esphome/components/camera/camera.h"
+#include "esphome/components/camera/encoder.h"
 #include "esphome/components/i2c/i2c_bus.h"
 #include "esphome/core/automation.h"
 #include "esphome/core/helpers.h"
@@ -62,6 +63,28 @@ class MipiCsiImage : public camera::CameraImage {
 
 class MipiCsiCamera;
 
+class MipiCsiH264Image : public camera::CameraImage {
+ public:
+  MipiCsiH264Image(MipiCsiCamera *camera, uint8_t *data, size_t length, uint8_t requesters, bool key)
+      : camera_(camera), data_(data), length_(length), requesters_(requesters), key_(key) {}
+  ~MipiCsiH264Image() override;
+
+  uint8_t *get_data_buffer() override { return this->data_; }
+  size_t get_data_length() override { return this->length_; }
+  bool was_requested_by(camera::CameraRequester requester) const override {
+    return (this->requesters_ & (1U << requester)) != 0;
+  }
+  camera::ImageFormat get_format() const override { return camera::IMAGE_FORMAT_H264; }
+  bool is_key_frame() const override { return this->key_; }
+
+ protected:
+  MipiCsiCamera *camera_;
+  uint8_t *data_;
+  size_t length_;
+  uint8_t requesters_;
+  bool key_;
+};
+
 /// Tracks how far a consumer has read into an image; tells the camera when it gives the image back.
 class MipiCsiImageReader : public camera::CameraImageReader {
  public:
@@ -99,6 +122,8 @@ class MipiCsiCamera final : public camera::Camera {
   }
   /// The HW JPEG encoder engine to encode with (shared with others; nullptr while none exists).
   void set_jpeg_encoder(jpeg_encoder_handle_t (*engine)()) { this->jpeg_engine_ = engine; }
+  void set_h264_encoder(camera::Encoder *encoder) { this->h264_encoder_ = encoder; }
+  camera::Encoder *get_h264_encoder() const { return this->h264_encoder_; }
   void set_sensor_name(const char *sensor_name) { this->sensor_name_ = sensor_name; }
   void set_resolution(uint16_t width, uint16_t height) {
     this->width_ = width;
@@ -138,6 +163,16 @@ class MipiCsiCamera final : public camera::Camera {
   void request_image(camera::CameraRequester requester) override;
   void start_stream(camera::CameraRequester requester) override;
   void stop_stream(camera::CameraRequester requester) override;
+  bool supports_format(camera::ImageFormat format) const override {
+    return format == camera::IMAGE_FORMAT_JPEG || this->h264_encoder_ != nullptr;
+  }
+  void start_stream_as(camera::CameraRequester requester, camera::ImageFormat format) override;
+  void stop_stream_as(camera::CameraRequester requester, camera::ImageFormat format) override;
+  void request_key_frame() override;
+  void on_h264_released() {
+    this->h264_free_.store(true);
+    this->enable_loop_soon_any_context();
+  }
   /// Main loop: every frame copied raw (the capture format) into @p buffer while it is set; the stream runs while
   /// set. nullptr ends it: the buffer goes back through the released callback once no copy into it is under way.
   void set_preview_buffer(uint8_t *buffer, size_t size);
@@ -168,6 +203,17 @@ class MipiCsiCamera final : public camera::Camera {
     size_t length;
   };
 
+  class FrameView : public camera::Buffer {
+   public:
+    FrameView(uint8_t *data, size_t length) : data_(data), length_(length) {}
+    uint8_t *get_data_buffer() override { return this->data_; }
+    size_t get_data_length() override { return this->length_; }
+
+   protected:
+    uint8_t *data_;
+    size_t length_;
+  };
+
   enum class State : uint8_t { IDLE, RUNNING, STOPPING };
 
   bool start_external_clock_();
@@ -194,8 +240,11 @@ class MipiCsiCamera final : public camera::Camera {
   bool read_back_format_(uint32_t expected_fourcc, uint8_t bytes_per_pixel, const char *name);
   bool has_requested_image_() const {
     return this->single_requesters_ != 0 || this->stream_requesters_ != 0 || this->preview_buffer_.load() != nullptr ||
-           this->direct_.load();
+           this->direct_.load() || this->h264_requesters_.load() != 0 || this->h264_started_;
   }
+  bool h264_spec_(camera::CameraImageSpec *spec) const;
+  void h264_step_();
+  void encode_h264_(const FrameBuffer &frame);
   uint8_t bytes_per_pixel_() const;
   bool settled_(uint32_t index);
   int32_t frame_level_(const FrameBuffer &frame) const;
@@ -278,6 +327,15 @@ class MipiCsiCamera final : public camera::Camera {
   std::vector<camera::CameraListener *> listeners_;
   std::atomic<uint8_t> single_requesters_{0};
   std::atomic<uint8_t> stream_requesters_{0};
+  camera::Encoder *h264_encoder_{nullptr};
+  std::atomic<uint8_t> h264_requesters_{0};
+  bool h264_started_{false};
+  std::atomic<bool> h264_on_{false};
+  std::atomic<bool> h264_free_{true};
+  std::atomic<bool> h264_encoding_{false};
+  std::atomic<bool> h264_ready_{false};
+  std::atomic<size_t> h264_length_{0};
+  std::atomic<bool> h264_key_{false};
   /// Requesters recorded when the frame currently being captured was asked for.
   uint8_t pending_requesters_{0};
 };

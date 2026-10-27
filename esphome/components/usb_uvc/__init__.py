@@ -5,6 +5,7 @@ from esphome.components.esp32 import (
     VARIANT_ESP32S3,
     only_on_variant,
 )
+from esphome.components.camera_encoder import H264Encoder
 from esphome.components.usb_host import USB_BLACKLIST_SCHEMA, setup_usb_match, usb_host_ns
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
@@ -23,6 +24,7 @@ CONF_NUM_URBS = "num_urbs"
 CONF_VID = "vid"
 CONF_PID = "pid"
 CONF_CAMERA = "camera"
+CONF_H264_ENCODER = "h264_encoder"
 
 usb_uvc_ns = cg.esphome_ns.namespace("usb_uvc")
 
@@ -55,7 +57,10 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_NUM_URBS, default=3): cv.int_range(min=1, max=8),
             # The first plugged camera as a Home Assistant camera entity (its MJPEG frames)
             cv.Optional(CONF_CAMERA): cv.ENTITY_BASE_SCHEMA.extend(
-                {cv.GenerateID(): cv.declare_id(UvcCamera)}
+                {
+                    cv.GenerateID(): cv.declare_id(UvcCamera),
+                    cv.Optional(CONF_H264_ENCODER): cv.use_id(H264Encoder),
+                }
             ).extend(cv.COMPONENT_SCHEMA),
         }
     ),
@@ -88,3 +93,5 @@ async def to_code(config):
         await setup_entity(cam, camera, "camera")
         await cg.register_component(cam, camera)
         cg.add(cam.set_client(var))
+        if (h264 := camera.get(CONF_H264_ENCODER)) is not None:
+            cg.add(cam.set_h264_encoder(await cg.get_variable(h264)))

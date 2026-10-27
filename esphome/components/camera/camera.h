@@ -13,13 +13,37 @@ namespace esphome::camera {
  *  WEB_REQUESTER: ESP32 web server request an image. Ignored by API.
  *  RTSP_REQUESTER: RTSP server requests a stream of images. Ignored by API and web server.
  */
-enum CameraRequester : uint8_t { IDLE, API_REQUESTER, WEB_REQUESTER, RTSP_REQUESTER };
+enum CameraRequester : uint8_t {
+  IDLE,
+  API_REQUESTER,
+  WEB_REQUESTER,
+  RTSP_REQUESTER,
+  RECORD_REQUESTER,
+  CALL_REQUESTER,
+};
+
+enum ImageFormat : uint8_t {
+  IMAGE_FORMAT_JPEG = 0,
+  IMAGE_FORMAT_H264,
+};
+
+inline const char *to_string(ImageFormat format) {
+  switch (format) {
+    case IMAGE_FORMAT_JPEG:
+      return "JPEG";
+    case IMAGE_FORMAT_H264:
+      return "H.264";
+  }
+  return "UNKNOWN";
+}
 
 /// Enumeration of different pixel formats.
 enum PixelFormat : uint8_t {
   PIXEL_FORMAT_GRAYSCALE = 0,  ///< 8-bit grayscale.
   PIXEL_FORMAT_RGB565,         ///< 16-bit RGB (5-6-5).
   PIXEL_FORMAT_BGR888,         ///< RGB pixel data in 8-bit format, stored as B, G, R (1 byte each).
+  PIXEL_FORMAT_YUYV,
+  PIXEL_FORMAT_UYVY,
 };
 
 /// Returns string name for a given PixelFormat.
@@ -31,6 +55,10 @@ inline const char *to_string(PixelFormat format) {
       return "PIXEL_FORMAT_RGB565";
     case PIXEL_FORMAT_BGR888:
       return "PIXEL_FORMAT_BGR888";
+    case PIXEL_FORMAT_YUYV:
+      return "PIXEL_FORMAT_YUYV";
+    case PIXEL_FORMAT_UYVY:
+      return "PIXEL_FORMAT_UYVY";
   }
   return "PIXEL_FORMAT_UNKNOWN";
 }
@@ -59,6 +87,8 @@ class CameraImage {
   virtual uint8_t *get_data_buffer() = 0;
   virtual size_t get_data_length() = 0;
   virtual bool was_requested_by(CameraRequester requester) const = 0;
+  virtual ImageFormat get_format() const { return IMAGE_FORMAT_JPEG; }
+  virtual bool is_key_frame() const { return true; }
   virtual ~CameraImage() {}
 };
 
@@ -93,6 +123,9 @@ struct CameraImageSpec {
         return 2;
       case PIXEL_FORMAT_BGR888:
         return 3;
+      case PIXEL_FORMAT_YUYV:
+      case PIXEL_FORMAT_UYVY:
+        return 2;
     }
 
     return 1;
@@ -126,6 +159,16 @@ class Camera : public EntityBase, public Component {
   virtual void start_stream(CameraRequester requester) = 0;
   // Connection or web server stops the previously started stream.
   virtual void stop_stream(CameraRequester requester) = 0;
+  virtual bool supports_format(ImageFormat format) const { return format == IMAGE_FORMAT_JPEG; }
+  virtual void start_stream_as(CameraRequester requester, ImageFormat format) {
+    if (format == IMAGE_FORMAT_JPEG)
+      this->start_stream(requester);
+  }
+  virtual void stop_stream_as(CameraRequester requester, ImageFormat format) {
+    if (format == IMAGE_FORMAT_JPEG)
+      this->stop_stream(requester);
+  }
+  virtual void request_key_frame() {}
   virtual ~Camera() {}
   /// The singleton instance of the camera implementation.
   static Camera *instance();

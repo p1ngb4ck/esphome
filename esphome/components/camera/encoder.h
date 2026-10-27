@@ -63,6 +63,11 @@ class Encoder {
 
   ///  Prints the encoder's configuration to the log.
   virtual void dump_config() = 0;
+  virtual ImageFormat get_format() const { return IMAGE_FORMAT_JPEG; }
+  virtual bool start(const CameraImageSpec &spec) { return true; }
+  virtual void stop() {}
+  virtual bool is_key_frame() const { return true; }
+  virtual void request_key_frame() {}
   virtual ~Encoder() = default;
 };
 

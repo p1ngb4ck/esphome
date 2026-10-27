@@ -74,6 +74,10 @@ pixformat_t ESP32CameraJPEGEncoder::to_internal_(camera::PixelFormat format) {
     // Internal representation for RGB is in byte order: B, G, R
     case camera::PIXEL_FORMAT_BGR888:
       return PIXFORMAT_RGB888;
+    case camera::PIXEL_FORMAT_YUYV:
+      return PIXFORMAT_YUV422;
+    case camera::PIXEL_FORMAT_UYVY:
+      break;
   }
 
   return PIXFORMAT_GRAYSCALE;
