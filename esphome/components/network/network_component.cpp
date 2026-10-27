@@ -24,6 +24,9 @@
 #ifdef USE_WIFI
 #include "esphome/components/wifi/wifi_component.h"
 #endif
+#ifdef USE_USB_ETHERNET
+#include "esphome/components/usb_ethernet/usb_ethernet.h"
+#endif
 #endif
 
 namespace esphome::network {
@@ -105,12 +108,23 @@ static esp_netif_t *connected_ethernet_netif() {
   return nullptr;
 }
 
+static esp_netif_t *connected_usb_ethernet_netif() {
+#ifdef USE_USB_ETHERNET
+  auto *usb = usb_ethernet::global_usb_ethernet;
+  if (usb != nullptr && usb->is_connected())
+    return usb->get_esp_netif();
+#endif
+  return nullptr;
+}
+
 static esp_netif_t *connected_netif(NetworkInterface interface) {
   switch (interface) {
     case NetworkInterface::NETWORK_INTERFACE_ETHERNET:
       return connected_ethernet_netif();
     case NetworkInterface::NETWORK_INTERFACE_WIFI:
       return connected_wifi_netif();
+    case NetworkInterface::NETWORK_INTERFACE_USB_ETHERNET:
+      return connected_usb_ethernet_netif();
     default:
       return nullptr;
   }

@@ -111,6 +111,10 @@ network::IPAddresses get_ip_addresses() {
       case NetworkInterface::NETWORK_INTERFACE_WIFI:
         return wifi::global_wifi_component->get_ip_addresses();
 #endif
+#ifdef USE_USB_ETHERNET
+      case NetworkInterface::NETWORK_INTERFACE_USB_ETHERNET:
+        return usb_ethernet::global_usb_ethernet->get_ip_addresses();
+#endif
       default:
         break;
     }

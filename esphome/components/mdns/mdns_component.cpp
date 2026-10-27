@@ -82,6 +82,7 @@ void MDNSComponent::update_network_txt_(const char *network) {
 void MDNSComponent::on_active_interface(network::NetworkInterface interface) {
   switch (interface) {
     case network::NetworkInterface::NETWORK_INTERFACE_ETHERNET:
+    case network::NetworkInterface::NETWORK_INTERFACE_USB_ETHERNET:
       this->update_network_txt_(NETWORK_ETHERNET);
       break;
     case network::NetworkInterface::NETWORK_INTERFACE_WIFI:
