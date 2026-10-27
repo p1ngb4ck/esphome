@@ -9,6 +9,7 @@
 #include "core/lv_obj_private.h"
 #include "display/lv_display_private.h"
 #include "misc/lv_area_private.h"
+#include "misc/lv_text_private.h"
 
 #include <algorithm>
 #include <climits>
@@ -1425,7 +1426,7 @@ void LVHIDKeypadListener::read_(lv_indev_data_t *data) {
       if (event.kind == TEXT) {
         if (!is_textarea(this->focused_()))
           continue;
-        this->key_ = event.code;
+        this->key_ = lv_text_unicode_to_encoded(event.code);
         this->pressed_ = true;
         this->release_next_ = true;
         break;
