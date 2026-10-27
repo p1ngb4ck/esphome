@@ -97,6 +97,7 @@ constexpr size_t VIDEO_SEND_MAX = 16 * 1024;
 constexpr size_t MAX_VIDEO_GROUPS = 2;
 constexpr size_t MAX_GROUP_SSRCS = 4;
 constexpr size_t MAX_VIDEO_PARAMS = 4;
+constexpr size_t MAX_FEEDBACK = 6;
 constexpr uint8_t RELAY_HANGUP = 'X';
 
 struct Event {
@@ -183,6 +184,16 @@ struct CallSession {
   uint8_t *video_item;
   size_t video_item_len;
   size_t video_item_off;
+  bool send_video;
+  bool media_state_sent;
+  uint32_t local_vssrc;
+  uint32_t local_vrtx_ssrc;
+  int local_vrtx_pt;
+  char local_vparams[MAX_VIDEO_PARAMS][2][32];
+  uint8_t local_vparam_count;
+  char local_vfeedback[MAX_FEEDBACK][2][16];
+  uint8_t local_vfeedback_count;
+  uint32_t video_start_ms;
   esp_peer_cfg_t peer_cfg;
   esp_peer_default_cfg_t peer_extra;
   TelegramCall *owner;
@@ -273,6 +284,53 @@ int section_pt(const char *begin, const char *end, const char *codec) {
   return -1;
 }
 
+void parse_local_video(CallSession *s, const char *begin, const char *end) {
+  char line[96];
+  if (section_value(begin, end, "a=ssrc-group:FID ", line, sizeof(line))) {
+    char *after = nullptr;
+    s->local_vssrc = static_cast<uint32_t>(strtoul(line, &after, 10));
+    s->local_vrtx_ssrc = after != nullptr ? static_cast<uint32_t>(strtoul(after, nullptr, 10)) : 0;
+  } else if (section_value(begin, end, "a=ssrc:", line, sizeof(line))) {
+    s->local_vssrc = static_cast<uint32_t>(strtoul(line, nullptr, 10));
+  }
+  s->local_vrtx_pt = section_pt(begin, end, " rtx/");
+  char prefix[24];
+  snprintf(prefix, sizeof(prefix), "a=fmtp:%d ", s->local_vpt);
+  s->local_vparam_count = 0;
+  if (section_value(begin, end, prefix, line, sizeof(line))) {
+    char *state = nullptr;
+    for (char *item = strtok_r(line, ";", &state); item != nullptr && s->local_vparam_count < MAX_VIDEO_PARAMS;
+         item = strtok_r(nullptr, ";", &state)) {
+      char *eq = strchr(item, '=');
+      if (eq == nullptr)
+        continue;
+      *eq = '\0';
+      tl_read::copy(s->local_vparams[s->local_vparam_count][0], sizeof(s->local_vparams[0][0]), item, strlen(item));
+      tl_read::copy(s->local_vparams[s->local_vparam_count][1], sizeof(s->local_vparams[0][1]), eq + 1,
+                    strlen(eq + 1));
+      s->local_vparam_count++;
+    }
+  }
+  snprintf(prefix, sizeof(prefix), "a=rtcp-fb:%d ", s->local_vpt);
+  const size_t prefix_len = strlen(prefix);
+  s->local_vfeedback_count = 0;
+  for (const char *at = strstr(begin, prefix); at != nullptr && at < end && s->local_vfeedback_count < MAX_FEEDBACK;
+       at = strstr(at + prefix_len, prefix)) {
+    const char *value = at + prefix_len;
+    const size_t len = std::min<size_t>(strcspn(value, "\r\n"), static_cast<size_t>(end - value));
+    tl_read::copy(line, sizeof(line), value, len);
+    char *space = strchr(line, ' ');
+    if (space != nullptr)
+      *space = '\0';
+    tl_read::copy(s->local_vfeedback[s->local_vfeedback_count][0], sizeof(s->local_vfeedback[0][0]), line,
+                  strlen(line));
+    const char *sub = space != nullptr ? space + 1 : "";
+    tl_read::copy(s->local_vfeedback[s->local_vfeedback_count][1], sizeof(s->local_vfeedback[0][1]), sub,
+                  strlen(sub));
+    s->local_vfeedback_count++;
+  }
+}
+
 bool access_unit_has_key(const uint8_t *data, size_t size) {
   for (size_t i = 0; i + 3 < size; i++) {
     if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) {
@@ -291,6 +349,13 @@ void TelegramCall::attach(mtproto::Mtproto *mtproto, Component *owner) {
   this->mtproto_ = mtproto;
   this->owner_ = owner;
   mtproto->add_update_listener([this](TlReader updates) { this->on_updates_(updates); });
+}
+
+void TelegramCall::attach_camera() {
+#ifdef USE_CAMERA
+  if (camera::Camera::instance() != nullptr)
+    camera::Camera::instance()->add_listener(this);
+#endif
 }
 
 void TelegramCall::set_mute(bool mute) {
@@ -352,6 +417,7 @@ bool TelegramCall::begin_(bool outgoing, int64_t call_id, int64_t call_hash, con
   s->call_hash = call_hash;
   s->local_pt = -1;
   s->local_vpt = -1;
+  s->local_vrtx_pt = -1;
   s->relay_fd = -1;
   if (g_a_hash != nullptr)
     memcpy(s->g_a_hash, g_a_hash, 32);
@@ -783,6 +849,13 @@ void TelegramCall::run_() {
         esp_peer_send_msg(s->peer, &msg);
       }
       this->pump_video_relay_(s);
+      if (s->send_video && s->connected && !s->media_state_sent) {
+        s->media_state_sent = true;
+        s->video_start_ms = millis();
+        this->send_media_state_(s);
+        this->camera_stream_(true);
+      }
+      this->send_video_(s);
     }
     if (s->relay_hangup) {
       ok = false;
@@ -947,6 +1020,12 @@ bool TelegramCall::start_media_(CallSession *s, TlReader call) {
     cfg.video_info.height = VIDEO_HEIGHT;
     cfg.video_info.fps = VIDEO_FPS;
     cfg.video_dir = ESP_PEER_MEDIA_DIR_RECV_ONLY;
+#ifdef USE_CAMERA
+    camera::Camera *cam = camera::Camera::instance();
+    s->send_video = cam != nullptr && cam->supports_format(camera::IMAGE_FORMAT_H264);
+    if (s->send_video)
+      cfg.video_dir = ESP_PEER_MEDIA_DIR_SEND_RECV;
+#endif
   }
   cfg.no_auto_reconnect = true;
   cfg.enable_data_channel = false;
@@ -956,7 +1035,12 @@ bool TelegramCall::start_media_(CallSession *s, TlReader call) {
   cfg.on_state = [](esp_peer_state_t state, void *ctx) -> int {
     auto *session = static_cast<CallSession *>(ctx);
     TelegramCall *self = session->owner;
-    if (state == ESP_PEER_STATE_CONNECTED) {
+    if (state == ESP_PEER_STATE_VIDEO_PLI_RECEIVED) {
+#ifdef USE_CAMERA
+      if (camera::Camera::instance() != nullptr)
+        camera::Camera::instance()->request_key_frame();
+#endif
+    } else if (state == ESP_PEER_STATE_CONNECTED) {
       session->connected = true;
       self->set_state_(CallState::ACTIVE);
     } else if (state == ESP_PEER_STATE_CONNECT_FAILED ||
@@ -1028,6 +1112,8 @@ void TelegramCall::stop_media_(CallSession *s) {
   this->close_video_relay_(s);
   delete s->video_ring;
   s->video_ring = nullptr;
+  if (s->media_state_sent)
+    this->camera_stream_(false);
   if (s->media) {
     s->media = false;
     App.scheduler.set_timeout(this->owner_, static_cast<const char *>(nullptr), 0, [this]() {
@@ -1305,6 +1391,8 @@ void TelegramCall::on_local_sdp_(CallSession *s, const char *sdp) {
   if (s->video && section_of(sdp, "m=video", &video_begin, &video_end)) {
     section_value(video_begin, video_end, "a=mid:", s->local_vmid, sizeof(s->local_vmid));
     s->local_vpt = section_pt(video_begin, video_end, " H264/");
+    if (s->send_video && s->local_vpt >= 0)
+      parse_local_video(s, video_begin, video_end);
   }
   if (line_value(sdp, "a=fingerprint:", fingerprint, sizeof(fingerprint))) {
     const char *space = strchr(fingerprint, ' ');
@@ -1399,6 +1487,52 @@ void add_video_content(JsonArray contents, const CallSession *s) {
   content["rtpExtensions"].to<JsonArray>();
 }
 
+void add_own_video_content(JsonArray contents, const CallSession *s) {
+  JsonObject content = contents.add<JsonObject>();
+  char text[12];
+  snprintf(text, sizeof(text), "%" PRIu32, s->local_vssrc);
+  content["type"] = "video";
+  content["ssrc"] = text;
+  JsonArray groups = content["ssrcGroups"].to<JsonArray>();
+  JsonObject group = groups.add<JsonObject>();
+  group["semantics"] = "FID";
+  JsonArray ssrcs = group["ssrcs"].to<JsonArray>();
+  ssrcs.add(text);
+  if (s->local_vrtx_ssrc != 0) {
+    char rtx[12];
+    snprintf(rtx, sizeof(rtx), "%" PRIu32, s->local_vrtx_ssrc);
+    ssrcs.add(rtx);
+  }
+  JsonArray types = content["payloadTypes"].to<JsonArray>();
+  JsonObject h264 = types.add<JsonObject>();
+  h264["id"] = s->local_vpt;
+  h264["name"] = "H264";
+  h264["clockrate"] = 90000;
+  h264["channels"] = 0;
+  JsonArray feedback = h264["feedbackTypes"].to<JsonArray>();
+  for (uint8_t i = 0; i < s->local_vfeedback_count; i++) {
+    JsonObject item = feedback.add<JsonObject>();
+    item["type"] = s->local_vfeedback[i][0];
+    item["subtype"] = s->local_vfeedback[i][1];
+  }
+  JsonObject parameters = h264["parameters"].to<JsonObject>();
+  for (uint8_t i = 0; i < s->local_vparam_count; i++)
+    parameters[s->local_vparams[i][0]] = s->local_vparams[i][1];
+  if (s->local_vrtx_pt >= 0 && s->local_vrtx_ssrc != 0) {
+    JsonObject rtx = types.add<JsonObject>();
+    rtx["id"] = s->local_vrtx_pt;
+    rtx["name"] = "rtx";
+    rtx["clockrate"] = 90000;
+    rtx["channels"] = 0;
+    rtx["feedbackTypes"].to<JsonArray>();
+    JsonObject rtx_parameters = rtx["parameters"].to<JsonObject>();
+    char apt[8];
+    snprintf(apt, sizeof(apt), "%d", s->local_vpt);
+    rtx_parameters["apt"] = apt;
+  }
+  content["rtpExtensions"].to<JsonArray>();
+}
+
 void add_audio_content(JsonArray contents, uint32_t ssrc, int pt) {
   JsonObject content = contents.add<JsonObject>();
   char text[12];
@@ -1427,9 +1561,91 @@ void TelegramCall::send_offer_(CallSession *s) {
   const std::string json = json::build_json([s](JsonObject root) {
     root["@type"] = "NegotiateChannels";
     root["exchangeId"] = s->offer_id;
-    add_audio_content(root["contents"].to<JsonArray>(), s->local_ssrc, s->local_pt);
+    JsonArray contents = root["contents"].to<JsonArray>();
+    add_audio_content(contents, s->local_ssrc, s->local_pt);
+    if (s->send_video && s->local_vssrc != 0 && s->local_vpt >= 0)
+      add_own_video_content(contents, s);
   });
   this->send_signaling_(s, json);
+}
+
+void TelegramCall::send_media_state_(CallSession *s) {
+  const bool muted = this->mute_.load();
+  const bool video = s->send_video;
+  const std::string json = json::build_json([muted, video](JsonObject root) {
+    root["@type"] = "MediaState";
+    root["muted"] = muted;
+    root["lowBattery"] = false;
+    root["videoState"] = video ? "active" : "inactive";
+    root["videoRotation"] = 0;
+    root["screencastState"] = "inactive";
+  });
+  this->send_signaling_(s, json);
+}
+
+void TelegramCall::camera_stream_(bool on) {
+#ifdef USE_CAMERA
+  if (this->camera_on_.exchange(on) == on)
+    return;
+  if (!on) {
+    LockGuard guard(this->video_lock_);
+    this->video_out_.reset();
+  }
+  App.scheduler.set_timeout(this->owner_, static_cast<const char *>(nullptr), 0, [on]() {
+    camera::Camera *cam = camera::Camera::instance();
+    if (cam == nullptr)
+      return;
+    if (on) {
+      cam->start_stream_as(camera::CALL_REQUESTER, camera::IMAGE_FORMAT_H264);
+    } else {
+      cam->stop_stream_as(camera::CALL_REQUESTER, camera::IMAGE_FORMAT_H264);
+    }
+  });
+#endif
+}
+
+#ifdef USE_CAMERA
+void TelegramCall::on_camera_image(const std::shared_ptr<camera::CameraImage> &image) {
+  if (!this->camera_on_.load() || image->get_format() != camera::IMAGE_FORMAT_H264 ||
+      !image->was_requested_by(camera::CALL_REQUESTER))
+    return;
+  bool taken = false;
+  {
+    LockGuard guard(this->video_lock_);
+    if (this->video_out_ == nullptr) {
+      this->video_out_ = image;
+      taken = true;
+    }
+  }
+  if (!taken) {
+    camera::Camera::instance()->request_key_frame();
+    return;
+  }
+  LockGuard guard(this->lock_);
+  if (this->session_ != nullptr) {
+    Event *wake = nullptr;
+    xQueueSend(this->session_->events, &wake, 0);
+  }
+}
+#endif
+
+void TelegramCall::send_video_(CallSession *s) {
+#ifdef USE_CAMERA
+  std::shared_ptr<camera::CameraImage> image;
+  {
+    LockGuard guard(this->video_lock_);
+    image = std::move(this->video_out_);
+    this->video_out_.reset();
+  }
+  if (image == nullptr || s->peer == nullptr || !s->connected)
+    return;
+  esp_peer_video_frame_t frame{};
+  frame.pts = millis() - s->video_start_ms;
+  frame.data = image->get_data_buffer();
+  frame.size = static_cast<int>(image->get_data_length());
+  if (esp_peer_send_video(s->peer, &frame) != ESP_PEER_ERR_NONE && camera::Camera::instance() != nullptr)
+    camera::Camera::instance()->request_key_frame();
+#endif
 }
 
 void TelegramCall::answer_offer_(CallSession *s) {

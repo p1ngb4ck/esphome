@@ -163,6 +163,9 @@ void Messenger::setup() {
     return;
   }
   this->jobs_ = xQueueCreateStatic(JOB_QUEUE_LEN, sizeof(Job *), this->jobs_storage_, &this->jobs_queue_);
+#ifdef USE_MESSENGER_CALL
+  this->call_.attach_camera();
+#endif
   this->inbound_ = RAMAllocator<Inbound>(RAMAllocator<Inbound>::ALLOC_EXTERNAL).allocate(INBOUND_SLOTS);
   this->history_ = RAMAllocator<HistoryEntry>(RAMAllocator<HistoryEntry>::ALLOC_EXTERNAL).allocate(HISTORY_SLOTS);
   if (this->jobs_ == nullptr || this->inbound_ == nullptr || this->history_ == nullptr) {

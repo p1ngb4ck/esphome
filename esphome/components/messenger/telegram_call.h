@@ -6,6 +6,9 @@
 
 #include "esphome/components/mtproto/mtproto.h"
 #include "esphome/components/sip_phone/sip_phone.h"
+#ifdef USE_CAMERA
+#include "esphome/components/camera/camera.h"
+#endif
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/static_task.h"
@@ -25,12 +28,17 @@ enum class CallState : uint8_t { IDLE = 0, OUTGOING, RINGING, INCOMING, CONNECTI
 
 struct CallSession;
 
+#ifdef USE_CAMERA
+class TelegramCall : public sip_phone::MediaTransport, public camera::CameraListener {
+#else
 class TelegramCall : public sip_phone::MediaTransport {
+#endif
  public:
   static constexpr uint32_t TASK_STACK = 16384;
   static constexpr UBaseType_t TASK_PRIORITY = 18;
 
   void attach(mtproto::Mtproto *mtproto, Component *owner);
+  void attach_camera();
   void set_phone(sip_phone::SipPhone *phone) { this->phone_ = phone; }
   void set_video_relay(const char *host, uint16_t port) {
     this->video_host_ = host;
@@ -48,6 +56,9 @@ class TelegramCall : public sip_phone::MediaTransport {
   uint32_t seconds() const;
   bool take_change() { return this->changed_.exchange(false); }
   void on_media_payload(const uint8_t *payload, size_t len, uint32_t timestamp) override;
+#ifdef USE_CAMERA
+  void on_camera_image(const std::shared_ptr<camera::CameraImage> &image) override;
+#endif
 
  protected:
   void on_updates_(mtproto::TlReader updates);
@@ -82,6 +93,9 @@ class TelegramCall : public sip_phone::MediaTransport {
   void close_video_relay_(CallSession *s);
   void on_video_frame_(CallSession *s, const uint8_t *data, size_t size);
   void pump_video_relay_(CallSession *s);
+  void send_video_(CallSession *s);
+  void send_media_state_(CallSession *s);
+  void camera_stream_(bool on);
 
   mtproto::Mtproto *mtproto_{nullptr};
   Component *owner_{nullptr};
@@ -100,6 +114,11 @@ class TelegramCall : public sip_phone::MediaTransport {
   uint32_t active_since_{0};
 
   StaticTask task_;
+#ifdef USE_CAMERA
+  Mutex video_lock_;
+  std::shared_ptr<camera::CameraImage> video_out_;
+  std::atomic<bool> camera_on_{false};
+#endif
   CallSession *session_{nullptr};
   Mutex wait_lock_;
   uint32_t wait_serial_{0};
