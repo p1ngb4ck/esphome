@@ -30,7 +30,6 @@ class FT63X6Touchscreen final : public Touchscreen, public i2c::I2CDevice {
   }
 
  protected:
-  void hard_reset_();
   void update_touches() override;
 
   InternalGPIOPin *interrupt_pin_{nullptr};

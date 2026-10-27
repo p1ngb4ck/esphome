@@ -106,7 +106,7 @@ COLOR_DEPTHS = {
 }
 
 
-def model_schema(config: ConfigType) -> cv.All:
+def model_schema(config: ConfigType) -> cv.Schema:
     model = MODELS[config[CONF_MODEL].upper()]
     transform = model.transform_schema()
     # CUSTOM model will need to provide a custom init sequence
@@ -125,9 +125,7 @@ def model_schema(config: ConfigType) -> cv.All:
             cv_dimensions(CONF_DIMENSIONS): dimension_schema(
                 model.get_default(CONF_DRAW_ROUNDING, 1)
             ),
-            model.option(CONF_ENABLE_PIN, cv.UNDEFINED): cv.ensure_list(
-                pins.gpio_output_pin_schema
-            ),
+            **display.enable_pin_schema(model, config),
             model.option(CONF_COLOR_ORDER, MODE_BGR): cv.enum(COLOR_ORDERS, upper=True),
             model.option(CONF_DRAW_ROUNDING, 2): power_of_two,
             model.option(CONF_PIXEL_MODE, PIXEL_MODE_16BIT): cv.one_of(
@@ -178,11 +176,7 @@ def model_schema(config: ConfigType) -> cv.All:
         isinstance(x, tuple) and x[0] == I2C_FLAG for x in model.initsequence or ()
     ):
         schema = schema.extend({cv.GenerateID(CONF_I2C_ID): cv.use_id(i2c.I2CBus)})
-    return cv.All(
-        schema,
-        cv.only_on_esp32,
-        only_on_variant(supported=[VARIANT_ESP32P4]),
-    )
+    return schema
 
 
 @model_schema_extractor(MODELS, model_schema)
@@ -193,9 +187,13 @@ def _config_schema(config: ConfigType) -> ConfigType:
         },
         extra=cv.ALLOW_EXTRA,
     )(config)
-    config = model_schema(config)(config)
+    config = cv.All(cv.only_on_esp32, only_on_variant(supported=[VARIANT_ESP32P4]))(
+        config
+    )
+    # Check before the schema, which would fail on default pins of a missing expander
     model = MODELS[config[CONF_MODEL].upper()]
     model.check_requirements()
+    config = model_schema(config)(config)
     width, height, _offset_width, _offset_height, _pad_width, _pad_height = (
         model.get_dimensions(config)
     )
