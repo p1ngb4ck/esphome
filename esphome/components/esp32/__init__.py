@@ -558,6 +558,9 @@ FLASH_VENDOR_IDS = {
     0xCD: "th",
 }
 FLASH_AUTO_FREQUENCY = "80MHZ"
+KEY_NVS_DEFAULTS = "nvs_defaults"
+NVS_DEFAULTS_CSV = "nvs_defaults.csv"
+NVS_DEFAULTS_PARTITION = "nvs"
 FLASH_SAFE_FREQUENCY = "40MHZ"
 
 # Socket limit configuration for ESP-IDF
@@ -1205,6 +1208,25 @@ def add_src_cmake(block: str) -> None:
     ``idf_component_register`` so the block never runs in script mode.
     """
     CORE.data[KEY_ESP32][KEY_SRC_CMAKE].append(block)
+
+
+def add_nvs_default(namespace: str, key: str, data: bytes) -> None:
+    defaults = CORE.data[KEY_ESP32].setdefault(KEY_NVS_DEFAULTS, {})
+    if not defaults:
+        CORE.add_job(_write_nvs_defaults)
+    defaults.setdefault(namespace, {})[key] = data
+
+
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _write_nvs_defaults() -> None:
+    lines = ["key,type,encoding,value"]
+    for namespace, entries in CORE.data[KEY_ESP32][KEY_NVS_DEFAULTS].items():
+        lines.append(f"{namespace},namespace,,")
+        lines.extend(f"{key},data,hex2bin,{data.hex()}" for key, data in entries.items())
+    write_file_if_changed(CORE.relative_build_path(NVS_DEFAULTS_CSV), "\n".join(lines) + "\n")
+    add_src_cmake(
+        f"nvs_create_partition_image({NVS_DEFAULTS_PARTITION} ${{CMAKE_SOURCE_DIR}}/{NVS_DEFAULTS_CSV})"
+    )
 
 
 def add_extra_build_file(filename: str, path: Path) -> bool:

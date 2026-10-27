@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import logging
 
 from esphome import automation, pins
 import esphome.codegen as cg
@@ -59,7 +60,10 @@ from esphome.core import (
     coroutine_with_priority,
 )
 import esphome.final_validate as fv
+from esphome.helpers import fnv1_hash
 from esphome.types import ConfigType
+
+_LOGGER = logging.getLogger(__name__)
 
 AUTO_LOAD = ["network"]
 DOMAIN = "ethernet"
@@ -625,6 +629,26 @@ def _final_validate_spi(config: ConfigType) -> None:
                     )
 
 
+ETHERNET_SETTINGS_PREF = "ethernet_settings"
+PREFERENCES_NAMESPACE = "esphome"
+SAVED_MANUAL_IP = 0x01
+SAVED_DISABLED = 0x02
+
+
+def _manual_ip_nvs_default(config: ConfigType) -> None:
+    from esphome.components.esp32 import add_nvs_default
+
+    if (CORE.config.get("preferences") or {}).get("external_nvs") is not None:
+        _LOGGER.warning(
+            "ethernet manual_ip: the default goes into the internal NVS, but the preferences use "
+            "'external_nvs'; it is not written"
+        )
+        return
+    flags = SAVED_MANUAL_IP | (0 if config[CONF_ENABLE_ON_BOOT] else SAVED_DISABLED)
+    data = bytes([flags, *_manual_ip_table(config[CONF_MANUAL_IP])])
+    add_nvs_default(PREFERENCES_NAMESPACE, str(fnv1_hash(ETHERNET_SETTINGS_PREF)), data)
+
+
 def _manual_ip_table(config: ConfigType) -> list[int]:
     keys = (CONF_STATIC_IP, CONF_GATEWAY, CONF_SUBNET, CONF_DNS1, CONF_DNS2)
     return [octet for key in keys for octet in config[key].packed]
@@ -680,7 +704,9 @@ async def to_code(config: ConfigType) -> None:
     # ESP32: always, so the address can be set at runtime (apply_manual_ip)
     if CONF_MANUAL_IP in config or CORE.is_esp32:
         cg.add_define("USE_ETHERNET_MANUAL_IP")
-    if CONF_MANUAL_IP in config:
+    if CONF_MANUAL_IP in config and CORE.is_esp32:
+        _manual_ip_nvs_default(config)
+    elif CONF_MANUAL_IP in config:
         cg.add_define("USE_ETHERNET_MANUAL_IP_CONFIG")
         cg.extern_progmem_array(
             "esphome::ethernet::ETHERNET_MANUAL_IP",
