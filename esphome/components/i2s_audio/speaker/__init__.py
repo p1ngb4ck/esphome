@@ -179,7 +179,7 @@ BASE_SCHEMA = (
                 cv.one_of(CONF_NEVER, lower=True),
             ),
             # The amplifier's power or enable: active only while the I2S clocks run
-            cv.Optional(CONF_ENABLE_PIN): pins.internal_gpio_output_pin_schema,
+            cv.Optional(CONF_ENABLE_PIN): pins.gpio_output_pin_schema,
             cv.Optional(CONF_KEEP_ALIVE, default=False): cv.boolean,
         }
     )

@@ -57,7 +57,7 @@ class I2SAudioSpeakerBase : public I2SAudioOut, public speaker::Speaker, public 
   void set_keep_alive(bool keep_alive) { this->keep_alive_ = keep_alive; }
   void set_dout_pin(uint8_t pin) { this->dout_pin_ = (gpio_num_t) pin; }
   /// @brief The amplifier's power or enable pin: active only while the I2S clocks run
-  void set_enable_pin(InternalGPIOPin *pin) { this->enable_pin_ = pin; }
+  void set_enable_pin(GPIOPin *pin) { this->enable_pin_ = pin; }
 
   /// @brief Get the I2S TX channel handle
   i2s_chan_handle_t get_tx_handle() const { return this->tx_handle_; }
@@ -160,17 +160,22 @@ class I2SAudioSpeakerBase : public I2SAudioOut, public speaker::Speaker, public 
   /// @param preload Callable returning true once every DMA descriptor holds silence with a matching record
   /// @return false if the preload or the channel enable failed; the caller should restart the task
   template<typename F> bool resync_lockstep_(uint32_t extra_frames, F &&preload) {
-    this->set_amplifier_(false);
+    this->set_task_amplifier_(false);
     this->drain_lockstep_(extra_frames);
     const bool enabled = preload() && (i2s_channel_enable(this->tx_handle_) == ESP_OK);
     if (enabled)
-      this->set_amplifier_(true);
+      this->set_task_amplifier_(true);
     return enabled;
   }
 
   /// @brief Drives the enable pin, if one is configured
   void set_amplifier_(bool on) {
     if (this->enable_pin_ != nullptr)
+      this->enable_pin_->digital_write(on);
+  }
+
+  void set_task_amplifier_(bool on) {
+    if (this->enable_pin_ != nullptr && this->enable_pin_->is_internal())
       this->enable_pin_->digital_write(on);
   }
 
@@ -225,7 +230,7 @@ class I2SAudioSpeakerBase : public I2SAudioOut, public speaker::Speaker, public 
   audio::AudioStreamInfo output_stream_info_;
 
   gpio_num_t dout_pin_;
-  InternalGPIOPin *enable_pin_{nullptr};
+  GPIOPin *enable_pin_{nullptr};
   i2s_chan_handle_t tx_handle_{nullptr};
 };
 
