@@ -40,6 +40,7 @@ constexpr size_t STRL_VIDEO_START = AVIH_DATA + AVIH;
 
 constexpr uint32_t AVIF_ISINTERLEAVED = 0x100;
 constexpr uint32_t AVIF_TRUSTCKTYPE = 0x800;
+constexpr uint32_t DELTA_FRAME = 0x80000000u;
 
 }  // namespace
 
@@ -71,9 +72,10 @@ uint8_t *CastAvi::lay_out(uint8_t *pic, const Batch &batch) {
 }
 
 bool CastAvi::begin(uint16_t width, uint16_t height, uint32_t fps, uint32_t sample_rate, uint8_t channels,
-                    uint32_t max_chunk, uint8_t *index, size_t index_bytes) {
+                    uint32_t max_chunk, uint8_t *index, size_t index_bytes, bool h264) {
   if (index == nullptr || fps == 0 || index_bytes < SUPER_BYTES + 2 * (IX_HEADER + 8 * 256))
     return false;
+  this->h264_ = h264;
   this->index_ = index;
   this->ix_bytes_ = ((index_bytes - SUPER_BYTES) / 2) & ~static_cast<size_t>(127);
   this->width_ = width;
@@ -141,7 +143,7 @@ void CastAvi::build_header(uint8_t *out) const {
     h += 8;
     if (video) {
       fourcc(h, "vids");
-      fourcc(h + 4, "MJPG");
+      fourcc(h + 4, this->h264_ ? "H264" : "MJPG");
       put32(h + 20, 1);           // dwScale
       put32(h + 24, this->fps_);  // dwRate
       put32(h + 32, this->total_pictures_);
@@ -167,7 +169,7 @@ void CastAvi::build_header(uint8_t *out) const {
       put32(h + 8, this->height_);
       put16(h + 12, 1);
       put16(h + 14, 24);
-      fourcc(h + 16, "MJPG");
+      fourcc(h + 16, this->h264_ ? "H264" : "MJPG");
       put32(h + 20, static_cast<uint32_t>(this->width_) * this->height_ * 3);
       h += STRF_VIDEO;
     } else {
@@ -230,10 +232,10 @@ void CastAvi::put_entry_(uint8_t stream, uint64_t chunk_pos, uint32_t size) {
 
 void CastAvi::add(const Batch &batch) {
   uint64_t pos = this->file_pos_;
-  this->put_entry_(0, pos, batch.jpeg_len);
+  this->put_entry_(0, pos, batch.jpeg_len | (batch.key ? 0 : DELTA_FRAME));
   pos += CHUNK_HEADER + batch.jpeg_len + (batch.jpeg_len & 1);
   for (uint16_t i = 1; i < batch.pictures; i++) {
-    this->put_entry_(0, pos, 0);
+    this->put_entry_(0, pos, this->h264_ ? DELTA_FRAME : 0);
     pos += CHUNK_HEADER;
   }
   if (batch.audio_len != 0 && this->rate_ != 0) {

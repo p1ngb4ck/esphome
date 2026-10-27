@@ -29,6 +29,7 @@ class CastAvi {
     uint32_t jpeg_len;
     uint16_t pictures;  // at least 1
     uint32_t audio_len;
+    bool key{true};
     uint32_t audio_chunks() const { return this->audio_len != 0 ? 1 : 0; }
     /// The bytes of its chunks (headers, data, padding).
     size_t bytes() const;
@@ -41,7 +42,7 @@ class CastAvi {
 
   /// sample_rate 0: no sound stream. index: index_bytes long, its end SUPER_BYTES the super entries.
   bool begin(uint16_t width, uint16_t height, uint32_t fps, uint32_t sample_rate, uint8_t channels,
-             uint32_t max_chunk, uint8_t *index, size_t index_bytes);
+             uint32_t max_chunk, uint8_t *index, size_t index_bytes, bool h264 = false);
   size_t header_size() const { return this->header_size_; }
   /// The first RIFF's header, through its movi list's 'movi' fourcc, with everything known so far
   /// (0 for a size not known yet: read to the end). For the network stream: before the first chunk.
@@ -88,6 +89,7 @@ class CastAvi {
 
   uint16_t width_{0};
   uint16_t height_{0};
+  bool h264_{false};
   uint32_t fps_{25};
   uint32_t rate_{0};
   uint8_t channels_{0};

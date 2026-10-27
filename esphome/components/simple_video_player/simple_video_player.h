@@ -67,6 +67,9 @@
 #include "driver/jpeg_encode.h"
 #include "driver/ppa.h"
 #include "cast_avi.h"
+#ifdef USE_CAMERA
+#include "esphome/components/camera/camera.h"
+#endif
 #endif
 #ifdef SVP_CAPTURE_MIC
 #include "esphome/components/microphone/microphone_source.h"
@@ -949,7 +952,7 @@ class SimpleVideoPlayer : public Component
   /// the frame was not taken. target nullptr (MJPEG only): decoded into one of two scratch pieces only (the one the
   /// reader does not hold), camera_decoded() gives its pixels: the next frame can be decoded while the reader still
   /// shows the last one (as the video's decoded double buffer).
-  enum class CameraFrameFormat : uint8_t { MJPEG, YUYV, UYVY, RGB565 };
+  enum class CameraFrameFormat : uint8_t { MJPEG, YUYV, UYVY, RGB565, H264 };
   bool show_camera_frame(const uint8_t *data, size_t length, CameraFrameFormat format, uint16_t width,
                          uint16_t height, uint8_t *target, size_t target_capacity, int32_t target_w, int32_t target_h,
                          std::function<void(bool)> &&done);
@@ -1132,6 +1135,9 @@ class SimpleVideoPlayer : public Component
   }
   bool camera_screenshot();
   bool camera_record_start(uint16_t width, uint16_t height);
+  void set_camera_record_h264(bool on) { this->cast_h264_wanted_ = on; }
+  bool get_camera_record_h264() const { return this->cast_h264_wanted_; }
+  bool is_camera_recording_h264() const { return this->is_camera_recording() && this->cap_h264_; }
   void camera_record_stop();
   bool is_camera_recording() const {
     return this->cap_camera_ && (this->cast_state_ == CAST_STARTING || this->cast_state_ == CAST_RUNNING);
@@ -3259,6 +3265,25 @@ class SimpleVideoPlayer : public Component
   bool shot_busy_{false};
   uint8_t cam_cap_{0};
   bool cap_camera_{false};
+  bool cast_h264_wanted_{false};
+  bool cap_h264_{false};
+  bool cam_cap_key_{false};
+  bool cap_ekey_{false};
+  std::atomic<bool> cap_need_key_{true};
+#ifdef USE_CAMERA
+  class CameraH264Feed : public camera::CameraListener {
+   public:
+    explicit CameraH264Feed(SimpleVideoPlayer *player) : player_(player) {}
+    void on_camera_image(const std::shared_ptr<camera::CameraImage> &image) override {
+      this->player_->camera_h264_image_(image);
+    }
+
+   protected:
+    SimpleVideoPlayer *player_;
+  };
+  CameraH264Feed cam_h264_feed_{this};
+  void camera_h264_image_(const std::shared_ptr<camera::CameraImage> &image);
+#endif
   bool cam_cap_shot_{false};
   std::atomic<bool> cam_cap_busy_{false};
   std::atomic<bool> cam_cap_finished_{false};

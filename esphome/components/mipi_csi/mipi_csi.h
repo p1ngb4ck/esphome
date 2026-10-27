@@ -344,7 +344,8 @@ class MipiCsiImageTrigger final : public Trigger<CameraImageData>, public camera
  public:
   explicit MipiCsiImageTrigger(MipiCsiCamera *parent) { parent->add_listener(this); }
   void on_camera_image(const std::shared_ptr<camera::CameraImage> &image) override {
-    this->trigger(CameraImageData{image->get_data_buffer(), image->get_data_length()});
+    if (image->get_format() == camera::IMAGE_FORMAT_JPEG)
+      this->trigger(CameraImageData{image->get_data_buffer(), image->get_data_length()});
   }
 };
 

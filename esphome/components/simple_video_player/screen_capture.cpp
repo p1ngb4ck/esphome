@@ -46,6 +46,10 @@ static const char *const R_CAMERA = "The camera stopped";
 void SimpleVideoPlayer::capture_setup_() {
   if (this->cast_dir_.empty())
     this->cast_dir_ = this->shot_dir_;
+#ifdef USE_CAMERA
+  if (camera::Camera::instance() != nullptr)
+    camera::Camera::instance()->add_listener(&this->cam_h264_feed_);
+#endif
 #ifdef SVP_CAPTURE_MIC
   if (this->cap_mic_ != nullptr) {
     // Registered once; it writes only while a screencast takes the sound.
@@ -380,7 +384,23 @@ void SimpleVideoPlayer::capture_camera_() {
   }
   uint32_t len = 0;
   bool ok = false;
-  if (out != nullptr) {
+  if (this->cam_cap_format_ == CameraFrameFormat::H264) {
+    if (this->cap_ejpeg_ready_)
+      return;
+    if (out != nullptr && this->cam_cap_len_ <= CAP_JPEG_ROOM &&
+        (this->cam_cap_key_ || !this->cap_need_key_.load(std::memory_order_acquire))) {
+      std::memcpy(out, this->cam_cap_data_, this->cam_cap_len_);
+      len = static_cast<uint32_t>(this->cam_cap_len_);
+      ok = true;
+      this->cap_need_key_.store(false, std::memory_order_release);
+      this->cap_ekey_ = this->cam_cap_key_;
+    } else {
+      this->cap_need_key_.store(true, std::memory_order_release);
+#ifdef USE_CAMERA
+      camera::Camera::instance()->request_key_frame();
+#endif
+    }
+  } else if (out != nullptr) {
     if (this->cam_cap_format_ == CameraFrameFormat::MJPEG) {
       ok = this->cam_cap_len_ <= CAP_JPEG_ROOM;
       if (ok) {
@@ -440,7 +460,8 @@ void SimpleVideoPlayer::capture_cast_encode_() {
 // One batch at a time: the ticks since the last one, the newest JPEG (else an empty chunk for the
 // same picture) and the sound since.
 void SimpleVideoPlayer::capture_compose_() {
-  if (this->cap_ticks_ == 0 || this->cap_batch_sinks_.load(std::memory_order_acquire) != 0 ||
+  if ((this->cap_ticks_ == 0 && !(this->cap_h264_ && this->cap_ejpeg_ready_)) ||
+      this->cap_batch_sinks_.load(std::memory_order_acquire) != 0 ||
       this->cap_sinks_.load(std::memory_order_acquire) == 0)
     return;
   const bool fresh = this->cap_ejpeg_ready_;
@@ -453,12 +474,15 @@ void SimpleVideoPlayer::capture_compose_() {
     return;  // no picture yet
   uint8_t *buf = this->cap_jpeg_[this->cap_wjpeg_];
   CastAvi::Batch batch{};
-  batch.pictures = static_cast<uint16_t>(std::min<uint32_t>(this->cap_ticks_, CAP_MAX_PICTURES));
-  this->cap_ticks_ -= batch.pictures;
+  batch.pictures = static_cast<uint16_t>(
+      std::max<uint32_t>(1, std::min<uint32_t>(this->cap_ticks_, CAP_MAX_PICTURES)));
+  this->cap_ticks_ -= std::min<uint32_t>(this->cap_ticks_, batch.pictures);
   uint8_t *pic = buf + CAP_PREFIX;
   if (fresh) {
     batch.jpeg_len = this->cap_wlen_;
+    batch.key = !this->cap_h264_ || this->cap_ekey_;
   } else {
+    batch.key = !this->cap_h264_;
     // After the JPEG kept there: a screenshot may still write that one.
     pic += this->cap_wlen_ + (this->cap_wlen_ & 1) + CastAvi::CHUNK_HEADER;
   }
@@ -497,6 +521,8 @@ void SimpleVideoPlayer::capture_compose_() {
     this->cap_tx_send_.store(true, std::memory_order_release);
     xTaskNotifyGive(this->cap_tx_task_);
   }
+  if (fresh && this->cap_h264_ && this->cam_cap_busy_.load(std::memory_order_acquire))
+    this->capture_camera_();
 }
 
 // Casting: a screenshot is the newest JPEG written out.
@@ -688,6 +714,7 @@ bool SimpleVideoPlayer::screencast_start() {
     lv_obj_invalidate(lv_screen_active());
   }
   this->cap_camera_ = false;
+  this->cap_h264_ = false;
   this->cast_prefix_ = "screencast_";
   return this->capture_cast_begin_(target);
 }
@@ -764,9 +791,43 @@ bool SimpleVideoPlayer::camera_record_start(uint16_t width, uint16_t height) {
   this->cap_swaps_.store(0, std::memory_order_relaxed);
   this->cam_cap_last_ = 0;
   this->cap_camera_ = true;
+  this->cap_h264_ = false;
+#ifdef USE_CAMERA
+  camera::Camera *cam = camera::Camera::instance();
+  if (this->cast_h264_wanted_) {
+    if (cam != nullptr && cam->supports_format(camera::IMAGE_FORMAT_H264)) {
+      this->cap_h264_ = true;
+    } else {
+      ESP_LOGW(TAG, "The camera has no H.264 stream: the recording is MJPEG");
+    }
+  }
+#endif
+  this->cap_need_key_.store(true, std::memory_order_release);
   this->cast_prefix_ = "camera_";
-  return this->capture_cast_begin_(CAST_LOCAL);
+  if (!this->capture_cast_begin_(CAST_LOCAL)) {
+    this->cap_h264_ = false;
+    return false;
+  }
+#ifdef USE_CAMERA
+  if (this->cap_h264_)
+    cam->start_stream_as(camera::RECORD_REQUESTER, camera::IMAGE_FORMAT_H264);
+#endif
+  return true;
 }
+
+#ifdef USE_CAMERA
+void SimpleVideoPlayer::camera_h264_image_(const std::shared_ptr<camera::CameraImage> &image) {
+  if (!this->cap_h264_ || image->get_format() != camera::IMAGE_FORMAT_H264 ||
+      !image->was_requested_by(camera::RECORD_REQUESTER))
+    return;
+  this->cam_cap_key_ = image->is_key_frame();
+  if (!this->camera_capture_frame(image->get_data_buffer(), image->get_data_length(), CameraFrameFormat::H264,
+                                  this->cap_w_, this->cap_h_, [image]() {})) {
+    this->cap_need_key_.store(true, std::memory_order_release);
+    camera::Camera::instance()->request_key_frame();
+  }
+}
+#endif
 
 void SimpleVideoPlayer::camera_record_stop() {
   if (this->cap_camera_)
@@ -785,14 +846,15 @@ void SimpleVideoPlayer::camera_capture_end() {
 bool SimpleVideoPlayer::camera_capture_frame(const uint8_t *data, size_t length, CameraFrameFormat format,
                                              uint16_t width, uint16_t height, std::function<void()> &&done) {
   const bool recording = this->cap_camera_ && this->cast_state_ == CAST_RUNNING;
+  const bool h264 = format == CameraFrameFormat::H264;
   if (data == nullptr || (this->cam_cap_ == 0 && !recording) || format == CameraFrameFormat::YUYV ||
-      this->cam_cap_busy_.load(std::memory_order_acquire))
+      (h264 && (this->cam_cap_ != 0 || !this->cap_h264_)) || this->cam_cap_busy_.load(std::memory_order_acquire))
     return false;
   if (this->cam_cap_ == 0) {
-    if (width != this->cap_w_ || height != this->cap_h_)
+    if (width != this->cap_w_ || height != this->cap_h_ || (this->cap_h264_ && !h264))
       return false;
     const uint32_t now = millis();
-    if (this->cam_cap_last_ != 0 && now - this->cam_cap_last_ < 1000u / this->cast_fps_)
+    if (!h264 && this->cam_cap_last_ != 0 && now - this->cam_cap_last_ < 1000u / this->cast_fps_)
       return false;
     this->cam_cap_last_ = now;
   }
@@ -847,7 +909,7 @@ bool SimpleVideoPlayer::capture_cast_begin_(uint8_t target) {
   }
 #endif
   if (!this->cap_avi_.begin(this->cap_w_, this->cap_h_, this->cast_fps_, this->cap_rate_, this->cap_channels_,
-                            CAP_JPEG_ROOM, this->cap_index_, CAP_INDEX_BYTES)) {
+                            CAP_JPEG_ROOM, this->cap_index_, CAP_INDEX_BYTES, this->cap_h264_)) {
     this->capture_free_frames_();
     this->capture_free_rest_();
     this->cap_camera_ = false;
@@ -1068,6 +1130,11 @@ void SimpleVideoPlayer::capture_finished_() {
     this->shot_trigger_.trigger(std::string());
   }
   const bool written = this->cast_file_ == CF_DONE;
+#ifdef USE_CAMERA
+  if (this->cap_h264_ && camera::Camera::instance() != nullptr)
+    camera::Camera::instance()->stop_stream_as(camera::RECORD_REQUESTER, camera::IMAGE_FORMAT_H264);
+#endif
+  this->cap_h264_ = false;
   this->cap_camera_ = false;
   this->cast_file_ = CF_NONE;
   this->cast_file_final_ = false;
