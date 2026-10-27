@@ -1118,6 +1118,8 @@ void EthernetComponent::eth_event_handler(void *arg, esp_event_base_t event_base
 void EthernetComponent::got_ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
                                              void *event_data) {
   ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
+  if (event->esp_netif != global_eth_component->eth_netif_)
+    return;
   const esp_netif_ip_info_t *ip_info = &event->ip_info;
   ESP_LOGV(TAG, "[Ethernet event] ETH Got IP " IPSTR, IP2STR(&ip_info->ip));
   global_eth_component->got_ipv4_address_ = true;
@@ -1137,6 +1139,8 @@ void EthernetComponent::got_ip_event_handler(void *arg, esp_event_base_t event_b
 void EthernetComponent::got_ip6_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
                                               void *event_data) {
   ip_event_got_ip6_t *event = (ip_event_got_ip6_t *) event_data;
+  if (event->esp_netif != global_eth_component->eth_netif_)
+    return;
   ESP_LOGV(TAG, "[Ethernet event] ETH Got IPv6: " IPV6STR, IPV62STR(event->ip6_info.ip));
   // Count the addresses on the interface, not the events: recreating the link-local
   // after a link flap fires another event for the same address.
