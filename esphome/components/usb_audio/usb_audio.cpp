@@ -763,7 +763,7 @@ bool USBAudioSink::has_buffered_data() const {
 void USBAudioSink::set_volume(float volume) {
   speaker::Speaker::set_volume(volume);
 #ifdef USE_AUDIO_DAC
-  if (this->audio_dac_ != nullptr)
+  if (this->has_audio_dac_())
     return;
 #endif
   this->client_->spk_volume_.store(std::clamp(volume, 0.0f, 1.0f));
@@ -775,7 +775,7 @@ void USBAudioSink::set_volume(float volume) {
 void USBAudioSink::set_mute_state(bool mute_state) {
   speaker::Speaker::set_mute_state(mute_state);
 #ifdef USE_AUDIO_DAC
-  if (this->audio_dac_ != nullptr)
+  if (this->has_audio_dac_())
     return;
 #endif
   this->client_->spk_mute_.store(mute_state);
