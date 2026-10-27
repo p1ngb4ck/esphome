@@ -142,6 +142,12 @@ class Speaker {
       audio_dac->on_audio_started();
     }
   }
+
+  void notify_audio_dacs_stopping_() {
+    for (auto *audio_dac : this->audio_dacs_) {
+      audio_dac->on_audio_stopping();
+    }
+  }
 #endif
 
   State state_{STATE_STOPPED};
