@@ -116,8 +116,9 @@ void I2SAudioSpeakerBase::loop() {
     ESP_LOGV(TAG, "Stopping");
     xEventGroupClearBits(this->event_group_, SpeakerEventGroupBits::TASK_STOPPING);
     this->set_amplifier_(false);
-#ifdef USE_AUDIO_DAC
-    this->notify_audio_dacs_stopping_();
+#ifdef USE_AUDIO_DAC_STOPPING
+    for (auto *audio_dac : this->audio_dacs_)
+      audio_dac->on_audio_stopping();
 #endif
     this->state_ = speaker::STATE_STOPPING;
   }
