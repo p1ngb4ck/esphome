@@ -1,16 +1,16 @@
-# i2c: bus_recovery option
+# ESPHome [![Discord Chat](https://img.shields.io/discord/429907082951524364.svg)](https://discord.gg/KhAMKrd) [![GitHub release](https://img.shields.io/github/release/esphome/esphome.svg)](https://GitHub.com/esphome/esphome/releases/) [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/esphome/esphome)
 
-Adds the option `bus_recovery` to the `i2c` bus (ESP-IDF and Arduino, default `true` = unchanged). With `false` the bus
-recovery at setup (nine SCL pulses and a STOP) is skipped and the log shows `Recovery: disabled`.
+<a href="https://esphome.io/">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://media.esphome.io/logo/logo-text-on-dark.svg">
+    <img src="https://media.esphome.io/logo/logo-text-on-light.svg" alt="ESPHome Logo">
+  </picture>
+</a>
 
-Needed for devices that stall the bus after a recovery: the DFRobot DFR0550's STM32 keeps SCL low from its first
-addressing on when the recovery ran while it powered up.
+---
 
-```yaml
-i2c:
-  sda: GPIO7
-  scl: GPIO8
-  bus_recovery: false
-```
+[Documentation](https://esphome.io) -- [Issues](https://github.com/esphome/esphome/issues) -- [Feature requests](https://github.com/orgs/esphome/discussions)
 
-All changes for the DFR0550 together: [dfrobot-dfr0550-upstream](https://github.com/p1ngb4ck/esphome/tree/dfrobot-dfr0550-upstream).
+---
+
+[![ESPHome - A project from the Open Home Foundation](https://www.openhomefoundation.org/badges/esphome.png)](https://www.openhomefoundation.org/)

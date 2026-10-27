@@ -3,6 +3,8 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
+#include <algorithm>
+
 namespace esphome::ft5x06 {
 
 ESPHOME_LOG_TAG(TAG, "ft5x06.touchscreen");
@@ -25,6 +27,8 @@ void FT5x06Touchscreen::setup() {
     }
   }
 
+  if (this->firmware_reads_)
+    return;
   // wait 200ms after reset.
   this->set_timeout(200, [this] { this->continue_setup_(); });
 }
@@ -51,6 +55,10 @@ void FT5x06Touchscreen::continue_setup_() {
 }
 
 void FT5x06Touchscreen::update_touches() {
+  if (this->firmware_reads_) {
+    this->update_touches_firmware_();
+    return;
+  }
   uint8_t touch_cnt;
   uint8_t data[MAX_TOUCHES][6];
 
@@ -78,12 +86,39 @@ void FT5x06Touchscreen::update_touches() {
   }
 }
 
+void FT5x06Touchscreen::update_touches_firmware_() {
+  uint8_t touch_cnt;
+  if (!this->read_byte(FT5X06_TD_STATUS, &touch_cnt)) {
+    ESP_LOGW(TAG, "Failed to read status");
+    return;
+  }
+  if (touch_cnt == 0xFF)
+    return;
+  touch_cnt = std::min<uint8_t>(touch_cnt & 0x0F, MAX_TOUCHES);
+  for (uint8_t i = 0; i != touch_cnt; i++) {
+    uint8_t data[4];
+    if (!this->read_bytes(FT5X06_TOUCH_DATA + i * 6, data, sizeof(data))) {
+      ESP_LOGW(TAG, "Failed to read touch data");
+      return;
+    }
+    uint8_t status = data[0] >> 6;
+    if (status != 1 && status != 2)
+      continue;
+    uint8_t id = data[2] >> 4;
+    uint16_t x = encode_uint16(data[0] & 0x0F, data[1]);
+    uint16_t y = encode_uint16(data[2] & 0x0F, data[3]);
+    ESP_LOGV(TAG, "Read %X status, id: %d, pos %d/%d", status, id, x, y);
+    this->add_raw_touch_position_(id, x, y);
+  }
+}
+
 void FT5x06Touchscreen::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "FT5x06 Touchscreen:\n"
                 "  Address: 0x%02X\n"
-                "  Vendor ID: 0x%X",
-                this->address_, (int) this->vendor_id_);
+                "  Vendor ID: 0x%X\n"
+                "  Firmware reads: %s",
+                this->address_, (int) this->vendor_id_, YESNO(this->firmware_reads_));
 }
 
 bool FT5x06Touchscreen::err_check_(i2c::ErrorCode err, const char *msg) {
