@@ -6,7 +6,9 @@
 
 #include <cinttypes>
 
+extern "C" {
 #include <esp_h264_alloc.h>
+}
 #include <esp_h264_enc_param_hw.h>
 #include <esp_h264_enc_single_hw.h>
 
