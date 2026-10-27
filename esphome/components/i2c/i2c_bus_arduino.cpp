@@ -15,7 +15,9 @@ ESPHOME_LOG_TAG(TAG, "i2c");
 static constexpr size_t I2C_MAX_LOG_BYTES = 32;
 
 void ArduinoI2CBus::setup() {
-  this->recover_();
+  if (this->bus_recovery_) {
+    this->recover_();
+  }
 
 #if defined(USE_ESP8266)
   wire_ = new TwoWire();  // NOLINT(cppcoreguidelines-owning-memory)
@@ -74,16 +76,20 @@ void ArduinoI2CBus::dump_config() {
     ESP_LOGCONFIG(TAG, "  Timeout: %u ms", this->timeout_ / 1000);
 #endif
   }
-  switch (this->recovery_result_) {
-    case RECOVERY_COMPLETED:
-      ESP_LOGCONFIG(TAG, "  Recovery: bus successfully recovered");
-      break;
-    case RECOVERY_FAILED_SCL_LOW:
-      ESP_LOGCONFIG(TAG, "  Recovery: failed, SCL is held low on the bus");
-      break;
-    case RECOVERY_FAILED_SDA_LOW:
-      ESP_LOGCONFIG(TAG, "  Recovery: failed, SDA is held low on the bus");
-      break;
+  if (this->bus_recovery_) {
+    switch (this->recovery_result_) {
+      case RECOVERY_COMPLETED:
+        ESP_LOGCONFIG(TAG, "  Recovery: bus successfully recovered");
+        break;
+      case RECOVERY_FAILED_SCL_LOW:
+        ESP_LOGCONFIG(TAG, "  Recovery: failed, SCL is held low on the bus");
+        break;
+      case RECOVERY_FAILED_SDA_LOW:
+        ESP_LOGCONFIG(TAG, "  Recovery: failed, SDA is held low on the bus");
+        break;
+    }
+  } else {
+    ESP_LOGCONFIG(TAG, "  Recovery: disabled");
   }
   if (this->scan_) {
     ESP_LOGI(TAG, "Results from bus scan:");

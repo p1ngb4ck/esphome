@@ -23,6 +23,7 @@ class IDFI2CBus final : public InternalI2CBus, public Component {
   float get_setup_priority() const override { return setup_priority::BUS; }
 
   void set_scan(bool scan) { this->scan_ = scan; }
+  void set_bus_recovery(bool bus_recovery) { this->bus_recovery_ = bus_recovery; }
   void set_sda_pin(uint8_t sda_pin) { this->sda_pin_ = sda_pin; }
   void set_sda_pullup_enabled(bool sda_pullup_enabled) { this->sda_pullup_enabled_ = sda_pullup_enabled; }
   void set_scl_pin(uint8_t scl_pin) { this->scl_pin_ = scl_pin; }
@@ -45,6 +46,7 @@ class IDFI2CBus final : public InternalI2CBus, public Component {
   void recover_();
   i2c_master_dev_handle_t add_device_(uint32_t frequency);
   RecoveryCode recovery_result_{};
+  bool bus_recovery_{true};
 
  protected:
   i2c_master_dev_handle_t dev_{};

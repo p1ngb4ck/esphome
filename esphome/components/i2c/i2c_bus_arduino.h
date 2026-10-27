@@ -23,6 +23,7 @@ class ArduinoI2CBus final : public InternalI2CBus, public Component {
   float get_setup_priority() const override { return setup_priority::BUS; }
 
   void set_scan(bool scan) { this->scan_ = scan; }
+  void set_bus_recovery(bool bus_recovery) { this->bus_recovery_ = bus_recovery; }
   void set_sda_pin(uint8_t sda_pin) { this->sda_pin_ = sda_pin; }
   void set_scl_pin(uint8_t scl_pin) { this->scl_pin_ = scl_pin; }
   void set_timeout(uint32_t timeout) { this->timeout_ = timeout; }
@@ -38,6 +39,7 @@ class ArduinoI2CBus final : public InternalI2CBus, public Component {
   void recover_();
   void set_pins_and_clock_();
   RecoveryCode recovery_result_;
+  bool bus_recovery_{true};
 
  protected:
   TwoWire *wire_;
