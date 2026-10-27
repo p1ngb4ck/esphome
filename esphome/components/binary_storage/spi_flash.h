@@ -96,6 +96,12 @@ class SPIFlash : public BinaryStorage,
     const char *label;
     uint8_t subtype;  // esp_partition_subtype_t
   };
+#ifdef USE_BINARY_STORAGE_SPI_NVS_CS
+  void set_nvs_cs_pin(const char *ns, const char *key) {
+    this->nvs_cs_namespace_ = ns;
+    this->nvs_cs_key_ = key;
+  }
+#endif
   void enable_esp_partition_mode(uint8_t spi_host, int cs_pin, int freq_mhz) {
     this->esp_partition_mode_ = true;
     this->spi_host_ = spi_host;
@@ -279,6 +285,10 @@ class SPIFlash : public BinaryStorage,
   bool esp_partition_mode_{false};
   uint8_t spi_host_{0};
   int cs_pin_num_{-1};
+#ifdef USE_BINARY_STORAGE_SPI_NVS_CS
+  const char *nvs_cs_namespace_{nullptr};
+  const char *nvs_cs_key_{nullptr};
+#endif
   int flash_freq_mhz_{40};
   esp_flash_t *ext_chip_{nullptr};
   std::vector<PartitionRegion> partition_regions_;

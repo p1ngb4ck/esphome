@@ -145,6 +145,22 @@ CONF_INTERFACE = "interface"
 CONF_INTERFACE_INDEX = "interface_index"
 CONF_RELEASE_DEVICE = "release_device"
 CONF_PSRAM_DMA = "psram_dma"
+CONF_NVS_PINS = "nvs_pins"
+CONF_NVS_NAMESPACE = "namespace"
+
+NVS_NAME = cv.All(cv.string_strict, cv.Length(min=1, max=15))
+
+NVS_PINS_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(CONF_NVS_NAMESPACE): NVS_NAME,
+            cv.Optional(CONF_CLK_PIN, default="spi_clk"): NVS_NAME,
+            cv.Optional(CONF_MOSI_PIN, default="spi_mosi"): NVS_NAME,
+            cv.Optional(CONF_MISO_PIN, default="spi_miso"): NVS_NAME,
+        }
+    ),
+    cv.only_on_esp32,
+)
 TYPE_SINGLE = "single"
 TYPE_QUAD = "quad"
 TYPE_OCTAL = "octal"
@@ -398,6 +414,7 @@ SPI_SINGLE_SCHEMA = cv.All(
             cv.Optional(CONF_DATA_PINS): cv.invalid(
                 "'data_pins' should be used with 'type: quad or octal' only"
             ),
+            cv.Optional(CONF_NVS_PINS): NVS_PINS_SCHEMA,
         }
     ),
     cv.has_at_least_one_key(CONF_MISO_PIN, CONF_MOSI_PIN),
@@ -504,6 +521,16 @@ async def to_code(configs: list[ConfigType]) -> None:
         await cg.add_pin(var.set_mosi, spi.get(CONF_MOSI_PIN))
         if data_pins := spi.get(CONF_DATA_PINS):
             cg.add(var.set_data_pins(data_pins))
+        if nvs_pins := spi.get(CONF_NVS_PINS):
+            cg.add_define("USE_SPI_NVS_PINS")
+            cg.add(
+                var.set_nvs_pins(
+                    nvs_pins[CONF_NVS_NAMESPACE],
+                    nvs_pins[CONF_CLK_PIN],
+                    nvs_pins[CONF_MOSI_PIN],
+                    nvs_pins[CONF_MISO_PIN],
+                )
+            )
         if (index := spi.get(CONF_INTERFACE_INDEX)) is not None:
             interface = get_spi_interface(index)
             cg.add(var.set_interface(cg.RawExpression(interface)))

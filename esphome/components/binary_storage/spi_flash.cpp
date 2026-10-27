@@ -78,6 +78,14 @@ static spi_flash_caps_t four_byte_chip_caps(esp_flash_t *chip) {
 void SPIFlash::setup() {
   ESP_LOGCONFIG(TAG, "Setting up SPI Flash...");
 
+#ifdef USE_BINARY_STORAGE_SPI_NVS_CS
+  int nvs_cs = spi::nvs_pin(this->nvs_cs_namespace_, this->nvs_cs_key_);
+  if (nvs_cs >= 0) {
+    this->cs_pin_num_ = nvs_cs;
+    spi::override_pin(this->cs_, nvs_cs);
+  }
+#endif
+
 #ifdef USE_ESP_IDF
   if (this->esp_partition_mode_) {
     if (!this->esp_partition_setup_()) {

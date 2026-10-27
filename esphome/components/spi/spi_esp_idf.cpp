@@ -4,12 +4,45 @@
 #ifdef USE_SPI_PSRAM_DMA
 #include <esp_memory_utils.h>
 #endif
+#ifdef USE_SPI_NVS_PINS
+#include <nvs.h>
+#include "esphome/components/esp32/gpio.h"
+#endif
 
 namespace esphome::spi {
 
 #ifdef USE_ESP32
 ESPHOME_LOG_TAG(TAG, "spi");
 static const size_t MAX_TRANSFER_SIZE = 4092;  // dictated by ESP-IDF API.
+
+#ifdef USE_SPI_NVS_PINS
+int nvs_pin(const char *ns, const char *key) {
+  if (ns == nullptr || key == nullptr)
+    return -1;
+  nvs_handle_t handle;
+  if (nvs_open(ns, NVS_READONLY, &handle) != ESP_OK)
+    return -1;
+  int8_t value = -1;
+  if (nvs_get_i8(handle, key, &value) != ESP_OK)
+    value = -1;
+  nvs_close(handle);
+  return value;
+}
+
+void override_pin(GPIOPin *pin, int number) {
+  if (number < 0 || pin == nullptr || !pin->is_internal() || number >= GPIO_NUM_MAX)
+    return;
+  static_cast<esp32::ESP32InternalGPIOPin *>(pin)->set_pin(static_cast<gpio_num_t>(number));
+}
+
+void SPIComponent::apply_nvs_pins_() {
+  if (this->nvs_namespace_ == nullptr)
+    return;
+  override_pin(this->clk_pin_, nvs_pin(this->nvs_namespace_, this->nvs_clk_key_));
+  override_pin(this->sdo_pin_, nvs_pin(this->nvs_namespace_, this->nvs_mosi_key_));
+  override_pin(this->sdi_pin_, nvs_pin(this->nvs_namespace_, this->nvs_miso_key_));
+}
+#endif
 
 #ifdef USE_SPI_PSRAM_DMA
 static uint32_t get_psram_dma_flags(bool enabled, const void *tx_buffer) {

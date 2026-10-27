@@ -34,6 +34,7 @@ from esphome.const import (
     CONF_SOURCE,
     CONF_CS_PIN,
     CONF_DATA_RATE,
+    CONF_KEY,
     CONF_NUMBER,
     CONF_SPI_ID,
     CONF_TARGET,
@@ -125,6 +126,7 @@ CONF_PARTITION_ID = "partition_id"
 CONF_STORAGE_NAME = "storage_name"
 CONF_NAMESPACE = "namespace"
 CONF_ASSUME_EXCLUSIVE_BUS = "assume_exclusive_bus"
+CONF_NVS_CS_PIN = "nvs_cs_pin"
 CONF_DEVICE_NODE = "device_node"
 CONF_DEVICE_NODE_NAME = "device_node_name"
 
@@ -380,6 +382,15 @@ _SPI_FLASH_BASE_SCHEMA = (
             # else. Defaults to the device type, which is unambiguous until a second device of
             # that type shows up -- then it is required.
             cv.Optional(CONF_DEVICE_NODE_NAME): cv.string_strict,
+            cv.Optional(CONF_NVS_CS_PIN): cv.All(
+                cv.Schema(
+                    {
+                        cv.Required(CONF_NAMESPACE): spi.NVS_NAME,
+                        cv.Optional(CONF_KEY, default="spi_flash_cs"): spi.NVS_NAME,
+                    }
+                ),
+                cv.only_on_esp32,
+            ),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -1089,6 +1100,10 @@ async def to_code(config):
 
     if is_spi:
         cg.add_define("USE_BINARY_STORAGE_SPI")
+        if nvs_cs := config.get(CONF_NVS_CS_PIN):
+            cg.add_define("USE_SPI_NVS_PINS")
+            cg.add_define("USE_BINARY_STORAGE_SPI_NVS_CS")
+            cg.add(var.set_nvs_cs_pin(nvs_cs[CONF_NAMESPACE], nvs_cs[CONF_KEY]))
         if _esp_partition_active(config):
             # esp_partition mode: esp_flash owns the exclusive bus, so the flash is NOT registered
             # as an ESPHome spi_device (esp_flash and spi_device cannot share a bus).
