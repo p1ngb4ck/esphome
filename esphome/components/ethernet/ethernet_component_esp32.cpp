@@ -227,6 +227,9 @@ static network::IPAddress ip4_address(uint32_t value) {
 }
 
 void EthernetComponent::load_settings_() {
+#ifdef USE_ETHERNET_MANUAL_IP_CONFIG
+  this->manual_ip_ = load_manual_ip();
+#endif
   this->settings_pref_ =
       global_preferences->make_preference<SavedEthernetSettings>(fnv1_hash("ethernet_settings"), true);
   SavedEthernetSettings saved{};
