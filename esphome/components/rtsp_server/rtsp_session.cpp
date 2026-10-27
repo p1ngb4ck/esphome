@@ -18,6 +18,7 @@ namespace esphome::rtsp_server {
 ESPHOME_LOG_TAG(TAG, "rtsp_server");
 
 static constexpr uint8_t RTP_PAYLOAD_TYPE_JPEG = 26;
+static constexpr uint8_t RTP_PAYLOAD_TYPE_H264 = 96;
 static constexpr uint32_t RTP_CLOCK_RATE = 90000;
 static constexpr uint32_t SESSION_TIMEOUT_MS = 60000;
 static constexpr char REQUEST_END[] = "\r\n\r\n";
@@ -29,6 +30,14 @@ static constexpr char SDP_BODY[] = "v=0\r\n"
                                    "t=0 0\r\n"
                                    "m=video 0 RTP/AVP 26\r\n"
                                    "a=control:trackID=0\r\n";
+static constexpr char SDP_BODY_H264[] = "v=0\r\n"
+                                        "o=- 0 0 IN IP4 0.0.0.0\r\n"
+                                        "s=ESPHome RTSP\r\n"
+                                        "t=0 0\r\n"
+                                        "m=video 0 RTP/AVP 96\r\n"
+                                        "a=rtpmap:96 H264/90000\r\n"
+                                        "a=fmtp:96 packetization-mode=1\r\n"
+                                        "a=control:trackID=0\r\n";
 
 namespace {
 
@@ -145,7 +154,10 @@ bool parse_jpeg_info(const uint8_t *data, size_t len, JpegInfo &out) {
   return false;
 }
 
-void RTSPSession::open(std::unique_ptr<socket::Socket> socket, uint32_t now) {
+void RTSPSession::open(std::unique_ptr<socket::Socket> socket, uint32_t now, camera::ImageFormat format) {
+  this->format_ = format;
+  this->need_key_ = true;
+  this->nal_active_ = false;
   this->socket_ = std::move(socket);
   this->socket_->setblocking(false);
   int enable = 1;
@@ -332,13 +344,15 @@ void RTSPSession::handle_request_(StringRef request, uint16_t port) {
     char addr_buf[socket::SOCKADDR_STR_LEN];
     this->socket_->getsockname_to(addr_buf);
     const bool ipv6 = std::strchr(addr_buf, ':') != nullptr;
+    const bool h264 = this->format_ == camera::IMAGE_FORMAT_H264;
+    const char *sdp = h264 ? SDP_BODY_H264 : SDP_BODY;
+    const size_t sdp_len = h264 ? sizeof(SDP_BODY_H264) - 1 : sizeof(SDP_BODY) - 1;
     this->queue_response_(200, "OK",
                           "Content-Base: rtsp://%s%s%s:%u/\r\n"
                           "Content-Type: application/sdp\r\n"
                           "Content-Length: %u\r\n",
-                          ipv6 ? "[" : "", addr_buf, ipv6 ? "]" : "", port,
-                          static_cast<unsigned>(sizeof(SDP_BODY) - 1));
-    this->iov_[this->iov_count_++] = {const_cast<char *>(SDP_BODY), sizeof(SDP_BODY) - 1};
+                          ipv6 ? "[" : "", addr_buf, ipv6 ? "]" : "", port, static_cast<unsigned>(sdp_len));
+    this->iov_[this->iov_count_++] = {const_cast<char *>(sdp), sdp_len};
   } else if (str_equals_case_insensitive(method, StringRef::from_lit("SETUP"))) {
     this->handle_setup_(transport);
   } else if (str_equals_case_insensitive(method, StringRef::from_lit("PLAY"))) {
@@ -393,6 +407,8 @@ void RTSPSession::handle_play_() {
   }
   this->state_ = State::PLAYING;
   this->frame_.reset();  // a repeated PLAY may arrive mid-frame
+  this->need_key_ = true;
+  this->nal_active_ = false;
   this->queue_response_(200, "OK", "Range: npt=0.000-\r\n");
 }
 
@@ -416,7 +432,125 @@ void RTSPSession::on_new_frame(const std::shared_ptr<camera::CameraImage> &image
   this->last_frame_ms_ = now;
 }
 
+bool RTSPSession::on_new_h264_frame(const std::shared_ptr<camera::CameraImage> &image, uint32_t now) {
+  if (this->state_ != State::PLAYING)
+    return false;
+  if (this->frame_ != nullptr || this->iov_pos_ < this->iov_count_ || this->filler_len_ > 0) {
+    this->need_key_ = true;
+    return false;
+  }
+  if (this->need_key_ && !image->is_key_frame())
+    return true;
+  this->need_key_ = false;
+  this->frame_ = image;
+  this->frame_sent_ = 0;
+  this->nal_active_ = false;
+  this->frame_progress_ms_ = now;
+  uint32_t elapsed_ms = this->last_frame_ms_ == 0 ? 0 : now - this->last_frame_ms_;
+  this->rtp_timestamp_ += static_cast<uint32_t>((static_cast<uint64_t>(elapsed_ms) * RTP_CLOCK_RATE) / 1000);
+  this->last_frame_ms_ = now;
+  return false;
+}
+
+void RTSPSession::write_rtp_header_(uint8_t *buf, size_t rtp_len, bool marker, uint8_t payload_type) {
+  size_t pos = 0;
+  buf[pos++] = '$';
+  buf[pos++] = 0;
+  buf[pos++] = static_cast<uint8_t>(rtp_len >> 8);
+  buf[pos++] = static_cast<uint8_t>(rtp_len);
+  buf[pos++] = 0x80;
+  buf[pos++] = static_cast<uint8_t>((marker ? 0x80 : 0x00) | payload_type);
+  buf[pos++] = static_cast<uint8_t>(this->sequence_number_ >> 8);
+  buf[pos++] = static_cast<uint8_t>(this->sequence_number_);
+  this->sequence_number_++;
+  buf[pos++] = static_cast<uint8_t>(this->rtp_timestamp_ >> 24);
+  buf[pos++] = static_cast<uint8_t>(this->rtp_timestamp_ >> 16);
+  buf[pos++] = static_cast<uint8_t>(this->rtp_timestamp_ >> 8);
+  buf[pos++] = static_cast<uint8_t>(this->rtp_timestamp_);
+  buf[pos++] = static_cast<uint8_t>(this->ssrc_ >> 24);
+  buf[pos++] = static_cast<uint8_t>(this->ssrc_ >> 16);
+  buf[pos++] = static_cast<uint8_t>(this->ssrc_ >> 8);
+  buf[pos++] = static_cast<uint8_t>(this->ssrc_);
+}
+
+static size_t find_start_code(const uint8_t *data, size_t len, size_t from, size_t *code_len) {
+  for (size_t i = from; i + 3 <= len; i++) {
+    if (data[i] == 0 && data[i + 1] == 0) {
+      if (data[i + 2] == 1) {
+        *code_len = 3;
+        return i;
+      }
+      if (i + 4 <= len && data[i + 2] == 0 && data[i + 3] == 1) {
+        *code_len = 4;
+        return i;
+      }
+    }
+  }
+  *code_len = 0;
+  return len;
+}
+
+bool RTSPSession::queue_next_h264_packet_() {
+  if (this->frame_ == nullptr)
+    return false;
+  const uint8_t *data = this->frame_->get_data_buffer();
+  const size_t len = this->frame_->get_data_length();
+  if (!this->nal_active_) {
+    size_t code_len = 0;
+    const size_t start = find_start_code(data, len, this->frame_sent_, &code_len);
+    if (code_len == 0) {
+      this->frame_.reset();
+      return false;
+    }
+    this->nal_start_ = start + code_len;
+    size_t next_code = 0;
+    size_t end = find_start_code(data, len, this->nal_start_, &next_code);
+    while (end > this->nal_start_ && data[end - 1] == 0 && end < len)
+      end--;
+    this->nal_len_ = end > this->nal_start_ ? end - this->nal_start_ : 0;
+    this->frame_sent_ = this->nal_start_ + this->nal_len_;
+    this->nal_sent_ = 0;
+    this->nal_active_ = this->nal_len_ > 0;
+    if (!this->nal_active_)
+      return this->queue_next_h264_packet_();
+  }
+  size_t ignored = 0;
+  const bool last_nal = find_start_code(data, len, this->frame_sent_, &ignored) >= len;
+  const uint8_t *nal = data + this->nal_start_;
+  auto *buf = reinterpret_cast<uint8_t *>(this->send_buf_.data());
+  if (this->nal_sent_ == 0 && this->nal_len_ <= RTP_H264_PAYLOAD_SIZE) {
+    this->write_rtp_header_(buf, RTP_HEADER_LEN + this->nal_len_, last_nal, RTP_PAYLOAD_TYPE_H264);
+    this->iov_[0] = {buf, INTERLEAVED_HEADER_LEN + RTP_HEADER_LEN};
+    this->iov_[1] = {const_cast<uint8_t *>(nal), this->nal_len_};
+    this->iov_pos_ = 0;
+    this->iov_count_ = 2;
+    this->sending_packet_ = true;
+    this->nal_active_ = false;
+    return true;
+  }
+  if (this->nal_sent_ == 0)
+    this->nal_sent_ = 1;
+  const size_t chunk = std::min(this->nal_len_ - this->nal_sent_, RTP_H264_PAYLOAD_SIZE - FU_HEADER_LEN);
+  const bool first = this->nal_sent_ == 1;
+  const bool last = this->nal_sent_ + chunk >= this->nal_len_;
+  this->write_rtp_header_(buf, RTP_HEADER_LEN + FU_HEADER_LEN + chunk, last && last_nal, RTP_PAYLOAD_TYPE_H264);
+  buf[INTERLEAVED_HEADER_LEN + RTP_HEADER_LEN] = static_cast<uint8_t>((nal[0] & 0xE0) | 28);
+  buf[INTERLEAVED_HEADER_LEN + RTP_HEADER_LEN + 1] =
+      static_cast<uint8_t>((first ? 0x80 : 0x00) | (last ? 0x40 : 0x00) | (nal[0] & 0x1F));
+  this->iov_[0] = {buf, INTERLEAVED_HEADER_LEN + RTP_HEADER_LEN + FU_HEADER_LEN};
+  this->iov_[1] = {const_cast<uint8_t *>(nal + this->nal_sent_), chunk};
+  this->iov_pos_ = 0;
+  this->iov_count_ = 2;
+  this->sending_packet_ = true;
+  this->nal_sent_ += chunk;
+  if (last)
+    this->nal_active_ = false;
+  return true;
+}
+
 bool RTSPSession::queue_next_packet_() {
+  if (this->format_ == camera::IMAGE_FORMAT_H264)
+    return this->queue_next_h264_packet_();
   if (this->frame_ == nullptr)
     return false;
   if (this->frame_sent_ >= this->jpeg_.scan_len) {
@@ -488,6 +622,8 @@ bool RTSPSession::queue_next_packet_() {
 
 void RTSPSession::drop_frame_() {
   this->frame_.reset();
+  this->need_key_ = true;
+  this->nal_active_ = false;
   if (!this->sending_packet_ || this->iov_pos_ >= this->iov_count_)
     return;
   // Even an unwritten packet is kept, so output stays pending and on_new_frame() takes nothing until the

@@ -8,7 +8,13 @@ from esphome.components.esp32_camera import (
     FRAME_SIZES,
 )
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_MAX_CONNECTIONS, CONF_PORT, CONF_RESOLUTION
+from esphome.const import (
+    CONF_FORMAT,
+    CONF_ID,
+    CONF_MAX_CONNECTIONS,
+    CONF_PORT,
+    CONF_RESOLUTION,
+)
 import esphome.final_validate as fv
 from esphome.types import ConfigType
 
@@ -22,6 +28,11 @@ RTP_JPEG_MAX_DIMENSION = 255 * 8
 
 rtsp_server_ns = cg.esphome_ns.namespace("rtsp_server")
 RTSPServer = rtsp_server_ns.class_("RTSPServer", cg.Component)
+ImageFormat = cg.esphome_ns.namespace("camera").enum("ImageFormat")
+FORMATS = {
+    "MJPEG": ImageFormat.IMAGE_FORMAT_JPEG,
+    "H264": ImageFormat.IMAGE_FORMAT_H264,
+}
 
 
 def _consume_rtsp_server_sockets(config: ConfigType) -> ConfigType:
@@ -40,6 +51,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_PORT, default=554): cv.port,
             cv.Optional(CONF_MAX_CONNECTIONS, default=2): cv.int_range(min=1, max=4),
             cv.Optional(CONF_ALLOWED_IPS): socket.IPV4_ALLOW_SCHEMA,
+            cv.Optional(CONF_FORMAT, default="MJPEG"): cv.enum(FORMATS, upper=True),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _consume_rtsp_server_sockets,
@@ -49,9 +61,7 @@ CONFIG_SCHEMA = cv.All(
 def _final_validate(config: ConfigType) -> None:
     camera = fv.full_config.get().get(ESP32_CAMERA_DOMAIN)
     if camera is None:
-        raise cv.Invalid(
-            f"{DOMAIN} requires a camera, add an '{ESP32_CAMERA_DOMAIN}:' block"
-        )
+        return
     pixel_format = camera[CONF_PIXEL_FORMAT]
     # A GRAYSCALE frame converts to a one-component JPEG, which RTP/JPEG cannot carry.
     if pixel_format == "GRAYSCALE":
@@ -82,4 +92,5 @@ async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID], config[CONF_PORT])
     await cg.register_component(var, config)
     cg.add_define("MAX_RTSP_CONNECTIONS", config[CONF_MAX_CONNECTIONS])
+    cg.add(var.set_initial_format(config[CONF_FORMAT]))
     socket.add_ipv4_allow(var.set_allow, config.get(CONF_ALLOWED_IPS), config[CONF_ID])

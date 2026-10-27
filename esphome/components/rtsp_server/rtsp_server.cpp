@@ -48,7 +48,27 @@ void RTSPServer::setup() {
     return;
   }
 
-  camera::Camera::instance()->add_listener(this);
+  camera::Camera *camera = camera::Camera::instance();
+  if (camera == nullptr) {
+    ESP_LOGE(TAG, "No camera");
+    this->mark_failed();
+    return;
+  }
+  if (!camera->supports_format(this->format_)) {
+    ESP_LOGW(TAG, "The camera has no %s stream; JPEG is used", camera::to_string(this->format_));
+    this->format_ = camera::IMAGE_FORMAT_JPEG;
+  }
+  camera->add_listener(this);
+}
+
+void RTSPServer::set_format(camera::ImageFormat format) {
+  camera::Camera *camera = camera::Camera::instance();
+  if (format == this->format_ || (camera != nullptr && !camera->supports_format(format)))
+    return;
+  this->format_ = format;
+  for (auto &session : this->sessions_)
+    session.close();
+  ESP_LOGI(TAG, "Stream format %s", camera::to_string(format));
 }
 
 void RTSPServer::loop() {
@@ -63,13 +83,14 @@ void RTSPServer::loop() {
     playing |= session.is_playing();
   }
 
-  if (playing != this->streaming_) {
+  if (playing != this->streaming_ || (playing && this->stream_format_ != this->format_)) {
+    camera::Camera *camera = camera::Camera::instance();
+    if (this->streaming_)
+      camera->stop_stream_as(camera::RTSP_REQUESTER, this->stream_format_);
     this->streaming_ = playing;
-    if (playing) {
-      camera::Camera::instance()->start_stream(camera::RTSP_REQUESTER);
-    } else {
-      camera::Camera::instance()->stop_stream(camera::RTSP_REQUESTER);
-    }
+    this->stream_format_ = this->format_;
+    if (playing)
+      camera->start_stream_as(camera::RTSP_REQUESTER, this->stream_format_);
   }
 }
 
@@ -99,13 +120,23 @@ void RTSPServer::accept_new_connections_(uint32_t now) {
     }
 
     ESP_LOGD(TAG, "Accepted RTSP connection");
-    free_slot->open(std::move(sock), now);
+    free_slot->open(std::move(sock), now, this->format_);
   }
 }
 
 void RTSPServer::on_camera_image(const std::shared_ptr<camera::CameraImage> &image) {
-  if (!this->streaming_ || !image->was_requested_by(camera::RTSP_REQUESTER))
+  if (!this->streaming_ || !image->was_requested_by(camera::RTSP_REQUESTER) ||
+      image->get_format() != this->stream_format_)
     return;
+  if (this->stream_format_ == camera::IMAGE_FORMAT_H264) {
+    const uint32_t now = App.get_loop_component_start_time();
+    bool key = false;
+    for (auto &session : this->sessions_)
+      key |= session.on_new_h264_frame(image, now);
+    if (key)
+      camera::Camera::instance()->request_key_frame();
+    return;
+  }
 
   JpegInfo jpeg;
   if (!parse_jpeg_info(image->get_data_buffer(), image->get_data_length(), jpeg) ||
@@ -130,8 +161,9 @@ void RTSPServer::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "RTSP Server:\n"
                 "  Port: %u\n"
-                "  Max connections: %u",
-                this->port_, MAX_RTSP_CONNECTIONS);
+                "  Max connections: %u\n"
+                "  Format: %s",
+                this->port_, MAX_RTSP_CONNECTIONS, camera::to_string(this->format_));
 #ifdef USE_SOCKET_IPV4_ALLOW
   this->allow_.dump_config(TAG);
 #endif
