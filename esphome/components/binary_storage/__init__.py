@@ -387,6 +387,9 @@ _SPI_FLASH_BASE_SCHEMA = (
                     {
                         cv.Required(CONF_NAMESPACE): spi.NVS_NAME,
                         cv.Optional(CONF_KEY, default="spi_flash_cs"): spi.NVS_NAME,
+                        cv.Optional(spi.CONF_NVS_LINES, default="spi_lines"): spi.NVS_NAME,
+                        cv.Optional(spi.CONF_NVS_DATA2_PIN, default="spi_d2"): spi.NVS_NAME,
+                        cv.Optional(spi.CONF_NVS_DATA3_PIN, default="spi_d3"): spi.NVS_NAME,
                     }
                 ),
                 cv.only_on_esp32,
@@ -1103,7 +1106,15 @@ async def to_code(config):
         if nvs_cs := config.get(CONF_NVS_CS_PIN):
             cg.add_define("USE_SPI_NVS_PINS")
             cg.add_define("USE_BINARY_STORAGE_SPI_NVS_CS")
-            cg.add(var.set_nvs_cs_pin(nvs_cs[CONF_NAMESPACE], nvs_cs[CONF_KEY]))
+            cg.add(
+                var.set_nvs_cs_pin(
+                    nvs_cs[CONF_NAMESPACE],
+                    nvs_cs[CONF_KEY],
+                    nvs_cs[spi.CONF_NVS_LINES],
+                    nvs_cs[spi.CONF_NVS_DATA2_PIN],
+                    nvs_cs[spi.CONF_NVS_DATA3_PIN],
+                )
+            )
         if _esp_partition_active(config):
             # esp_partition mode: esp_flash owns the exclusive bus, so the flash is NOT registered
             # as an ESPHome spi_device (esp_flash and spi_device cannot share a bus).

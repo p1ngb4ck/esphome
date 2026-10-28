@@ -370,11 +370,15 @@ class SPIComponent final : public Component {
   void set_interface_name(const char *name) { this->interface_name_ = name; }
 
 #ifdef USE_SPI_NVS_PINS
-  void set_nvs_pins(const char *ns, const char *clk_key, const char *mosi_key, const char *miso_key) {
+  void set_nvs_pins(const char *ns, const char *clk_key, const char *mosi_key, const char *miso_key,
+                    const char *data2_key, const char *data3_key, const char *lines_key) {
     this->nvs_namespace_ = ns;
     this->nvs_clk_key_ = clk_key;
     this->nvs_mosi_key_ = mosi_key;
     this->nvs_miso_key_ = miso_key;
+    this->nvs_data2_key_ = data2_key;
+    this->nvs_data3_key_ = data3_key;
+    this->nvs_lines_key_ = lines_key;
   }
 #endif
 
@@ -404,6 +408,9 @@ class SPIComponent final : public Component {
   const char *nvs_clk_key_{nullptr};
   const char *nvs_mosi_key_{nullptr};
   const char *nvs_miso_key_{nullptr};
+  const char *nvs_data2_key_{nullptr};
+  const char *nvs_data3_key_{nullptr};
+  const char *nvs_lines_key_{nullptr};
   void apply_nvs_pins_();
 #endif
   std::map<SPIClient *, SPIDelegate *> devices_;
@@ -415,6 +422,7 @@ class SPIComponent final : public Component {
 #ifdef USE_SPI_NVS_PINS
 int nvs_pin(const char *ns, const char *key);
 void override_pin(GPIOPin *pin, int number);
+uint8_t nvs_data_lines(const char *ns, const char *lines_key, const char *data2_key, const char *data3_key);
 #endif
 
 using QuadSPIComponent = SPIComponent;

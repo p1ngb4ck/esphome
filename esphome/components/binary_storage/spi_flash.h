@@ -97,9 +97,13 @@ class SPIFlash : public BinaryStorage,
     uint8_t subtype;  // esp_partition_subtype_t
   };
 #ifdef USE_BINARY_STORAGE_SPI_NVS_CS
-  void set_nvs_cs_pin(const char *ns, const char *key) {
+  void set_nvs_cs_pin(const char *ns, const char *key, const char *lines_key, const char *data2_key,
+                      const char *data3_key) {
     this->nvs_cs_namespace_ = ns;
     this->nvs_cs_key_ = key;
+    this->nvs_lines_key_ = lines_key;
+    this->nvs_data2_key_ = data2_key;
+    this->nvs_data3_key_ = data3_key;
   }
 #endif
   void enable_esp_partition_mode(uint8_t spi_host, int cs_pin, int freq_mhz) {
@@ -288,6 +292,9 @@ class SPIFlash : public BinaryStorage,
 #ifdef USE_BINARY_STORAGE_SPI_NVS_CS
   const char *nvs_cs_namespace_{nullptr};
   const char *nvs_cs_key_{nullptr};
+  const char *nvs_lines_key_{nullptr};
+  const char *nvs_data2_key_{nullptr};
+  const char *nvs_data3_key_{nullptr};
 #endif
   int flash_freq_mhz_{40};
   esp_flash_t *ext_chip_{nullptr};

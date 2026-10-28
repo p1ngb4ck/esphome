@@ -84,6 +84,12 @@ void SPIFlash::setup() {
     this->cs_pin_num_ = nvs_cs;
     spi::override_pin(this->cs_, nvs_cs);
   }
+#ifdef USE_ESP_IDF
+  const uint8_t lines =
+      spi::nvs_data_lines(this->nvs_cs_namespace_, this->nvs_lines_key_, this->nvs_data2_key_, this->nvs_data3_key_);
+  if (this->esp_partition_mode_ && lines != 0)
+    this->data_lines_ = lines;
+#endif
 #endif
 
 #ifdef USE_ESP_IDF

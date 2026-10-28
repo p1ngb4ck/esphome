@@ -35,12 +35,31 @@ void override_pin(GPIOPin *pin, int number) {
   static_cast<esp32::ESP32InternalGPIOPin *>(pin)->set_pin(static_cast<gpio_num_t>(number));
 }
 
+uint8_t nvs_data_lines(const char *ns, const char *lines_key, const char *data2_key, const char *data3_key) {
+  const int lines = nvs_pin(ns, lines_key);
+  if (lines == 4 && nvs_pin(ns, data2_key) >= 0 && nvs_pin(ns, data3_key) >= 0)
+    return 4;
+  if (lines == 2)
+    return 2;
+  return lines == 1 ? 1 : 0;
+}
+
 void SPIComponent::apply_nvs_pins_() {
   if (this->nvs_namespace_ == nullptr)
     return;
   override_pin(this->clk_pin_, nvs_pin(this->nvs_namespace_, this->nvs_clk_key_));
   override_pin(this->sdo_pin_, nvs_pin(this->nvs_namespace_, this->nvs_mosi_key_));
   override_pin(this->sdi_pin_, nvs_pin(this->nvs_namespace_, this->nvs_miso_key_));
+  const uint8_t lines =
+      nvs_data_lines(this->nvs_namespace_, this->nvs_lines_key_, this->nvs_data2_key_, this->nvs_data3_key_);
+  if (lines == 4 && this->sdo_pin_ != nullptr && this->sdi_pin_ != nullptr) {
+    this->data_pins_ = {static_cast<uint8_t>(Utility::get_pin_no(this->sdo_pin_)),
+                        static_cast<uint8_t>(Utility::get_pin_no(this->sdi_pin_)),
+                        static_cast<uint8_t>(nvs_pin(this->nvs_namespace_, this->nvs_data2_key_)),
+                        static_cast<uint8_t>(nvs_pin(this->nvs_namespace_, this->nvs_data3_key_))};
+  } else if (lines == 1 || lines == 2) {
+    this->data_pins_.clear();
+  }
 }
 #endif
 

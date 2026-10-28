@@ -147,6 +147,9 @@ CONF_RELEASE_DEVICE = "release_device"
 CONF_PSRAM_DMA = "psram_dma"
 CONF_NVS_PINS = "nvs_pins"
 CONF_NVS_NAMESPACE = "namespace"
+CONF_NVS_DATA2_PIN = "data2_pin"
+CONF_NVS_DATA3_PIN = "data3_pin"
+CONF_NVS_LINES = "lines"
 
 NVS_NAME = cv.All(cv.string_strict, cv.Length(min=1, max=15))
 
@@ -157,6 +160,9 @@ NVS_PINS_SCHEMA = cv.All(
             cv.Optional(CONF_CLK_PIN, default="spi_clk"): NVS_NAME,
             cv.Optional(CONF_MOSI_PIN, default="spi_mosi"): NVS_NAME,
             cv.Optional(CONF_MISO_PIN, default="spi_miso"): NVS_NAME,
+            cv.Optional(CONF_NVS_DATA2_PIN, default="spi_d2"): NVS_NAME,
+            cv.Optional(CONF_NVS_DATA3_PIN, default="spi_d3"): NVS_NAME,
+            cv.Optional(CONF_NVS_LINES, default="spi_lines"): NVS_NAME,
         }
     ),
     cv.only_on_esp32,
@@ -529,6 +535,9 @@ async def to_code(configs: list[ConfigType]) -> None:
                     nvs_pins[CONF_CLK_PIN],
                     nvs_pins[CONF_MOSI_PIN],
                     nvs_pins[CONF_MISO_PIN],
+                    nvs_pins[CONF_NVS_DATA2_PIN],
+                    nvs_pins[CONF_NVS_DATA3_PIN],
+                    nvs_pins[CONF_NVS_LINES],
                 )
             )
         if (index := spi.get(CONF_INTERFACE_INDEX)) is not None:
