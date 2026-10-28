@@ -189,6 +189,7 @@ class Messenger : public Component
   const uint8_t *photo_data() const { return this->photo_; }
   size_t photo_size() const { return this->photo_len_; }
   void photo_release();
+  bool set_photo_jpeg(const uint8_t *data, size_t len);
   bool download_file(Channel channel, const std::string &file_ref, const std::string &path);
   bool voice_start(Channel channel, int64_t chat_id);
   bool voice_stop_and_send();

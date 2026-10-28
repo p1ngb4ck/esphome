@@ -1021,6 +1021,22 @@ void Messenger::end_body_(Job *job) {
   body += "--\r\n";
 }
 
+bool Messenger::set_photo_jpeg(const uint8_t *data, size_t len) {
+  if (data == nullptr || len == 0)
+    return false;
+  auto *copy = static_cast<uint8_t *>(heap_caps_malloc(len + JPEG_STREAM_SLACK, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (copy == nullptr) {
+    this->sent_trigger_.trigger(std::string(), std::string("photo"), std::string("no PSRAM for the picture"));
+    return false;
+  }
+  memcpy(copy, data, len);
+  this->photo_release();
+  this->photo_ = copy;
+  this->photo_len_ = len;
+  this->defer([this]() { this->photo_trigger_.trigger(); });
+  return true;
+}
+
 void Messenger::photo_release() {
   heap_caps_free(this->photo_);
   this->photo_ = nullptr;
@@ -1903,16 +1919,7 @@ void Messenger::on_camera_image(const std::shared_ptr<camera::CameraImage> &imag
       return;
     this->capture_pending_ = false;
     this->cancel_timeout("msg_camera");
-    auto *copy = static_cast<uint8_t *>(heap_caps_malloc(len + JPEG_STREAM_SLACK, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (copy == nullptr) {
-      this->sent_trigger_.trigger(std::string(), std::string("photo"), std::string("no PSRAM for the picture"));
-      return;
-    }
-    memcpy(copy, image->get_data_buffer(), len);
-    this->photo_release();
-    this->photo_ = copy;
-    this->photo_len_ = len;
-    this->photo_trigger_.trigger();
+    this->set_photo_jpeg(image->get_data_buffer(), len);
     return;
   }
   Job *job = this->camera_job_;
