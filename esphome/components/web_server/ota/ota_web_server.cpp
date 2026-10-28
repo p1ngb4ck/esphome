@@ -23,6 +23,14 @@ bool WebServerOTAComponent::canHandle(AsyncWebServerRequest *request) const {
   bool is_ota_request = request->url() == ESPHOME_F("/update");
 #endif
 
+#ifdef USE_CAPTIVE_PORTAL
+  if (!this->web_upload_)
+    return is_ota_request && captive_portal::global_captive_portal != nullptr &&
+           captive_portal::global_captive_portal->is_active();
+#else
+  if (!this->web_upload_)
+    return false;
+#endif
 #if defined(USE_WEBSERVER_OTA_DISABLED) && defined(USE_CAPTIVE_PORTAL)
   // IMPORTANT: USE_WEBSERVER_OTA_DISABLED only disables OTA for the web_server component
   // Captive portal can still perform OTA updates - check if request is from active captive portal

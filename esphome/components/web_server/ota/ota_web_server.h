@@ -19,6 +19,8 @@ class WebServerOTAComponent final : public AsyncWebHandler, public ota::OTACompo
   void handleUpload(AsyncWebServerRequest *request, const PlatformString &filename, size_t index, uint8_t *data,
                     size_t len, bool final) override;
   bool canHandle(AsyncWebServerRequest *request) const override;
+  void set_web_upload(bool enabled) { this->web_upload_ = enabled; }
+  bool get_web_upload() const { return this->web_upload_; }
 
   // NOLINTNEXTLINE(readability-identifier-naming)
   bool isRequestHandlerTrivial() const override { return false; }
@@ -35,6 +37,7 @@ class WebServerOTAComponent final : public AsyncWebHandler, public ota::OTACompo
   uint32_t last_ota_progress_{0};
   uint32_t ota_read_length_{0};
   bool ota_success_{false};
+  bool web_upload_{true};
 
  private:
   ota::OTABackendPtr ota_backend_{nullptr};
