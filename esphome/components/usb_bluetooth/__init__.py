@@ -31,6 +31,7 @@ AUTO_LOAD = ["usb_host"]
 MULTI_CONF = True
 
 CONF_BLUEDROID = "bluedroid"
+CONF_C6_OFFLOAD = "c6_offload"
 CONF_FIRMWARE = "firmware"
 CONF_FIRMWARE_CONFIG = "firmware_config"
 # An HCI command is up to 3 + 255 bytes, sent as one control transfer.
@@ -69,6 +70,7 @@ CONFIG_SCHEMA = cv.All(
             **USB_BLACKLIST_SCHEMA,
             # ESP-IDF's Bluedroid host stack, with the dongle as its controller.
             cv.Optional(CONF_BLUEDROID, default=False): cv.boolean,
+            cv.Optional(CONF_C6_OFFLOAD, default=False): cv.boolean,
             # Realtek firmware (linux-firmware rtl_bt/<chip>_fw.bin and, where the chip has one,
             # <chip>_config.bin), downloaded into a Realtek controller still on its ROM.
             cv.Optional(CONF_FIRMWARE): cv.file_,
@@ -88,8 +90,19 @@ def _final_validate(config):
             f"usb_bluetooth sends HCI commands of up to 258 bytes in one control transfer: set "
             f"usb_host max_packet_size to {MIN_TRANSFER_BUFFER} or more"
         )
+    full = fv.full_config.get()
+    if config[CONF_C6_OFFLOAD]:
+        if config[CONF_BLUEDROID]:
+            raise cv.Invalid(f"{CONF_C6_OFFLOAD} and {CONF_BLUEDROID} are exclusive: one host stack per dongle")
+        if "esp32_hosted" not in full:
+            raise cv.Invalid(f"{CONF_C6_OFFLOAD} needs esp32_hosted (the C6 runs the host stack)")
+        if "esp32_ble" in full:
+            raise cv.Invalid(
+                f"{CONF_C6_OFFLOAD}: the C6's offload firmware runs no controller for esp32_ble; "
+                "Bluetooth LE then also goes through the dongle on the C6"
+            )
     # Bluedroid is one stack with one controller.
-    instances = fv.full_config.get().get("usb_bluetooth") or []
+    instances = full.get("usb_bluetooth") or []
     if config[CONF_BLUEDROID] and sum(1 for c in instances if c[CONF_BLUEDROID]) > 1:
         raise cv.Invalid(f"{CONF_BLUEDROID}: only one usb_bluetooth can run Bluedroid")
     if config[CONF_BLUEDROID] and _splits_with_esp32_ble(fv.full_config.get()):
@@ -139,6 +152,10 @@ async def to_code(config):
             )
             cg.add(var.add_realtek_firmware(lmp_subver, rom, arr, len(data)))
 
+    if config[CONF_BLUEDROID] or config[CONF_C6_OFFLOAD]:
+        cg.add_define("USE_USB_BLUETOOTH_H4")
+    if config[CONF_C6_OFFLOAD]:
+        cg.add_define("USE_USB_BLUETOOTH_C6_OFFLOAD")
     if config[CONF_BLUEDROID]:
         request_bluetooth()
         add_idf_sdkconfig_option("CONFIG_BT_BLUEDROID_ENABLED", True)

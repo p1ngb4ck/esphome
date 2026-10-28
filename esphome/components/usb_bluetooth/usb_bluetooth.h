@@ -45,7 +45,7 @@ class USBBluetooth : public usb_host::USBClient {
     this->realtek_images_.push_back({lmp_subver, rom_version, data, length});
   }
 
-#ifdef USE_USB_BLUETOOTH_BLUEDROID
+#ifdef USE_USB_BLUETOOTH_H4
   // Bluedroid's transport operations; its HCI task calls these.
   void hci_send(uint8_t *data, uint16_t len);
   bool hci_send_available();
@@ -79,6 +79,8 @@ class USBBluetooth : public usb_host::USBClient {
   void send_done_();
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
   void start_bluedroid_();
+#endif
+#ifdef USE_USB_BLUETOOTH_H4
   bool send_acl_(const uint8_t *data, size_t len);
   // USB task: an H4 packet from the dongle to the host stack.
   void to_stack_(uint8_t *h4, size_t len);

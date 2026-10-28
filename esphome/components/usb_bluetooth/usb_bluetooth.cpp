@@ -16,6 +16,9 @@
 #include "hci_split.h"
 #include "esphome/components/esp32_ble/ble.h"
 #endif
+#ifdef USE_USB_BLUETOOTH_C6_OFFLOAD
+#include "c6_offload.h"
+#endif
 
 #include <algorithm>
 #include <cinttypes>
@@ -42,7 +45,7 @@ static constexpr size_t RTL_FRAGMENT = 252;
 
 static constexpr uint16_t MANUFACTURER_REALTEK = 93;
 
-#ifdef USE_USB_BLUETOOTH_BLUEDROID
+#ifdef USE_USB_BLUETOOTH_H4
 // H4 packet types, the byte Bluedroid's transport puts in front of every packet.
 static constexpr uint8_t H4_COMMAND = 0x01;
 static constexpr uint8_t H4_ACL = 0x02;
@@ -50,6 +53,9 @@ static constexpr uint8_t H4_SCO = 0x03;
 static constexpr uint8_t H4_EVENT = 0x04;
 // Transfer slots a send leaves free (the two readers hold theirs all the time).
 static constexpr size_t SPARE_SLOTS = 1;
+#endif
+
+#ifdef USE_USB_BLUETOOTH_BLUEDROID
 
 // The transport operations are plain C function pointers without a user argument.
 static USBBluetooth *g_instance = nullptr;
@@ -225,10 +231,12 @@ bool USBBluetooth::send_command(const uint8_t *packet, size_t len) {
 
 // USB task.
 void USBBluetooth::send_done_() {
-#ifdef USE_USB_BLUETOOTH_BLUEDROID
+#ifdef USE_USB_BLUETOOTH_H4
   if (this->send_blocked_.exchange(false, std::memory_order_acq_rel)) {
 #ifdef USE_USB_BLUETOOTH_HCI_SPLIT
     hci_split::br_send_available();
+#elif defined(USE_USB_BLUETOOTH_C6_OFFLOAD)
+    c6_offload::send_available(true);
 #else
     if (g_host_cb != nullptr && g_host_cb->notify_host_send_available != nullptr)
       g_host_cb->notify_host_send_available();
@@ -237,7 +245,7 @@ void USBBluetooth::send_done_() {
 #endif
 }
 
-#ifdef USE_USB_BLUETOOTH_BLUEDROID
+#ifdef USE_USB_BLUETOOTH_H4
 bool USBBluetooth::hci_send_available() {
   const size_t used = __builtin_popcount(this->get_trq_in_use());
   const bool available =
@@ -303,6 +311,8 @@ bool USBBluetooth::send_acl_(const uint8_t *data, size_t len) {
 void USBBluetooth::to_stack_(uint8_t *h4, size_t len) {
 #ifdef USE_USB_BLUETOOTH_HCI_SPLIT
   hci_split::br_recv(h4, len);
+#elif defined(USE_USB_BLUETOOTH_C6_OFFLOAD)
+  c6_offload::up(h4, len);
 #else
   if (g_host_cb != nullptr && g_host_cb->notify_host_recv != nullptr)
     g_host_cb->notify_host_recv(h4, static_cast<uint16_t>(len));
@@ -335,6 +345,9 @@ void USBBluetooth::start_split_() {
 }
 #endif
 
+#endif
+
+#ifdef USE_USB_BLUETOOTH_BLUEDROID
 void USBBluetooth::start_bluedroid_() {
 #ifdef USE_BT_PERSISTENCE
   // Bluedroid reads its pairing data once, when it starts.
@@ -392,7 +405,7 @@ void USBBluetooth::read_event_(uint32_t generation) {
         if (this->event_len_ >= 2 && this->event_len_ >= 2u + event[1]) {
           const size_t len = 2u + event[1];
           this->event_len_ = 0;
-#ifdef USE_USB_BLUETOOTH_BLUEDROID
+#ifdef USE_USB_BLUETOOTH_H4
           if (this->stack_attached_.load(std::memory_order_acquire)) {
             this->event_[0] = H4_EVENT;
             this->to_stack_(this->event_, len + 1);
@@ -445,7 +458,7 @@ void USBBluetooth::read_acl_(uint32_t generation) {
           }
           if (this->acl_len_ < total)
             continue;
-#ifdef USE_USB_BLUETOOTH_BLUEDROID
+#ifdef USE_USB_BLUETOOTH_H4
           if (this->stack_attached_.load(std::memory_order_acquire)) {
             this->acl_[0] = H4_ACL;
             this->to_stack_(this->acl_, total + 1);
@@ -627,6 +640,9 @@ void USBBluetooth::probe_done_(bool ok) {
 #elif defined(USE_USB_BLUETOOTH_BLUEDROID)
   if (ok)
     this->start_bluedroid_();
+#elif defined(USE_USB_BLUETOOTH_C6_OFFLOAD)
+  if (ok && c6_offload::start(this))
+    this->stack_attached_.store(true, std::memory_order_release);
 #endif
 }
 
