@@ -15,8 +15,7 @@ namespace esphome::boot_announce {
 
 /// After a boot that a receiver waits for (armed with watch() before the restart), sends the boot's facts
 /// through the udp component until the receiver acknowledges them: started by the network component's
-/// active-interface event (the network is online; with a single interface its IP event), resent by the scheduler
-/// only until the ack. No loop.
+/// active-interface event (the network is online), resent by the scheduler only until the ack. No loop.
 class BootAnnounce final : public Component
 #ifdef NETWORK_ACTIVE_INTERFACE_LISTENER_COUNT
     ,
