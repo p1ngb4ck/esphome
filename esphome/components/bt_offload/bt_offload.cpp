@@ -3,6 +3,9 @@
 #ifdef USE_BT_OFFLOAD
 
 #include "esphome/core/log.h"
+#ifdef USE_BT_OFFLOAD_SPEAKER
+#include "speaker/bt_offload_speaker.h"
+#endif
 #include "esp_hosted_misc.h"
 #include "esp_heap_caps.h"
 
@@ -16,9 +19,15 @@ static const char *const TAG = "bt_offload";
 static constexpr uint32_t MSG_HID_OPEN = 0x42545010u;
 static constexpr uint32_t MSG_HID_INPUT = 0x42545011u;
 static constexpr uint32_t MSG_HID_CLOSE = 0x42545012u;
-static constexpr uint32_t MSG_SCAN = 0x42545020u;
 static constexpr uint32_t MSG_FOUND = 0x42545021u;
-static constexpr uint32_t MSG_CONNECT = 0x42545022u;
+static constexpr uint32_t MSG_AUDIO_STATE = 0x42545033u;
+static constexpr uint32_t MSG_AUDIO_CREDIT = 0x42545034u;
+static constexpr uint32_t MSG_COMMAND = 0x42545040u;
+static constexpr uint8_t TYPE_SCAN = 0x20;
+static constexpr uint8_t TYPE_CONNECT = 0x22;
+static constexpr uint8_t TYPE_AUDIO_CONNECT = 0x30;
+static constexpr uint8_t TYPE_AUDIO_DISCONNECT = 0x31;
+static constexpr uint8_t TYPE_AUDIO_VOLUME = 0x35;
 static constexpr size_t FOUND_MAX = 16;
 
 static BTOffload *g_offload = nullptr;
@@ -70,6 +79,12 @@ void BTOffload::loop() {
       case MSG_FOUND:
         this->on_found_(event->data(), event->len);
         break;
+      case MSG_AUDIO_STATE:
+        this->on_audio_state_(event->data(), event->len);
+        break;
+      case MSG_AUDIO_CREDIT:
+        this->on_audio_credit_(event->data(), event->len);
+        break;
       default:
         break;
     }
@@ -87,7 +102,7 @@ static std::string format_address(const uint8_t *a) {
 void BTOffload::setup() {
   this->disable_loop();
   g_offload = this;
-  for (uint32_t id : {MSG_HID_OPEN, MSG_HID_INPUT, MSG_HID_CLOSE, MSG_FOUND}) {
+  for (uint32_t id : {MSG_HID_OPEN, MSG_HID_INPUT, MSG_HID_CLOSE, MSG_FOUND, MSG_AUDIO_STATE, MSG_AUDIO_CREDIT}) {
     const esp_err_t err = esp_hosted_register_custom_callback(id, forward, nullptr);
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Handler 0x%08X not registered: %s", static_cast<unsigned>(id), esp_err_to_name(err));
@@ -107,11 +122,22 @@ BTOffload::Device *BTOffload::device_(const uint8_t *address) {
   return nullptr;
 }
 
+bool BTOffload::command_(uint8_t type, const uint8_t *data, size_t len) {
+  uint8_t msg[16];
+  if (len + 1 > sizeof(msg))
+    return false;
+  msg[0] = type;
+  if (len > 0)
+    std::memcpy(msg + 1, data, len);
+  const esp_err_t err = esp_hosted_send_custom_data(MSG_COMMAND, msg, len + 1);
+  if (err != ESP_OK)
+    ESP_LOGW(TAG, "Command 0x%02X not sent: %s", type, esp_err_to_name(err));
+  return err == ESP_OK;
+}
+
 void BTOffload::scan(uint8_t seconds) {
   this->found_.clear();
-  esp_err_t err = esp_hosted_send_custom_data(MSG_SCAN, &seconds, 1);
-  if (err != ESP_OK)
-    ESP_LOGW(TAG, "Scan request not sent: %s", esp_err_to_name(err));
+  this->command_(TYPE_SCAN, &seconds, 1);
 }
 
 bool BTOffload::connect(const std::string &address) {
@@ -122,10 +148,54 @@ bool BTOffload::connect(const std::string &address) {
     std::memcpy(msg, found.address.data(), 6);
     msg[6] = found.transport;
     msg[7] = found.addr_type;
-    return esp_hosted_send_custom_data(MSG_CONNECT, msg, sizeof(msg)) == ESP_OK;
+    return this->command_(TYPE_CONNECT, msg, sizeof(msg));
   }
   ESP_LOGW(TAG, "%s was not found by the last scan", address.c_str());
   return false;
+}
+
+bool BTOffload::audio_connect(const std::string &address) {
+  std::array<uint8_t, 6> bytes{};
+  unsigned value[6];
+  if (std::sscanf(address.c_str(), "%x:%x:%x:%x:%x:%x", &value[0], &value[1], &value[2], &value[3], &value[4],
+                  &value[5]) != 6) {
+    ESP_LOGW(TAG, "%s is no Bluetooth address", address.c_str());
+    return false;
+  }
+  for (size_t i = 0; i < 6; i++)
+    bytes[i] = static_cast<uint8_t>(value[i]);
+  this->audio_address_ = bytes;
+  return this->command_(TYPE_AUDIO_CONNECT, bytes.data(), bytes.size());
+}
+
+bool BTOffload::audio_disconnect() {
+  if (!this->audio_connected_)
+    return false;
+  return this->command_(TYPE_AUDIO_DISCONNECT, this->audio_address_.data(), this->audio_address_.size());
+}
+
+bool BTOffload::set_audio_volume(uint8_t volume) { return this->command_(TYPE_AUDIO_VOLUME, &volume, 1); }
+
+void BTOffload::on_audio_state_(const uint8_t *data, size_t len) {
+  if (len < 7)
+    return;
+  std::memcpy(this->audio_address_.data(), data, 6);
+  this->audio_connected_ = data[6] != 0;
+  ESP_LOGI(TAG, "Audio %s %s", format_address(data).c_str(), this->audio_connected_ ? "connected" : "disconnected");
+#ifdef USE_BT_OFFLOAD_SPEAKER
+  if (this->speaker_ != nullptr)
+    this->speaker_->on_audio_state(this->audio_connected_);
+#endif
+}
+
+void BTOffload::on_audio_credit_(const uint8_t *data, size_t len) {
+#ifdef USE_BT_OFFLOAD_SPEAKER
+  if (len < 4 || this->speaker_ == nullptr)
+    return;
+  uint32_t bytes;
+  std::memcpy(&bytes, data, sizeof(bytes));
+  this->speaker_->on_credit(bytes);
+#endif
 }
 
 void BTOffload::on_found_(const uint8_t *data, size_t len) {
