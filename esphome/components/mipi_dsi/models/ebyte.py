@@ -17,5 +17,6 @@ DsiDriverChip(
     color_order="RGB",
     use_axis_flips=False,
     video_mode_only=True,
+    frame_ack=False,
     continuous_clock=True,
 )
