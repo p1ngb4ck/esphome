@@ -21,6 +21,8 @@ from esphome.types import ConfigType
 
 from .. import (
     CONF_I2S_AUDIO_ID,
+    CONF_NVS,
+    DOMAIN,
     CONF_I2S_COMM_FMT,
     CONF_I2S_DOUT_PIN,
     CONF_I2S_MODE,
@@ -197,7 +199,7 @@ CONFIG_SCHEMA = cv.All(
             ),
             "external": BASE_SCHEMA.extend(
                 {
-                    cv.Required(
+                    cv.Optional(
                         CONF_I2S_DOUT_PIN
                     ): pins.internal_gpio_output_pin_number,
                     cv.Optional(CONF_I2S_COMM_FMT, default="stand_i2s"): cv.one_of(
@@ -246,6 +248,16 @@ def _final_validate(config: ConfigType) -> None:
         if config[CONF_KEEP_ALIVE]:
             raise cv.Invalid("SPDIF mode does not support 'keep_alive'")
 
+    if CONF_I2S_DOUT_PIN not in config:
+        bus = str(config[CONF_I2S_AUDIO_ID])
+        if not any(
+            str(bus_config[CONF_ID]) == bus and CONF_NVS in bus_config
+            for bus_config in fv.full_config.get()[DOMAIN]
+        ):
+            raise cv.Invalid(
+                f"'{CONF_I2S_DOUT_PIN}' is required unless the bus has '{CONF_NVS}'"
+            )
+
     if config[CONF_KEEP_ALIVE]:
         # A kept channel holds the port between sessions, so nothing else may share the bus
         bus = config[CONF_I2S_AUDIO_ID]
@@ -271,7 +283,7 @@ async def to_code(config: ConfigType) -> None:
     await register_i2s_audio_component(var, config)
     await speaker.register_speaker(var, config)
 
-    cg.add(var.set_dout_pin(config[CONF_I2S_DOUT_PIN]))
+    cg.add_optional(var.set_dout_pin, config.get(CONF_I2S_DOUT_PIN))
     if CONF_ENABLE_PIN in config:
         cg.add(var.set_enable_pin(await cg.gpio_pin_expression(config[CONF_ENABLE_PIN])))
 

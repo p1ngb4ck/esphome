@@ -60,6 +60,10 @@ void I2SAudioSpeakerSPDIF::setup() {
   if (this->is_failed()) {
     return;
   }
+#ifdef USE_I2S_AUDIO_NVS
+  if (this->nvs_inactive_)
+    return;
+#endif
 
   this->spdif_encoder_ = new SPDIFEncoder();
   if (!this->spdif_encoder_->setup()) {

@@ -10,11 +10,15 @@ from esphome.const import (
     CONF_NUM_CHANNELS,
     CONF_SAMPLE_RATE,
 )
+import esphome.final_validate as fv
 from esphome.types import ConfigType
 
 from .. import (
     CONF_ADC_TYPE,
+    CONF_I2S_AUDIO_ID,
     CONF_I2S_DIN_PIN,
+    CONF_NVS,
+    DOMAIN,
     CONF_LEFT,
     CONF_MONO,
     CONF_PDM,
@@ -122,7 +126,7 @@ CONFIG_SCHEMA = cv.All(
             ),
             "external": BASE_SCHEMA.extend(
                 {
-                    cv.Required(CONF_I2S_DIN_PIN): pins.internal_gpio_input_pin_number,
+                    cv.Optional(CONF_I2S_DIN_PIN): pins.internal_gpio_input_pin_number,
                     cv.Optional(CONF_PDM, default=False): cv.boolean,
                     cv.Optional(CONF_PDM_DSR, default=8): cv.enum(
                         I2S_PDM_DSR, int=True
@@ -145,6 +149,15 @@ def _final_validate(config: ConfigType) -> None:
         raise cv.Invalid(
             "Internal ADC is no longer supported. Use an external I2S microphone instead."
         )
+    if CONF_I2S_DIN_PIN not in config:
+        bus = str(config[CONF_I2S_AUDIO_ID])
+        if not any(
+            str(bus_config[CONF_ID]) == bus and CONF_NVS in bus_config
+            for bus_config in fv.full_config.get()[DOMAIN]
+        ):
+            raise cv.Invalid(
+                f"'{CONF_I2S_DIN_PIN}' is required unless the bus has '{CONF_NVS}'"
+            )
 
 
 FINAL_VALIDATE_SCHEMA = _final_validate
@@ -156,7 +169,7 @@ async def to_code(config: ConfigType) -> None:
     await register_i2s_audio_component(var, config)
     await microphone.register_microphone(var, config)
 
-    cg.add(var.set_din_pin(config[CONF_I2S_DIN_PIN]))
+    cg.add_optional(var.set_din_pin, config.get(CONF_I2S_DIN_PIN))
     cg.add(var.set_pdm(config[CONF_PDM]))
     if esp32.get_esp32_variant() in PDM_VARIANTS:
         cg.add(var.set_pdm_dsr(config[CONF_PDM_DSR]))

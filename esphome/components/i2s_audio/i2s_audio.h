@@ -61,14 +61,60 @@ class I2SAudioOut : public I2SAudioBase {
 
 class I2SAudioComponent final : public Component {
  public:
-#ifdef USE_I2S_AUDIO_FULL_DUPLEX
+#if defined(USE_I2S_AUDIO_FULL_DUPLEX) || defined(USE_I2S_AUDIO_NVS)
   void setup() override;
+#endif
+#ifdef USE_I2S_AUDIO_NVS
+  enum NvsType : int8_t {
+    NVS_TYPE_SPEAKER = 1,
+    NVS_TYPE_MICROPHONE = 2,
+    NVS_TYPE_FULL_DUPLEX = 3,
+    NVS_TYPE_PDM = 4,
+    NVS_TYPE_SPDIF = 5,
+  };
+  void set_nvs(const char *ns, bool enable_default, const char *enable_key, const char *type_key,
+               const char *lrclk_key, const char *bclk_key, const char *mclk_key, const char *dout_key,
+               const char *din_key, const char *enable_pin_key) {
+    this->nvs_namespace_ = ns;
+    this->enabled_ = enable_default;
+    this->nvs_keys_[0] = enable_key;
+    this->nvs_keys_[1] = type_key;
+    this->nvs_keys_[2] = lrclk_key;
+    this->nvs_keys_[3] = bclk_key;
+    this->nvs_keys_[4] = mclk_key;
+    this->nvs_keys_[5] = dout_key;
+    this->nvs_keys_[6] = din_key;
+    this->nvs_keys_[7] = enable_pin_key;
+  }
+  bool is_enabled() const { return this->enabled_; }
+  bool has_standard_output() const {
+    return this->enabled_ &&
+           (this->type_ < 0 || this->type_ == NVS_TYPE_SPEAKER || this->type_ == NVS_TYPE_FULL_DUPLEX);
+  }
+  bool has_spdif_output() const { return this->enabled_ && (this->type_ < 0 || this->type_ == NVS_TYPE_SPDIF); }
+  bool has_input() const {
+    return this->enabled_ && (this->type_ < 0 || this->type_ == NVS_TYPE_MICROPHONE ||
+                              this->type_ == NVS_TYPE_FULL_DUPLEX || this->type_ == NVS_TYPE_PDM);
+  }
+  bool is_nvs_pdm() const { return this->type_ == NVS_TYPE_PDM; }
+  int8_t get_nvs_dout_pin() const { return this->nvs_dout_pin_; }
+  int8_t get_nvs_din_pin() const { return this->nvs_din_pin_; }
+  int8_t get_nvs_enable_pin() const { return this->nvs_enable_pin_; }
+  void request_port0() { this->port0_ = true; }
+#endif
+#ifdef USE_I2S_AUDIO_FULL_DUPLEX
 
   void set_audio_in(I2SAudioIn *audio_in) { this->audio_in_ = audio_in; }
   void set_audio_out(I2SAudioOut *audio_out) { this->audio_out_ = audio_out; }
 
   /// @brief True when a microphone and a speaker share this bus at the same time.
-  bool is_full_duplex() const { return this->audio_in_ != nullptr && this->audio_out_ != nullptr; }
+  bool is_full_duplex() const {
+#ifdef USE_I2S_AUDIO_NVS
+    if (!this->enabled_ || (this->type_ >= 0 && this->type_ != NVS_TYPE_FULL_DUPLEX))
+      return false;
+#endif
+    return this->audio_in_ != nullptr && this->audio_out_ != nullptr;
+  }
 
   /// @brief Enables the full duplex RX channel. Main loop only.
   /// @return The enabled RX handle, or nullptr if the channel pair is unavailable
@@ -103,10 +149,18 @@ class I2SAudioComponent final : public Component {
   void set_bclk_pin(int pin) { this->bclk_pin_ = pin; }
   void set_lrclk_pin(int pin) { this->lrclk_pin_ = pin; }
   void set_port(int port) { this->port_ = port; }
+#ifdef USE_I2S_AUDIO_NVS
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+  int get_port() const { return this->claim_port_(); }
+#else
+  i2s_port_t get_port() const { return static_cast<i2s_port_t>(this->claim_port_()); }
+#endif
+#else
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
   int get_port() const { return this->port_; }
 #else
   i2s_port_t get_port() const { return static_cast<i2s_port_t>(this->port_); }
+#endif
 #endif
 
   void lock() { this->lock_.lock(); }
@@ -132,8 +186,23 @@ class I2SAudioComponent final : public Component {
 #endif
   int mclk_pin_{I2S_GPIO_UNUSED};
   int bclk_pin_{I2S_GPIO_UNUSED};
-  int lrclk_pin_;
+  int lrclk_pin_{I2S_GPIO_UNUSED};
+#ifdef USE_I2S_AUDIO_NVS
+  int claim_port_() const;
+  void apply_nvs_();
+
+  const char *nvs_namespace_{nullptr};
+  const char *nvs_keys_[8]{};
+  mutable int port_{-1};
+  bool enabled_{true};
+  bool port0_{false};
+  int8_t type_{-1};
+  int8_t nvs_dout_pin_{-1};
+  int8_t nvs_din_pin_{-1};
+  int8_t nvs_enable_pin_{-1};
+#else
   int port_{};
+#endif
 };
 
 }  // namespace esphome::i2s_audio

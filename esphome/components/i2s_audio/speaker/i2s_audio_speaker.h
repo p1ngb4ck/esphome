@@ -229,9 +229,13 @@ class I2SAudioSpeakerBase : public I2SAudioOut, public speaker::Speaker, public 
   // Set by start_i2s_driver before the speaker task starts.
   audio::AudioStreamInfo output_stream_info_;
 
-  gpio_num_t dout_pin_;
+  gpio_num_t dout_pin_{GPIO_NUM_NC};
   GPIOPin *enable_pin_{nullptr};
   i2s_chan_handle_t tx_handle_{nullptr};
+#ifdef USE_I2S_AUDIO_NVS
+  virtual bool nvs_active_() const { return this->parent_->has_standard_output(); }
+  bool nvs_inactive_{false};
+#endif
 };
 
 }  // namespace esphome::i2s_audio

@@ -46,6 +46,20 @@ void I2SAudioMicrophone::setup() {
     return;
   }
 
+#ifdef USE_I2S_AUDIO_NVS
+  if (!this->parent_->has_input()) {
+    this->nvs_inactive_ = true;
+    this->disable_loop();
+    return;
+  }
+  if (this->parent_->get_nvs_din_pin() >= 0)
+    this->din_pin_ = static_cast<gpio_num_t>(this->parent_->get_nvs_din_pin());
+  if (this->parent_->is_nvs_pdm())
+    this->pdm_ = true;
+  if (this->pdm_)
+    this->parent_->request_port0();
+#endif
+
 #ifdef USE_I2S_AUDIO_FULL_DUPLEX
   if (this->parent_->is_full_duplex() && this->parent_->is_failed()) {
     this->mark_failed(LOG_STR("Full duplex bus setup failed"));
@@ -97,6 +111,10 @@ void I2SAudioMicrophone::configure_stream_settings_() {
 void I2SAudioMicrophone::start() {
   if (this->is_failed())
     return;
+#ifdef USE_I2S_AUDIO_NVS
+  if (this->nvs_inactive_)
+    return;
+#endif
 
   xSemaphoreTake(this->active_listeners_semaphore_, 0);
 }
