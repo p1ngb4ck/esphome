@@ -1,4 +1,5 @@
 #include "wifi_component.h"
+#include "esphome/components/network/util.h"
 #ifdef USE_WIFI
 #include <cassert>
 #include <cinttypes>
@@ -1133,7 +1134,7 @@ void WiFiComponent::setup_ap_config_() {
     // Build AP SSID from app name without heap allocation; WiFi SSID max is 32 bytes
     static constexpr size_t AP_SSID_MAX_LEN = 32;
 
-    const auto &app_name = App.get_name();
+    const StringRef app_name = network::device_name();
     if (app_name.length() <= AP_SSID_MAX_LEN) {
       // Name fits, use directly
       this->ap_.set_ssid(app_name.c_str());
@@ -1790,7 +1791,7 @@ void WiFiComponent::print_connect_params_() {
                 "  Gateway: %s\n"
                 "  DNS1: %s\n"
                 "  DNS2: %s",
-                wifi_ssid_to(ssid_buf), bssid_s, App.get_name().c_str(), rssi, LOG_STR_ARG(get_signal_bars(rssi)),
+                wifi_ssid_to(ssid_buf), bssid_s, network::device_name().c_str(), rssi, LOG_STR_ARG(get_signal_bars(rssi)),
                 get_wifi_channel(), wifi_subnet_mask_().str_to(subnet_buf), wifi_gateway_ip_().str_to(gateway_buf),
                 wifi_dns_ip_(0).str_to(dns1_buf), wifi_dns_ip_(1).str_to(dns2_buf));
   // clang-format on

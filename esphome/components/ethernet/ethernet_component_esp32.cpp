@@ -1216,7 +1216,7 @@ void EthernetComponent::start_connect_() {
   this->status_set_warning(LOG_STR("waiting for IP configuration"));
 
   esp_err_t err;
-  err = esp_netif_set_hostname(this->eth_netif_, App.get_name().c_str());
+  err = esp_netif_set_hostname(this->eth_netif_, network::device_name().c_str());
   if (err != ERR_OK) {
     ESP_LOGW(TAG, "esp_netif_set_hostname failed: %s", esp_err_to_name(err));
   }

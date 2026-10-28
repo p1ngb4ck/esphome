@@ -2,6 +2,7 @@
 #ifdef USE_CAPTIVE_PORTAL
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
+#include "esphome/components/network/util.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/string_ref.h"
 #include "esphome/components/wifi/scan_list.h"
@@ -24,7 +25,7 @@ void CaptivePortal::handle_config(AsyncWebServerRequest *request) {
   stream->print(App.get_name().c_str());
   stream->print(ESPHOME_F("\",\"aps\":[{}"));
 #else
-  stream->printf(R"({"mac":"%s","name":"%s","aps":[{})", mac_str, App.get_name().c_str());
+  stream->printf(R"({"mac":"%s","name":"%s","aps":[{})", mac_str, network::device_name().c_str());
 #endif
 
   // An SSID can contain a " or \ that would break the JSON, so escape it before writing it out. An SSID is at most

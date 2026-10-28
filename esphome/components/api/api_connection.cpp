@@ -1936,7 +1936,7 @@ bool APIConnection::send_hello_response_(const HelloRequest &msg) {
   resp.api_version_minor = 19;
   // Send only the version string - the client only logs this for debugging and doesn't use it otherwise
   resp.server_info = esphome_version_ref();
-  resp.name = StringRef(App.get_name());
+  resp.name = network::device_name();
 
 #ifdef USE_PROVISIONING
   if (provisioning::global_provisioning_manager != nullptr && provisioning::global_provisioning_manager->closed()) {
@@ -1979,8 +1979,8 @@ bool APIConnection::send_ping_response_() {
 
 bool APIConnection::send_device_info_response_() {
   DeviceInfoResponse resp;
-  resp.name = StringRef(App.get_name());
-  resp.friendly_name = StringRef(App.get_friendly_name());
+  resp.name = network::device_name();
+  resp.friendly_name = network::device_friendly_name();
 #ifdef USE_AREAS
   resp.suggested_area = StringRef(App.get_area());
 #endif

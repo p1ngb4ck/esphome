@@ -395,7 +395,12 @@ json::SerializationBuffer<> WebServer::get_config_json() {
   json::JsonBuilder builder;
   JsonObject root = builder.root();
 
+#ifdef USE_NETWORK
+  root[ESPHOME_F("title")] = linked(network::device_friendly_name().empty() ? network::device_name()
+                                                                             : network::device_friendly_name());
+#else
   root[ESPHOME_F("title")] = linked(App.get_friendly_name().empty() ? App.get_name() : App.get_friendly_name());
+#endif
   char comment_buffer[Application::ESPHOME_COMMENT_SIZE_MAX];
   App.get_comment_string(comment_buffer);
   root[ESPHOME_F("comment")] = static_cast<const char *>(comment_buffer);
@@ -589,7 +594,11 @@ void WebServer::handle_pna_cors_request(AsyncWebServerRequest *request) {
   // Echo the specific origin back so the response is valid even when auth (credentials) is enabled.
   response->addHeader(ESPHOME_F("Access-Control-Allow-Origin"), origin.empty() ? "*" : origin.c_str());
   response->addHeader(ESPHOME_F("Access-Control-Allow-Private-Network"), ESPHOME_F("true"));
+#ifdef USE_NETWORK
+  response->addHeader(ESPHOME_F("Private-Network-Access-Name"), network::device_name().c_str());
+#else
   response->addHeader(ESPHOME_F("Private-Network-Access-Name"), App.get_name().c_str());
+#endif
   char mac_s[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   response->addHeader(ESPHOME_F("Private-Network-Access-ID"), get_mac_address_pretty_into_buffer(mac_s));
   request->send(response);

@@ -20,6 +20,7 @@ from esphome.const import (
     CONF_WIFI,
 )
 from esphome.core import CORE, CoroPriority, coroutine_with_priority
+from esphome.cpp_generator import cpp_string_escape
 import esphome.final_validate as fv
 from esphome.types import ConfigType
 
@@ -157,6 +158,12 @@ ActiveInterfaceTrigger = network_ns.class_(
     "ActiveInterfaceTrigger", automation.Trigger.template()
 )
 CONF_ON_ACTIVE_INTERFACE = "on_active_interface"
+CONF_NAME_FROM_NVS = "name_from_nvs"
+CONF_NVS_NAMESPACE = "namespace"
+CONF_NAME_KEY = "name"
+CONF_FRIENDLY_NAME_KEY = "friendly_name"
+CONF_NAME_SUFFIX = "name_suffix"
+CONF_FRIENDLY_NAME_SUFFIX = "friendly_name_suffix"
 
 
 def _register_provisioning_source(config: ConfigType) -> ConfigType:
@@ -438,6 +445,24 @@ CONFIG_SCHEMA = cv.All(
                     ),
                 }
             ),
+            cv.Optional(CONF_NAME_FROM_NVS): cv.All(
+                cv.Schema(
+                    {
+                        cv.Required(CONF_NVS_NAMESPACE): cv.All(cv.string_strict, cv.Length(min=1, max=15)),
+                        cv.Optional(CONF_NAME_KEY, default="name"): cv.All(
+                            cv.string_strict, cv.Length(min=1, max=15)
+                        ),
+                        cv.Optional(CONF_FRIENDLY_NAME_KEY, default="friendly_name"): cv.All(
+                            cv.string_strict, cv.Length(min=1, max=15)
+                        ),
+                        cv.Optional(CONF_NAME_SUFFIX, default=""): cv.All(cv.string_strict, cv.Length(max=16)),
+                        cv.Optional(CONF_FRIENDLY_NAME_SUFFIX, default=""): cv.All(
+                            cv.string_strict, cv.Length(max=24)
+                        ),
+                    }
+                ),
+                cv.only_on_esp32,
+            ),
         }
     ),
     _register_provisioning_source,
@@ -528,6 +553,18 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 @coroutine_with_priority(CoroPriority.NETWORK)
 async def to_code(config: ConfigType) -> None:
     cg.add_define("USE_NETWORK")
+    if (from_nvs := config.get(CONF_NAME_FROM_NVS)) is not None:
+        cg.add_define("USE_NETWORK_NAME_NVS")
+        cg.add_define("NETWORK_NAME_NVS_NAMESPACE", cg.RawExpression(cpp_string_escape(from_nvs[CONF_NVS_NAMESPACE])))
+        cg.add_define("NETWORK_NAME_NVS_KEY", cg.RawExpression(cpp_string_escape(from_nvs[CONF_NAME_KEY])))
+        cg.add_define(
+            "NETWORK_FRIENDLY_NAME_NVS_KEY", cg.RawExpression(cpp_string_escape(from_nvs[CONF_FRIENDLY_NAME_KEY]))
+        )
+        cg.add_define("NETWORK_NAME_NVS_SUFFIX", cg.RawExpression(cpp_string_escape(from_nvs[CONF_NAME_SUFFIX])))
+        cg.add_define(
+            "NETWORK_FRIENDLY_NAME_NVS_SUFFIX",
+            cg.RawExpression(cpp_string_escape(from_nvs[CONF_FRIENDLY_NAME_SUFFIX])),
+        )
     enable_ipv6 = config[CONF_ENABLE_IPV6]
     enable_ipv4 = config[CONF_ENABLE_IPV4]
 

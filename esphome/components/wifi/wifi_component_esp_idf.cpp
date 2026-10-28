@@ -1046,7 +1046,7 @@ void WiFiComponent::wifi_process_event_(IDFWiFiEvent *data) {
   if (data->event_base == WIFI_EVENT && data->event_id == WIFI_EVENT_STA_START) {
     ESP_LOGV(TAG, "STA start");
     // apply hostname
-    err = esp_netif_set_hostname(s_sta_netif, App.get_name().c_str());
+    err = esp_netif_set_hostname(s_sta_netif, network::device_name().c_str());
     if (err != ERR_OK) {
       ESP_LOGW(TAG, "esp_netif_set_hostname failed: %s", esp_err_to_name(err));
     }

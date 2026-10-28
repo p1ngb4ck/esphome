@@ -255,7 +255,11 @@ void ImprovSerialComponent::send_version_info_() {
   IMPROV_ADD_INFO(ESPHOME_VARIANT);
 #undef IMPROV_ADD_INFO
   // Only the device name length is unknown at compile time
+#ifdef USE_NETWORK
+  const StringRef name = network::device_name();
+#else
   const auto &name = App.get_name();
+#endif
   if (INFO_ENTRIES_LEN + 1 + name.size() <= MAX_SERIAL_PAYLOAD) {
     builder.add_string(name.c_str(), name.size());
   } else {

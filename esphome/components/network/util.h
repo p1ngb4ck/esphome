@@ -4,6 +4,7 @@
 #include <span>
 #include <string>
 #include "esphome/core/helpers.h"
+#include "esphome/core/string_ref.h"
 #include "ip_address.h"
 
 #ifdef USE_ETHERNET
@@ -84,6 +85,8 @@ static constexpr size_t USE_ADDRESS_BUFFER_SIZE = 70;
 /// device name into buf (so it includes the MAC suffix from name_add_mac_suffix).
 const char *get_use_address_to(std::span<char, USE_ADDRESS_BUFFER_SIZE> buf);
 IPAddresses get_ip_addresses();
+StringRef device_name();
+StringRef device_friendly_name();
 
 }  // namespace esphome::network
 #endif
