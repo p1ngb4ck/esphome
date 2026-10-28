@@ -168,7 +168,7 @@ bool CallMedia::release() {
   return true;
 }
 
-void CallMedia::on_mic_data(const std::vector<uint8_t> &data) {
+void CallMedia::on_mic_data(std::span<const uint8_t> data) {
   this->mic_users_.fetch_add(1);
   if (this->tx_active_.load() && this->tx_ring_ != nullptr) {
     this->tx_ring_->write(data.data(), data.size());

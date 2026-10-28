@@ -63,9 +63,9 @@ void ResamplerMicrophone::setup() {
 }
 
 void ResamplerMicrophone::hook_(microphone::MicrophoneSource *source) {
-  source->add_data_callback([this, source](const std::vector<uint8_t> &data) {
+  source->add_data_callback([this, source](const microphone::AudioCapture &capture) {
     if (this->active_.load() == source)
-      this->process_audio_(source, data);
+      this->process_audio_(source, capture.data);
   });
 }
 
@@ -290,14 +290,14 @@ bool ResamplerMicrophone::init_resampler_(const audio::AudioStreamInfo &input_st
   return true;
 }
 
-void ResamplerMicrophone::process_audio_(microphone::MicrophoneSource *source, const std::vector<uint8_t> &data) {
+void ResamplerMicrophone::process_audio_(microphone::MicrophoneSource *source, std::span<const uint8_t> data) {
   if (this->processing_.exchange(true))
     return;
   this->process_chunk_(source, data);
   this->processing_.store(false);
 }
 
-void ResamplerMicrophone::process_chunk_(microphone::MicrophoneSource *source, const std::vector<uint8_t> &data) {
+void ResamplerMicrophone::process_chunk_(microphone::MicrophoneSource *source, std::span<const uint8_t> data) {
   const audio::AudioStreamInfo input_stream_info = source->get_audio_stream_info();
 #ifdef USE_RESAMPLER_MICROPHONE_AEC
   if (source == this->aec_source_.load()) {
@@ -307,12 +307,21 @@ void ResamplerMicrophone::process_chunk_(microphone::MicrophoneSource *source, c
 #endif
   if (this->emitting_.exchange(true))
     return;
-  this->emit_(input_stream_info, data.data(), data.size(), &data);
+  this->emit_(input_stream_info, data.data(), data.size(), true);
   this->emitting_.store(false);
 }
 
+void ResamplerMicrophone::publish_source_(const uint8_t *data, size_t len) {
+  if (this->mute_state_) {
+    this->output_buffer_.assign(len, 0);
+    this->publish_audio_(this->output_buffer_, this->audio_stream_info_);
+    return;
+  }
+  this->data_callbacks_.call(microphone::AudioCapture{std::span<const uint8_t>(data, len), this->audio_stream_info_, 0});
+}
+
 void ResamplerMicrophone::emit_(const audio::AudioStreamInfo &input_stream_info, const uint8_t *data, size_t len,
-                                const std::vector<uint8_t> *original) {
+                                bool from_source) {
   bool reinit = false;
   if (this->format_pending_.exchange(false)) {
     this->target_sample_rate_ = this->pending_sample_rate_;
@@ -335,14 +344,14 @@ void ResamplerMicrophone::emit_(const audio::AudioStreamInfo &input_stream_info,
   const size_t sample_bytes = input_stream_info.samples_to_bytes(1);
 
   if (this->resampler_ == nullptr) {
-    if (in_channels == out_channels && original != nullptr) {
-      this->data_callbacks_.call(*original);
+    if (in_channels == out_channels && from_source) {
+      this->publish_source_(data, len);
       return;
     }
     const uint32_t frames = input_stream_info.bytes_to_frames(len);
     this->output_buffer_.resize(output_stream_info.frames_to_bytes(frames));
     audio::convert_channels(data, this->output_buffer_.data(), frames, in_channels, out_channels, sample_bytes);
-    this->data_callbacks_.call(this->output_buffer_);
+    this->publish_audio_(this->output_buffer_, this->audio_stream_info_);
     return;
   }
 
@@ -372,7 +381,7 @@ void ResamplerMicrophone::emit_(const audio::AudioStreamInfo &input_stream_info,
                                 in_channels, out_channels, sample_bytes);
       }
       this->output_buffer_.resize(output_stream_info.frames_to_bytes(results.frames_generated));
-      this->data_callbacks_.call(this->output_buffer_);
+      this->publish_audio_(this->output_buffer_, this->audio_stream_info_);
     } else if (results.frames_used == 0) {
       break;  // No progress; drop the rest of the chunk instead of spinning
     }
@@ -457,12 +466,12 @@ bool ResamplerMicrophone::aec_update_() {
 }
 
 void ResamplerMicrophone::aec_input_(const audio::AudioStreamInfo &input_stream_info,
-                                     const std::vector<uint8_t> &data) {
+                                     std::span<const uint8_t> data) {
   if (input_stream_info.get_sample_rate() != 16000 || input_stream_info.get_bits_per_sample() != 16 ||
       input_stream_info.get_channels() != 2) {
     if (this->emitting_.exchange(true))
       return;
-    this->emit_(input_stream_info, data.data(), data.size(), &data);
+    this->emit_(input_stream_info, data.data(), data.size(), true);
     this->emitting_.store(false);
     return;
   }
@@ -488,7 +497,7 @@ void ResamplerMicrophone::aec_run_() {
       if (this->emitting_.exchange(true))
         continue;
       this->emit_(mono_stream_info, reinterpret_cast<const uint8_t *>(this->aec_out_),
-                  this->aec_frame_ * sizeof(int16_t), nullptr);
+                  this->aec_frame_ * sizeof(int16_t), false);
       this->emitting_.store(false);
     }
   }

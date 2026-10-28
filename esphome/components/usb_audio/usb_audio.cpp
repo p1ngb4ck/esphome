@@ -929,7 +929,7 @@ size_t USBAudioCapture::read(std::vector<uint8_t> &buffer) {
 
 void USBAudioCapture::deliver(std::vector<uint8_t> &buffer) {
   this->apply_channel_selection_(buffer.data(), buffer.size());
-  this->data_callbacks_.call(buffer);
+  this->publish_audio_(buffer, this->audio_stream_info_);
 }
 
 void USBAudioCapture::apply_channel_selection_(uint8_t *data, size_t length) {

@@ -1948,7 +1948,8 @@ bool Messenger::capture_photo() { return false; }
 #ifdef USE_MESSENGER_MICROPHONE
 void Messenger::set_microphone_source(microphone::MicrophoneSource *source) {
   this->mic_source_ = source;
-  source->add_data_callback([this](const std::vector<uint8_t> &data) {
+  source->add_data_callback([this](const microphone::AudioCapture &capture) {
+    const std::span<const uint8_t> data = capture.data;
     if (!this->recording_.load(std::memory_order_acquire))
       return;
     ring_buffer::RingBuffer *ring = this->voice_ring_.get();

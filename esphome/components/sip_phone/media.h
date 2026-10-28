@@ -57,7 +57,7 @@ class CallMedia {
   bool is_running() const { return this->task_.is_created(); }
   bool parked() const { return this->parked_.load(); }
   bool release();
-  void on_mic_data(const std::vector<uint8_t> &data);
+  void on_mic_data(std::span<const uint8_t> data);
   void on_payload(const uint8_t *payload, size_t len);
   void set_mute(bool mute) { this->mute_.store(mute); }
   void send_dtmf(const char *digits);

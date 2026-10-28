@@ -93,14 +93,14 @@ class ResamplerMicrophone final : public Component, public microphone::Microphon
   }
 
   /// @brief Resamples a chunk of source audio and passes it to the data callbacks. Source microphone task only.
-  void process_audio_(microphone::MicrophoneSource *source, const std::vector<uint8_t> &data);
-  void process_chunk_(microphone::MicrophoneSource *source, const std::vector<uint8_t> &data);
-  void emit_(const audio::AudioStreamInfo &input_stream_info, const uint8_t *data, size_t len,
-             const std::vector<uint8_t> *original);
+  void process_audio_(microphone::MicrophoneSource *source, std::span<const uint8_t> data);
+  void process_chunk_(microphone::MicrophoneSource *source, std::span<const uint8_t> data);
+  void emit_(const audio::AudioStreamInfo &input_stream_info, const uint8_t *data, size_t len, bool from_source);
+  void publish_source_(const uint8_t *data, size_t len);
 #ifdef USE_RESAMPLER_MICROPHONE_AEC
   bool aec_wanted_() const;
   bool aec_update_();
-  void aec_input_(const audio::AudioStreamInfo &input_stream_info, const std::vector<uint8_t> &data);
+  void aec_input_(const audio::AudioStreamInfo &input_stream_info, std::span<const uint8_t> data);
   void aec_release_();
   static void aec_task_entry_(void *param);
   void aec_run_();

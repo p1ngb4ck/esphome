@@ -53,7 +53,8 @@ void SimpleVideoPlayer::capture_setup_() {
 #ifdef SVP_CAPTURE_MIC
   if (this->cap_mic_ != nullptr) {
     // Registered once; it writes only while a screencast takes the sound.
-    this->cap_mic_->add_data_callback([this](const std::vector<uint8_t> &data) {
+    this->cap_mic_->add_data_callback([this](const microphone::AudioCapture &capture) {
+      const std::span<const uint8_t> data = capture.data;
       if (this->cap_ring_raw_.load(std::memory_order_acquire) == nullptr)
         return;
       this->cap_mic_in_.fetch_add(1, std::memory_order_acq_rel);

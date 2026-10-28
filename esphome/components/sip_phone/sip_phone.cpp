@@ -157,7 +157,8 @@ void SipPhone::setup() {
     this->opus_params_.sample_rate = rate;
   this->opus_params_.channels = mic_info.get_channels() > 1 ? 2 : 1;
 
-  this->microphone_->add_data_callback([this](const std::vector<uint8_t> &data) { this->media_.on_mic_data(data); });
+  this->microphone_->add_data_callback(
+      [this](const microphone::AudioCapture &capture) { this->media_.on_mic_data(capture.data); });
 
   this->commands_ = xQueueCreateWithCaps(COMMAND_QUEUE, sizeof(Command), MALLOC_CAP_SPIRAM);
   this->events_ = xQueueCreateWithCaps(EVENT_QUEUE, sizeof(Event), MALLOC_CAP_SPIRAM);

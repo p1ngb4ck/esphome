@@ -140,7 +140,8 @@ void A2DPSource::setup() {
 
 #ifdef USE_MICROPHONE
   if (this->mic_source_ != nullptr) {
-    this->mic_source_->add_data_callback([this](const std::vector<uint8_t> &data) {
+    this->mic_source_->add_data_callback([this](const microphone::AudioCapture &capture) {
+      const std::span<const uint8_t> data = capture.data;
       if (data.empty()) {
         return;
       }
