@@ -442,6 +442,7 @@ CONFIG_SCHEMA = cv.All(
 
 
 async def to_code(config):
+    cg.add_define("USE_USB_AUDIO")
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await setup_usb_match(var, config)

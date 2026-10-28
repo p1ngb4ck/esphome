@@ -198,6 +198,7 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 async def to_code(config):
+    cg.add_define("USE_A2DP_SOURCE")
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     if CONF_BT_PAIRING_ID in config:
