@@ -79,6 +79,8 @@ def AUTO_LOAD(config):
         load.append("text_sensor")
     if config and "emulator" in config:
         load.append("hid")
+    if config and CONF_CONTROLS in config:
+        load.append("touchscreen")
     return load
 
 
@@ -628,10 +630,6 @@ def _validate_controls(config):
         return config
     if CONF_AUDIO_CONTROLS in config[CONF_CONTROLS] and CONF_AUDIO_FILE_SPEAKER_ID not in config:
         raise cv.Invalid(f"'{CONF_CONTROLS}: {CONF_AUDIO_CONTROLS}' is for the audio queue: it needs '{CONF_AUDIO_FILE_SPEAKER_ID}'.")
-    if CONF_DISPLAY_ID in config and CONF_TOUCHSCREEN_ID not in config:
-        raise cv.Invalid(
-            f"'{CONF_CONTROLS}' over a full-screen video take its touches directly: they need '{CONF_TOUCHSCREEN_ID}'."
-        )
     # The player builds the controls from these widgets and renders them with lv_snapshot.
     lvgl_defines.add_define("LV_USE_SNAPSHOT", "1")
     lvgl_defines.add_lv_use("label", "bar", "button")
