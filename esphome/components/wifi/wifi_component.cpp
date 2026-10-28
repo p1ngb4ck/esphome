@@ -1148,6 +1148,8 @@ void WiFiComponent::setup_ap_config_() {
   // Reset before the AP exists: afterwards only the platform's event path writes the counter
   this->ap_clients_ = 0;
   this->ap_setup_ = this->wifi_start_ap_(this->ap_);
+  if (this->ap_setup_)
+    this->ap_state_callback_.call(true);
   // The station path applied it in start(); without a station the radio only exists from here
   if (this->ap_setup_ && !this->has_sta() && !std::isnan(this->output_power_) &&
       !this->wifi_apply_output_power_(this->output_power_)) {
@@ -1211,9 +1213,12 @@ void WiFiComponent::forget_ap_() {
   this->cancel_timeout(AP_DEAUTH_RETRY_TIMEOUT_ID);  // the next AP setup works out its clients' resolver itself
 #endif
   this->end_ap_portal_();
+  const bool was_setup = this->ap_setup_;
   // The AP may come back later; its clients dropped with it without a disconnect event for each
   this->ap_setup_ = false;
   this->ap_clients_ = 0;
+  if (was_setup)
+    this->ap_state_callback_.call(false);
 }
 
 void WiFiComponent::disable_ap_() {

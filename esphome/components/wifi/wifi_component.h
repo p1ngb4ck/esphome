@@ -514,6 +514,9 @@ class WiFiComponent final : public Component {
   void set_ap(const WiFiAP &ap);
   WiFiAP get_ap() { return this->ap_; }
   void set_ap_timeout(uint32_t ap_timeout) { ap_timeout_ = ap_timeout; }
+  template<typename F> void add_on_ap_state_callback(F &&callback) {
+    this->ap_state_callback_.add(std::forward<F>(callback));
+  }
 #endif  // USE_WIFI_AP
 
 #ifdef USE_WIFI_DPP
@@ -1126,6 +1129,9 @@ class WiFiComponent final : public Component {
     this->startup_done_callback_.call();
   }
   LazyCallbackManager<void()> startup_done_callback_;
+#ifdef USE_WIFI_AP
+  LazyCallbackManager<void(bool)> ap_state_callback_;
+#endif
   bool startup_done_{false};
 #ifdef USE_WIFI_DPP
   const char *dpp_key_{nullptr};
