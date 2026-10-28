@@ -2,6 +2,7 @@ from . import DsiDriverChip
 
 DsiDriverChip(
     "ECA20-MHA1-I",
+    initsequence=(),
     width=1280,
     height=720,
     lanes=2,
