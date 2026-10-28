@@ -31,6 +31,7 @@ static USBHost *&usb_host_ref() {
 USBHost *get_usb_host() { return usb_host_ref(); }
 
 void USBHost::setup() {
+  this->load_mode_switch_state_();
 #if defined(USE_ESP32_VARIANT_ESP32P4)
   // The full-speed OTG controller shares two internal FSLS PHYs with USB-Serial-JTAG. Out of
   // reset the controller gets PHY 1 (GPIO26/27) and USB-Serial-JTAG gets PHY 0 (GPIO24/25).
@@ -249,9 +250,49 @@ void USBHost::device_gone_(usb_device_handle_t handle) {
 
 // -- Mode switching --------------------------------------------------------------
 
+void USBHost::load_mode_switch_state_() {
+  if (this->mode_switches_.empty())
+    return;
+  this->mode_switch_pref_ = global_preferences->make_preference<uint32_t>(fnv1_hash("usb_host_mode_switch"), true);
+  uint32_t disabled = 0;
+  if (!this->mode_switch_pref_.load(&disabled))
+    return;
+  for (size_t i = 0; i < this->mode_switches_.size() && i < 32; i++)
+    this->mode_switches_[i].enabled = (disabled & (1u << i)) == 0;
+}
+
+void USBHost::set_mode_switch_enabled(uint16_t vid, uint16_t pid, bool enabled) {
+  uint32_t disabled = 0;
+  bool found = false;
+  for (size_t i = 0; i < this->mode_switches_.size() && i < 32; i++) {
+    auto &ms = this->mode_switches_[i];
+    if (ms.vid == vid && ms.pid == pid) {
+      ms.enabled = enabled;
+      found = true;
+    }
+    if (!ms.enabled)
+      disabled |= 1u << i;
+  }
+  if (!found)
+    return;
+  this->mode_switch_pref_.save(&disabled);
+  ESP_LOGI(TAG, "Mode switch %04X:%04X %s: applies when the device is plugged in or powered up again", vid, pid,
+           enabled ? "on" : "off");
+}
+
+bool USBHost::is_mode_switch_enabled(uint16_t vid, uint16_t pid) const {
+  for (const auto &ms : this->mode_switches_) {
+    if (ms.vid == vid && ms.pid == pid)
+      return ms.enabled;
+  }
+  return false;
+}
+
 bool USBHost::start_mode_switch_(RoutedDevice &dev) {
   for (auto &ms : this->mode_switches_) {
     if (ms.vid != dev.desc->idVendor || ms.pid != dev.desc->idProduct)
+      continue;
+    if (!ms.enabled)
       continue;
     const uint32_t now = millis();
     if (ms.sent_ms != 0 && now - ms.sent_ms < MODE_SWITCH_RETRY_MS) {
