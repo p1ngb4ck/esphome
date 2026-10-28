@@ -19,6 +19,11 @@ namespace esphome::improv_serial {
 ESPHOME_LOG_TAG(TAG, "improv_serial");
 
 static constexpr uint32_t WIFI_CONNECT_TIMEOUT_ID = 0;
+static constexpr uint8_t RPC_GET_NETWORK_CONFIG = 0x80;
+static constexpr uint8_t RPC_SET_NETWORK_PRIORITY = 0x81;
+static constexpr uint8_t RPC_SET_INTERFACE_ENABLED = 0x82;
+static constexpr uint8_t RPC_SET_ETHERNET_IP = 0x83;
+static constexpr uint8_t RPC_SET_WIFI_NETWORK = 0x84;
 
 void ImprovSerialComponent::setup() {
   global_improv_serial_component = this;
@@ -273,7 +278,224 @@ bool ImprovSerialComponent::parse_improv_serial_byte_(uint8_t byte) {
       });
 }
 
+#ifdef USE_WIFI
+void ImprovSerialComponent::provision_(const wifi::WiFiAP &sta) {
+  this->connecting_sta_ = sta;
+
+  // Sampled before start_connecting(): the old connection drops asynchronously after it.
+  const bool switching = wifi::global_wifi_component->is_connected();
+  wifi::global_wifi_component->set_sta(sta);
+  wifi::global_wifi_component->start_connecting(sta);
+  this->set_state_(improv::STATE_PROVISIONING);
+
+  this->set_timeout(WIFI_CONNECT_TIMEOUT_ID, switching ? WIFI_SWITCH_TIMEOUT_MS : WIFI_CONNECT_TIMEOUT_MS,
+                    [this]() { this->on_wifi_connect_timeout_(); });
+}
+#endif
+
+std::vector<std::string> ImprovSerialComponent::rpc_strings_() const {
+  std::vector<std::string> out;
+  if (this->rx_buffer_.size() < 11)
+    return out;
+  const size_t end = std::min<size_t>(this->rx_buffer_.size(), 11 + this->rx_buffer_[10]);
+  size_t pos = 11;
+  while (pos < end) {
+    const size_t len = this->rx_buffer_[pos++];
+    if (pos + len > end)
+      break;
+    out.emplace_back(reinterpret_cast<const char *>(&this->rx_buffer_[pos]), len);
+    pos += len;
+  }
+  return out;
+}
+
+void ImprovSerialComponent::send_ack_(uint8_t code) {
+  std::array<uint8_t, improv::RPC_RESPONSE_MAX_SIZE> buf;
+  improv::RpcResponseBuilder builder(buf, static_cast<improv::Command>(code));
+  this->send_response_(builder.finish(false));
+}
+
+bool ImprovSerialComponent::network_rpc_(uint8_t code) {
+  const std::vector<std::string> args = this->rpc_strings_();
+  auto ip_of = [](const std::string &text, network::IPAddress &out) -> bool {
+    out = network::IPAddress(text);
+    return out.is_set() && out.is_ip4();
+  };
+  auto optional_ip = [](const std::string &text, network::IPAddress &out) -> bool {
+    out = network::IPAddress(text);
+    return text.empty() || (out.is_set() && out.is_ip4());
+  };
+  switch (code) {
+    case RPC_GET_NETWORK_CONFIG: {
+      std::array<uint8_t, improv::RPC_RESPONSE_MAX_SIZE> buf;
+      improv::RpcResponseBuilder builder(buf, static_cast<improv::Command>(code));
+      char ip[network::IP_ADDRESS_BUFFER_SIZE];
+      auto add_ip = [&builder, &ip](const network::IPAddress &address) {
+        builder.add_string(address.is_set() ? address.str_to(ip) : "");
+      };
+      std::vector<network::NetworkInterface> order;
+#ifdef USE_NETWORK_DEFAULT_ROUTE
+      if (network::global_network_component != nullptr) {
+        for (size_t i = 0; i < network::global_network_component->interface_count(); i++)
+          order.push_back(network::global_network_component->interface_at(i));
+      }
+#else
+#ifdef USE_ETHERNET
+      order.push_back(network::NetworkInterface::NETWORK_INTERFACE_ETHERNET);
+#endif
+#ifdef USE_WIFI
+      order.push_back(network::NetworkInterface::NETWORK_INTERFACE_WIFI);
+#endif
+#endif
+      for (const auto interface : order) {
+#ifdef USE_ETHERNET
+        if (interface == network::NetworkInterface::NETWORK_INTERFACE_ETHERNET) {
+          auto *eth = ethernet::global_eth_component;
+          const auto &manual = eth->get_manual_ip();
+          builder.add_string("ethernet");
+          builder.add_string(eth->is_enabled() ? "1" : "0");
+          builder.add_string(manual.has_value() ? "static" : "dhcp");
+          if (manual.has_value()) {
+            add_ip(manual->static_ip);
+            add_ip(manual->subnet);
+            add_ip(manual->gateway);
+            add_ip(manual->dns1);
+            add_ip(manual->dns2);
+          } else {
+            for (int n = 0; n < 5; n++)
+              builder.add_string("");
+          }
+          continue;
+        }
+#endif
+#ifdef USE_WIFI
+        if (interface == network::NetworkInterface::NETWORK_INTERFACE_WIFI) {
+          builder.add_string("wifi");
+          builder.add_string(wifi::global_wifi_component->is_disabled() ? "0" : "1");
+          optional<wifi::ManualIP> manual{};
+#ifdef USE_WIFI_SAVED_NETWORKS
+          if (wifi::global_wifi_component->network_count() > 0)
+            manual = wifi::global_wifi_component->network_at(0).get_manual_ip();
+#endif
+          builder.add_string(manual.has_value() ? "static" : "dhcp");
+          if (manual.has_value()) {
+            add_ip(manual->static_ip);
+            add_ip(manual->subnet);
+            add_ip(manual->gateway);
+            add_ip(manual->dns1);
+            add_ip(manual->dns2);
+          } else {
+            for (int n = 0; n < 5; n++)
+              builder.add_string("");
+          }
+        }
+#endif
+      }
+      this->send_response_(builder.finish(false));
+      return true;
+    }
+    case RPC_SET_NETWORK_PRIORITY: {
+#ifdef USE_NETWORK_DEFAULT_ROUTE
+      auto *net = network::global_network_component;
+      if (net == nullptr) {
+        this->set_error_(improv::ERROR_INVALID_RPC);
+        return true;
+      }
+      for (size_t target = 0; target < args.size(); target++) {
+        const auto interface = args[target] == "ethernet" ? network::NetworkInterface::NETWORK_INTERFACE_ETHERNET
+                                                          : network::NetworkInterface::NETWORK_INTERFACE_WIFI;
+        for (size_t guard = 0; guard < net->interface_count(); guard++) {
+          size_t at = 0;
+          while (at < net->interface_count() && net->interface_at(at) != interface)
+            at++;
+          if (at >= net->interface_count() || at <= target)
+            break;
+          net->move_interface(interface, -1);
+        }
+      }
+#endif
+      this->send_ack_(code);
+      return true;
+    }
+    case RPC_SET_INTERFACE_ENABLED: {
+      if (args.size() < 2) {
+        this->set_error_(improv::ERROR_INVALID_RPC);
+        return true;
+      }
+      const bool on = args[1] == "1";
+#ifdef USE_ETHERNET
+      if (args[0] == "ethernet")
+        ethernet::global_eth_component->set_enabled(on);
+#endif
+#if defined(USE_WIFI) && defined(USE_WIFI_SAVED_NETWORKS)
+      if (args[0] == "wifi")
+        wifi::global_wifi_component->set_enabled(on);
+#endif
+      this->send_ack_(code);
+      return true;
+    }
+    case RPC_SET_ETHERNET_IP: {
+#ifdef USE_ETHERNET
+      if (args.empty()) {
+        this->set_error_(improv::ERROR_INVALID_RPC);
+        return true;
+      }
+      if (args[0] != "static") {
+        ethernet::global_eth_component->apply_manual_ip({});
+        this->send_ack_(code);
+        return true;
+      }
+      ethernet::ManualIP manual{};
+      if (args.size() < 4 || !ip_of(args[1], manual.static_ip) || !ip_of(args[2], manual.subnet) ||
+          !ip_of(args[3], manual.gateway) || !optional_ip(args.size() > 4 ? args[4] : "", manual.dns1) ||
+          !optional_ip(args.size() > 5 ? args[5] : "", manual.dns2)) {
+        this->set_error_(improv::ERROR_INVALID_RPC);
+        return true;
+      }
+      ethernet::global_eth_component->apply_manual_ip(manual);
+#endif
+      this->send_ack_(code);
+      return true;
+    }
+    case RPC_SET_WIFI_NETWORK: {
+#ifdef USE_WIFI
+      if (args.size() < 4 || args[0].empty() || wifi::global_wifi_component == nullptr ||
+          wifi::global_wifi_component->is_disabled()) {
+        this->set_error_(args.size() < 4 || args[0].empty() ? improv::ERROR_INVALID_RPC
+                                                             : improv::ERROR_UNABLE_TO_CONNECT);
+        return true;
+      }
+      wifi::WiFiAP sta{};
+      sta.set_ssid(args[0].c_str());
+      sta.set_password(args[1].c_str());
+      sta.set_hidden(args[2] == "1");
+      if (args[3] == "static") {
+        wifi::ManualIP manual{};
+        if (args.size() < 7 || !ip_of(args[4], manual.static_ip) || !ip_of(args[5], manual.subnet) ||
+            !ip_of(args[6], manual.gateway) || !optional_ip(args.size() > 7 ? args[7] : "", manual.dns1) ||
+            !optional_ip(args.size() > 8 ? args[8] : "", manual.dns2)) {
+          this->set_error_(improv::ERROR_INVALID_RPC);
+          return true;
+        }
+        sta.set_manual_ip(manual);
+      }
+      ESP_LOGD(TAG, "Received network settings: SSID=%s", args[0].c_str());
+      this->provision_(sta);
+#else
+      this->set_error_(improv::ERROR_UNABLE_TO_CONNECT);
+#endif
+      return true;
+    }
+    default:
+      this->set_error_(improv::ERROR_UNKNOWN_RPC);
+      return false;
+  }
+}
+
 bool ImprovSerialComponent::parse_improv_payload_(improv::ImprovCommand &command) {
+  if (static_cast<uint8_t>(command.command) >= RPC_GET_NETWORK_CONFIG &&
+      static_cast<uint8_t>(command.command) != improv::BAD_CHECKSUM)
+    return this->network_rpc_(static_cast<uint8_t>(command.command));
   switch (command.command) {
     case improv::WIFI_SETTINGS: {
 #ifdef USE_WIFI
@@ -287,18 +509,9 @@ bool ImprovSerialComponent::parse_improv_payload_(improv::ImprovCommand &command
       wifi::WiFiAP sta{};
       sta.set_ssid(command.ssid.c_str());
       sta.set_password(command.password.c_str());
-      this->connecting_sta_ = sta;
-
-      // Sampled before start_connecting(): the old connection drops asynchronously after it.
-      const bool switching = wifi::global_wifi_component->is_connected();
-      wifi::global_wifi_component->set_sta(sta);
-      wifi::global_wifi_component->start_connecting(sta);
-      this->set_state_(improv::STATE_PROVISIONING);
       ESP_LOGD(TAG, "Received settings: SSID=%s, password=" LOG_SECRET("%s"), command.ssid.c_str(),
                command.password.c_str());
-
-      this->set_timeout(WIFI_CONNECT_TIMEOUT_ID, switching ? WIFI_SWITCH_TIMEOUT_MS : WIFI_CONNECT_TIMEOUT_MS,
-                        [this]() { this->on_wifi_connect_timeout_(); });
+      this->provision_(sta);
 #else
       // No Wi-Fi support compiled in; there is nothing to provision.
       ESP_LOGW(TAG, "Wi-Fi not supported; cannot provision");
