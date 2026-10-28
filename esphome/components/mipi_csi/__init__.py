@@ -335,6 +335,95 @@ def _sync_esp_ipa_override() -> str:
     return str(dest)
 
 
+ESP_CAM_SENSOR_VERSION = "2.6.0"
+ESP_CAM_SENSOR_URL = (
+    "https://components-file.espressif.com/components/espressif/esp_cam_sensor/"
+    f"{ESP_CAM_SENSOR_VERSION}/espressif__esp_cam_sensor-v{ESP_CAM_SENSOR_VERSION}.zip"
+)
+OV02C10_PATCHES = (
+    (
+        "CMakeLists.txt",
+        "idf_component_register(SRCS ${srcs}\n",
+        "if(CONFIG_CAMERA_OV02C10)\n"
+        '    list(APPEND srcs "sensors/ov02c10/ov02c10.c")\n'
+        '    list(APPEND include_dirs "sensors/ov02c10/include")\n'
+        '    list(APPEND priv_include_dirs "sensors/ov02c10/private_include")\n'
+        "endif()\n\n"
+        "idf_component_register(SRCS ${srcs}\n",
+    ),
+    (
+        "CMakeLists.txt",
+        "if(CONFIG_CAMERA_SENSOR_MOTOR_DETECT_METHOD_DYNAMIC_LINK)\n"
+        "    if(CONFIG_CAMERA_OV2640_AUTO_DETECT_DVP_INTERFACE_SENSOR)\n",
+        "if(CONFIG_CAMERA_SENSOR_MOTOR_DETECT_METHOD_DYNAMIC_LINK)\n"
+        "    if(CONFIG_CAMERA_OV02C10_AUTO_DETECT_MIPI_INTERFACE_SENSOR)\n"
+        '        target_link_libraries(${COMPONENT_LIB} INTERFACE "-u ov02c10_detect")\n'
+        "    endif()\n\n"
+        "    if(CONFIG_CAMERA_OV2640_AUTO_DETECT_DVP_INTERFACE_SENSOR)\n",
+    ),
+    (
+        "Kconfig",
+        '            rsource "sensors/gc2145/Kconfig.gc2145"\n',
+        '            rsource "sensors/gc2145/Kconfig.gc2145"\n'
+        '            rsource "sensors/ov02c10/Kconfig.ov02c10"\n',
+    ),
+    (
+        "project_include.cmake",
+        "if(CONFIG_CAMERA_OV5647)\n",
+        "if(CONFIG_CAMERA_OV02C10)\n"
+        "    if(CONFIG_CAMERA_OV02C10_DEFAULT_IPA_JSON_CONFIGURATION_FILE)\n"
+        '        idf_build_set_property(ESP_IPA_JSON_CONFIG_FILE_PATH "${COMPONENT_PATH}/sensors/ov02c10/cfg/'
+        'ov02c10_default.json" APPEND)\n'
+        "    elseif(CONFIG_CAMERA_OV02C10_CUSTOMIZED_IPA_JSON_CONFIGURATION_FILE)\n"
+        "        idf_build_set_property(ESP_IPA_JSON_CONFIG_FILE_PATH "
+        "${CONFIG_CAMERA_OV02C10_CUSTOMIZED_IPA_JSON_CONFIGURATION_FILE_PATH} APPEND)\n"
+        "    endif()\n"
+        "endif()\n\n"
+        "if(CONFIG_CAMERA_OV5647)\n",
+    ),
+)
+
+
+def _sync_esp_cam_sensor_override() -> str:
+    import hashlib
+    import io
+    import shutil
+    import zipfile
+
+    from esphome.external_files import compute_local_file_path, download_content
+
+    driver = Path(__file__).parent / "ov02c10"
+    digest = hashlib.sha256(repr((ESP_CAM_SENSOR_URL, OV02C10_PATCHES)).encode())
+    for path in sorted(p for p in driver.rglob("*") if p.is_file()):
+        digest.update(path.relative_to(driver).as_posix().encode())
+        digest.update(path.read_bytes())
+    stamp = digest.hexdigest()
+    dest = Path(CORE.build_path) / "components-src" / "espressif__esp_cam_sensor"
+    marker = dest / _ESP_VIDEO_OVERRIDE_MARKER
+    if marker.is_file() and marker.read_text() == stamp:
+        return str(dest)
+
+    archive = download_content(ESP_CAM_SENSOR_URL, compute_local_file_path("mipi_csi", ESP_CAM_SENSOR_URL))
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        zf.extractall(dest)
+    shutil.copytree(driver, dest / "sensors" / "ov02c10")
+    for rel, old, new in OV02C10_PATCHES:
+        target = dest / rel
+        text = target.read_text(encoding="utf-8") if target.is_file() else ""
+        if text.count(old) != 1:
+            raise cv.Invalid(
+                f"mipi_csi: the OV02C10 addition no longer applies to {rel} in esp_cam_sensor "
+                f"{ESP_CAM_SENSOR_VERSION} -- the code it anchors on is missing or appears more than once"
+            )
+        target.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+    marker.write_text(stamp)
+    return str(dest)
+
+
 def _add_idf_config(config: ConfigType) -> None:
     # A copy without its USB UVC device (idf_video_patch.py): USB cameras are usb_uvc's
     from . import idf_video_patch as patch
@@ -344,7 +433,14 @@ def _add_idf_config(config: ConfigType) -> None:
         ref=patch.ESP_VIDEO_VERSION,
         override_path=_sync_esp_video_override(),
     )
-    add_idf_component(name="espressif/esp_cam_sensor", ref="2.6.0")
+    if config[CONF_SENSOR] == "OV02C10":
+        add_idf_component(
+            name="espressif/esp_cam_sensor",
+            ref=ESP_CAM_SENSOR_VERSION,
+            override_path=_sync_esp_cam_sensor_override(),
+        )
+    else:
+        add_idf_component(name="espressif/esp_cam_sensor", ref=ESP_CAM_SENSOR_VERSION)
     # esp_ipa 2.4.0's IDF 6 library is built for ESP32-P4 rev >= 3 (Zba / Zbb instructions): on a rev < 3 chip
     # the ISP pipeline's create_ipa_array() trapped (illegal instruction, sh2add). The commit that adds
     # libesp_ipa_p4_less_v3*.a (picked with CONFIG_ESP32P4_SELECTS_REV_LESS_V3), still version 2.4.0. As an
