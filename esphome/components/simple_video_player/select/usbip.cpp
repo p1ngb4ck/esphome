@@ -600,4 +600,4 @@ bool SpiceUsbSlot::usbip_unlink_(uint32_t seqnum, uint32_t target) {
 
 }  // namespace esphome::simple_video_player
 
-#endif  // SVP_SPICE_USB && SVP_DESKTOP_VNC
+#endif  // SVP_SPICE_USB
