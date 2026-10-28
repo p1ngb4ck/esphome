@@ -359,10 +359,8 @@ EMULATOR_SCHEMA = cv.Schema(
 
 
 def _spice(value):
-    """spice: true, or spice: {connections: N, connections_file: path, protocols: [spice, vnc]}: how many
-    connections (name, host, port) are kept, and where (the file: with each one's USB devices; else
-    preferences); which desktops the panel takes (spice: its own SPICE client and usbredir; vnc: VNC through
-    svp_relay, the Browser and USB/IP)."""
+    """spice: true, or spice: {connections: N, connections_file: path}: how many connections (name,
+    host, port) are kept, and where (the file: with each one's USB devices; else preferences)."""
     if isinstance(value, dict):
         return cv.Schema(
             {
