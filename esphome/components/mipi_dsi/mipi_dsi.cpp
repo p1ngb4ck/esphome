@@ -65,15 +65,17 @@ void MipiDsi::setup() {
     this->smark_failed(LOG_STR("lcd_new_dsi_bus failed"), err);
     return;
   }
-  esp_lcd_dbi_io_config_t dbi_config = {
-      .virtual_channel = 0,
-      .lcd_cmd_bits = 8,    // according to the LCD spec
-      .lcd_param_bits = 8,  // according to the LCD spec
-  };
-  err = esp_lcd_new_panel_io_dbi(this->bus_handle_, &dbi_config, &this->io_handle_);
-  if (err != ESP_OK) {
-    this->smark_failed(LOG_STR("new_panel_io_dbi failed"), err);
-    return;
+  if (!this->video_mode_only_) {
+    esp_lcd_dbi_io_config_t dbi_config = {
+        .virtual_channel = 0,
+        .lcd_cmd_bits = 8,    // according to the LCD spec
+        .lcd_param_bits = 8,  // according to the LCD spec
+    };
+    err = esp_lcd_new_panel_io_dbi(this->bus_handle_, &dbi_config, &this->io_handle_);
+    if (err != ESP_OK) {
+      this->smark_failed(LOG_STR("new_panel_io_dbi failed"), err);
+      return;
+    }
   }
   // clang-format off
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
@@ -131,9 +133,11 @@ void MipiDsi::setup() {
     return;
   }
 #endif
-  if (this->reset_pin_ != nullptr) {
+  if (this->reset_pin_ != nullptr && this->video_mode_only_) {
+    pulse_reset(this->reset_pin_, {.low_ms = 100, .high_after_ms = 200});
+  } else if (this->reset_pin_ != nullptr) {
     pulse_reset(this->reset_pin_, {.high_before_ms = 5, .low_ms = 5});
-  } else if (!this->generic_commands_) {
+  } else if (!this->generic_commands_ && !this->video_mode_only_) {
     esp_lcd_panel_io_tx_param(this->io_handle_, SW_RESET_CMD, nullptr, 0);
   }
   // need to know when the display is ready for SLPOUT command - will be 120ms after reset

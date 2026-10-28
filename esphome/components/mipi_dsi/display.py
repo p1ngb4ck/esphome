@@ -25,12 +25,14 @@ from esphome.components.mipi import (
     CONF_VSYNC_BACK_PORCH,
     CONF_VSYNC_FRONT_PORCH,
     CONF_VSYNC_PULSE_WIDTH,
+    DELAY_FLAG,
     I2C_FLAG,
     MODE_BGR,
     PIXEL_MODE_16BIT,
     PIXEL_MODE_24BIT,
     DriverChip,
     dimension_schema,
+    flatten_sequence,
     get_color_depth,
     map_sequence,
     model_schema_extractor,
@@ -80,6 +82,7 @@ CONF_FRAME_BUFFERS = "frame_buffers"
 CONF_VIDEO_MODE = "video_mode"
 CONF_FRAME_ACK = "frame_ack"
 CONF_CONTINUOUS_CLOCK = "continuous_clock"
+CONF_VIDEO_MODE_ONLY = "video_mode_only"
 CONF_READ_REGISTERS = "read_registers"
 CONF_EOTP = "eotp"
 CONF_LP_HORIZONTAL_BLANKING = "lp_horizontal_blanking"
@@ -147,6 +150,7 @@ def model_schema(config: ConfigType) -> cv.Schema:
             model.option(CONF_VIDEO_MODE, "burst"): cv.one_of(*VIDEO_MODES, lower=True),
             model.option(CONF_FRAME_ACK, True): cv.boolean,
             model.option(CONF_CONTINUOUS_CLOCK, False): cv.boolean,
+            model.option(CONF_VIDEO_MODE_ONLY, False): cv.boolean,
             model.option(CONF_EOTP, True): cv.boolean,
             model.option(CONF_LP_HORIZONTAL_BLANKING, True): cv.boolean,
             model.option(CONF_LP_VERTICAL_ACTIVE, True): cv.boolean,
@@ -179,6 +183,11 @@ def model_schema(config: ConfigType) -> cv.Schema:
     return schema
 
 
+def video_mode_sequence(model: DriverChip, config: ConfigType) -> list[tuple]:
+    sequence = [*(model.initsequence or ()), *config.get(CONF_INIT_SEQUENCE, [])]
+    return [x if isinstance(x, tuple) else (x,) for x in sequence]
+
+
 @model_schema_extractor(MODELS, model_schema)
 def _config_schema(config: ConfigType) -> ConfigType:
     config = cv.Schema(
@@ -194,6 +203,11 @@ def _config_schema(config: ConfigType) -> ConfigType:
     model = MODELS[config[CONF_MODEL].upper()]
     model.check_requirements()
     config = model_schema(config)(config)
+    if config[CONF_VIDEO_MODE_ONLY]:
+        if config[CONF_INVERT_COLORS]:
+            raise cv.Invalid(f"{CONF_VIDEO_MODE_ONLY} sends no commands, so no color inversion")
+        if any(x[0] not in (DELAY_FLAG, I2C_FLAG) for x in video_mode_sequence(model, config)):
+            raise cv.Invalid(f"{CONF_VIDEO_MODE_ONLY} allows only delays and I2C writes in the init sequence")
     width, height, _offset_width, _offset_height, _pad_width, _pad_height = (
         model.get_dimensions(config)
     )
@@ -235,7 +249,11 @@ async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID], width, height, color_depth, pixel_mode)
     cg.add(var.set_big_endian(config[CONF_BYTE_ORDER] == BYTE_ORDER_BIG))
 
-    sequence = model.get_sequence(config)
+    if config[CONF_VIDEO_MODE_ONLY]:
+        sequence = flatten_sequence(video_mode_sequence(model, config))
+    else:
+        sequence = model.get_sequence(config)
+    cg.add(var.set_video_mode_only(config[CONF_VIDEO_MODE_ONLY]))
     cg.add(var.set_model(config[CONF_MODEL]))
     table = cg.shared_progmem_array("mipi_dsi_init_sequence", cg.uint8, sequence)
     cg.add(var.set_init_sequence(table, len(sequence)))

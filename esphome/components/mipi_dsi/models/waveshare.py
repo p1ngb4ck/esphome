@@ -1,3 +1,5 @@
+from esphome.components.mipi import delay, i2c_write
+
 from . import DsiDriverChip
 
 # fmt: off
@@ -342,5 +344,35 @@ DsiDriverChip(
         (0xCC, 0x1A), (0xCD, 0x18), (0xCE, 0x4B), (0xCF, 0x20), (0xD0, 0x27), (0xD1, 0x50), (0xD2, 0x64), (0xD3, 0x39),
         (0xFF, 0x98, 0x81, 0x00),
         (0x3A, 0x77), (0x36, 0x00), (0x35, 0x00), (0x35, 0x00),
+    ],
+)
+
+DsiDriverChip(
+    "WAVESHARE-4.3-DSI",
+    width=800,
+    height=480,
+    lanes=1,
+    lane_bit_rate="800Mbps",
+    pclk_frequency="26MHz",
+    hsync_front_porch=2,
+    hsync_pulse_width=2,
+    hsync_back_porch=46,
+    vsync_front_porch=7,
+    vsync_pulse_width=2,
+    vsync_back_porch=21,
+    pixel_mode="24bit",
+    color_order="RGB",
+    use_axis_flips=False,
+    video_mode_only=True,
+    continuous_clock=True,
+    initsequence=[
+        i2c_write(0x45, 0x86, 0x00), delay(10),
+        i2c_write(0x45, 0x85, 0x00), delay(40),
+        i2c_write(0x45, 0x83, 0x00), delay(10),
+        i2c_write(0x45, 0x81, 0x04), delay(10),
+        i2c_write(0x45, 0x82, 0x80), delay(10),
+        i2c_write(0x45, 0x83, 0x01), delay(90),
+        i2c_write(0x45, 0x83, 0x0D), delay(20),
+        i2c_write(0x45, 0x83, 0x0F), delay(255), delay(55),
     ],
 )
