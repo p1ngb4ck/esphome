@@ -70,6 +70,26 @@ static bool post(uint32_t msg_id, const uint8_t *data, size_t len) {
   return true;
 }
 
+bool post_filled(uint32_t msg_id, size_t len, size_t (*fill)(uint8_t *dst, size_t len, void *ctx), void *ctx) {
+  if (s_queue == nullptr || len == 0 || len > UINT16_MAX)
+    return false;
+  auto *packet = static_cast<Packet *>(heap_caps_malloc(sizeof(Packet) + len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (packet == nullptr)
+    return false;
+  const size_t filled = fill(packet->data, len, ctx);
+  if (filled == 0 || filled > len) {
+    heap_caps_free(packet);
+    return false;
+  }
+  packet->msg_id = msg_id;
+  packet->len = static_cast<uint16_t>(filled);
+  if (xQueueSend(s_queue, &packet, 0) != pdTRUE) {
+    heap_caps_free(packet);
+    return false;
+  }
+  return true;
+}
+
 static void on_down(uint32_t, const uint8_t *data, size_t len, void *) {
   USBBluetooth *dongle = s_dongle;
   if (dongle == nullptr || data == nullptr || len < 2 || len > UINT16_MAX)
