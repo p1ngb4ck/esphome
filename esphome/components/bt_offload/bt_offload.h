@@ -5,6 +5,8 @@
 #ifdef USE_BT_OFFLOAD
 
 #include "esphome/core/component.h"
+#include "esphome/core/event_pool.h"
+#include "esphome/core/lock_free_queue.h"
 #include "esphome/components/hid/hid_input.h"
 #include "esphome/components/hid/hid_parser.h"
 
@@ -15,8 +17,20 @@
 
 namespace esphome::bt_offload {
 
+struct OffloadEvent {
+  static constexpr size_t INLINE_MAX = 80;
+  uint32_t msg_id{0};
+  uint16_t len{0};
+  uint8_t inline_data[INLINE_MAX];
+  uint8_t *large{nullptr};
+  const uint8_t *data() const { return this->large != nullptr ? this->large : this->inline_data; }
+  void release();
+};
+
 class BTOffload : public Component, public hid::HIDInput {
  public:
+  static constexpr uint8_t EVENT_SLOTS = 12;
+
   struct Found {
     std::array<uint8_t, 6> address;
     uint8_t transport;
@@ -25,6 +39,7 @@ class BTOffload : public Component, public hid::HIDInput {
   };
 
   void setup() override;
+  void loop() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
@@ -36,6 +51,7 @@ class BTOffload : public Component, public hid::HIDInput {
   void on_input_(const uint8_t *data, size_t len);
   void on_close_(const uint8_t *data, size_t len);
   void on_found_(const uint8_t *data, size_t len);
+  void receive_(uint32_t msg_id, const uint8_t *data, size_t len);
 
  protected:
   struct Device {
@@ -47,6 +63,8 @@ class BTOffload : public Component, public hid::HIDInput {
 
   std::vector<Device> devices_;
   std::vector<Found> found_;
+  EventPool<OffloadEvent, EVENT_SLOTS> pool_;
+  LockFreeQueue<OffloadEvent, EVENT_SLOTS + 1> queue_;
 };
 
 }

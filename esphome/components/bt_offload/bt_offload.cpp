@@ -4,6 +4,7 @@
 
 #include "esphome/core/log.h"
 #include "esp_hosted_misc.h"
+#include "esp_heap_caps.h"
 
 #include <cstdio>
 #include <cstring>
@@ -22,28 +23,59 @@ static constexpr size_t FOUND_MAX = 16;
 
 static BTOffload *g_offload = nullptr;
 
+void OffloadEvent::release() {
+  if (this->large != nullptr) {
+    heap_caps_free(this->large);
+    this->large = nullptr;
+  }
+  this->len = 0;
+}
+
 static void forward(uint32_t msg_id, const uint8_t *data, size_t len, void *) {
   BTOffload *self = g_offload;
-  if (self == nullptr || data == nullptr || len == 0)
+  if (self != nullptr && data != nullptr && len > 0 && len <= UINT16_MAX)
+    self->receive_(msg_id, data, len);
+}
+
+void BTOffload::receive_(uint32_t msg_id, const uint8_t *data, size_t len) {
+  OffloadEvent *event = this->pool_.allocate();
+  if (event == nullptr)
     return;
-  self->defer([self, msg_id, copy = std::vector<uint8_t>(data, data + len)]() {
-    switch (msg_id) {
+  event->msg_id = 0;
+  event->len = 0;
+  if (len > OffloadEvent::INLINE_MAX)
+    event->large = static_cast<uint8_t *>(heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (len <= OffloadEvent::INLINE_MAX || event->large != nullptr) {
+    event->msg_id = msg_id;
+    event->len = static_cast<uint16_t>(len);
+    std::memcpy(event->large != nullptr ? event->large : event->inline_data, data, len);
+  }
+  this->queue_.push(event);
+  this->enable_loop_soon_any_context();
+}
+
+void BTOffload::loop() {
+  OffloadEvent *event;
+  while ((event = this->queue_.pop()) != nullptr) {
+    switch (event->msg_id) {
       case MSG_HID_OPEN:
-        self->on_open_(copy.data(), copy.size());
+        this->on_open_(event->data(), event->len);
         break;
       case MSG_HID_INPUT:
-        self->on_input_(copy.data(), copy.size());
+        this->on_input_(event->data(), event->len);
         break;
       case MSG_HID_CLOSE:
-        self->on_close_(copy.data(), copy.size());
+        this->on_close_(event->data(), event->len);
         break;
       case MSG_FOUND:
-        self->on_found_(copy.data(), copy.size());
+        this->on_found_(event->data(), event->len);
         break;
       default:
         break;
     }
-  });
+    this->pool_.release(event);
+  }
+  this->disable_loop();
 }
 
 static std::string format_address(const uint8_t *a) {
@@ -53,6 +85,7 @@ static std::string format_address(const uint8_t *a) {
 }
 
 void BTOffload::setup() {
+  this->disable_loop();
   g_offload = this;
   for (uint32_t id : {MSG_HID_OPEN, MSG_HID_INPUT, MSG_HID_CLOSE, MSG_FOUND}) {
     const esp_err_t err = esp_hosted_register_custom_callback(id, forward, nullptr);
