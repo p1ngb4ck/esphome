@@ -131,6 +131,7 @@ void SpiceUsbSlot::setup() {
       heap_caps_calloc(MAX_DEVICES + 1, LABEL_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   this->dev_lock_ = xSemaphoreCreateMutex();
   this->done_q_ = xQueueCreate(GEN_XFERS + INT_XFERS + ISO_STREAMS * ISO_URBS + USBIP_ISO_XFERS, sizeof(Xfer *));
+#ifdef SVP_DESKTOP_VNC
   this->usbip_lock_ = xSemaphoreCreateMutex();
   this->usbip_offsets_ = static_cast<uint32_t *>(heap_caps_malloc(
       static_cast<size_t>(USBIP_ISO_XFERS) * USBIP_ISO_PKTS * sizeof(uint32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -138,12 +139,16 @@ void SpiceUsbSlot::setup() {
   // Zeroed: each Xfer as its defaults (nothing, not busy).
   this->usbip_iso_ =
       static_cast<Xfer *>(heap_caps_calloc(USBIP_ISO_XFERS, sizeof(Xfer), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+#endif
   this->pool_bufs_ =
       static_cast<PoolBuf *>(heap_caps_calloc(POOL_BUFS, sizeof(PoolBuf), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   // The transfers come with a session (link_open()), their buffers from the player's pool.
-  const bool ok = this->labels_ != nullptr && this->dev_lock_ != nullptr &&
-                  this->done_q_ != nullptr && this->usbip_lock_ != nullptr && this->usbip_offsets_ != nullptr &&
-                  this->usbip_entry_ != nullptr && this->usbip_iso_ != nullptr && this->pool_bufs_ != nullptr;
+  bool ok = this->labels_ != nullptr && this->dev_lock_ != nullptr && this->done_q_ != nullptr &&
+            this->pool_bufs_ != nullptr;
+#ifdef SVP_DESKTOP_VNC
+  ok = ok && this->usbip_lock_ != nullptr && this->usbip_offsets_ != nullptr && this->usbip_entry_ != nullptr &&
+       this->usbip_iso_ != nullptr;
+#endif
   if (!ok) {
     ESP_LOGE(TAG, "No memory for the USB redirection");
     this->mark_failed();
@@ -201,7 +206,9 @@ void SpiceUsbSlot::refresh_options() {
   }
   this->publish_state(this->labels_[shown]);
   this->apply_();
+#ifdef SVP_DESKTOP_VNC
   this->usbip_snapshot_();
+#endif
 }
 
 void SpiceUsbSlot::control(const std::string &value) {
@@ -589,8 +596,10 @@ bool SpiceUsbSlot::send_device_info_() {
 bool SpiceUsbSlot::service() {
   if (this->link_ == nullptr)
     return true;
+#ifdef SVP_DESKTOP_VNC
   if (this->proto_ == Proto::USBIP)
     return this->usbip_service_();
+#endif
   Xfer *x;
   while (xQueueReceive(this->done_q_, &x, 0) == pdTRUE) {
     x->in_flight = false;
@@ -650,8 +659,10 @@ bool SpiceUsbSlot::service() {
 }
 
 uint8_t *SpiceUsbSlot::rx_space(size_t &room) {
+#ifdef SVP_DESKTOP_VNC
   if (this->proto_ == Proto::USBIP)
     return this->usbip_rx_space_(room);
+#endif
   switch (this->rx_) {
     case Rx::HEADER:
       room = (this->peer_hello_ ? this->header_len_() : 12) - this->have_;
@@ -677,8 +688,10 @@ uint8_t *SpiceUsbSlot::rx_space(size_t &room) {
 }
 
 bool SpiceUsbSlot::rx_done(size_t n) {
+#ifdef SVP_DESKTOP_VNC
   if (this->proto_ == Proto::USBIP)
     return this->usbip_rx_done_(n);
+#endif
   this->have_ += n;
   switch (this->rx_) {
     case Rx::HEADER: {
@@ -868,8 +881,10 @@ bool SpiceUsbSlot::submit_(Xfer *x) {
 
 // A transfer back (or never submitted): its answer to the guest.
 bool SpiceUsbSlot::complete_(Xfer *x) {
+#ifdef SVP_DESKTOP_VNC
   if (this->proto_ == Proto::USBIP)
     return this->usbip_complete_(x);
+#endif
   usb_transfer_t *t = x->t;
   if ((x->kind == Kind::INTERRUPT_IN && x->intr == nullptr) || (x->kind == Kind::ISO && x->iso == nullptr)) {
     x->busy = false;

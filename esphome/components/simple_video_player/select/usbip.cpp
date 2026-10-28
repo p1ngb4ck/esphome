@@ -7,7 +7,7 @@
 
 #include "spice_usb.h"
 
-#ifdef SVP_SPICE_USB
+#if defined(SVP_SPICE_USB) && defined(SVP_DESKTOP_VNC)
 
 #include "esphome/core/log.h"
 #include "esp_memory_utils.h"
@@ -600,4 +600,4 @@ bool SpiceUsbSlot::usbip_unlink_(uint32_t seqnum, uint32_t target) {
 
 }  // namespace esphome::simple_video_player
 
-#endif  // SVP_SPICE_USB
+#endif  // SVP_SPICE_USB && SVP_DESKTOP_VNC

@@ -201,6 +201,8 @@ CONF_STREAM_STATISTICS = "stream_statistics"
 CONF_SPICE = "spice"
 CONF_CONNECTIONS = "connections"
 CONF_CONNECTIONS_FILE = "connections_file"
+CONF_PROTOCOLS = "protocols"
+SPICE_PROTOCOLS = ["spice", "vnc"]
 CONF_HOST = "host"
 CONF_INDEX = "index"
 SPICE_CONNECTIONS_DEFAULT = 8
@@ -357,16 +359,23 @@ EMULATOR_SCHEMA = cv.Schema(
 
 
 def _spice(value):
-    """spice: true, or spice: {connections: N, connections_file: path}: how many connections (name,
-    host, port) are kept, and where (the file: with each one's USB devices; else preferences)."""
+    """spice: true, or spice: {connections: N, connections_file: path, protocols: [spice, vnc]}: how many
+    connections (name, host, port) are kept, and where (the file: with each one's USB devices; else
+    preferences); which desktops the panel takes (spice: its own SPICE client and usbredir; vnc: VNC through
+    svp_relay, the Browser and USB/IP)."""
     if isinstance(value, dict):
         return cv.Schema(
             {
                 cv.Optional(CONF_CONNECTIONS, default=SPICE_CONNECTIONS_DEFAULT): cv.int_range(min=1, max=16),
                 cv.Optional(CONF_CONNECTIONS_FILE): _storage_path,
+                cv.Optional(CONF_PROTOCOLS, default=SPICE_PROTOCOLS): cv.All(
+                    cv.ensure_list(cv.one_of(*SPICE_PROTOCOLS, lower=True)), cv.Length(min=1)
+                ),
             }
         )(value)
-    return {CONF_CONNECTIONS: SPICE_CONNECTIONS_DEFAULT} if cv.boolean(value) else False
+    if cv.boolean(value):
+        return {CONF_CONNECTIONS: SPICE_CONNECTIONS_DEFAULT, CONF_PROTOCOLS: list(SPICE_PROTOCOLS)}
+    return False
 
 
 CONF_SCREEN_CAPTURE = "screen_capture"
@@ -1345,6 +1354,10 @@ async def to_code(config):
             cg.add_define("SVP_STREAM_TOUCH")
         if config.get(CONF_SPICE):
             cg.add_define("SVP_SPICE")
+            if "spice" in config[CONF_SPICE][CONF_PROTOCOLS]:
+                cg.add_define("SVP_DESKTOP_SPICE")
+            if "vnc" in config[CONF_SPICE][CONF_PROTOCOLS]:
+                cg.add_define("SVP_DESKTOP_VNC")
             cg.add(var.set_spice_connections(config[CONF_SPICE][CONF_CONNECTIONS]))
             if CONF_CONNECTIONS_FILE in config[CONF_SPICE]:
                 cg.add(var.set_spice_connections_file(config[CONF_SPICE][CONF_CONNECTIONS_FILE]))

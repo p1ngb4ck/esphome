@@ -181,7 +181,11 @@ class SpiceUsbSlot : public select::Select, public usb_host::USBClient {
   void drain_();
   size_t header_len_() const { return this->ids64_ ? 16 : 12; }
   // USB/IP (usbip.cpp), spice task.
+#ifdef SVP_DESKTOP_VNC
   static constexpr uint8_t USBIP_ISO_XFERS = 8;
+#else
+  static constexpr uint8_t USBIP_ISO_XFERS = 0;
+#endif
   static constexpr uint16_t USBIP_ISO_PKTS = 64;
   bool usbip_service_();
   uint8_t *usbip_rx_space_(size_t &room);

@@ -45,12 +45,15 @@ static const char *const TAG = "simple_video_player.spice";
 
 namespace {
 
+#ifdef SVP_DESKTOP_SPICE
 constexpr uint32_t SPICE_MAGIC = 0x51444552;  // "REDQ"
 constexpr uint32_t SPICE_VERSION_MAJOR = 2;
 constexpr uint32_t SPICE_VERSION_MINOR = 2;
 constexpr size_t PUBKEY_BYTES = 162;  // SPICE_TICKET_PUBKEY_BYTES
 constexpr size_t TICKET_BYTES = 128;  // SPICE_TICKET_KEY_PAIR_LENGTH / 8
+#endif
 constexpr size_t PASSWORD_MAX = 60;   // SPICE_MAX_PASSWORD_LENGTH
+#ifdef SVP_DESKTOP_SPICE
 constexpr size_t LINK_MESS_BYTES = 18;
 constexpr size_t LINK_REPLY_FIXED = 4 + PUBKEY_BYTES + 12;
 constexpr uint8_t CHANNEL_MAIN = 1;
@@ -114,6 +117,7 @@ constexpr uint16_t MSGC_SPICEVMC_DATA = 101;
 constexpr uint8_t BUTTON_LEFT = 1, BUTTON_MIDDLE = 2, BUTTON_RIGHT = 3, BUTTON_UP = 4, BUTTON_DOWN = 5, BUTTON_SIDE = 6,
                   BUTTON_EXTRA = 7;
 constexpr uint16_t button_mask(uint8_t button) { return static_cast<uint16_t>(1u << (button - 1)); }
+#endif
 constexpr uint32_t CONNECT_TIMEOUT_S = 5;
 constexpr uint32_t RECV_TIMEOUT_S = 30;
 constexpr uint32_t SEND_TIMEOUT_S = 10;
@@ -169,6 +173,7 @@ bool recv_all(int fd, uint8_t *data, size_t len) {
   return true;
 }
 
+#ifdef SVP_DESKTOP_SPICE
 // One DER element of the given tag at p: its content; p moves past it.
 bool der_take(const uint8_t *&p, const uint8_t *end, uint8_t tag, const uint8_t *&content, size_t &len) {
   if (end - p < 2 || p[0] != tag)
@@ -298,6 +303,7 @@ uint32_t key_code(uint16_t xt, bool release) {
     return code;
   return 0xE0u | (static_cast<uint32_t>(code & 0xFF) << 8);
 }
+#endif
 
 bool resolve_host(const char *host, uint16_t port, struct sockaddr_in &addr) {
   struct addrinfo hints {};
@@ -351,6 +357,7 @@ int connect_to(const struct sockaddr_in &addr) {
 
 }  // namespace
 
+#ifdef SVP_DESKTOP_SPICE
 class SpiceSession {
  public:
   using StreamFrame = SimpleVideoPlayer::StreamFrame;
@@ -1449,6 +1456,7 @@ void SpiceSession::run(const char *host, uint16_t port, const char *password) {
   p->desktop_sender_wanted_.store(false, std::memory_order_release);
   this->release_panel_();
 }
+#endif
 
 //========================================================================
 // A desktop session's share of the panel (SPICE, VNC), spice task
@@ -1760,7 +1768,7 @@ SimpleVideoPlayer::DesktopKind SimpleVideoPlayer::desktop_probe_(const char *hos
   return kind;
 }
 
-#ifdef SVP_SPICE_USB
+#if defined(SVP_SPICE_USB) && defined(SVP_DESKTOP_VNC)
 namespace {
 constexpr uint16_t USBIP_PORT = 3240;
 constexpr uint16_t USBIP_VERSION = 0x0111;
@@ -1804,6 +1812,7 @@ inline void put_be32(uint8_t *p, uint32_t v) {
 }  // namespace
 #endif
 
+#ifdef SVP_DESKTOP_VNC
 // The panel, then the relay's picture; until the panel ends it or the relay's sender goes. The USB
 // slots' devices are exported over USB/IP meanwhile (select/usbip.cpp).
 void SimpleVideoPlayer::desktop_vnc_(const char *kind, const char *host, uint16_t port, const char *password) {
@@ -1977,6 +1986,7 @@ void SimpleVideoPlayer::desktop_vnc_(const char *kind, const char *host, uint16_
   this->desktop_sender_wanted_.store(false, std::memory_order_release);
   this->desktop_release_panel_(panel_held, wifi_held);
 }
+#endif
 
 void SimpleVideoPlayer::desktop_cursor_set_(const SpiceCursorShape *shape) {
   xSemaphoreTake(this->spice_cursor_lock_, portMAX_DELAY);
@@ -2042,6 +2052,10 @@ void SimpleVideoPlayer::spice_connect(const std::string &host, uint16_t port, co
 }
 
 void SimpleVideoPlayer::spice_connect_browser() {
+#ifndef SVP_DESKTOP_VNC
+  ESP_LOGE(TAG, "The Browser is a VNC desktop: this panel takes SPICE desktops only");
+  return;
+#endif
   if (this->spice_task_ == nullptr) {
     ESP_LOGE(TAG, "The SPICE client is not running");
     return;
@@ -2720,10 +2734,18 @@ void SimpleVideoPlayer::spice_loop_() {
     if (this->spice_request_.load(std::memory_order_acquire) != 0) {
       // Asked anew meanwhile.
     } else if (kind == DesktopKind::VNC) {
+#ifdef SVP_DESKTOP_VNC
       this->desktop_vnc_(browser ? "browser" : "vnc", host, port, password);
+#else
+      ESP_LOGE(TAG, "%s:%u is a VNC server: this panel takes SPICE desktops only", host, port);
+#endif
     } else if (kind == DesktopKind::SPICE) {
+#ifdef SVP_DESKTOP_SPICE
       SpiceSession session(this);
       session.run(host, port, password);
+#else
+      ESP_LOGE(TAG, "%s:%u is a SPICE server: this panel takes VNC desktops only", host, port);
+#endif
     }
     this->pool_.free(this->spice_scratch_);
     this->spice_scratch_ = nullptr;
