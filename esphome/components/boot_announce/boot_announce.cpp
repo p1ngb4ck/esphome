@@ -49,11 +49,19 @@ void BootAnnounce::setup() {
       this->stop_();
     }
   });
+#ifdef USE_BOOT_ANNOUNCE_WIFI
+  wifi::global_wifi_component->add_ip_state_listener(this);
+  wifi::global_wifi_component->add_connect_state_listener(this);
+#endif
+#ifdef USE_BOOT_ANNOUNCE_ETHERNET
+  ethernet::global_eth_component->add_ip_state_listener(this);
+#endif
   // Online already (the network came up during setup): the event for it has passed
   if (network::is_connected())
     this->start_();
 }
 
+#ifdef NETWORK_ACTIVE_INTERFACE_LISTENER_COUNT
 void BootAnnounce::on_active_interface(network::NetworkInterface interface) {
   if (!this->waiting_)
     return;
@@ -63,6 +71,29 @@ void BootAnnounce::on_active_interface(network::NetworkInterface interface) {
     this->start_();
   }
 }
+#endif
+
+#if defined(USE_BOOT_ANNOUNCE_WIFI) || defined(USE_BOOT_ANNOUNCE_ETHERNET)
+void BootAnnounce::on_ip_state(const network::IPAddresses &ips, const network::IPAddress &dns1,
+                               const network::IPAddress &dns2) {
+  for (const auto &ip : ips) {
+    if (ip.is_set()) {
+      this->defer([this]() {
+        if (this->waiting_)
+          this->start_();
+      });
+      return;
+    }
+  }
+}
+#endif
+
+#ifdef USE_BOOT_ANNOUNCE_WIFI
+void BootAnnounce::on_wifi_connect_state(StringRef ssid, std::span<const uint8_t, 6> bssid) {
+  if (ssid.empty() && this->waiting_)
+    this->stop_();
+}
+#endif
 
 void BootAnnounce::start_() {
   this->send_();
