@@ -14,6 +14,16 @@
 
 #include <array>
 
+#ifdef IMPROV_SERIAL_IDENTITY_NAMESPACE
+#include <cstdlib>
+#include <cstring>
+#include <nvs.h>
+#include <nvs_flash.h>
+#endif
+#if defined(USE_API) && defined(USE_API_NOISE) && !defined(USE_API_NOISE_PSK_FROM_YAML)
+#include "esphome/components/api/api_server.h"
+#endif
+
 namespace esphome::improv_serial {
 
 ESPHOME_LOG_TAG(TAG, "improv_serial");
@@ -24,6 +34,67 @@ static constexpr uint8_t RPC_SET_NETWORK_PRIORITY = 0x81;
 static constexpr uint8_t RPC_SET_INTERFACE_ENABLED = 0x82;
 static constexpr uint8_t RPC_SET_ETHERNET_IP = 0x83;
 static constexpr uint8_t RPC_SET_WIFI_NETWORK = 0x84;
+#ifdef IMPROV_SERIAL_IDENTITY_NAMESPACE
+static constexpr uint8_t RPC_GET_IDENTITY = 0x85;
+static constexpr uint8_t RPC_SET_IDENTITY = 0x86;
+static constexpr uint8_t RPC_GET_MQTT = 0x87;
+static constexpr uint8_t RPC_SET_MQTT = 0x88;
+static constexpr uint8_t RPC_GET_AP = 0x89;
+static constexpr uint8_t RPC_SET_AP = 0x8A;
+static constexpr uint8_t RPC_SET_API_KEY = 0x8B;
+static constexpr size_t IDENTITY_NAME_MAX = 24;
+static constexpr size_t IDENTITY_FRIENDLY_NAME_MAX = 63;
+static constexpr size_t IDENTITY_MQTT_BROKER_MAX = 63;
+static constexpr size_t IDENTITY_MQTT_PORT_MAX = 5;
+static constexpr size_t IDENTITY_MQTT_USER_MAX = 63;
+static constexpr size_t IDENTITY_SECRET_MAX = 63;
+static constexpr size_t IDENTITY_AP_NAME_MAX = 32;
+
+static bool identity_read_(const char *key, std::string &out) {
+  out.clear();
+  nvs_flash_init();
+  nvs_handle_t handle;
+  if (nvs_open(IMPROV_SERIAL_IDENTITY_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
+    return false;
+  size_t len = 0;
+  esp_err_t err = nvs_get_str(handle, key, nullptr, &len);
+  if (err == ESP_OK && len > 0) {
+    out.resize(len);
+    err = nvs_get_str(handle, key, out.data(), &len);
+    if (err == ESP_OK)
+      out.resize(len > 0 ? len - 1 : 0);
+    else
+      out.clear();
+  }
+  nvs_close(handle);
+  return err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND;
+}
+
+static bool identity_write_(const char *key, const std::string &value) {
+  nvs_handle_t handle;
+  if (nvs_open(IMPROV_SERIAL_IDENTITY_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK)
+    return false;
+  esp_err_t err = value.empty() ? nvs_erase_key(handle, key) : nvs_set_str(handle, key, value.c_str());
+  if (err == ESP_ERR_NVS_NOT_FOUND)
+    err = ESP_OK;
+  if (err == ESP_OK)
+    err = nvs_commit(handle);
+  nvs_close(handle);
+  return err == ESP_OK;
+}
+
+static bool identity_port_valid_(const std::string &text) {
+  if (text.empty())
+    return true;
+  if (text.size() > IDENTITY_MQTT_PORT_MAX)
+    return false;
+  for (const char c : text)
+    if (c < '0' || c > '9')
+      return false;
+  const long port = strtol(text.c_str(), nullptr, 10);
+  return port >= 1 && port <= 65535;
+}
+#endif
 
 void ImprovSerialComponent::setup() {
   global_improv_serial_component = this;
@@ -496,10 +567,147 @@ bool ImprovSerialComponent::network_rpc_(uint8_t code) {
   }
 }
 
+#ifdef IMPROV_SERIAL_IDENTITY_NAMESPACE
+bool ImprovSerialComponent::identity_rpc_(uint8_t code) {
+  const std::vector<std::string> args = this->rpc_strings_();
+  auto stored = [](const char *key) {
+    std::string value;
+    identity_read_(key, value);
+    return value;
+  };
+  switch (code) {
+    case RPC_GET_IDENTITY: {
+      std::string name = stored("name");
+      if (name.empty())
+        name = App.get_name().str();
+      std::string friendly_name = stored("friendly_name");
+      if (friendly_name.empty())
+        friendly_name = App.get_friendly_name().str();
+      bool key_set = false;
+#if defined(USE_API) && defined(USE_API_NOISE) && defined(USE_OTA_ENCRYPTION_PROVISIONED) && \
+    !defined(USE_API_NOISE_PSK_FROM_YAML)
+      noise::psk_t psk;
+      key_set = api::load_saved_noise_psk(psk);
+#endif
+      std::array<uint8_t, improv::RPC_RESPONSE_MAX_SIZE> buf;
+      improv::RpcResponseBuilder builder(buf, static_cast<improv::Command>(code));
+      if (!builder.add_string(name.c_str(), name.size()) ||
+          !builder.add_string(friendly_name.c_str(), friendly_name.size()) ||
+          !builder.add_string(key_set ? "1" : "0", 1)) {
+        this->set_error_(improv::ERROR_UNKNOWN);
+        return true;
+      }
+      this->send_response_(builder.finish(false));
+      return true;
+    }
+    case RPC_SET_IDENTITY: {
+      if (args.size() < 2 || args[0].size() > IDENTITY_NAME_MAX ||
+          args[1].size() > IDENTITY_FRIENDLY_NAME_MAX ||
+          !identity_write_("name", args[0]) ||
+          !identity_write_("friendly_name", args[1])) {
+        this->set_error_(improv::ERROR_INVALID_RPC);
+        return true;
+      }
+      this->send_ack_(code);
+      return true;
+    }
+    case RPC_GET_MQTT: {
+      const std::string broker = stored("mqtt_broker");
+      const std::string port = stored("mqtt_port");
+      const std::string user = stored("mqtt_user");
+      const bool password_set = !stored("mqtt_pw").empty();
+      std::array<uint8_t, improv::RPC_RESPONSE_MAX_SIZE> buf;
+      improv::RpcResponseBuilder builder(buf, static_cast<improv::Command>(code));
+      if (!builder.add_string(broker.c_str(), broker.size()) ||
+          !builder.add_string(port.c_str(), port.size()) ||
+          !builder.add_string(user.c_str(), user.size()) ||
+          !builder.add_string(password_set ? "1" : "0", 1)) {
+        this->set_error_(improv::ERROR_UNKNOWN);
+        return true;
+      }
+      this->send_response_(builder.finish(false));
+      return true;
+    }
+    case RPC_SET_MQTT: {
+      if (args.size() < 4 || args[0].size() > IDENTITY_MQTT_BROKER_MAX ||
+          args[2].size() > IDENTITY_MQTT_USER_MAX || args[3].size() > IDENTITY_SECRET_MAX ||
+          !identity_port_valid_(args[1]) ||
+          !identity_write_("mqtt_broker", args[0]) ||
+          !identity_write_("mqtt_port", args[1]) ||
+          !identity_write_("mqtt_user", args[2]) ||
+          (!args[3].empty() && !identity_write_("mqtt_pw", args[3]))) {
+        this->set_error_(improv::ERROR_INVALID_RPC);
+        return true;
+      }
+      this->send_ack_(code);
+      return true;
+    }
+    case RPC_GET_AP: {
+      const std::string enable = stored("ap_enable") == "off" ? "off" : "on";
+      const std::string name = stored("ap_name");
+      const std::string popup = stored("ap_popup") == "off" ? "off" : "on";
+      const bool password_set = !stored("ap_pw").empty();
+      std::array<uint8_t, improv::RPC_RESPONSE_MAX_SIZE> buf;
+      improv::RpcResponseBuilder builder(buf, static_cast<improv::Command>(code));
+      if (!builder.add_string(enable.c_str(), enable.size()) ||
+          !builder.add_string(name.c_str(), name.size()) ||
+          !builder.add_string(popup.c_str(), popup.size()) ||
+          !builder.add_string(password_set ? "1" : "0", 1)) {
+        this->set_error_(improv::ERROR_UNKNOWN);
+        return true;
+      }
+      this->send_response_(builder.finish(false));
+      return true;
+    }
+    case RPC_SET_AP: {
+      if (args.size() < 4 || (args[0] != "on" && args[0] != "off") ||
+          args[1].size() > IDENTITY_AP_NAME_MAX || args[2].size() > IDENTITY_SECRET_MAX ||
+          (args[3] != "on" && args[3] != "off") ||
+          !identity_write_("ap_enable", args[0]) ||
+          !identity_write_("ap_name", args[1]) ||
+          (!args[2].empty() && !identity_write_("ap_pw", args[2])) ||
+          !identity_write_("ap_popup", args[3])) {
+        this->set_error_(improv::ERROR_INVALID_RPC);
+        return true;
+      }
+      this->send_ack_(code);
+      return true;
+    }
+    case RPC_SET_API_KEY: {
+#if defined(USE_API) && defined(USE_API_NOISE) && !defined(USE_API_NOISE_PSK_FROM_YAML)
+      uint8_t decoded[32];
+      if (args.empty() || args[0].empty() ||
+          base64_decode(args[0], decoded, sizeof(decoded)) != sizeof(decoded)) {
+        this->set_error_(improv::ERROR_INVALID_RPC);
+        return true;
+      }
+      noise::psk_t psk{};
+      memcpy(psk.data(), decoded, sizeof(decoded));
+      if (api::global_api_server == nullptr || !api::global_api_server->save_noise_psk(psk)) {
+        this->set_error_(improv::ERROR_UNKNOWN);
+        return true;
+      }
+      this->send_ack_(code);
+#else
+      this->set_error_(improv::ERROR_UNKNOWN_RPC);
+#endif
+      return true;
+    }
+    default:
+      this->set_error_(improv::ERROR_UNKNOWN_RPC);
+      return false;
+  }
+}
+#endif
+
 bool ImprovSerialComponent::parse_improv_payload_(improv::ImprovCommand &command) {
-  if (static_cast<uint8_t>(command.command) >= RPC_GET_NETWORK_CONFIG &&
-      static_cast<uint8_t>(command.command) != improv::BAD_CHECKSUM)
-    return this->network_rpc_(static_cast<uint8_t>(command.command));
+  const auto code = static_cast<uint8_t>(command.command);
+#ifdef IMPROV_SERIAL_IDENTITY_NAMESPACE
+  if (code >= RPC_GET_IDENTITY && command.command != improv::BAD_CHECKSUM)
+    return this->identity_rpc_(code);
+#endif
+  if (code >= RPC_GET_NETWORK_CONFIG && command.command != improv::BAD_CHECKSUM)
+    return this->network_rpc_(code);
   switch (command.command) {
     case improv::WIFI_SETTINGS: {
 #ifdef USE_WIFI
