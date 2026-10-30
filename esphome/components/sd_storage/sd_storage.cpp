@@ -220,7 +220,8 @@ storage::StorageError SdMmc::mount() {
     return storage::StorageError::STORAGE_ERROR_OK;
   sdmmc_host_t host = SDMMC_HOST_DEFAULT();
   host.max_freq_khz = static_cast<int>(this->data_rate_khz_);
-  host.flags = this->mode_1bit_ ? SDMMC_HOST_FLAG_1BIT : SDMMC_HOST_FLAG_4BIT;
+  host.flags =
+      (host.flags & SDMMC_HOST_FLAG_DEINIT_ARG) | (this->mode_1bit_ ? SDMMC_HOST_FLAG_1BIT : SDMMC_HOST_FLAG_4BIT);
   host.slot = this->slot_;
 #if defined(SOC_SDMMC_PSRAM_DMA_CAPABLE) && SOC_SDMMC_PSRAM_DMA_CAPABLE
   // Unaligned transfers go through this one PSRAM buffer (sdmmc_write_sectors / _read_sectors use
