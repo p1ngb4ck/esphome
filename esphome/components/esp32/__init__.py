@@ -4142,8 +4142,6 @@ KEY_CUSTOM_PARTITIONS = "custom_partitions"
 
 _EXFAT_PATCHES = (
     ("FF_FS_EXFAT", "1"),
-    # exFAT's media sizes make 32-bit LBA pointless (ends at 2 TiB, predates GPT).
-    ("FF_LBA64", "1"),
     # exFAT on a card driven over SPI trips the TRIM path (ESP_ERR_INVALID_RESPONSE);
     # TRIM is an optimisation for the medium, not a feature anything depends on.
     ("FF_USE_TRIM", "0"),
