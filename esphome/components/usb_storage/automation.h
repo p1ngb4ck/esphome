@@ -84,4 +84,4 @@ template<typename... Ts> class DeviceMountedCondition : public Condition<Ts...> 
 
 }  // namespace esphome::usb_storage
 
-#endif  // USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3 || USE_ESP32_VARIANT_ESP32P4
+#endif  // USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3 || USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S31 || USE_ESP32_VARIANT_ESP32H4
