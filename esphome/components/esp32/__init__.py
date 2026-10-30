@@ -3415,6 +3415,11 @@ async def _reconcile_vfs_fatfs_sdkconfig(
         )
         if exfat_override is not None:
             add_idf_component(name="fatfs", override_path=exfat_override)
+        else:
+            add_src_cmake(
+                "idf_component_get_property(esphome_fatfs_lib fatfs COMPONENT_LIB)\n"
+                "target_link_libraries(${COMPONENT_LIB} PUBLIC ${esphome_fatfs_lib})"
+            )
     elif enable_exfat:
         raise cv.Invalid(
             f"'{CONF_ENABLE_EXFAT}' has no effect here: no component in this configuration "
