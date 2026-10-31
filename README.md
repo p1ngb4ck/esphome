@@ -2,10 +2,9 @@
 
 ESPHome `dev` plus the USB device drivers of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome) `testing_dev`
 on the `usb_host` rework ([esphome-usb-host](https://github.com/p1ngb4ck/esphome-usb-host)): mass storage, optical
-drives, HID, UVC cameras, Bluetooth dongles, USB audio, USB serial adapters. One branch per driver or change; `main` contains every
+drives, HID, UVC cameras, Bluetooth dongles, USB audio, USB serial adapters, USB Ethernet. One branch per driver or change; `main` contains every
 branch and esphome-usb-host's `main`. Base: ESPHome `dev` at `1f70f86b47`. The code is taken over unchanged from
-`testing_dev` (all files of these components identical). `usb_ethernet` follows with the network topic (it needs
-the network changes).
+`testing_dev` (all files of these components identical).
 
 Every driver is matched by device class: a device works when it is plugged in, `vid` / `pid` only to give one
 particular device to one particular block, `blacklist` to keep a device away from a block.
@@ -24,6 +23,7 @@ particular device to one particular block, `blacklist` to keep a device away fro
 | `pr/usb-audio-media-player` | `usb_audio` `media_player` platform | as `usb_audio` | `pr/usb-audio` |
 | `pr/usb-uart` | `usb_uart` rework: one client for every serial adapter (an adapter without a YAML entry gets its type from its `vid` / `pid`, else CDC ACM), RX buffer allocated on connect and freed after drain, receive chunks sized from the endpoint, `claim_notification_ep`, `claim_comm_interface`, runtime line settings | S2, S3, S31, P4, H4 | `pr/usb-host-refactor`, `pr/uart-runtime-line-settings` |
 | `pr/usb-uart-ch934x` | `usb_uart` CH934X type (CH9344, CH348): multiplexed channels over a shared command endpoint, paced parallel channel init, shared TX queue, DTR / RTS | as `usb_uart` | `pr/usb-uart` |
+| `pr/usb-ethernet` | `usb_ethernet`: USB Ethernet adapters (CDC-ECM, CDC-NCM) as a network interface beside WiFi and Ethernet | S2, S3, S31, P4 | `pr/usb-host-refactor`, `pr/network-usb-ethernet` |
 | `pr/uart-debug-add-uart-settings` | `uart` and `usb_uart` `debug_add_uart_settings`: the line settings (baud:data bits:parity:stop bits) in every debug line | all | `pr/usb-uart` |
 
 Branches from other topics, contained as merges:
@@ -34,8 +34,9 @@ Branches from other topics, contained as merges:
 | `pr/usb-host-refactor` | [esphome-usb-host](https://github.com/p1ngb4ck/esphome-usb-host) | routing by class, transfer engine |
 | `pr/hid` | esphome-hid | the `hid` component |
 | `pr/camera-encoder-h264` | esphome-camera | `camera` / `camera_encoder` H.264 streams, key frames |
-| `pr/wifi-startup-done-callback` | esphome-network | `wifi` `add_on_startup_done_callback` |
+| `pr/wifi-startup-done-callback` | [esphome-network](https://github.com/p1ngb4ck/esphome-network) | `wifi` `add_on_startup_done_callback` |
 | `pr/esp32-ble-start-order` | esphome-bluetooth | Bluedroid starts after WiFi's start-up and, with a bluedroid dongle, once the dongle is ready |
+| `pr/network-usb-ethernet` | [esphome-network](https://github.com/p1ngb4ck/esphome-network) | network / mdns: usb_ethernet as a third interface, `restore_default_dns` |
 | `pr/uart-runtime-line-settings` | esphome-uart-tcp | `uart` line settings settable at runtime and saved |
 
 `usb_bluetooth` is the dongle path. Chips with Bluetooth Classic and BLE on chip (ESP32, ESP32-S31) need no dongle
@@ -48,7 +49,7 @@ The 8-channel path of `audio` / `speaker` / `mixer` is in esphome-audio.
 external_components:
   - source: github://p1ngb4ck/esphome-usb-drivers@main
     components: [esp32, storage, usb_host, usb_storage, usb_cdrom, usb_hid, hid, usb_uvc, camera, camera_encoder,
-                 usb_bluetooth, esp32_ble, wifi, usb_audio, usb_uart, uart]
+                 usb_bluetooth, esp32_ble, wifi, usb_audio, usb_uart, uart, usb_ethernet, network, mdns]
 
 usb_host:
   dual_host: true
