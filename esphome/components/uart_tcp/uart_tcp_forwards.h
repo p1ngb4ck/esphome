@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 
 namespace esphome::uart_tcp {
 
@@ -71,6 +72,7 @@ class UartTcpForwards : public Component {
   void save();
   /// A runner's need for the loop changed.
   void runner_changed();
+  }
 
  protected:
   struct Uart {

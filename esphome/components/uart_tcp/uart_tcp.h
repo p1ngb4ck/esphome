@@ -18,12 +18,14 @@
 #include "esphome/components/uart/uart_virtual.h"
 #endif
 #include "esphome/core/component.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/preferences.h"
 
 #include <cstdint>
 #include <memory>
 #include <span>
 #include <string>
+#include <utility>
 
 namespace esphome::uart_tcp {
 
@@ -98,6 +100,7 @@ class UartTcp final : public Component, public uart::UARTDevice {
   uint32_t connected_since() const { return this->connected_ms_; }
   size_t peer_address(std::span<char, socket::SOCKADDR_STR_LEN> buf) const { return this->link_.peer_address(buf); }
   uint32_t get_disconnects() const { return this->disconnects_; }
+  }
 
   void setup() override;
   void loop() override;
