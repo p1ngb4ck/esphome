@@ -123,72 +123,16 @@ void MipiDsi::setup() {
   auto when = millis() + 120;
   if (this->generic_commands_) {
     mipi_dsi_host_ll_enable_cmd_ack(MIPI_DSI_LL_GET_HOST(0), false);
+    if (!this->send_init_sequence_(when))
+      return;
   }
   err = esp_lcd_panel_init(this->handle_);
   if (err != ESP_OK) {
     this->smark_failed(LOG_STR("esp_lcd_init failed"), err);
     return;
   }
-  size_t index = 0;
-  const uint8_t *seq = this->init_sequence_;
-  const size_t len = this->init_sequence_len_;
-  while (index != len) {
-    if (len - index < 2) {
-      this->mark_failed(LOG_STR("Malformed init sequence"));
-      return;
-    }
-    uint8_t cmd = seq[index++];
-    uint8_t x = seq[index++];
-    if (x == DELAY_FLAG) {
-      ESP_LOGD(TAG, "Delay %dms", cmd);
-      delay(cmd);
-#ifdef USE_I2C
-    } else if (x == I2C_FLAG) {
-      if (len - index < 2) {
-        this->mark_failed(LOG_STR("Malformed init sequence"));
-        return;
-      }
-      this->i2c_device_.set_i2c_address(cmd);
-      if (!this->i2c_device_.write_registers(reinterpret_cast<const i2c::I2CRegValue *>(seq + index), 1)) {
-        this->mark_failed(LOG_STR("I2C write failed"));
-        return;
-      }
-      index += 2;
-#endif
-    } else {
-      uint8_t num_args = x & 0x7F;
-      if (len - index < num_args) {
-        this->mark_failed(LOG_STR("Malformed init sequence"));
-        return;
-      }
-      if (cmd == SLEEP_OUT && !this->generic_commands_) {
-        // are we ready, boots?
-        int duration = when - millis();
-        if (duration > 0) {
-          delay(duration);
-        }
-      }
-      const auto *ptr = seq + index;
-#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERY_VERBOSE
-      char hex_buf[format_hex_pretty_size(MIPI_DSI_MAX_CMD_LOG_BYTES)];
-#endif
-      ESP_LOGVV(TAG, "Command %02X, length %d, byte(s) %s", cmd, num_args,
-                format_hex_pretty_to(hex_buf, ptr, num_args, '.'));
-      if (this->generic_commands_) {
-        this->write_generic_(cmd, ptr, num_args);
-        index += num_args;
-        continue;
-      }
-      err = esp_lcd_panel_io_tx_param(this->io_handle_, cmd, ptr, num_args);
-      if (err != ESP_OK) {
-        this->smark_failed(LOG_STR("lcd_panel_io_tx_param failed"), err);
-        return;
-      }
-      index += num_args;
-      if (cmd == SLEEP_OUT)
-        delay(10);
-    }
-  }
+  if (!this->generic_commands_ && !this->send_init_sequence_(when))
+    return;
   this->io_lock_ = xSemaphoreCreateBinary();
   esp_lcd_dpi_panel_event_callbacks_t cbs = {
       .on_color_trans_done = notify_refresh_ready,
@@ -433,6 +377,71 @@ int MipiDsi::get_height() {
     default:
       return this->get_width_internal();
   }
+}
+
+bool MipiDsi::send_init_sequence_(uint32_t when) {
+  esp_err_t err;
+  size_t index = 0;
+  const uint8_t *seq = this->init_sequence_;
+  const size_t len = this->init_sequence_len_;
+  while (index != len) {
+    if (len - index < 2) {
+      this->mark_failed(LOG_STR("Malformed init sequence"));
+      return false;
+    }
+    uint8_t cmd = seq[index++];
+    uint8_t x = seq[index++];
+    if (x == DELAY_FLAG) {
+      ESP_LOGD(TAG, "Delay %dms", cmd);
+      delay(cmd);
+#ifdef USE_I2C
+    } else if (x == I2C_FLAG) {
+      if (len - index < 2) {
+        this->mark_failed(LOG_STR("Malformed init sequence"));
+        return false;
+      }
+      this->i2c_device_.set_i2c_address(cmd);
+      if (!this->i2c_device_.write_registers(reinterpret_cast<const i2c::I2CRegValue *>(seq + index), 1)) {
+        this->mark_failed(LOG_STR("I2C write failed"));
+        return false;
+      }
+      index += 2;
+#endif
+    } else {
+      uint8_t num_args = x & 0x7F;
+      if (len - index < num_args) {
+        this->mark_failed(LOG_STR("Malformed init sequence"));
+        return false;
+      }
+      if (cmd == SLEEP_OUT && !this->generic_commands_) {
+        // are we ready, boots?
+        int duration = when - millis();
+        if (duration > 0) {
+          delay(duration);
+        }
+      }
+      const auto *ptr = seq + index;
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERY_VERBOSE
+      char hex_buf[format_hex_pretty_size(MIPI_DSI_MAX_CMD_LOG_BYTES)];
+#endif
+      ESP_LOGVV(TAG, "Command %02X, length %d, byte(s) %s", cmd, num_args,
+                format_hex_pretty_to(hex_buf, ptr, num_args, '.'));
+      if (this->generic_commands_) {
+        this->write_generic_(cmd, ptr, num_args);
+        index += num_args;
+        continue;
+      }
+      err = esp_lcd_panel_io_tx_param(this->io_handle_, cmd, ptr, num_args);
+      if (err != ESP_OK) {
+        this->smark_failed(LOG_STR("lcd_panel_io_tx_param failed"), err);
+        return false;
+      }
+      index += num_args;
+      if (cmd == SLEEP_OUT)
+        delay(10);
+    }
+  }
+  return true;
 }
 
 void MipiDsi::write_generic_(uint8_t cmd, const uint8_t *args, uint8_t num_args) {

@@ -121,6 +121,7 @@ class MipiDsi final : public display::Display {
     }
   }
   void mark_dirty_(int x_start, int y_start, int w, int h);
+  bool send_init_sequence_(uint32_t when);
   void write_generic_(uint8_t cmd, const uint8_t *args, uint8_t num_args);
   /// Pack a colour as the 565 value the panel's byte order expects in memory.
   uint16_t to_panel_565_(Color color) const {

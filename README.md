@@ -13,6 +13,11 @@ reset and an OTA restart alike. Each change as its own pull request branch:
 - [pr/mipi-i2c-init-writes](https://github.com/p1ngb4ck/esphome/tree/pr/mipi-i2c-init-writes): I2C register writes (`i2c_write`) as init sequence
   entries, display option `i2c_id`.
 - [pr/mipi-dsi-rpi-7inch-v1](https://github.com/p1ngb4ck/esphome/tree/pr/mipi-dsi-rpi-7inch-v1): the model `RPI-7INCH-V1` (needs the three mipi PRs above).
+- `main` also: with `command_mode: generic` the init sequence goes out before `esp_lcd_panel_init()` starts the
+  video, the bridge's register writes in command mode (testing_dev a1f865b6f3).
+- Optional, not in `main`: [pr/mipi-dsi-video-mode](https://github.com/p1ngb4ck/esphome-rpi-7inch-display/tree/pr/mipi-dsi-video-mode):
+  mipi_dsi `video_mode` (`burst`, `non_burst_sync_pulses`, `non_burst_sync_events`), `RPI-7INCH-V1` with
+  `non_burst_sync_pulses`; the display works without it.
 
 ## Status
 
