@@ -57,7 +57,7 @@ void EthernetComponent::setup() {
   this->eth_->hostname(App.get_name().c_str());
 
   // Configure static IP (must be done before begin())
-#ifdef USE_ETHERNET_MANUAL_IP
+#ifdef USE_ETHERNET_MANUAL_IP_CONFIG
   {
     const ManualIP manual_ip = load_manual_ip();
     this->eth_->config(IPAddress(manual_ip.static_ip), IPAddress(manual_ip.gateway), IPAddress(manual_ip.subnet),
@@ -286,7 +286,7 @@ void EthernetComponent::start_connect_() {
 
   // Hostname is already set in setup() via LwipIntf::setHostname()
 
-#ifdef USE_ETHERNET_MANUAL_IP
+#ifdef USE_ETHERNET_MANUAL_IP_CONFIG
   // Static IP was already configured before begin() in setup()
   // Set DNS servers
   const ManualIP manual_ip = load_manual_ip();
