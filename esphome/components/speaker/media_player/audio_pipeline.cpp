@@ -271,6 +271,8 @@ esp_err_t AudioPipeline::start_tasks_() {
   }
 
   if (!this->decode_task_.is_created()) {
+    // One above the reader and the main loop: paced by its sink, it takes no more than the sound needs,
+    // and the sound does not wait for them. The reader fills its ring as fast as the source gives.
     snprintf(task_name, sizeof(task_name), "%s_decode", this->base_name_);
     if (!this->decode_task_.create(decode_task, task_name, DECODE_TASK_STACK_SIZE, (void *) this, this->priority_,
                                    this->task_stack_in_psram_)) {

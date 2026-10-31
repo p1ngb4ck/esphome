@@ -14,7 +14,8 @@
 
 namespace esphome::resampler {
 
-static const UBaseType_t RESAMPLER_TASK_PRIORITY = 1;
+// Above the main loop: paced by its input and output, it takes no more than the sound needs.
+static const UBaseType_t RESAMPLER_TASK_PRIORITY = 2;
 
 static const uint32_t TRANSFER_BUFFER_DURATION_MS = 50;
 
