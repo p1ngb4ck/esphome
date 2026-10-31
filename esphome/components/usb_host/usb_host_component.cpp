@@ -16,6 +16,12 @@ namespace esphome::usb_host {
 
 // Routing client events; a hub brings up several devices at once.
 static constexpr int HOST_EVENT_QUEUE_SIZE = 16;
+// After a mode switch the device is left alone this long, to re-enumerate in its new mode.
+static constexpr uint32_t MODE_SWITCH_SETTLE_MS = 5000;
+// The same ids back within this long after a switch: the switch did not take.
+static constexpr uint32_t MODE_SWITCH_RETRY_MS = 15000;
+// A bulk step the device does not complete is cancelled after this long.
+static constexpr uint32_t MODE_SWITCH_STEP_TIMEOUT_MS = 5000;
 
 static USBHost *&usb_host_ref() {
   static USBHost *instance = nullptr;
@@ -25,6 +31,7 @@ static USBHost *&usb_host_ref() {
 USBHost *get_usb_host() { return usb_host_ref(); }
 
 void USBHost::setup() {
+  this->load_mode_switch_state_();
   usb_host_config_t config{};
 #ifdef USE_USB_HOST_PER_PORT_FIFO_BIAS
   // Each controller resolves its own split from its own FIFO depth, so setting one here
@@ -174,7 +181,8 @@ void USBHost::device_new_(uint8_t addr) {
   }
   ESP_LOGD(TAG, "Device %u: %04X:%04X", addr, dev.desc->idVendor, dev.desc->idProduct);
   this->devices_.push_back(std::move(dev));
-  this->route_(this->devices_.back());
+  if (!this->start_mode_switch_(this->devices_.back()))
+    this->route_(this->devices_.back());
   this->devices_callback_.call();
 }
 
@@ -190,6 +198,8 @@ void USBHost::forget_device_(usb_device_handle_t handle) {
   for (auto it = this->devices_.begin(); it != this->devices_.end(); ++it) {
     if (it->handle != handle)
       continue;
+    if (it->switch_intf != 0xFF)
+      usb_host_interface_release(this->client_handle_, it->handle, it->switch_intf);
     usb_host_device_close(this->client_handle_, it->handle);
     this->devices_.erase(it);
     this->devices_callback_.call();
@@ -202,7 +212,219 @@ void USBHost::device_gone_(usb_device_handle_t handle) {
   if (dev == nullptr)
     return;
   ESP_LOGD(TAG, "Device %u gone", dev->addr);
+  if (dev->switch_xfer != nullptr) {
+    // Its transfer still has to come back; the device is closed from there.
+    dev->gone = true;
+    return;
+  }
   this->forget_device_(handle);
+}
+
+// -- Mode switching --------------------------------------------------------------
+
+void USBHost::load_mode_switch_state_() {
+  if (this->mode_switches_.empty())
+    return;
+  this->mode_switch_pref_ = global_preferences->make_preference<uint32_t>(fnv1_hash("usb_host_mode_switch"), true);
+  uint32_t disabled = 0;
+  if (!this->mode_switch_pref_.load(&disabled))
+    return;
+  for (size_t i = 0; i < this->mode_switches_.size() && i < 32; i++)
+    this->mode_switches_[i].enabled = (disabled & (1u << i)) == 0;
+}
+
+void USBHost::set_mode_switch_enabled(uint16_t vid, uint16_t pid, bool enabled) {
+  uint32_t disabled = 0;
+  bool found = false;
+  for (size_t i = 0; i < this->mode_switches_.size() && i < 32; i++) {
+    auto &ms = this->mode_switches_[i];
+    if (ms.vid == vid && ms.pid == pid) {
+      ms.enabled = enabled;
+      found = true;
+    }
+    if (!ms.enabled)
+      disabled |= 1u << i;
+  }
+  if (!found)
+    return;
+  this->mode_switch_pref_.save(&disabled);
+  ESP_LOGI(TAG, "Mode switch %04X:%04X %s: applies when the device is plugged in or powered up again", vid, pid,
+           enabled ? "on" : "off");
+}
+
+bool USBHost::is_mode_switch_enabled(uint16_t vid, uint16_t pid) const {
+  for (const auto &ms : this->mode_switches_) {
+    if (ms.vid == vid && ms.pid == pid)
+      return ms.enabled;
+  }
+  return false;
+}
+
+bool USBHost::start_mode_switch_(RoutedDevice &dev) {
+  for (auto &ms : this->mode_switches_) {
+    if (ms.vid != dev.desc->idVendor || ms.pid != dev.desc->idProduct)
+      continue;
+    if (!ms.enabled)
+      continue;
+    const uint32_t now = millis();
+    if (ms.sent_ms != 0 && now - ms.sent_ms < MODE_SWITCH_RETRY_MS) {
+      ESP_LOGW(TAG, "%04X:%04X is back unchanged after its mode switch; routing it as it is", ms.vid, ms.pid);
+      return false;
+    }
+    ms.sent_ms = now != 0 ? now : 1;
+    if (!ms.messages.empty()) {
+      // The first interface with a bulk OUT endpoint, as usb_modeswitch picks it.
+      int offset = 0;
+      const auto *next = reinterpret_cast<const usb_standard_desc_t *>(dev.config);
+      uint8_t intf = 0xFF;
+      while ((next = usb_parse_next_descriptor(next, dev.config->wTotalLength, &offset)) != nullptr) {
+        if (next->bDescriptorType == USB_W_VALUE_DT_INTERFACE) {
+          const auto *desc = reinterpret_cast<const usb_intf_desc_t *>(next);
+          if (dev.switch_ep_out != 0)
+            break;
+          intf = desc->bAlternateSetting == 0 ? desc->bInterfaceNumber : 0xFF;
+          dev.switch_ep_in = 0;
+          continue;
+        }
+        if (next->bDescriptorType != USB_W_VALUE_DT_ENDPOINT || intf == 0xFF)
+          continue;
+        const auto *ep = reinterpret_cast<const usb_ep_desc_t *>(next);
+        if (USB_EP_DESC_GET_XFERTYPE(ep) != USB_BM_ATTRIBUTES_XFER_BULK)
+          continue;
+        if (USB_EP_DESC_GET_EP_DIR(ep)) {
+          if (dev.switch_ep_in == 0) {
+            dev.switch_ep_in = ep->bEndpointAddress;
+            dev.switch_mps_in = USB_EP_DESC_GET_MPS(ep);
+          }
+        } else if (dev.switch_ep_out == 0) {
+          dev.switch_ep_out = ep->bEndpointAddress;
+          dev.switch_intf = intf;
+        }
+      }
+      if (dev.switch_ep_out == 0 || (ms.need_response && dev.switch_ep_in == 0)) {
+        ESP_LOGW(TAG, "%04X:%04X: no bulk endpoint for its mode switch", ms.vid, ms.pid);
+        dev.switch_intf = 0xFF;
+        return false;
+      }
+      const uint8_t intf_num = dev.switch_intf;
+      dev.switch_intf = 0xFF;
+      esp_err_t err = usb_host_interface_claim(this->client_handle_, dev.handle, intf_num, 0);
+      if (err != ESP_OK) {
+        ESP_LOGW(TAG, "%04X:%04X: claiming interface %u for the mode switch failed: %s", ms.vid, ms.pid, intf_num,
+                 esp_err_to_name(err));
+        return false;
+      }
+      dev.switch_intf = intf_num;
+    }
+    dev.mode_switch = &ms;
+    dev.switch_step = 0;
+    ESP_LOGI(TAG, "%04X:%04X: sending its mode switch", ms.vid, ms.pid);
+    if (this->submit_switch_step_(dev))
+      return true;
+    this->finish_mode_switch_(dev.handle);
+    return true;
+  }
+  return false;
+}
+
+bool USBHost::submit_switch_step_(RoutedDevice &dev) {
+  const ModeSwitch &ms = *dev.mode_switch;
+  usb_transfer_t *xfer = nullptr;
+  esp_err_t err;
+  if (ms.messages.empty()) {
+    const size_t len = ms.data.size();
+    if ((err = usb_host_transfer_alloc(SETUP_PACKET_SIZE + len, 0, &xfer)) != ESP_OK)
+      return false;
+    auto *setup = reinterpret_cast<usb_setup_packet_t *>(xfer->data_buffer);
+    setup->bmRequestType = ms.request_type;
+    setup->bRequest = ms.request;
+    setup->wValue = ms.value;
+    setup->wIndex = ms.index;
+    setup->wLength = static_cast<uint16_t>(len);
+    if (len != 0)
+      memcpy(xfer->data_buffer + SETUP_PACKET_SIZE, ms.data.data(), len);
+    xfer->num_bytes = static_cast<int>(SETUP_PACKET_SIZE + len);
+    xfer->bEndpointAddress = 0;
+  } else {
+    const size_t per_message = ms.need_response ? 2 : 1;
+    const auto &message = ms.messages[dev.switch_step / per_message];
+    const bool response = ms.need_response && (dev.switch_step % 2) == 1;
+    const size_t len = response ? dev.switch_mps_in : message.size();
+    if ((err = usb_host_transfer_alloc(len, 0, &xfer)) != ESP_OK)
+      return false;
+    if (!response)
+      memcpy(xfer->data_buffer, message.data(), len);
+    xfer->num_bytes = static_cast<int>(len);
+    xfer->bEndpointAddress = response ? dev.switch_ep_in : dev.switch_ep_out;
+  }
+  xfer->device_handle = dev.handle;
+  xfer->callback = USBHost::switch_cb;
+  xfer->context = this;
+  xfer->timeout_ms = 0;
+  err = ms.messages.empty() ? usb_host_transfer_submit_control(this->client_handle_, xfer)
+                            : usb_host_transfer_submit(xfer);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Mode switch transfer refused: %s", esp_err_to_name(err));
+    usb_host_transfer_free(xfer);
+    return false;
+  }
+  dev.switch_xfer = xfer;
+  if (!ms.messages.empty()) {
+    // A bulk step the device never completes is cancelled; that ends the switch.
+    const usb_device_handle_t handle = dev.handle;
+    const uint8_t ep = xfer->bEndpointAddress;
+    this->set_timeout(dev.addr, MODE_SWITCH_STEP_TIMEOUT_MS, [this, handle, ep]() {
+      RoutedDevice *d = this->find_device_(handle);
+      if (d == nullptr || d->switch_xfer == nullptr)
+        return;
+      ESP_LOGW(TAG, "Mode switch step not completed; cancelling it");
+      if (usb_host_endpoint_halt(handle, ep) == ESP_OK)
+        usb_host_endpoint_flush(handle, ep);
+    });
+  }
+  return true;
+}
+
+// Main loop: called from usb_host_client_handle_events() in loop().
+void USBHost::switch_cb(usb_transfer_t *xfer) {
+  auto *host = static_cast<USBHost *>(xfer->context);
+  const usb_device_handle_t handle = xfer->device_handle;
+  const bool ok = xfer->status == USB_TRANSFER_STATUS_COMPLETED;
+  usb_host_transfer_free(xfer);
+  RoutedDevice *dev = host->find_device_(handle);
+  if (dev == nullptr)
+    return;
+  dev->switch_xfer = nullptr;
+  host->cancel_timeout(dev->addr);
+  const ModeSwitch &ms = *dev->mode_switch;
+  const size_t steps = ms.messages.empty() ? 1 : ms.messages.size() * (ms.need_response ? 2 : 1);
+  // A control switch usually ends with the device dropping off the bus, which is success.
+  if (ok && !dev->gone && ++dev->switch_step < steps && host->submit_switch_step_(*dev))
+    return;
+  // The transfer still counts as in flight until its callback returns, so releasing the
+  // interface here fails, and closing the device with it: the device is never freed and its
+  // port never sees the device come back in its new mode.
+  host->defer([host, handle]() { host->finish_mode_switch_(handle); });
+}
+
+void USBHost::finish_mode_switch_(usb_device_handle_t handle) {
+  RoutedDevice *dev = this->find_device_(handle);
+  if (dev == nullptr)
+    return;
+  if (dev->gone) {
+    this->forget_device_(handle);
+    return;
+  }
+  if (dev->switch_intf != 0xFF) {
+    usb_host_interface_release(this->client_handle_, dev->handle, dev->switch_intf);
+    dev->switch_intf = 0xFF;
+  }
+  dev->mode_switch = nullptr;
+  dev->switched_ms = millis();
+  if (dev->switched_ms == 0)
+    dev->switched_ms = 1;
+  // Still here once it had time to leave: route it as it is.
+  this->set_timeout(MODE_SWITCH_SETTLE_MS, [this]() { this->reroute_ = true; });
 }
 
 void USBHost::client_released(USBClient *client, int addr) {
@@ -238,7 +460,7 @@ bool USBHost::take_device(USBClient *taker, uint8_t addr) {
     if (d.addr == addr && !d.gone)
       dev = &d;
   }
-  if (dev == nullptr)
+  if (dev == nullptr || dev->mode_switch != nullptr)
     return false;
   if (dev->taken_by != nullptr)
     return dev->taken_by == taker;
@@ -307,6 +529,8 @@ void USBHost::continue_take_(RoutedDevice &dev) {
 
 void USBHost::route_(RoutedDevice &dev) {
   if (dev.taken_by != nullptr)
+    return;
+  if (dev.mode_switch != nullptr || (dev.switched_ms != 0 && millis() - dev.switched_ms < MODE_SWITCH_SETTLE_MS))
     return;
   auto listed = [](const std::vector<USBClient *> &list, USBClient *client) {
     return std::find(list.begin(), list.end(), client) != list.end();
@@ -462,6 +686,10 @@ int USBHost::channel_need_(const usb_device_desc_t *desc, const usb_config_desc_
           drivers += client->interface_channels_(desc, config, n);
       }
     }
+  }
+  for (const auto &ms : this->mode_switches_) {
+    if (ms.vid == desc->idVendor && ms.pid == desc->idProduct && !ms.messages.empty())
+      drivers = std::max(drivers, 2);  // its bulk OUT / IN pair, claimed before any driver
   }
   return need + drivers;
 }

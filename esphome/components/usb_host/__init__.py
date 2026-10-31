@@ -17,7 +17,7 @@ from esphome.components.esp32 import (
     only_on_variant,
 )
 import esphome.config_validation as cv
-from esphome.const import CONF_DEVICES, CONF_ID
+from esphome.const import CONF_DATA, CONF_DEVICES, CONF_ID, CONF_VALUE
 from esphome.core import CORE, ID
 from esphome.coroutine import CoroPriority, coroutine_with_priority
 from esphome.cpp_generator import MockObj
@@ -41,6 +41,31 @@ CONF_PRODUCT = "product"
 CONF_ENABLE_HUBS = "enable_hubs"
 CONF_MAX_TRANSFER_REQUESTS = "max_transfer_requests"
 CONF_MAX_PACKET_SIZE = "max_packet_size"
+CONF_MODE_SWITCH = "mode_switch"
+CONF_HID2HCI = "hid2hci"
+CONF_BULK_MESSAGES = "bulk_messages"
+CONF_NEED_RESPONSE = "need_response"
+CONF_CONTROL = "control"
+CONF_REQUEST_TYPE = "request_type"
+CONF_REQUEST = "request"
+CONF_INDEX = "index"
+
+# BlueZ tools/hid2hci.c: the request each method sends to switch a dongle from HID proxy mode
+# to HCI, as (bmRequestType, bRequest, wValue, wIndex, data).
+HID2HCI_METHODS = {
+    # usb_switch_dell(): HID SET_REPORT, feature report 0x7f, on interface 0.
+    "dell": (0x21, 0x09, 0x037F, 0, [0x7F, 0x13, 0x00, 0x00]),
+    # usb_switch_csr(): vendor request 0 with wValue 0 (HCI).
+    "csr": (0x40, 0x00, 0x0000, 0, []),
+    # usb_switch_csr2(): HID SET_REPORT, feature report 0x01, on interface 0.
+    "csr2": (
+        0x21,
+        0x09,
+        0x0301,
+        0,
+        [0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+    ),
+}
 
 # Transfer-class requirement tracking. Consumer components call the require_*()
 # functions below; the FINAL-priority job turns the union into defines.
@@ -179,6 +204,45 @@ def usb_device_schema(
             **USB_BLACKLIST_SCHEMA,
         }
     )
+
+
+def _hex_message(value) -> list[int]:
+    """A usb_modeswitch MessageContent: hex digits, two per byte."""
+    value = cv.string_strict(value).replace(" ", "")
+    if not value or len(value) % 2:
+        raise cv.Invalid("a message is an even number of hex digits")
+    try:
+        return list(bytes.fromhex(value))
+    except ValueError as err:
+        raise cv.Invalid(f"not a hex string: {value}") from err
+
+
+MODE_SWITCH_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(CONF_VID): cv.hex_uint16_t,
+            cv.Required(CONF_PID): cv.hex_uint16_t,
+            # Bluetooth dongles in HID proxy mode, by BlueZ hid2hci's methods.
+            cv.Optional(CONF_HID2HCI): cv.one_of(*HID2HCI_METHODS, lower=True),
+            # usb_modeswitch style: up to three messages to the first bulk OUT endpoint.
+            cv.Optional(CONF_BULK_MESSAGES): cv.All(
+                cv.ensure_list(_hex_message), cv.Length(min=1, max=3)
+            ),
+            cv.Optional(CONF_NEED_RESPONSE, default=False): cv.boolean,
+            # Any control request.
+            cv.Optional(CONF_CONTROL): cv.Schema(
+                {
+                    cv.Required(CONF_REQUEST_TYPE): cv.hex_uint8_t,
+                    cv.Required(CONF_REQUEST): cv.hex_uint8_t,
+                    cv.Optional(CONF_VALUE, default=0): cv.hex_uint16_t,
+                    cv.Optional(CONF_INDEX, default=0): cv.hex_uint16_t,
+                    cv.Optional(CONF_DATA, default=[]): cv.ensure_list(cv.hex_uint8_t),
+                }
+            ),
+        }
+    ),
+    cv.has_exactly_one_key(CONF_HID2HCI, CONF_BULK_MESSAGES, CONF_CONTROL),
+)
 
 
 def _matches_by_class_only(config: ConfigType) -> bool:
@@ -420,6 +484,8 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_MAX_PACKET_SIZE, default=_default_max_packet_size
             ): cv.one_of(64, 128, 256, 512, 1024, int=True),
+            # Devices that enumerate in the wrong mode, switched before they are routed.
+            cv.Optional(CONF_MODE_SWITCH): cv.ensure_list(MODE_SWITCH_SCHEMA),
         }
     ),
     only_on_variant(
@@ -548,6 +614,33 @@ async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     CORE.add_job(_usb_match_guards)
+
+    for entry in config.get(CONF_MODE_SWITCH) or ():
+        vid, pid = entry[CONF_VID], entry[CONF_PID]
+        if CONF_BULK_MESSAGES in entry:
+            cg.add(
+                var.add_mode_switch_bulk(
+                    vid, pid, entry[CONF_BULK_MESSAGES], entry[CONF_NEED_RESPONSE]
+                )
+            )
+            continue
+        if CONF_HID2HCI in entry:
+            request_type, request, value, index, data = HID2HCI_METHODS[
+                entry[CONF_HID2HCI]
+            ]
+        else:
+            control = entry[CONF_CONTROL]
+            request_type, request = control[CONF_REQUEST_TYPE], control[CONF_REQUEST]
+            value, index, data = (
+                control[CONF_VALUE],
+                control[CONF_INDEX],
+                control[CONF_DATA],
+            )
+        cg.add(
+            var.add_mode_switch_control(
+                vid, pid, request_type, request, value, index, data
+            )
+        )
 
     # FINAL: require_*() calls arrive from consumer to_code() at higher priorities, so
     # turn the collected set into defines once after every job ran. Emitting per call
