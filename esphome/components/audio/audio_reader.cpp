@@ -19,6 +19,9 @@ static const uint32_t CONNECTION_TIMEOUT_MS = 5000;
 static const uint8_t MAX_FETCHING_HEADER_ATTEMPTS = 6;
 
 static const size_t HTTP_STREAM_BUFFER_SIZE = 2048;
+// The request line and headers: a signed Home Assistant media URL alone is longer than the client's
+// default 512 bytes (ESP_ERR_HTTP_HEADER_TOO_LONG).
+static const size_t HTTP_REQUEST_BUFFER_SIZE = 2048;
 
 static const uint8_t MAX_REDIRECTIONS = 5;
 
@@ -160,6 +163,7 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
   client_config.event_handler = http_event_handler;
   client_config.user_data = this;
   client_config.buffer_size = HTTP_STREAM_BUFFER_SIZE;
+  client_config.buffer_size_tx = HTTP_REQUEST_BUFFER_SIZE;
   client_config.keep_alive_enable = true;
   client_config.timeout_ms = CONNECTION_TIMEOUT_MS;  // Shouldn't trigger watchdog resets if caller runs in a task
 

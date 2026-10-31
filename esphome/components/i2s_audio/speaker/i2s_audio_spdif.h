@@ -25,6 +25,10 @@ class I2SAudioSpeakerSPDIF : public I2SAudioSpeakerBase {
   esp_err_t start_i2s_driver(audio::AudioStreamInfo &audio_stream_info) override;
   void on_task_stopped() override;
 
+#ifdef USE_I2S_AUDIO_NVS
+  bool nvs_active_() const override { return this->parent_->has_spdif_output(); }
+#endif
+
   SPDIFEncoder *spdif_encoder_{nullptr};
   uint32_t spdif_silence_start_{0};  // Timestamp when silence mode started (0 = not in silence)
 };

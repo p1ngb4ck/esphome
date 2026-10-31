@@ -56,6 +56,8 @@ class I2SAudioSpeakerBase : public I2SAudioOut, public speaker::Speaker, public 
   void set_timeout(uint32_t ms) { this->timeout_ = ms; }
   void set_keep_alive(bool keep_alive) { this->keep_alive_ = keep_alive; }
   void set_dout_pin(uint8_t pin) { this->dout_pin_ = (gpio_num_t) pin; }
+  /// @brief The amplifier's power or enable pin: active only while the I2S clocks run
+  void set_enable_pin(GPIOPin *pin) { this->enable_pin_ = pin; }
 
   /// @brief Get the I2S TX channel handle
   i2s_chan_handle_t get_tx_handle() const { return this->tx_handle_; }
@@ -158,8 +160,23 @@ class I2SAudioSpeakerBase : public I2SAudioOut, public speaker::Speaker, public 
   /// @param preload Callable returning true once every DMA descriptor holds silence with a matching record
   /// @return false if the preload or the channel enable failed; the caller should restart the task
   template<typename F> bool resync_lockstep_(uint32_t extra_frames, F &&preload) {
+    this->set_task_amplifier_(false);
     this->drain_lockstep_(extra_frames);
-    return preload() && (i2s_channel_enable(this->tx_handle_) == ESP_OK);
+    const bool enabled = preload() && (i2s_channel_enable(this->tx_handle_) == ESP_OK);
+    if (enabled)
+      this->set_task_amplifier_(true);
+    return enabled;
+  }
+
+  /// @brief Drives the enable pin, if one is configured
+  void set_amplifier_(bool on) {
+    if (this->enable_pin_ != nullptr)
+      this->enable_pin_->digital_write(on);
+  }
+
+  void set_task_amplifier_(bool on) {
+    if (this->enable_pin_ != nullptr && this->enable_pin_->is_internal())
+      this->enable_pin_->digital_write(on);
   }
 
   /// @brief Disables the channel, credits ``extra_frames`` plus every real frame still recorded as in flight,
@@ -212,8 +229,13 @@ class I2SAudioSpeakerBase : public I2SAudioOut, public speaker::Speaker, public 
   // Set by start_i2s_driver before the speaker task starts.
   audio::AudioStreamInfo output_stream_info_;
 
-  gpio_num_t dout_pin_;
+  gpio_num_t dout_pin_{GPIO_NUM_NC};
+  GPIOPin *enable_pin_{nullptr};
   i2s_chan_handle_t tx_handle_{nullptr};
+#ifdef USE_I2S_AUDIO_NVS
+  virtual bool nvs_active_() const { return this->parent_->has_standard_output(); }
+  bool nvs_inactive_{false};
+#endif
 };
 
 }  // namespace esphome::i2s_audio

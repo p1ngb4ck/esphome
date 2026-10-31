@@ -17,6 +17,7 @@ class AudioDac {
   /// Called from the main loop by the speaker driving this DAC once its audio clocks are running.
   /// DACs that can only be configured while clocked (e.g. DSP state lost across clock stops) override this.
   virtual void on_audio_started() {}
+  virtual void on_audio_stopping() {}
 
  protected:
   bool is_muted_{false};
