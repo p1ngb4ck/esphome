@@ -211,6 +211,26 @@ enum class MatchTier : uint8_t {
   NAMED,   // its configured filters name the device
 };
 
+// A message that takes a device out of the mode it enumerates in (a Bluetooth dongle in HID
+// proxy mode, a camera or modem posing as mass storage), from the usb_host mode_switch option.
+// Either a control request, or bulk messages to the first bulk OUT endpoint as usb_modeswitch
+// sends its MessageContent.
+struct ModeSwitch {
+  uint16_t vid;
+  uint16_t pid;
+  uint8_t request_type;
+  uint8_t request;
+  uint16_t value;
+  uint16_t index;
+  std::vector<uint8_t> data;
+  std::vector<std::vector<uint8_t>> messages;
+  bool need_response;
+  // When it was last sent; a device that comes back with the same ids soon after is routed
+  // as it is instead of being switched again.
+  uint32_t sent_ms;
+  bool enabled{true};
+};
+
 // A device USBHost has open, from enumeration until it is gone.
 struct RoutedDevice {
   uint8_t addr{0};
@@ -227,6 +247,15 @@ struct RoutedDevice {
   // Drivers that let the device go again; not offered it until it is plugged in anew.
   std::vector<USBClient *> declined{};
   bool reported_unrouted{false};
+  // Mode switch in progress: not routed until it is done and the device had time to leave.
+  const ModeSwitch *mode_switch{nullptr};
+  uint8_t switch_step{0};
+  usb_transfer_t *switch_xfer{nullptr};
+  uint8_t switch_intf{0xFF};
+  uint8_t switch_ep_out{0};
+  uint8_t switch_ep_in{0};
+  uint16_t switch_mps_in{0};
+  uint32_t switched_ms{0};
   bool gone{false};
   // Given to this driver alone by take_device(): not routed to others until it lets go.
   USBClient *taken_by{nullptr};
@@ -681,6 +710,11 @@ class USBHost final : public Component {
   void loop() override;
   void setup() override;
 
+  // Which ESP32-P4 controllers run as host (controllers option): usb_host_config_t's
+  // peripheral_map, BIT0 high-speed, BIT1 full-speed. Only the patched espressif/usb component
+  // sets up a PHY per controller (IDF's 5.x built-in sets up one), hence the guards at the use
+  // site and in codegen.
+  void set_peripheral_map(uint8_t map) { this->peripheral_map_ = map; }
 #ifdef USE_USB_HOST_CHANNEL_BUDGET
   /// Host channels of a controller (0 high-speed, 1 full-speed): allocated now, committed to the configured devices,
   /// the hardware's total. False while the controller has no port (not in use).
@@ -688,6 +722,9 @@ class USBHost final : public Component {
     return usb_host_channel_usage(controller, &used, &committed, &total) == ESP_OK;
   }
 #endif
+  // Which of the ESP32-P4's two internal FSLS PHYs the full-speed OTG controller uses:
+  // 0 is GPIO24/25, 1 is GPIO26/27 (the reset default). Set from the fs_pins option.
+  void set_fs_phy_index(uint8_t index) { this->fs_phy_index_ = index; }
 #ifdef USE_USB_HOST_PER_PORT_FIFO_BIAS
   // How one host controller divides its hardware FIFO between received data, non-periodic
   // OUT and periodic OUT. The division caps the largest packet each direction can carry, so
@@ -699,6 +736,8 @@ class USBHost final : public Component {
     if (peripheral_index < SOC_USB_OTG_PERIPH_NUM)
       this->port_fifo_bias_[peripheral_index] = bias;
   }
+  // The high-speed controller as a full/low-speed host (full_speed_only option).
+  void set_full_speed_only(bool full_speed_only) { this->full_speed_only_ = full_speed_only; }
 #endif
 
   // -- Submission engine (called by USBClient thin forwarders) ----------------
@@ -767,6 +806,18 @@ class USBHost final : public Component {
   /// another.
   bool take_device(USBClient *taker, uint8_t addr);
 
+  // -- Mode switching (mode_switch option) ---------------------------------------
+  void add_mode_switch_control(uint16_t vid, uint16_t pid, uint8_t request_type, uint8_t request, uint16_t value,
+                               uint16_t index, std::vector<uint8_t> data) {
+    this->mode_switches_.push_back({vid, pid, request_type, request, value, index, std::move(data), {}, false, 0});
+  }
+  void add_mode_switch_bulk(uint16_t vid, uint16_t pid, std::vector<std::vector<uint8_t>> messages,
+                            bool need_response) {
+    this->mode_switches_.push_back({vid, pid, 0, 0, 0, 0, {}, std::move(messages), need_response, 0});
+  }
+  void set_mode_switch_enabled(uint16_t vid, uint16_t pid, bool enabled);
+  bool is_mode_switch_enabled(uint16_t vid, uint16_t pid) const;
+
  protected:
   static void host_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg);
   void device_new_(uint8_t addr);
@@ -780,6 +831,11 @@ class USBHost final : public Component {
   static int channel_budget_cb(const usb_device_desc_t *desc, const usb_config_desc_t *config, void *arg);
   int channel_need_(const usb_device_desc_t *desc, const usb_config_desc_t *config) const;
 #endif
+  bool start_mode_switch_(RoutedDevice &dev);
+  void load_mode_switch_state_();
+  bool submit_switch_step_(RoutedDevice &dev);
+  static void switch_cb(usb_transfer_t *xfer);
+  void finish_mode_switch_(usb_device_handle_t handle);
   void forget_device_(usb_device_handle_t handle);
   void continue_take_(RoutedDevice &dev);
 #ifdef USE_USB_HOST_SHARED_TASK
@@ -790,12 +846,17 @@ class USBHost final : public Component {
 #endif
 
   std::vector<USBClient *> clients_{};
+  std::vector<ModeSwitch> mode_switches_{};
+  ESPPreferenceObject mode_switch_pref_;
   usb_host_client_handle_t client_handle_{nullptr};
   std::vector<RoutedDevice> devices_{};
   LazyCallbackManager<void()> devices_callback_;
   bool reroute_{false};
+  uint8_t peripheral_map_{0};  // 0: ESP-IDF's default, the high-speed controller
+  uint8_t fs_phy_index_{1};
 #ifdef USE_USB_HOST_PER_PORT_FIFO_BIAS
   uint8_t port_fifo_bias_[SOC_USB_OTG_PERIPH_NUM]{};
+  bool full_speed_only_{false};
 #endif
 };
 

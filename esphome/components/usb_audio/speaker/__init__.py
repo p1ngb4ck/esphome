@@ -1,62 +1,70 @@
 import esphome.codegen as cg
-from esphome.components import speaker
+from esphome.components import audio, speaker
 import esphome.config_validation as cv
-from esphome.const import CONF_BUFFER_SIZE, CONF_ID, CONF_SAMPLE_RATE
-from esphome.types import ConfigType
-
-from .. import (
-    CONF_USB_AUDIO_ID,
-    apply_buffer_size,
-    bytes_per_frame,
-    final_validate_one_per_hub,
-    request_speaker_fifo,
-    set_stream_limits,
-    stream_info,
-    stream_schema,
-    usb_audio_ns,
+from esphome.const import (
+    CONF_BITS_PER_SAMPLE,
+    CONF_ID,
+    CONF_NUM_CHANNELS,
+    CONF_SAMPLE_RATE,
 )
+
+from .. import CONF_USB_AUDIO_ID, USBAudioClient, usb_audio_ns
 
 USBAudioSpeaker = usb_audio_ns.class_("USBAudioSpeaker", speaker.Speaker, cg.Component)
 
-CONF_WRITE_TIMEOUT = "write_timeout"
-
-# Keep in sync with the usb_host_uac default of CONFIG_UAC_NUM_PACKETS_PER_URB (1 ms packets per transfer)
-PACKETS_PER_TRANSFER = 3
+BITS_PER_SAMPLE_OPTIONS = [8, 16, 24, 32]
 
 
-def validate_buffer_size(config: ConfigType) -> ConfigType:
-    """The driver only sends complete transfers, so the buffer must hold two of them to keep audio flowing."""
-    frames_per_packet = -(-config[CONF_SAMPLE_RATE] // 1000)
-    transfer_size = PACKETS_PER_TRANSFER * frames_per_packet * bytes_per_frame(config)
-    return apply_buffer_size(config, 2 * transfer_size, "two USB transfers")
+def _bits_validator():
+    return cv.All(
+        cv.float_with_unit("bits", "bit"), cv.one_of(*BITS_PER_SAMPLE_OPTIONS)
+    )
+
+
+def _set_stream_limits(config):
+    bits_per_sample = int(config[CONF_BITS_PER_SAMPLE])
+
+    audio.set_stream_limits(
+        min_bits_per_sample=bits_per_sample,
+        max_bits_per_sample=bits_per_sample,
+        min_channels=config[CONF_NUM_CHANNELS],
+        max_channels=config[CONF_NUM_CHANNELS],
+        min_sample_rate=config[CONF_SAMPLE_RATE],
+        max_sample_rate=config[CONF_SAMPLE_RATE],
+    )(config)
+    return config
 
 
 CONFIG_SCHEMA = cv.All(
-    speaker.SPEAKER_SCHEMA.extend(stream_schema(48000, 2)).extend(
-        {
-            cv.GenerateID(): cv.declare_id(USBAudioSpeaker),
-            cv.Optional(
-                CONF_WRITE_TIMEOUT, default="20ms"
-            ): cv.positive_time_period_milliseconds,
-        }
+    speaker.SPEAKER_SCHEMA.extend(
+        cv.Schema(
+            {
+                cv.GenerateID(): cv.declare_id(USBAudioSpeaker),
+                cv.GenerateID(CONF_USB_AUDIO_ID): cv.use_id(USBAudioClient),
+                cv.Optional(CONF_SAMPLE_RATE, default=48000): cv.int_range(
+                    min=8000, max=96000
+                ),
+                cv.Optional(CONF_BITS_PER_SAMPLE, default="16bit"): _bits_validator(),
+                # A device is driven with the channel count configured here, which needs an
+                # alt-setting carrying exactly that many. Above two there is no fallback:
+                # the pair-from-a-wider-frame path exists for a stereo request only.
+                cv.Optional(CONF_NUM_CHANNELS, default=2): cv.int_range(min=1, max=8),
+            }
+        ).extend(cv.COMPONENT_SCHEMA)
     ),
-    set_stream_limits,
-    validate_buffer_size,
-    request_speaker_fifo,
+    _set_stream_limits,
 )
 
-FINAL_VALIDATE_SCHEMA = final_validate_one_per_hub("speaker")
 
-
-async def to_code(config: ConfigType) -> None:
-    var = cg.new_Pvariable(
-        config[CONF_ID],
-        stream_info(config),
-        config[CONF_BUFFER_SIZE],
-        config[CONF_WRITE_TIMEOUT].total_milliseconds,
-    )
+async def to_code(config):
+    parent = await cg.get_variable(config[CONF_USB_AUDIO_ID])
+    var = cg.new_Pvariable(config[CONF_ID], parent)
     await cg.register_component(var, config)
     await speaker.register_speaker(var, config)
-    hub = await cg.get_variable(config[CONF_USB_AUDIO_ID])
-    await cg.register_parented(var, hub)
-    cg.add(hub.register_speaker(var))
+
+    sample_rate = int(config[CONF_SAMPLE_RATE])
+    bits_per_sample = int(config[CONF_BITS_PER_SAMPLE])
+    channels = int(config[CONF_NUM_CHANNELS])
+
+    cg.add(parent.set_speaker(var))
+    cg.add(parent.set_speaker_params(channels, bits_per_sample, sample_rate))

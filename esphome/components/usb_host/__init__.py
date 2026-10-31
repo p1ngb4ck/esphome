@@ -17,7 +17,7 @@ from esphome.components.esp32 import (
     only_on_variant,
 )
 import esphome.config_validation as cv
-from esphome.const import CONF_DEVICES, CONF_ID
+from esphome.const import CONF_DATA, CONF_DEVICES, CONF_ID, CONF_VALUE
 from esphome.core import CORE, ID
 from esphome.coroutine import CoroPriority, coroutine_with_priority
 from esphome.cpp_generator import MockObj
@@ -41,6 +41,51 @@ CONF_PRODUCT = "product"
 CONF_ENABLE_HUBS = "enable_hubs"
 CONF_MAX_TRANSFER_REQUESTS = "max_transfer_requests"
 CONF_MAX_PACKET_SIZE = "max_packet_size"
+CONF_DUAL_HOST = "dual_host"
+CONF_CONTROLLERS = "controllers"
+CONTROLLERS_HIGH_SPEED = "high_speed"
+CONTROLLERS_FULL_SPEED = "full_speed"
+CONTROLLERS_BOTH = "both"
+# usb_host_config_t.peripheral_map on the ESP32-P4: bit 0 is the high-speed controller (UTMI
+# PHY), bit 1 the full-speed one (soc/esp32p4/usb_dwc_periph.c).
+_PERIPHERAL_MAPS = {
+    CONTROLLERS_HIGH_SPEED: 0b01,
+    CONTROLLERS_FULL_SPEED: 0b10,
+    CONTROLLERS_BOTH: 0b11,
+}
+CONF_FS_PINS = "fs_pins"
+CONF_FULL_SPEED_ONLY = "full_speed_only"
+CONF_MODE_SWITCH = "mode_switch"
+CONF_HID2HCI = "hid2hci"
+CONF_BULK_MESSAGES = "bulk_messages"
+CONF_NEED_RESPONSE = "need_response"
+CONF_CONTROL = "control"
+CONF_REQUEST_TYPE = "request_type"
+CONF_REQUEST = "request"
+CONF_INDEX = "index"
+
+# BlueZ tools/hid2hci.c: the request each method sends to switch a dongle from HID proxy mode
+# to HCI, as (bmRequestType, bRequest, wValue, wIndex, data).
+HID2HCI_METHODS = {
+    # usb_switch_dell(): HID SET_REPORT, feature report 0x7f, on interface 0.
+    "dell": (0x21, 0x09, 0x037F, 0, [0x7F, 0x13, 0x00, 0x00]),
+    # usb_switch_csr(): vendor request 0 with wValue 0 (HCI).
+    "csr": (0x40, 0x00, 0x0000, 0, []),
+    # usb_switch_csr2(): HID SET_REPORT, feature report 0x01, on interface 0.
+    "csr2": (
+        0x21,
+        0x09,
+        0x0301,
+        0,
+        [0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+    ),
+}
+
+# GPIO pair the ESP32-P4 full-speed OTG controller is wired to on the board. The chip has
+# two internal FSLS PHYs: PHY 0 on GPIO24 (D-) / GPIO25 (D+), PHY 1 on GPIO26 / GPIO27.
+# Out of reset OTG_FS gets PHY 1 and USB-Serial-JTAG gets PHY 0; selecting "24_25" swaps
+# them, which also moves USB-Serial-JTAG to GPIO26/27.
+FS_PIN_CHOICES = {"26_27": 1, "24_25": 0}
 
 # Transfer-class requirement tracking. Consumer components call the require_*()
 # functions below; the FINAL-priority job turns the union into defines.
@@ -181,6 +226,45 @@ def usb_device_schema(
     )
 
 
+def _hex_message(value) -> list[int]:
+    """A usb_modeswitch MessageContent: hex digits, two per byte."""
+    value = cv.string_strict(value).replace(" ", "")
+    if not value or len(value) % 2:
+        raise cv.Invalid("a message is an even number of hex digits")
+    try:
+        return list(bytes.fromhex(value))
+    except ValueError as err:
+        raise cv.Invalid(f"not a hex string: {value}") from err
+
+
+MODE_SWITCH_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(CONF_VID): cv.hex_uint16_t,
+            cv.Required(CONF_PID): cv.hex_uint16_t,
+            # Bluetooth dongles in HID proxy mode, by BlueZ hid2hci's methods.
+            cv.Optional(CONF_HID2HCI): cv.one_of(*HID2HCI_METHODS, lower=True),
+            # usb_modeswitch style: up to three messages to the first bulk OUT endpoint.
+            cv.Optional(CONF_BULK_MESSAGES): cv.All(
+                cv.ensure_list(_hex_message), cv.Length(min=1, max=3)
+            ),
+            cv.Optional(CONF_NEED_RESPONSE, default=False): cv.boolean,
+            # Any control request.
+            cv.Optional(CONF_CONTROL): cv.Schema(
+                {
+                    cv.Required(CONF_REQUEST_TYPE): cv.hex_uint8_t,
+                    cv.Required(CONF_REQUEST): cv.hex_uint8_t,
+                    cv.Optional(CONF_VALUE, default=0): cv.hex_uint16_t,
+                    cv.Optional(CONF_INDEX, default=0): cv.hex_uint16_t,
+                    cv.Optional(CONF_DATA, default=[]): cv.ensure_list(cv.hex_uint8_t),
+                }
+            ),
+        }
+    ),
+    cv.has_exactly_one_key(CONF_HID2HCI, CONF_BULK_MESSAGES, CONF_CONTROL),
+)
+
+
 def _matches_by_class_only(config: ConfigType) -> bool:
     # No vid/pid/manufacturer/product constraint: the client is matched purely by the
     # device class its C++ subclass claims, which this config-level check cannot see, so
@@ -250,6 +334,44 @@ def _store_host_options(config: dict) -> dict:
     domain_data = CORE.data.setdefault(DOMAIN, {})
     domain_data[CONF_MAX_PACKET_SIZE] = config[CONF_MAX_PACKET_SIZE]
     domain_data[CONF_MAX_TRANSFER_REQUESTS] = config[CONF_MAX_TRANSFER_REQUESTS]
+    domain_data[CONF_CONTROLLERS] = config.get(CONF_CONTROLLERS)
+    return config
+
+
+def _resolve_controllers(config: dict) -> dict:
+    """controllers: which ESP32-P4 controllers run as host; dual_host: true means both."""
+    controllers = config.get(CONF_CONTROLLERS)
+    if config[CONF_DUAL_HOST]:
+        if controllers not in (None, CONTROLLERS_BOTH):
+            raise cv.Invalid(
+                f"dual_host runs both controllers; it contradicts {CONF_CONTROLLERS}: {controllers}"
+            )
+        controllers = CONTROLLERS_BOTH
+    if controllers is None:
+        return config
+    if get_esp32_variant() != VARIANT_ESP32P4:
+        raise cv.Invalid(
+            f"{CONF_CONTROLLERS} and {CONF_DUAL_HOST} are only supported on ESP32-P4"
+        )
+    if controllers != CONTROLLERS_HIGH_SPEED and not per_port_fifo_bias_available():
+        raise cv.Invalid(f"{CONF_CONTROLLERS}: {controllers} requires IDF >= 5.4.0")
+    config[CONF_CONTROLLERS] = controllers
+    return config
+
+
+def _validate_full_speed_only(config: dict) -> dict:
+    """full_speed_only: the high-speed controller as a full/low-speed host."""
+    if not config.get(CONF_FULL_SPEED_ONLY):
+        return config
+    if get_esp32_variant() not in (VARIANT_ESP32P4, VARIANT_ESP32S31):
+        raise cv.Invalid(f"{CONF_FULL_SPEED_ONLY} is only supported on ESP32-P4 and ESP32-S31")
+    if not per_port_fifo_bias_available():
+        raise cv.Invalid(f"{CONF_FULL_SPEED_ONLY} requires IDF >= 5.4.0")
+    if config.get(CONF_CONTROLLERS) == CONTROLLERS_FULL_SPEED:
+        raise cv.Invalid(
+            f"{CONF_FULL_SPEED_ONLY} applies to the high-speed controller, which "
+            f"{CONF_CONTROLLERS}: {CONTROLLERS_FULL_SPEED} does not run"
+        )
     return config
 
 
@@ -355,6 +477,9 @@ def fs_peripheral_index() -> int | None:
     variants whose full-speed controller is the only controller it is index 0.
     """
     variant = get_esp32_variant()
+    if variant == VARIANT_ESP32P4:
+        controllers = CORE.data.get(DOMAIN, {}).get(CONF_CONTROLLERS)
+        return 1 if controllers in (CONTROLLERS_FULL_SPEED, CONTROLLERS_BOTH) else None
     if variant in (VARIANT_ESP32S2, VARIANT_ESP32S3):
         return 0
     return None
@@ -398,6 +523,16 @@ def get_max_transfer_requests() -> int:
     return CORE.data.get(DOMAIN, {}).get(CONF_MAX_TRANSFER_REQUESTS, 16)
 
 
+def dual_host_enabled() -> bool:
+    """Whether both USB controllers are brought up.
+
+    Matters to consumers because the two controllers are not equivalent: with dual host a
+    device can land on the full-speed one, whose FIFO and packet limits are those of a
+    full-speed controller no matter how capable the variant is overall.
+    """
+    return CORE.data.get(DOMAIN, {}).get(CONF_CONTROLLERS) == CONTROLLERS_BOTH
+
+
 def _default_max_packet_size() -> int:
     """Largest bulk/interrupt packet the controller in this variant moves at once.
 
@@ -420,6 +555,14 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_MAX_PACKET_SIZE, default=_default_max_packet_size
             ): cv.one_of(64, 128, 256, 512, 1024, int=True),
+            cv.Optional(CONF_DUAL_HOST, default=False): cv.boolean,
+            cv.Optional(CONF_CONTROLLERS): cv.one_of(*_PERIPHERAL_MAPS, lower=True),
+            cv.Optional(CONF_FS_PINS, default="26_27"): cv.enum(FS_PIN_CHOICES),
+            # The high-speed controller as a full/low-speed host: it ignores the
+            # high-speed chirp, so every device and hub on it runs at full or low speed.
+            cv.Optional(CONF_FULL_SPEED_ONLY): cv.boolean,
+            # Devices that enumerate in the wrong mode, switched before they are routed.
+            cv.Optional(CONF_MODE_SWITCH): cv.ensure_list(MODE_SWITCH_SCHEMA),
         }
     ),
     only_on_variant(
@@ -431,6 +574,8 @@ CONFIG_SCHEMA = cv.All(
             VARIANT_ESP32S31,
         ]
     ),
+    _resolve_controllers,
+    _validate_full_speed_only,
     _store_host_options,
 )
 
@@ -548,6 +693,42 @@ async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     CORE.add_job(_usb_match_guards)
+
+    if (controllers := config.get(CONF_CONTROLLERS)) not in (
+        None,
+        CONTROLLERS_HIGH_SPEED,
+    ):
+        cg.add(var.set_peripheral_map(_PERIPHERAL_MAPS[controllers]))
+    cg.add(var.set_fs_phy_index(config[CONF_FS_PINS]))
+    if config.get(CONF_FULL_SPEED_ONLY):
+        cg.add(var.set_full_speed_only(True))
+
+    for entry in config.get(CONF_MODE_SWITCH) or ():
+        vid, pid = entry[CONF_VID], entry[CONF_PID]
+        if CONF_BULK_MESSAGES in entry:
+            cg.add(
+                var.add_mode_switch_bulk(
+                    vid, pid, entry[CONF_BULK_MESSAGES], entry[CONF_NEED_RESPONSE]
+                )
+            )
+            continue
+        if CONF_HID2HCI in entry:
+            request_type, request, value, index, data = HID2HCI_METHODS[
+                entry[CONF_HID2HCI]
+            ]
+        else:
+            control = entry[CONF_CONTROL]
+            request_type, request = control[CONF_REQUEST_TYPE], control[CONF_REQUEST]
+            value, index, data = (
+                control[CONF_VALUE],
+                control[CONF_INDEX],
+                control[CONF_DATA],
+            )
+        cg.add(
+            var.add_mode_switch_control(
+                vid, pid, request_type, request, value, index, data
+            )
+        )
 
     # FINAL: require_*() calls arrive from consumer to_code() at higher priorities, so
     # turn the collected set into defines once after every job ran. Emitting per call
