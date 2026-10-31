@@ -16,6 +16,13 @@ enum VendorId {
   FT5X06_ID_4 = 0x79,
 };
 
+enum FTEvent : uint8_t {
+  FT5X06_EVENT_UP = 1,
+  FT5X06_EVENT_CONTACT = 2,
+};
+
+static constexpr uint8_t FT5X06_NOT_TOUCHED = 0xFF;
+
 enum FTCmd : uint8_t {
   FT5X06_MODE_REG = 0x00,
   FT5X06_ORIGIN_REG = 0x08,
@@ -42,14 +49,17 @@ class FT5x06Touchscreen final : public touchscreen::Touchscreen, public i2c::I2C
   void update_touches() override;
 
   void set_interrupt_pin(InternalGPIOPin *interrupt_pin) { this->interrupt_pin_ = interrupt_pin; }
+  void set_firmware_reads(bool firmware_reads) { this->firmware_reads_ = firmware_reads; }
 
  protected:
   void continue_setup_();
   bool err_check_(i2c::ErrorCode err, const char *msg);
   bool set_mode_(FTMode mode);
+  void update_touches_firmware_();
   VendorId vendor_id_{FT5X06_ID_UNKNOWN};
 
   InternalGPIOPin *interrupt_pin_{nullptr};
+  bool firmware_reads_{false};
 };
 
 }  // namespace esphome::ft5x06
