@@ -109,6 +109,10 @@ from .const import (
 from .gpio import esp32_pin_to_code  # noqa: F401
 
 _LOGGER = logging.getLogger(__name__)
+FLASH_ACTIONS = {
+    "flash_info": esp32_ns.class_("FlashInfoAction"),
+    "flash_verify": esp32_ns.class_("FlashVerifyAction"),
+}
 
 CHIP_REVISION_ACTION = "chip_revision"
 ChipRevisionAction = esp32_ns.class_("ChipRevisionAction")
@@ -508,6 +512,7 @@ ESP32_CHIP_REVISIONS = {
     "3.0": "CONFIG_ESP32_REV_MIN_3",
     "3.1": "CONFIG_ESP32_REV_MIN_3_1",
 }
+P4_MIN_REVISION_FAST_FLASH = ("80MHZ", "120MHZ")
 ESP32P4_CHIP_REVISIONS = {
     "0.0": "CONFIG_ESP32P4_REV_MIN_0",
     "0.1": "CONFIG_ESP32P4_REV_MIN_1",
@@ -531,6 +536,18 @@ ESP32_FLASH_CHIPS = {
 }
 FLASH_CHIP_GENERIC = "generic"
 FLASH_CHIP_OPI = "mxic_opi"  # the octal driver, ESP32-S3 only
+FLASH_ID_ENV = "ESPHOME_FLASH_ID"
+FLASH_MAX_FREQUENCY_ENV = "ESPHOME_FLASH_MAX_FREQUENCY"
+FLASH_VENDOR_IDS = {
+    0xC8: "gd",
+    0x9D: "issi",
+    0xC2: "mxic",
+    0xEF: "winbond",
+    0x68: "boya",
+    0xCD: "th",
+}
+FLASH_AUTO_FREQUENCY = "80MHZ"
+FLASH_SAFE_FREQUENCY = "40MHZ"
 
 # Socket limit configuration for ESP-IDF
 # ESP-IDF CONFIG_LWIP_MAX_SOCKETS has range 1-253, default 10
@@ -1960,6 +1977,18 @@ def final_validate(config) -> None:
                 path=[CONF_FRAMEWORK, CONF_ADVANCED, CONF_MINIMUM_CHIP_REVISION],
             )
         )
+    if (
+        config[CONF_VARIANT] == VARIANT_ESP32P4
+        and config.get(CONF_FLASH_FREQUENCY) in P4_MIN_REVISION_FAST_FLASH
+        and min_rev in (None, "0.0")
+    ):
+        _LOGGER.warning(
+            "'%s: %s' needs '%s' 0.1 or higher on %s; ESP-IDF builds with 40MHz otherwise",
+            CONF_FLASH_FREQUENCY,
+            config[CONF_FLASH_FREQUENCY],
+            CONF_MINIMUM_CHIP_REVISION,
+            VARIANT_ESP32P4,
+        )
     if config[CONF_VARIANT] != VARIANT_ESP32S3 and config.get(CONF_FLASH_MODE) == "opi":
         errs.append(
             cv.Invalid(
@@ -2690,6 +2719,7 @@ CONFIG_SCHEMA = cv.All(
     _resolve_toolchain,
     _detect_variant,
     _set_default_framework,
+    _apply_detected_flash,
     _apply_detected_chip_revision,
     _check_versions,
     set_core_data,
@@ -2774,6 +2804,10 @@ def register_exclude_components_cmake_arg() -> None:
         cg.add_cmake_arg("EXCLUDE_COMPONENTS", ";".join(excluded))
 
 
+    cg.add_define("USE_ESP32_FLASH_ACTIONS")
+    for name, action_class in FLASH_ACTIONS.items():
+        action = cg.new_Pvariable(ID(f"esp32_{name}_action", True, action_class), fnv1_hash(name))
+        cg.add(api.register_user_service(action))
 
 
 @coroutine_with_priority(CoroPriority.FINAL)
