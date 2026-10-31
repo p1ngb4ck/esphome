@@ -25,6 +25,9 @@ extern "C" {
 #include <freertos/FreeRTOSConfig.h>
 #include <freertos/task.h>
 
+#ifdef USE_BT_PERSISTENCE
+#include "esphome/components/bt_persistence/bt_persistence.h"
+#endif
 #include <cstring>
 
 #ifdef USE_ARDUINO
@@ -636,6 +639,11 @@ void ESP32BLE::loop_handle_state_transition_not_active_() {
     this->state_ =
         this->state_ == BLE_COMPONENT_STATE_ACTIVE ? BLE_COMPONENT_STATE_ENABLE : BLE_COMPONENT_STATE_DISABLED;
   } else if (this->state_ == BLE_COMPONENT_STATE_ENABLE) {
+#ifdef USE_BT_PERSISTENCE
+    // Bluedroid reads its pairing data once, when it starts.
+    if (bt_persistence::global_bt_persistence != nullptr && !bt_persistence::global_bt_persistence->is_ready())
+      return;
+#endif
     ESP_LOGD(TAG, "Enabling");
     this->state_ = BLE_COMPONENT_STATE_OFF;
 
