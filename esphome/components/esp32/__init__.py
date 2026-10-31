@@ -109,6 +109,10 @@ from .const import (
 from .gpio import esp32_pin_to_code  # noqa: F401
 
 _LOGGER = logging.getLogger(__name__)
+NVS_ACTIONS = {
+    "nvs_list": esp32_ns.class_("NvsListAction"),
+    "nvs_erase": esp32_ns.class_("NvsEraseAction"),
+}
 
 CHIP_REVISION_ACTION = "chip_revision"
 ChipRevisionAction = esp32_ns.class_("ChipRevisionAction")
@@ -2774,6 +2778,10 @@ def register_exclude_components_cmake_arg() -> None:
         cg.add_cmake_arg("EXCLUDE_COMPONENTS", ";".join(excluded))
 
 
+    cg.add_define("USE_ESP32_NVS_ACTIONS")
+    for name, action_class in NVS_ACTIONS.items():
+        action = cg.new_Pvariable(ID(f"esp32_{name}_action", True, action_class), fnv1_hash(name))
+        cg.add(api.register_user_service(action))
 
 
 @coroutine_with_priority(CoroPriority.FINAL)
