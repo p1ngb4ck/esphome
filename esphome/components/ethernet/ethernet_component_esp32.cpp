@@ -1066,7 +1066,7 @@ network::IPAddress EthernetComponent::get_dns_address(uint8_t num) {
 }
 
 void EthernetComponent::eth_event_handler(void *arg, esp_event_base_t event_base, int32_t event, void *event_data) {
-  const char *event_name;
+  [[maybe_unused]] const char *event_name;
 
   switch (event) {
     case ETHERNET_EVENT_START:
