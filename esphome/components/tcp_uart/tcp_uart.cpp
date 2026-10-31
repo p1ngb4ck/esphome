@@ -33,6 +33,9 @@ void TcpUart::dump_config() {
                 this->server_ ? LOG_STR_LITERAL("Listen") : LOG_STR_LITERAL("Host"),
                 this->server_ ? LOG_STR_LITERAL("*") : this->link_.host(), this->link_.port(),
                 this->link_.reconnect_interval());
+  if (this->link_.idle_timeout() != 0) {
+    ESP_LOGCONFIG(TAG, "  Timeout: %" PRIu32 "ms", this->link_.idle_timeout());
+  }
 #ifdef USE_SOCKET_TCP_LISTENER
   this->listener_.dump_config();
 #endif
@@ -80,6 +83,7 @@ void TcpUart::read_socket_() {
   if (room == 0) {
     // Only a read that filled all free space gets here, so rx_pending_ is already set.
     return;
+    // Unread bytes are waiting on the consumer. The peer is not idle.
   }
   ssize_t count = this->link_.read(this->rx_ + this->rx_end_, room);
   if (count <= 0) {
@@ -111,8 +115,10 @@ void TcpUart::loop() {
   if (!this->link_was_up_) {
     return;
   }
+  // A byte moved in this pass resets the clock before the timeout can close.
   if (this->rx_pending_ || this->link_.ready()) {
     this->read_socket_();
+  this->link_.check_idle();
   }
   this->link_.flush_tx();
 }
