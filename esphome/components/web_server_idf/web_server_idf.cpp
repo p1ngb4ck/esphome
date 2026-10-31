@@ -25,7 +25,7 @@
 #include <esp_rom_md5.h>
 #endif
 
-#ifdef USE_WEBSERVER_OTA
+#if defined(USE_WEBSERVER_OTA) || defined(USE_WEBSERVER_FILE_API)
 #include <multipart_parser.h>
 #include "multipart.h"  // For parse_multipart_boundary and other utils
 #endif
@@ -38,6 +38,7 @@
 // Include socket headers after Arduino headers to avoid IPADDR_NONE/INADDR_NONE macro conflicts
 #include <cerrno>
 #include <sys/socket.h>
+#include <freertos/queue.h>
 
 namespace esphome::web_server_idf {
 
@@ -204,7 +205,8 @@ esp_err_t AsyncWebServer::request_post_handler(httpd_req_t *r) {
     size_t content_type_len = strlen(content_type_char);
     if (strcasestr_n(content_type_char, content_type_len, "application/x-www-form-urlencoded") != nullptr) {
       // Normal form data - proceed with regular handling
-#ifdef USE_WEBSERVER_OTA
+#if defined(USE_WEBSERVER_OTA) || defined(USE_WEBSERVER_FILE_API)
+      // Multipart is needed by OTA uploads and by the file API's /files/upload alike.
     } else if (strcasestr_n(content_type_char, content_type_len, "multipart/form-data") != nullptr) {
       auto *server = static_cast<AsyncWebServer *>(r->user_ctx);
       return server->handle_multipart_upload_(r, content_type_char);
@@ -212,6 +214,7 @@ esp_err_t AsyncWebServer::request_post_handler(httpd_req_t *r) {
     } else {
       // Other content types (e.g. application/json) are delivered raw to a matching
       // custom handler via handleBody(), like the Arduino AsyncWebServer does
+      ESP_LOGD(TAG, "POST %s: raw body path, content-type: '%s'", r->uri, content_type_char);
       auto *server = static_cast<AsyncWebServer *>(r->user_ctx);
       return server->handle_raw_body_(r, content_type_char);
     }
@@ -1313,7 +1316,7 @@ void AsyncEventSourceResponse::deferrable_send_state(void *source, bool detail_a
 }
 #endif
 
-#ifdef USE_WEBSERVER_OTA
+#if defined(USE_WEBSERVER_OTA) || defined(USE_WEBSERVER_FILE_API)
 esp_err_t AsyncWebServer::handle_multipart_upload_(httpd_req_t *r, const char *content_type) {
   // Parse boundary and create reader
   const char *boundary_start;
@@ -1323,7 +1326,59 @@ esp_err_t AsyncWebServer::handle_multipart_upload_(httpd_req_t *r, const char *c
     httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, nullptr);
     return ESP_FAIL;
   }
+  // Copy now: the pointer targets the original request's header buffer, which is invalid
+  // after an async handoff returns this handler.
+  std::string boundary(boundary_start, boundary_len);
 
+  // Async opt-in: handlers with task-agnostic upload callbacks receive their body on the
+  // dedicated upload task so this (one and only) httpd server task stays responsive.
+  {
+    AsyncWebServerRequest probe(r);
+    AsyncWebHandler *handler = nullptr;
+    for (auto *h : this->handlers_) {
+      if (h->canHandle(&probe)) {
+        handler = h;
+        break;
+      }
+    }
+    if (handler != nullptr && handler->supportsAsyncUpload()) {
+      if (this->upload_queue_ == nullptr) {
+        this->upload_queue_ = xQueueCreate(2, sizeof(AsyncUploadJob *));
+        if (this->upload_queue_ != nullptr) {
+          xTaskCreate(AsyncWebServer::upload_task_trampoline_, "ws_upload", 6144, this, 3, &this->upload_task_handle_);
+        }
+      }
+      httpd_req_t *async_req = nullptr;
+      if (this->upload_task_handle_ != nullptr && httpd_req_async_handler_begin(r, &async_req) == ESP_OK) {
+        auto *job = new AsyncUploadJob{async_req, boundary};  // NOLINT(cppcoreguidelines-owning-memory)
+        if (xQueueSend(this->upload_queue_, &job, 0) == pdTRUE) {
+          return ESP_OK;  // upload task finishes the response and completes the async request
+        }
+        // Pipeline full — release the copy and fall through to the inline path below.
+        httpd_req_async_handler_complete(async_req);
+        delete job;  // NOLINT(cppcoreguidelines-owning-memory)
+      }
+      // begin() failing (no async slot) also falls through: blocking upload beats a failed one.
+    }
+  }
+
+  return this->multipart_pump_(r, boundary);
+}
+
+void AsyncWebServer::upload_task_trampoline_(void *arg) { static_cast<AsyncWebServer *>(arg)->upload_task_(); }
+
+void AsyncWebServer::upload_task_() {
+  for (;;) {
+    AsyncUploadJob *job = nullptr;
+    if (xQueueReceive(this->upload_queue_, &job, portMAX_DELAY) != pdTRUE || job == nullptr)
+      continue;
+    this->multipart_pump_(job->req, job->boundary);
+    httpd_req_async_handler_complete(job->req);
+    delete job;  // NOLINT(cppcoreguidelines-owning-memory)
+  }
+}
+
+esp_err_t AsyncWebServer::multipart_pump_(httpd_req_t *r, const std::string &boundary) {
   AsyncWebServerRequest req(r);
   AsyncWebHandler *handler = nullptr;
   for (auto *h : this->handlers_) {
@@ -1343,7 +1398,14 @@ esp_err_t AsyncWebServer::handle_multipart_upload_(httpd_req_t *r, const char *c
   std::string filename;
   size_t index = 0;
   // Create reader on heap to reduce stack usage
-  auto reader = std::make_unique<MultipartReader>("--" + std::string(boundary_start, boundary_len));
+  auto reader = std::make_unique<MultipartReader>("--" + boundary);
+
+  // An empty file part carries no data: it produces no on_part_data callback, and the parser
+  // leaves the trailing epilogue after the final boundary unconsumed. Only when the client
+  // explicitly asks (?create=1) do we accept that and create the empty file; a normal upload
+  // that produced no data stays an error, so existing behaviour is unchanged.
+  auto *create_param = req.getParam("create");
+  const bool allow_empty = create_param != nullptr && create_param->value() == "1";
 
   // Configure callbacks
   reader->set_data_callback([&](const uint8_t *data, size_t len) {
@@ -1365,6 +1427,15 @@ esp_err_t AsyncWebServer::handle_multipart_upload_(httpd_req_t *r, const char *c
       handler->handleUpload(&req, filename, index, nullptr, 0, true);  // End
       filename.clear();
       index = 0;
+    } else if (allow_empty && reader->has_file()) {
+      // Explicitly-requested empty file: the part named a file but carried no data. Drive
+      // the markers here, while current_part_ is still valid -- on_part_data_end resets it
+      // immediately after this callback returns.
+      const std::string &empty_name = reader->get_current_part().filename;
+      if (!empty_name.empty()) {
+        handler->handleUpload(&req, empty_name, 0, nullptr, 0, false);  // Start
+        handler->handleUpload(&req, empty_name, 0, nullptr, 0, true);   // End
+      }
     }
   });
 
@@ -1380,7 +1451,8 @@ esp_err_t AsyncWebServer::handle_multipart_upload_(httpd_req_t *r, const char *c
       return recv_len == HTTPD_SOCK_ERR_TIMEOUT ? ESP_ERR_TIMEOUT : ESP_FAIL;
     }
 
-    if (reader->parse(buffer.get(), recv_len) != static_cast<size_t>(recv_len)) {
+    if (reader->parse(buffer.get(), recv_len) != static_cast<size_t>(recv_len) &&
+        !(allow_empty && remaining == static_cast<size_t>(recv_len))) {
       ESP_LOGW(TAG, "Multipart parser error");
       httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, nullptr);
       return ESP_FAIL;
@@ -1402,4 +1474,4 @@ esp_err_t AsyncWebServer::handle_multipart_upload_(httpd_req_t *r, const char *c
 
 }  // namespace esphome::web_server_idf
 
-#endif  // !defined(USE_ESP32)
+#endif  // USE_ESP32
