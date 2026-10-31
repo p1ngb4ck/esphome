@@ -88,7 +88,7 @@ static void bluedroid_start_task(void * /*arg*/) {
   } else if ((err = esp_bluedroid_enable()) != ESP_OK) {
     ESP_LOGE(TAG, "Bluedroid enable failed: %s", esp_err_to_name(err));
   } else {
-    ESP_LOGI(TAG, "Bluedroid running on the USB dongle");
+    ESP_LOGV(TAG, "Bluedroid running on the USB dongle");
   }
   g_stack_starting.store(false, std::memory_order_release);
   vTaskDelete(nullptr);
@@ -174,7 +174,7 @@ bool USBBluetooth::find_interface_() {
 void USBBluetooth::on_connected() {
   const uint32_t generation = this->generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
   if (!this->find_interface_()) {
-    ESP_LOGW(TAG, "No Bluetooth controller interface on this device");
+    ESP_LOGV(TAG, "No Bluetooth controller interface on this device");
     this->report_connected_();
     return;
   }
@@ -184,8 +184,8 @@ void USBBluetooth::on_connected() {
     this->report_connected_();
     return;
   }
-  ESP_LOGI(TAG, "Bluetooth controller on interface %u%s (events 0x%02X, ACL 0x%02X/0x%02X)", this->intf_,
-           this->vendor_class_ ? " (vendor class)" : "", this->evt_ep_, this->acl_in_ep_, this->acl_out_ep_);
+  ESP_LOGI(TAG, "Bluetooth controller on interface %u%s", this->intf_,
+           this->vendor_class_ ? " (vendor class)" : "");
   this->event_len_ = 0;
   this->acl_len_ = 0;
   this->link_up_.store(true, std::memory_order_release);
@@ -273,7 +273,7 @@ void USBBluetooth::hci_send(uint8_t *data, uint16_t len) {
       static bool said = false;
       if (!said) {
         said = true;
-        ESP_LOGW(TAG, "SCO (voice) is not carried over this transport");
+        ESP_LOGV(TAG, "SCO (voice) is not carried over this transport");
       }
       break;
     }
@@ -329,7 +329,7 @@ void USBBluetooth::start_split_() {
   this->set_interval("acl_check", 10000, [this]() {
     hci_split::report_acl();
     if (this->send_blocked_.load(std::memory_order_acquire))
-      ESP_LOGW(TAG, "Bluedroid waits for a free transfer: %u of %u in use",
+      ESP_LOGV(TAG, "Bluedroid waits for a free transfer: %u of %u in use",
                static_cast<unsigned>(__builtin_popcount(this->get_trq_in_use())),
                static_cast<unsigned>(usb_host::MAX_REQUESTS));
   });
@@ -338,7 +338,7 @@ void USBBluetooth::start_split_() {
   esp32_ble::global_ble->usb_bluetooth_ready();
   if (esp32_ble::global_ble->is_active()) {
     // Plugged after Bluedroid came up (or replugged): it reads its controllers only at its start
-    ESP_LOGI(TAG, "Restarting Bluedroid for the dongle (BR/EDR)");
+    ESP_LOGV(TAG, "Restarting Bluedroid for the dongle (BR/EDR)");
     esp32_ble::global_ble->restart();
   } else {
     esp32_ble::global_ble->enable();  // the one start, on both controllers, once WiFi's start-up is done
@@ -529,7 +529,7 @@ void USBBluetooth::probe_start_() {
       const uint16_t hci_rev = static_cast<uint16_t>(p[1] | (p[2] << 8));
       this->manufacturer_ = static_cast<uint16_t>(p[4] | (p[5] << 8));
       this->lmp_subver_ = static_cast<uint16_t>(p[6] | (p[7] << 8));
-      ESP_LOGI(TAG, "HCI %u (Bluetooth %s), revision 0x%04X, LMP subversion 0x%04X, manufacturer %u", p[0],
+      ESP_LOGV(TAG, "HCI %u (Bluetooth %s), revision 0x%04X, LMP subversion 0x%04X, manufacturer %u", p[0],
                core_version(p[0]), hci_rev, this->lmp_subver_, this->manufacturer_);
       if (this->manufacturer_ == MANUFACTURER_REALTEK) {
         this->realtek_();
@@ -543,10 +543,10 @@ void USBBluetooth::probe_start_() {
 void USBBluetooth::probe_identity_() {
   this->ask_(OP_READ_BD_ADDR, {}, [this](const uint8_t *p, size_t n) {
     if (n >= 6)
-      ESP_LOGI(TAG, "Address %02X:%02X:%02X:%02X:%02X:%02X", p[5], p[4], p[3], p[2], p[1], p[0]);
+      ESP_LOGV(TAG, "Address %02X:%02X:%02X:%02X:%02X:%02X", p[5], p[4], p[3], p[2], p[1], p[0]);
     this->ask_(OP_READ_LOCAL_NAME, {}, [this](const uint8_t *name, size_t size) {
       const size_t len = strnlen(reinterpret_cast<const char *>(name), size);
-      ESP_LOGI(TAG, "Name '%.*s'", static_cast<int>(len), reinterpret_cast<const char *>(name));
+      ESP_LOGV(TAG, "Name '%.*s'", static_cast<int>(len), reinterpret_cast<const char *>(name));
       this->probe_done_(true);
     });
   });
@@ -583,7 +583,7 @@ void USBBluetooth::realtek_() {
       this->probe_identity_();
       return;
     }
-    ESP_LOGI(TAG, "Realtek ROM version %u: downloading %u bytes", rom, static_cast<unsigned>(this->download_->length));
+    ESP_LOGV(TAG, "Realtek ROM version %u: downloading %u bytes", rom, static_cast<unsigned>(this->download_->length));
     this->download_fragment_(0);
   });
 }

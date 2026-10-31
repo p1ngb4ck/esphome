@@ -47,7 +47,7 @@ void BLEBroadcast::loop() {
   if (this->address_ != 0) {
     char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
     format_mac_addr_upper(bda, mac);
-    ESP_LOGI(TAG, "[%s] Listening", mac);
+    ESP_LOGV(TAG, "[%s] Listening", mac);
   }
   this->disable_loop();
 }
@@ -95,15 +95,15 @@ bool BLEBroadcast::parse_device(const ble_device_base::ESPBTDevice &device) {
   this->last_hash_ = hash;
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   device.address_str_to(mac);
-  char hex[format_hex_pretty_size(64)];
+  [[maybe_unused]] char hex[format_hex_pretty_size(64)];
   for (const auto &data : device.get_manufacturer_datas()) {
     const uint16_t id = uuid16_of(data.uuid);
-    ESP_LOGD(TAG, "[%s] Manufacturer 0x%04X: %s", mac, id, format_hex_pretty_to(hex, data.data, ' '));
+    ESP_LOGV(TAG, "[%s] Manufacturer 0x%04X: %s", mac, id, format_hex_pretty_to(hex, data.data, ' '));
     this->manufacturer_cb_.call(data.data, id);
   }
   for (const auto &data : device.get_service_datas()) {
     const uint16_t uuid = uuid16_of(data.uuid);
-    ESP_LOGD(TAG, "[%s] Service 0x%04X: %s", mac, uuid, format_hex_pretty_to(hex, data.data, ' '));
+    ESP_LOGV(TAG, "[%s] Service 0x%04X: %s", mac, uuid, format_hex_pretty_to(hex, data.data, ' '));
     this->service_cb_.call(data.data, uuid);
   }
   return true;

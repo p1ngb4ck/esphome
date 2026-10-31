@@ -119,7 +119,7 @@ bool start(USBBluetooth *dongle) {
     ESP_LOGE(TAG, "C6 not told to start its Bluetooth host");
     return false;
   }
-  ESP_LOGI(TAG, "USB dongle handed to the C6's Bluetooth host");
+  ESP_LOGV(TAG, "USB dongle handed to the C6's Bluetooth host");
   return true;
 }
 

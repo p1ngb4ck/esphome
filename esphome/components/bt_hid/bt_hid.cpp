@@ -412,7 +412,7 @@ void handle_event(HostEvent &e) {
       h.ready = true;
       // Paired devices reconnect on their own when they wake up.
       esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
-      ESP_LOGI(TAG, "HID host ready");
+      ESP_LOGV(TAG, "HID host ready");
       break;
     case HostEvent::OPEN: {
       // esp_bt_hid_host_connect() answers at once with OK and CONNECTING, without a handle
@@ -424,7 +424,7 @@ void handle_event(HostEvent &e) {
       BTHIDDevice *dev = opened ? find_or_adopt(e.bda) : find_by_address(e.bda);
       if (dev != nullptr && opened && (!dev->get_auto_connect() || (dev->is_pooled() && in_list(h.refused, e.bda)))) {
         format_mac_addr_upper(e.bda, mac);
-        ESP_LOGI(TAG, "[%s] Disconnected by request, refusing", mac);
+        ESP_LOGV(TAG, "[%s] Disconnected by request, refusing", mac);
         esp_bt_hid_host_disconnect(e.bda);
         if (dev->is_pooled())
           dev->release();
@@ -450,7 +450,7 @@ void handle_event(HostEvent &e) {
       break;
     case HostEvent::DESCRIPTOR:
       if (BTHIDDevice *dev = find_by_handle(e.handle)) {
-        ESP_LOGD(TAG, "Device %04" PRIX32 ":%04" PRIX32 ", report descriptor %u bytes", e.value >> 16, e.value & 0xFFFF,
+        ESP_LOGV(TAG, "Device %04" PRIX32 ":%04" PRIX32 ", report descriptor %u bytes", e.value >> 16, e.value & 0xFFFF,
                  static_cast<unsigned>(e.data.size()));
         dev->on_descriptor(e.data, e.value >> 16, e.value & 0xFFFF);
       }
@@ -494,7 +494,7 @@ void handle_event(HostEvent &e) {
       const std::string name(e.data.begin(), e.data.end());
       // Other inquiries (bt_pairing, a2dp_source) report their own finds.
       if (h.pairing != nullptr || h.scan_requested) {
-        ESP_LOGI(TAG, "Found %s %s '%s', RSSI %d", peripheral_kind(e.value), mac, name.c_str(),
+        ESP_LOGV(TAG, "Found %s %s '%s', RSSI %d", peripheral_kind(e.value), mac, name.c_str(),
                  e.has_rssi ? e.rssi : 0);
       } else {
         ESP_LOGV(TAG, "Found %s %s '%s'", peripheral_kind(e.value), mac, name.c_str());
@@ -511,7 +511,7 @@ void handle_event(HostEvent &e) {
     case HostEvent::SCAN_STATE:
       h.discovering = e.value != 0;
       if (h.pairing != nullptr || h.scan_requested) {
-        ESP_LOGI(TAG, "Scan %s", h.discovering ? "started" : "finished");
+        ESP_LOGV(TAG, "Scan %s", h.discovering ? "started" : "finished");
       } else {
         ESP_LOGV(TAG, "Scan %s", h.discovering ? "started" : "finished");
       }
@@ -520,12 +520,12 @@ void handle_event(HostEvent &e) {
       // Without a device found the window stays open until it times out: a device in pairing
       // mode may still connect on its own.
       if (!h.discovering && h.pairing != nullptr && !h.pairing->has_address())
-        ESP_LOGI(TAG, "No device in pairing mode found; waiting for one to connect");
+        ESP_LOGV(TAG, "No device in pairing mode found; waiting for one to connect");
       break;
     case HostEvent::AUTH:
       format_mac_addr_upper(e.bda, mac);
       if (e.status == ESP_BT_STATUS_SUCCESS) {
-        ESP_LOGI(TAG, "[%s] Paired", mac);
+        ESP_LOGV(TAG, "[%s] Paired", mac);
       } else {
         // The pairing window stays open: a key kept from before fails first, then the device
         // pairs anew; a wrong PIN can be typed again.
@@ -745,7 +745,7 @@ void BTHIDDevice::restore_paired() {
     this->set_bda_(bda);
     char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
     format_mac_addr_upper(bda, mac);
-    ESP_LOGI(TAG, "[%s] Paired device", mac);
+    ESP_LOGV(TAG, "[%s] Paired device", mac);
   }
 }
 
@@ -822,7 +822,7 @@ void BTHIDDevice::unpair() {
 void BTHIDDevice::pair(uint32_t duration_ms) {
   Host &h = host();
   if (this->fixed_address_) {
-    ESP_LOGI(TAG, "Configured address: connecting, which pairs it if it is not paired yet");
+    ESP_LOGV(TAG, "Configured address: connecting, which pairs it if it is not paired yet");
     this->connect();
     return;
   }
@@ -854,9 +854,9 @@ void BTHIDDevice::pair(uint32_t duration_ms) {
   this->publish_found_();
   this->open_window_(millis() + units * 1280 + CONNECT_TIMEOUT_MS);
   if (this->device_select_ != nullptr) {
-    ESP_LOGI(TAG, "Pairing: listing the devices in pairing mode, pick one");
+    ESP_LOGV(TAG, "Pairing: listing the devices in pairing mode, pick one");
   } else {
-    ESP_LOGI(TAG, "Pairing: looking for a device in pairing mode");
+    ESP_LOGV(TAG, "Pairing: looking for a device in pairing mode");
   }
 }
 
@@ -953,7 +953,7 @@ bool BTHIDDevice::on_pairing_candidate(const uint8_t *bda, uint32_t device_class
 #endif
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(bda, mac);
-  ESP_LOGI(TAG, "[%s] Pairing with '%s'", mac, name.c_str());
+  ESP_LOGV(TAG, "[%s] Pairing with '%s'", mac, name.c_str());
   // A device in pairing mode has dropped any key kept here from before; pair it anew.
   if (is_bonded(bda))
     esp_bt_gap_remove_bond_device(const_cast<uint8_t *>(bda));
@@ -1054,7 +1054,7 @@ void BTHIDDevice::disconnect_address(const uint8_t *address) {
 void BTHIDDevice::on_adopted() {
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(this->bda_, mac);
-  ESP_LOGI(TAG, "[%s] Pairing with the device that connected", mac);
+  ESP_LOGV(TAG, "[%s] Pairing with the device that connected", mac);
   this->candidate_class_ = 0;
   this->candidate_name_.clear();
   this->retry_ms_ = 0;
@@ -1147,7 +1147,7 @@ void BTHIDDevice::on_open(uint8_t handle, bool success, int status) {
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(this->bda_, mac);
   if (!success) {
-    ESP_LOGD(TAG, "[%s] Connection failed: %d", mac, status);
+    ESP_LOGV(TAG, "[%s] Connection failed: %d", mac, status);
     // A shared slot is given up, unless the page has not gone out yet or a pairing retries.
     if (this->pooled_ && status != ESP_HIDH_BUSY && host().pairing != this)
       this->release();

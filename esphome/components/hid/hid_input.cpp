@@ -266,7 +266,7 @@ void HIDInput::key_(uint16_t page, uint16_t usage, bool pressed) {
   }
 #if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
   if (this->log_name_[0] != '\0')
-    ESP_LOGD(TAG, "[%s] %s %s", this->log_name_, key_name(page, usage).c_str(), pressed ? "pressed" : "released");
+    ESP_LOGV(TAG, "[%s] %s %s", this->log_name_, key_name(page, usage).c_str(), pressed ? "pressed" : "released");
 #endif
   if (page == PAGE_KEYBOARD && usage >= KEY_LEFT_CTRL && usage <= KEY_RIGHT_GUI) {
     const uint8_t bit = 1u << (usage - KEY_LEFT_CTRL);

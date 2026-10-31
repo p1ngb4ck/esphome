@@ -109,15 +109,14 @@ void BTPairing::loop() {
       case LoadResult::OK:
         this->loaded_ = true;
         this->migrate_records_();
-        ESP_LOGI(TAG, "%u paired device(s) loaded", static_cast<unsigned>(this->records_.size()));
-        this->log_records();
+        ESP_LOGV(TAG, "%u paired device(s) loaded", static_cast<unsigned>(this->records_.size()));
 #ifdef USE_BT_PAIRING_HID
         this->devices_changed_();
 #endif
         break;
       case LoadResult::EMPTY:
         this->loaded_ = true;
-        ESP_LOGI(TAG, "No paired devices stored");
+        ESP_LOGV(TAG, "No paired devices stored");
         break;
       case LoadResult::RETRY:
         this->next_attempt_ms_ = now + RETRY_MS;
@@ -196,7 +195,7 @@ bool BTPairing::store(const PairingRecord &record) {
   }
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(copy.address, mac);
-  ESP_LOGI(TAG, "Stored %s %s '%s'", transport_str(copy.transport), mac, copy.name);
+  ESP_LOGV(TAG, "Stored %s %s '%s'", transport_str(copy.transport), mac, copy.name);
   this->dirty_ = true;
 #ifdef USE_BT_PAIRING_STORAGE
   this->change_gen_++;
@@ -247,7 +246,7 @@ void BTPairing::delete_bond(const uint8_t *address, Transport transport) {
   }
   uint8_t bda[6];
   memcpy(bda, address, sizeof(bda));
-  esp_err_t err = ESP_ERR_NOT_SUPPORTED;
+  [[maybe_unused]] esp_err_t err = ESP_ERR_NOT_SUPPORTED;
   if (transport == Transport::LE) {
 #ifdef CONFIG_BT_BLE_ENABLED
     err = esp_ble_remove_bond_device(bda);
@@ -257,7 +256,7 @@ void BTPairing::delete_bond(const uint8_t *address, Transport transport) {
     err = esp_bt_gap_remove_bond_device(bda);
 #endif
   }
-  ESP_LOGD(TAG, "Bond of %s deleted: %s", mac, esp_err_to_name(err));
+  ESP_LOGV(TAG, "Bond of %s deleted: %s", mac, esp_err_to_name(err));
 #endif
 }
 
@@ -326,7 +325,7 @@ void BTPairing::log_records() const {
 // -- Pairing scan -------------------------------------------------------------------------
 
 void BTPairing::status_(const std::string &message) {
-  ESP_LOGI(TAG, "%s", message.c_str());
+  ESP_LOGV(TAG, "%s", message.c_str());
   this->status_callbacks_.call(message);
 }
 
@@ -545,7 +544,7 @@ void BTPairing::add_scanned_(const ScannedDevice &device) {
   this->scanned_.push_back(device);
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(device.address, mac);
-  ESP_LOGI(TAG, "Found %s %s '%s'", kind_str(device), mac, device.name.c_str());
+  ESP_LOGV(TAG, "Found %s %s '%s'", kind_str(device), mac, device.name.c_str());
   this->publish_scanned_();
 }
 
@@ -782,7 +781,7 @@ void BTPairing::add_hid_slot(hid::HIDInput *input, PairingTarget *target) {
   input->add_on_key_event_callback([this, target, input](uint16_t page, uint16_t usage, bool pressed) {
     this->device_label_into_(target, this->event_device_);
 #if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
-    ESP_LOGD(TAG, "[%s] %s %s", this->event_device_.c_str(), hid::key_name(page, usage).c_str(),
+    ESP_LOGV(TAG, "[%s] %s %s", this->event_device_.c_str(), hid::key_name(page, usage).c_str(),
              pressed ? "pressed" : "released");
 #endif
     // The key types with the layout of the device it came from.
@@ -1014,7 +1013,7 @@ storage::PathStorage *BTPairing::resolve_file_(const char **rel) {
     return nullptr;
   storage::PathStorage *storage = storage::global_storage_registry->resolve_path(this->file_, rel);
   if (storage == nullptr)
-    ESP_LOGD(TAG, "No storage mounted for %s yet", this->file_);
+    ESP_LOGV(TAG, "No storage mounted for %s yet", this->file_);
   return storage;
 }
 
@@ -1094,13 +1093,12 @@ void BTPairing::file_loaded_(LoadResult result) {
   this->loaded_ = true;
   if (result == LoadResult::OK) {
     this->migrate_records_();
-    ESP_LOGI(TAG, "%u paired device(s) loaded", static_cast<unsigned>(this->records_.size()));
-    this->log_records();
+    ESP_LOGV(TAG, "%u paired device(s) loaded", static_cast<unsigned>(this->records_.size()));
 #ifdef USE_BT_PAIRING_HID
     this->devices_changed_();
 #endif
   } else {
-    ESP_LOGI(TAG, "No paired devices stored");
+    ESP_LOGV(TAG, "No paired devices stored");
   }
   this->next_attempt_ms_ = millis();
   this->enable_loop();

@@ -281,12 +281,12 @@ void BLEClientHID::restore_paired_() {
   // The advertisement the client connects on brings the current address type.
   this->parent()->set_address(address_to_uint64(bda));
   this->parent()->set_remote_addr_type(type);
-  ESP_LOGI(TAG, "[%s] Paired device", this->parent()->address_str());
+  ESP_LOGV(TAG, "[%s] Paired device", this->parent()->address_str());
 }
 
 void BLEClientHID::pair(uint32_t duration_ms) {
   if (!this->dynamic_) {
-    ESP_LOGI(TAG, "Configured address: connecting, which pairs it if it is not paired yet");
+    ESP_LOGV(TAG, "Configured address: connecting, which pairs it if it is not paired yet");
     this->parent()->set_auto_connect(true);
     return;
   }
@@ -304,9 +304,9 @@ void BLEClientHID::pair(uint32_t duration_ms) {
   this->publish_found_();
   this->open_window_(duration_ms);
   if (this->device_select_ != nullptr) {
-    ESP_LOGI(TAG, "Pairing: listing the HID devices in pairing mode, pick one");
+    ESP_LOGV(TAG, "Pairing: listing the HID devices in pairing mode, pick one");
   } else {
-    ESP_LOGI(TAG, "Pairing: looking for a HID device in pairing mode");
+    ESP_LOGV(TAG, "Pairing: looking for a HID device in pairing mode");
   }
 }
 
@@ -376,7 +376,7 @@ bool BLEClientHID::pair_found_(const FoundBLEDevice &picked) {
   for (int i = 0; i < 6; i++)
     bda[i] = static_cast<uint8_t>(found.address >> (40 - 8 * i));
   format_mac_addr_upper(bda, mac);
-  ESP_LOGI(TAG, "[%s] Pairing with '%s'", mac, found.name.c_str());
+  ESP_LOGV(TAG, "[%s] Pairing with '%s'", mac, found.name.c_str());
   return true;
 }
 
@@ -433,7 +433,7 @@ bool BLEClientHID::parse_device(const ble_device_base::ESPBTDevice &device) {
   this->parent()->set_address(address);
   this->parent()->set_remote_addr_type(device.get_address_type());
   this->parent()->set_auto_connect(true);
-  ESP_LOGI(TAG, "[%s] Pairing with '%s'", this->parent()->address_str(), this->candidate_name_.c_str());
+  ESP_LOGV(TAG, "[%s] Pairing with '%s'", this->parent()->address_str(), this->candidate_name_.c_str());
   return false;
 }
 #endif
@@ -525,7 +525,7 @@ void BLEClientHID::loop() {
   }
   if (this->rediscovery_requested_) {
     this->rediscovery_requested_ = false;
-    ESP_LOGW(TAG, "HID_PROFILE_INVALIDATED action=reconnect");
+    ESP_LOGV(TAG, "HID_PROFILE_INVALIDATED action=reconnect");
     this->parent()->disconnect();
   }
 
@@ -737,7 +737,7 @@ bool BLEClientHID::inventory_gatt_database_() {
     if (status == ESP_GATT_INVALID_OFFSET || status == ESP_GATT_NOT_FOUND)
       break;
     if (status != ESP_GATT_OK || count == 0) {
-      ESP_LOGW(TAG, "GATT_INVENTORY_ERROR object=service offset=%u status=%d", service_offset, status);
+      ESP_LOGV(TAG, "GATT_INVENTORY_ERROR object=service offset=%u status=%d", service_offset, status);
       return false;
     }
     GattServiceInfo service;
@@ -845,7 +845,7 @@ bool BLEClientHID::inventory_gatt_database_() {
   char hex[65];
   normalized.get_hex(hex);
   this->gatt_profile_hash_ = hex;
-  ESP_LOGD(TAG, "GATT_PROFILE services=%u included_services=%u characteristics=%u descriptors=%u sha256=%s",
+  ESP_LOGV(TAG, "GATT_PROFILE services=%u included_services=%u characteristics=%u descriptors=%u sha256=%s",
            static_cast<unsigned>(this->services_.size()), static_cast<unsigned>(included_service_total),
            static_cast<unsigned>(characteristic_total), static_cast<unsigned>(descriptor_total),
            this->gatt_profile_hash_.c_str());
@@ -863,11 +863,11 @@ void BLEClientHID::select_profile_() {
         context.report_map->reset_runtime_state();
     }
     this->profile_ready_ = true;
-    ESP_LOGD(TAG, "HID_PROFILE source=cache sha256=%s", this->gatt_profile_hash_.c_str());
+    ESP_LOGV(TAG, "HID_PROFILE source=cache sha256=%s", this->gatt_profile_hash_.c_str());
     return;
   }
   if (this->cache_valid_)
-    ESP_LOGD(TAG, "HID_PROFILE source=rebuild reason=gatt_database_changed");
+    ESP_LOGV(TAG, "HID_PROFILE source=rebuild reason=gatt_database_changed");
   this->cache_valid_ = false;
   this->hid_services_.clear();
   this->handle_report_source_.clear();
@@ -987,7 +987,7 @@ void BLEClientHID::plan_reads_() {
       }
     }
   }
-  ESP_LOGD(TAG, "GATT_READ_PLAN operations=%u mode=%s start=%s", static_cast<unsigned>(this->read_queue_.size()),
+  ESP_LOGV(TAG, "GATT_READ_PLAN operations=%u mode=%s start=%s", static_cast<unsigned>(this->read_queue_.size()),
            this->discovery_mode_ == DiscoveryMode::FORENSIC ? "forensic" : "standard",
            this->warm_start_ ? "warm" : "cold");
 }
@@ -1032,7 +1032,7 @@ void BLEClientHID::finish_active_read_(esp_gatt_status_t status, const uint8_t *
   GattReadOperation operation = std::move(*this->active_read_);
   this->active_read_.reset();
   if (status != ESP_GATT_OK) {
-    ESP_LOGW(TAG, "GATT_READ handle=%u uuid=%s status=failed code=%d", operation.handle,
+    ESP_LOGV(TAG, "GATT_READ handle=%u uuid=%s status=failed code=%d", operation.handle,
              uuid_string_(operation.attribute_uuid).c_str(), status);
     if (operation.required) {
       this->mark_degraded_("required GATT read failed");
@@ -1042,7 +1042,7 @@ void BLEClientHID::finish_active_read_(esp_gatt_status_t status, const uint8_t *
     return;
   }
   if (length > MAX_ATTRIBUTE_VALUE_BYTES) {
-    ESP_LOGW(TAG, "GATT_READ handle=%u status=value_too_large length=%u limit=%u", operation.handle,
+    ESP_LOGV(TAG, "GATT_READ handle=%u status=value_too_large length=%u limit=%u", operation.handle,
              static_cast<unsigned>(length), static_cast<unsigned>(MAX_ATTRIBUTE_VALUE_BYTES));
     if (operation.required) {
       this->mark_degraded_("required GATT value exceeded limit");
@@ -1068,15 +1068,15 @@ void BLEClientHID::process_read_value_(const GattReadOperation &operation, const
   }
   switch (operation.purpose) {
     case ReadPurpose::DEVICE_NAME:
-      ESP_LOGD(TAG, "HID_DEVICE field=device_name len=%u value=%s", static_cast<unsigned>(length),
+      ESP_LOGV(TAG, "HID_DEVICE field=device_name len=%u value=%s", static_cast<unsigned>(length),
                printable_text(value, length).c_str());
       break;
     case ReadPurpose::MANUFACTURER:
-      ESP_LOGD(TAG, "HID_DEVICE field=manufacturer len=%u value=%s", static_cast<unsigned>(length),
+      ESP_LOGV(TAG, "HID_DEVICE field=manufacturer len=%u value=%s", static_cast<unsigned>(length),
                printable_text(value, length).c_str());
       break;
     case ReadPurpose::SERIAL_NUMBER:
-      ESP_LOGD(TAG, "HID_DEVICE field=serial_number len=%u value=%s privacy=sensitive", static_cast<unsigned>(length),
+      ESP_LOGV(TAG, "HID_DEVICE field=serial_number len=%u value=%s privacy=sensitive", static_cast<unsigned>(length),
                printable_text(value, length).c_str());
       break;
     case ReadPurpose::FIRMWARE_REVISION:
@@ -1084,7 +1084,7 @@ void BLEClientHID::process_read_value_(const GattReadOperation &operation, const
       break;
     case ReadPurpose::APPEARANCE:
       if (length == 2) {
-        ESP_LOGD(TAG, "HID_DEVICE field=appearance value=%u", value[0] | (static_cast<uint16_t>(value[1]) << 8U));
+        ESP_LOGV(TAG, "HID_DEVICE field=appearance value=%u", value[0] | (static_cast<uint16_t>(value[1]) << 8U));
       } else {
         this->mark_degraded_("Appearance has invalid length");
       }
@@ -1103,7 +1103,7 @@ void BLEClientHID::process_read_value_(const GattReadOperation &operation, const
     case ReadPurpose::BATTERY_LEVEL:
       this->battery_handles_.insert(operation.characteristic_handle);
       if (length >= 1) {
-        ESP_LOGD(TAG, "HID_BATTERY source=read value=%u", value[0]);
+        ESP_LOGV(TAG, "HID_BATTERY source=read value=%u", value[0]);
         this->set_battery(static_cast<int8_t>(std::min<uint8_t>(value[0], 100)), this->get_details().battery_state);
 #ifdef USE_SENSOR
         if (this->battery_sensor_ != nullptr)
@@ -1128,7 +1128,7 @@ void BLEClientHID::process_read_value_(const GattReadOperation &operation, const
         const uint16_t vendor_id = value[1] | (static_cast<uint16_t>(value[2]) << 8U);
         const uint16_t product_id = value[3] | (static_cast<uint16_t>(value[4]) << 8U);
         const uint16_t version = value[5] | (static_cast<uint16_t>(value[6]) << 8U);
-        ESP_LOGD(TAG, "HID_DEVICE field=pnp_id source=%u vendor_id=0x%04X product_id=0x%04X version=0x%04X", value[0],
+        ESP_LOGV(TAG, "HID_DEVICE field=pnp_id source=%u vendor_id=0x%04X product_id=0x%04X version=0x%04X", value[0],
                  vendor_id, product_id, version);
         this->pnp_vid_ = vendor_id;
         this->pnp_pid_ = product_id;
@@ -1140,7 +1140,7 @@ void BLEClientHID::process_read_value_(const GattReadOperation &operation, const
     case ReadPurpose::HID_INFORMATION: {
       const HIDServiceContext *context = this->find_hid_context_(operation.service_instance);
       if (context != nullptr && length == 4) {
-        ESP_LOGD(TAG, "HID_INFO service_instance=%u bcd_hid=0x%02X%02X country=%u flags=0x%02X",
+        ESP_LOGV(TAG, "HID_INFO service_instance=%u bcd_hid=0x%02X%02X country=%u flags=0x%02X",
                  operation.service_instance, value[1], value[0], value[2], value[3]);
       } else {
         this->mark_degraded_("HID Information has invalid length");
@@ -1152,7 +1152,7 @@ void BLEClientHID::process_read_value_(const GattReadOperation &operation, const
       if (context != nullptr && length == 1) {
         context->protocol_mode = value[0];
         context->protocol_mode_handle = operation.characteristic_handle;
-        ESP_LOGD(TAG, "HID_PROTOCOL service_instance=%u mode=%s raw=%u", operation.service_instance,
+        ESP_LOGV(TAG, "HID_PROTOCOL service_instance=%u mode=%s raw=%u", operation.service_instance,
                  value[0] == 0   ? "boot"
                  : value[0] == 1 ? "report"
                                  : "unknown",
@@ -1170,7 +1170,7 @@ void BLEClientHID::process_read_value_(const GattReadOperation &operation, const
       }
       context->report_map_hash = sha256_(value, length);
       context->report_map.reset(HIDReportMap::parse_report_map_data(value, length));
-      ESP_LOGI(TAG, "HID_REPORT_MAP service_instance=%u len=%u sha256=%s", operation.service_instance,
+      ESP_LOGV(TAG, "HID_REPORT_MAP service_instance=%u len=%u sha256=%s", operation.service_instance,
                static_cast<unsigned>(length), context->report_map_hash.c_str());
       ESP_LOGV(TAG, "HID_REPORT_MAP data=%s", format_value_(value, length).c_str());
       HIDReportMap::esp_logd_report_map(value, length);
@@ -1188,7 +1188,7 @@ void BLEClientHID::process_read_value_(const GattReadOperation &operation, const
         source.has_report_id = true;
         source.report_type = value[1];
         source.has_report_type = true;
-        ESP_LOGD(TAG, "HID_REPORT_REFERENCE service_instance=%u handle=%u report_id=%u report_type=%u",
+        ESP_LOGV(TAG, "HID_REPORT_REFERENCE service_instance=%u handle=%u report_id=%u report_type=%u",
                  operation.service_instance, operation.characteristic_handle, value[0], value[1]);
         if (value[1] < 1 || value[1] > 3)
           this->mark_degraded_("Report Reference has unknown Report Type");
@@ -1199,7 +1199,7 @@ void BLEClientHID::process_read_value_(const GattReadOperation &operation, const
     }
     case ReadPurpose::HID_EXTERNAL_REPORT_REFERENCE:
       if (length == 2) {
-        ESP_LOGD(TAG, "HID_EXTERNAL_REPORT_REFERENCE service_instance=%u uuid=0x%04X", operation.service_instance,
+        ESP_LOGV(TAG, "HID_EXTERNAL_REPORT_REFERENCE service_instance=%u uuid=0x%04X", operation.service_instance,
                  value[0] | (static_cast<uint16_t>(value[1]) << 8U));
       } else {
         this->mark_degraded_("External Report Reference has unsupported length");
@@ -1217,7 +1217,7 @@ void BLEClientHID::log_hid_schema_(const HIDServiceContext &context) const {
     return;
   for (const auto &diagnostic : context.report_map->diagnostics()) {
     if (diagnostic.error) {
-      ESP_LOGW(TAG, "HID_SCHEMA_WARNING service_instance=%u offset=%u message=%s", context.service_instance,
+      ESP_LOGV(TAG, "HID_SCHEMA_WARNING service_instance=%u offset=%u message=%s", context.service_instance,
                static_cast<unsigned>(diagnostic.offset), diagnostic.message.c_str());
     } else {
       ESP_LOGV(TAG, "HID_SCHEMA_DIAGNOSTIC service_instance=%u offset=%u message=%s", context.service_instance,
@@ -1280,7 +1280,7 @@ void BLEClientHID::build_hid_profiles_() {
           source.report_type = static_cast<uint8_t>(HIDReportKind::INPUT);
           source.has_report_type = true;
         } else if (!source.has_report_id) {
-          ESP_LOGW(TAG, "HID_SCHEMA_WARNING service_instance=%u handle=%u reason=missing_report_reference",
+          ESP_LOGV(TAG, "HID_SCHEMA_WARNING service_instance=%u handle=%u reason=missing_report_reference",
                    service.instance, characteristic.handle);
           this->degraded_ = true;
         }
@@ -1300,14 +1300,14 @@ void BLEClientHID::build_hid_profiles_() {
                                                   : HIDReportKind::FEATURE;
       if (source.report_type >= 1 && source.report_type <= 3 &&
           context->report_map->find_report(kind, source.report_id) == nullptr) {
-        ESP_LOGW(TAG,
+        ESP_LOGV(TAG,
                  "HID_SCHEMA_WARNING service_instance=%u handle=%u report_id=%u report_type=%u "
                  "reason=reference_not_defined",
                  service.instance, source.characteristic_handle, source.report_id, source.report_type);
         this->degraded_ = true;
       }
     }
-    ESP_LOGD(TAG,
+    ESP_LOGV(TAG,
              "HID_PROFILE service_instance=%u report_map_sha256=%s reports=%u fields=%u collections=%u protocol=%s",
              context->service_instance, context->report_map_hash.c_str(),
              static_cast<unsigned>(context->report_map->reports().size()),
@@ -1346,7 +1346,7 @@ void BLEClientHID::start_protocol_mode_write_() {
       if (context.protocol_mode_handle == handle)
         context.protocol_mode = value;
     }
-    ESP_LOGD(TAG, "HID_PROTOCOL_WRITE handle=%u requested_mode=%s status=scheduled", handle,
+    ESP_LOGV(TAG, "HID_PROTOCOL_WRITE handle=%u requested_mode=%s status=scheduled", handle,
              value == 0 ? "boot" : "report");
   } else {
     this->mark_degraded_("Protocol Mode write failed");
@@ -1402,7 +1402,7 @@ void BLEClientHID::plan_subscriptions_() {
         this->service_changed_handles_.insert(characteristic.handle);
     }
   }
-  ESP_LOGD(TAG, "HID_SUBSCRIPTION_PLAN count=%u mode=%s", static_cast<unsigned>(this->subscription_queue_.size()),
+  ESP_LOGV(TAG, "HID_SUBSCRIPTION_PLAN count=%u mode=%s", static_cast<unsigned>(this->subscription_queue_.size()),
            this->discovery_mode_ == DiscoveryMode::FORENSIC ? "forensic" : "standard");
 }
 
@@ -1418,7 +1418,7 @@ void BLEClientHID::start_next_subscription_() {
   this->subscription_state_.begin(this->active_subscription_->characteristic_handle,
                                   this->active_subscription_->cccd_handle);
   if (this->active_subscription_->cccd_handle == 0) {
-    ESP_LOGW(TAG, "HID_SUBSCRIPTION handle=%u status=failed reason=missing_cccd",
+    ESP_LOGV(TAG, "HID_SUBSCRIPTION handle=%u status=failed reason=missing_cccd",
              this->active_subscription_->characteristic_handle);
     if (this->active_subscription_->required) {
       this->mark_degraded_("required notification has no CCCD");
@@ -1498,7 +1498,7 @@ void BLEClientHID::handle_cccd_result_(uint16_t handle, esp_gatt_status_t status
     return;
   }
   if (decision == SubscriptionDecision::COMPLETE) {
-    ESP_LOGD(TAG, "HID_SUBSCRIPTION handle=%u cccd_handle=%u status=enabled",
+    ESP_LOGV(TAG, "HID_SUBSCRIPTION handle=%u cccd_handle=%u status=enabled",
              this->active_subscription_->characteristic_handle, handle);
     this->operations_succeeded_++;
     this->active_subscription_.reset();
@@ -1507,7 +1507,7 @@ void BLEClientHID::handle_cccd_result_(uint16_t handle, esp_gatt_status_t status
     return;
   }
   if (decision == SubscriptionDecision::RETRY_CCCD) {
-    ESP_LOGW(TAG, "HID_SUBSCRIPTION handle=%u cccd_handle=%u status=framework_write_failed code=%d action=retry",
+    ESP_LOGV(TAG, "HID_SUBSCRIPTION handle=%u cccd_handle=%u status=framework_write_failed code=%d action=retry",
              this->active_subscription_->characteristic_handle, handle, status);
     this->write_current_cccd_();
     return;
@@ -1557,7 +1557,7 @@ void BLEClientHID::finalize_setup_() {
     complete = complete && context.report_map != nullptr;
   this->cache_valid_ = complete;
   this->cached_profile_hash_ = complete ? this->gatt_profile_hash_ : std::string();
-  ESP_LOGI(TAG,
+  ESP_LOGV(TAG,
            "HID_READY status=%s start=%s services=%u hid_services=%u operations_succeeded=%u operations_failed=%u "
            "gatt_profile=%s",
            this->degraded_ ? "DEGRADED" : "OK", this->warm_start_ ? "warm" : "cold",
@@ -1576,19 +1576,19 @@ void BLEClientHID::finalize_setup_() {
 bool BLEClientHID::validate_preferred_conn_params_() {
   esp_ble_conn_update_params_t &p = this->preferred_conn_params_;
   if (p.min_int == 0xFFFF || p.max_int == 0xFFFF || p.timeout == 0xFFFF) {
-    ESP_LOGD(TAG, "HID_CONNECTION_PARAMETERS preferred=none");
+    ESP_LOGV(TAG, "HID_CONNECTION_PARAMETERS preferred=none");
     return false;
   }
   if (p.min_int < 0x0006 || p.max_int > 0x0C80 || p.min_int > p.max_int || p.timeout < 0x000A || p.timeout > 0x0C80 ||
       p.latency > 0x01F3) {
-    ESP_LOGW(TAG, "HID_CONNECTION_PARAMETERS preferred=invalid interval=%u-%u latency=%u timeout=%u", p.min_int,
+    ESP_LOGV(TAG, "HID_CONNECTION_PARAMETERS preferred=invalid interval=%u-%u latency=%u timeout=%u", p.min_int,
              p.max_int, p.latency, p.timeout);
     return false;
   }
   // timeout (10 ms units) * 4 > (1 + latency) * max interval (1.25 ms units)
   const uint32_t max_latency_plus_one = static_cast<uint32_t>(p.timeout) * 4 / p.max_int;
   if (max_latency_plus_one <= 1) {
-    ESP_LOGW(TAG, "HID_CONNECTION_PARAMETERS preferred=invalid reason=timeout_too_short");
+    ESP_LOGV(TAG, "HID_CONNECTION_PARAMETERS preferred=invalid reason=timeout_too_short");
     return false;
   }
   uint16_t max_latency = max_latency_plus_one - 1;
@@ -1596,7 +1596,7 @@ bool BLEClientHID::validate_preferred_conn_params_() {
   if (max_latency > 0)
     max_latency--;
   if (p.latency > max_latency) {
-    ESP_LOGW(TAG, "HID_CONNECTION_PARAMETERS latency=%u clamped_to=%u", p.latency, max_latency);
+    ESP_LOGV(TAG, "HID_CONNECTION_PARAMETERS latency=%u clamped_to=%u", p.latency, max_latency);
     p.latency = max_latency;
   }
   return true;
@@ -1626,7 +1626,7 @@ bool BLEClientHID::build_desired_conn_params_(esp_ble_conn_update_params_t &out)
     uint32_t required = ((1u + out.latency) * out.max_int * 3u + 7u) / 8u;
     required = std::max<uint32_t>(required, 10u);
     if (required > 3200u) {
-      ESP_LOGW(TAG, "HID_CONNECTION_PARAMETERS conn_latency=%u too large for interval %.2f ms, ignored", out.latency,
+      ESP_LOGV(TAG, "HID_CONNECTION_PARAMETERS conn_latency=%u too large for interval %.2f ms, ignored", out.latency,
                out.max_int * 1.25f);
       out.latency = 0;
     } else if (out.timeout < required) {
@@ -1648,19 +1648,19 @@ void BLEClientHID::update_conn_params_() {
   if (esp_ble_get_current_conn_params(this->parent()->get_remote_bda(), &current) == ESP_OK &&
       current.interval >= desired.min_int && current.interval <= desired.max_int &&
       current.latency == desired.latency && current.timeout == desired.timeout) {
-    ESP_LOGD(TAG, "HID_CONNECTION_PARAMETERS status=unchanged");
+    ESP_LOGV(TAG, "HID_CONNECTION_PARAMETERS status=unchanged");
     return;
   }
-  ESP_LOGI(TAG, "HID_CONNECTION_PARAMETERS status=requested interval_ms=%.2f-%.2f latency=%u timeout_ms=%.1f",
+  ESP_LOGV(TAG, "HID_CONNECTION_PARAMETERS status=requested interval_ms=%.2f-%.2f latency=%u timeout_ms=%.1f",
            desired.min_int * 1.25f, desired.max_int * 1.25f, desired.latency, desired.timeout * 10.0f);
   if (esp_ble_gap_update_conn_params(&desired) != ESP_OK) {
-    ESP_LOGW(TAG, "HID_CONNECTION_PARAMETERS status=request_failed");
+    ESP_LOGV(TAG, "HID_CONNECTION_PARAMETERS status=request_failed");
     return;
   }
   this->set_timeout("conn_params", CONN_PARAMS_SETTLE_MS, [this]() {
     esp_gap_conn_params_t params;
     if (esp_ble_get_current_conn_params(this->parent()->get_remote_bda(), &params) == ESP_OK) {
-      ESP_LOGI(TAG, "HID_CONNECTION_PARAMETERS status=active interval_ms=%.2f latency=%u timeout_ms=%.1f",
+      ESP_LOGV(TAG, "HID_CONNECTION_PARAMETERS status=active interval_ms=%.2f latency=%u timeout_ms=%.1f",
                params.interval * 1.25f, params.latency, params.timeout * 10.0f);
     }
   });
@@ -1675,9 +1675,9 @@ void BLEClientHID::set_keepalive_enabled(bool enabled) {
   if (enabled) {
     // Whatever enabled it was activity too.
     this->last_activity_ms_ = millis();
-    ESP_LOGD(TAG, "HID_KEEPALIVE status=enabled interval_ms=%" PRIu32, this->keepalive_interval_ms_);
+    ESP_LOGV(TAG, "HID_KEEPALIVE status=enabled interval_ms=%" PRIu32, this->keepalive_interval_ms_);
   } else {
-    ESP_LOGD(TAG, "HID_KEEPALIVE status=disabled");
+    ESP_LOGV(TAG, "HID_KEEPALIVE status=disabled");
     // Disconnected from here on is the intended state.
     if (this->setup_phase_ == SetupPhase::DISCONNECTED)
       this->status_clear_warning();
@@ -1699,7 +1699,7 @@ void BLEClientHID::maybe_send_keepalive_() {
   const esp_err_t status = esp_ble_gattc_read_char(this->parent()->get_gattc_if(), this->parent()->get_conn_id(),
                                                    this->keepalive_handle_, this->read_auth_());
   if (status != ESP_OK) {
-    ESP_LOGW(TAG, "HID_KEEPALIVE status=read_failed code=%d", status);
+    ESP_LOGV(TAG, "HID_KEEPALIVE status=read_failed code=%d", status);
     return;
   }
   this->active_read_ = std::move(operation);
@@ -1749,7 +1749,7 @@ void BLEClientHID::write_leds_(uint8_t leds) {
         this->parent()->get_gattc_if(), this->parent()->get_conn_id(), handle, payload.size(), payload.data(),
         with_response ? ESP_GATT_WRITE_TYPE_RSP : ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
     if (status != ESP_OK)
-      ESP_LOGW(TAG, "HID_LEDS handle=%u status=write_failed code=%d", handle, status);
+      ESP_LOGV(TAG, "HID_LEDS handle=%u status=write_failed code=%d", handle, status);
     return;
   }
 }
@@ -1847,7 +1847,7 @@ void BLEClientHID::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_c
       param->ble_security.auth_cmpl.fail_reason != ESP_AUTH_SMP_PAIR_NOT_SUPPORT)
     return;
   this->plain_address_ = this->parent()->get_address();
-  ESP_LOGI(TAG, "[%s] Pairing not supported by the device, continuing unencrypted", this->parent()->address_str());
+  ESP_LOGV(TAG, "[%s] Pairing not supported by the device, continuing unencrypted", this->parent()->address_str());
 }
 
 // Bluedroid reads the IO capability when a pairing starts (bta_dm_co_ble_io_req). The configured
@@ -1873,7 +1873,7 @@ void BLEClientHID::apply_io_capability_() {
   esp_ble_io_cap_t none = ESP_IO_CAP_NONE;
   esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &none, sizeof(none));
   this->io_cap_lowered_ = true;
-  ESP_LOGD(TAG, "[%s] Not a keyboard (appearance 0x%04X): pairing without passkey", this->parent()->address_str(),
+  ESP_LOGV(TAG, "[%s] Not a keyboard (appearance 0x%04X): pairing without passkey", this->parent()->address_str(),
            appearance);
 }
 
@@ -1911,9 +1911,9 @@ void BLEClientHID::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
       // disconnect while nothing lets it sleep is a fault.
       const bool expected = this->keepalive_interval_ms_ != 0 && !this->keepalive_enabled_;
       if (expected) {
-        ESP_LOGD(TAG, "HID_CONNECTION status=disconnected reason=%d expected=true", param->disconnect.reason);
+        ESP_LOGV(TAG, "HID_CONNECTION status=disconnected reason=%d expected=true", param->disconnect.reason);
       } else {
-        ESP_LOGW(TAG, "HID_CONNECTION status=disconnected reason=%d", param->disconnect.reason);
+        ESP_LOGI(TAG, "HID_CONNECTION status=disconnected reason=%d", param->disconnect.reason);
         this->status_set_warning("Disconnected");
       }
       this->feature_read_handle_ = 0;
@@ -1978,13 +1978,13 @@ void BLEClientHID::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
       this->last_activity_ms_ = millis();
       const uint64_t seq_id = this->log_raw_notification_(param->notify);
       if (this->service_changed_handles_.count(param->notify.handle) != 0) {
-        ESP_LOGW(TAG, "HID_SERVICE_CHANGED seq_id=%" PRIu64 " action=invalidate_profile", seq_id);
+        ESP_LOGV(TAG, "HID_SERVICE_CHANGED seq_id=%" PRIu64 " action=invalidate_profile", seq_id);
         this->request_rediscovery_();
       } else if (this->battery_handles_.count(param->notify.handle) != 0) {
         if (param->notify.value == nullptr || param->notify.value_len < 1) {
-          ESP_LOGW(TAG, "HID_IGNORE seq_id=%" PRIu64 " reason=invalid_battery_payload", seq_id);
+          ESP_LOGV(TAG, "HID_IGNORE seq_id=%" PRIu64 " reason=invalid_battery_payload", seq_id);
         } else {
-          ESP_LOGD(TAG, "HID_BATTERY source=notification value=%u", param->notify.value[0]);
+          ESP_LOGV(TAG, "HID_BATTERY source=notification value=%u", param->notify.value[0]);
           this->set_battery(static_cast<int8_t>(std::min<uint8_t>(param->notify.value[0], 100)),
                             this->get_details().battery_state);
 #ifdef USE_SENSOR
@@ -2006,13 +2006,13 @@ void BLEClientHID::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
     case ESP_GATTC_CONGEST_EVT:
       if (param->congest.conn_id == this->parent()->get_conn_id()) {
         this->congested_ = param->congest.congested;
-        ESP_LOGW(TAG, "GATT_CONGESTION congested=%s", this->congested_ ? "true" : "false");
+        ESP_LOGV(TAG, "GATT_CONGESTION congested=%s", this->congested_ ? "true" : "false");
       }
       break;
     case ESP_GATTC_QUEUE_FULL_EVT:
       if (param->queue_full.conn_id == this->parent()->get_conn_id()) {
         this->congested_ = param->queue_full.is_full;
-        ESP_LOGW(TAG, "GATT_QUEUE_FULL full=%s status=%d", param->queue_full.is_full ? "true" : "false",
+        ESP_LOGV(TAG, "GATT_QUEUE_FULL full=%s status=%d", param->queue_full.is_full ? "true" : "false",
                  param->queue_full.status);
       }
       break;
@@ -2057,11 +2057,11 @@ uint64_t BLEClientHID::log_raw_notification_(const esp_ble_gattc_cb_param_t::gat
 void BLEClientHID::enqueue_input_report_(const esp_ble_gattc_cb_param_t::gattc_notify_evt_param &notification,
                                          uint64_t seq_id) {
   if (notification.value == nullptr && notification.value_len != 0) {
-    ESP_LOGW(TAG, "HID_IGNORE seq_id=%" PRIu64 " reason=null_payload len=%u", seq_id, notification.value_len);
+    ESP_LOGV(TAG, "HID_IGNORE seq_id=%" PRIu64 " reason=null_payload len=%u", seq_id, notification.value_len);
     return;
   }
   if (notification.value_len > MAX_REPORT_PAYLOAD_BYTES) {
-    ESP_LOGW(TAG, "HID_IGNORE seq_id=%" PRIu64 " reason=payload_limit len=%u", seq_id, notification.value_len);
+    ESP_LOGV(TAG, "HID_IGNORE seq_id=%" PRIu64 " reason=payload_limit len=%u", seq_id, notification.value_len);
     return;
   }
   while (!this->pending_reports_.empty() &&

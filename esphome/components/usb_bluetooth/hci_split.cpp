@@ -596,7 +596,7 @@ static size_t merge_answers(uint8_t *out) {
   memcpy(out, base, len);
   const uint8_t other = use_le ? br_status : le_status;
   if (other != STATUS_SUCCESS && other != STATUS_UNKNOWN_COMMAND)
-    ESP_LOGW(TAG, "Command 0x%04X failed on the %s controller (0x%02X)", s_pending.opcode, use_le ? "BR/EDR" : "LE",
+    ESP_LOGV(TAG, "Command 0x%04X failed on the %s controller (0x%02X)", s_pending.opcode, use_le ? "BR/EDR" : "LE",
              other);
   if (s_pending.opcode == OP_READ_LOCAL_COMMANDS && br_status == STATUS_SUCCESS && le_status == STATUS_SUCCESS) {
     const size_t n = std::min(br_len, le_len);
@@ -640,7 +640,7 @@ static bool address_step(uint16_t opcode, const uint8_t *ev, size_t len, uint8_t
   if (s_pending.addr_stage == AddrStage::WRITE_BR && opcode == OP_BCM_WRITE_BD_ADDR) {
     if (ok) {
       const uint8_t *a = s_pending.addr_answer + 7;
-      ESP_LOGI(TAG, "Both radios on %02X:%02X:%02X:%02X:%02X:%02X", a[5], a[4], a[3], a[2], a[1], a[0]);
+      ESP_LOGV(TAG, "Both radios on %02X:%02X:%02X:%02X:%02X:%02X", a[5], a[4], a[3], a[2], a[1], a[0]);
       out_len = s_pending.addr_answer_len;
       memcpy(out, s_pending.addr_answer, out_len);
       out[3] = 1;
@@ -649,7 +649,7 @@ static bool address_step(uint16_t opcode, const uint8_t *ev, size_t len, uint8_t
       s_pending.opcode = 0;
       return true;
     }
-    ESP_LOGW(TAG, "The dongle keeps its own address");
+    ESP_LOGV(TAG, "The dongle keeps its own address");
     out_len = s_pending.addr_answer_len;
     memcpy(out, s_pending.addr_answer, out_len);
     out[3] = 1;
@@ -999,9 +999,9 @@ extern "C" esp_err_t __wrap_esp_bluedroid_attach_hci_driver(const esp_bluedroid_
   const bool with_br = s_br != nullptr;
   s_started_with_br.store(with_br, std::memory_order_release);
   if (with_br) {
-    ESP_LOGI(TAG, "Bluedroid on two controllers: LE on the co-processor, BR/EDR on the USB dongle");
+    ESP_LOGV(TAG, "Bluedroid on two controllers: LE on the co-processor, BR/EDR on the USB dongle");
   } else {
-    ESP_LOGI(TAG, "Bluedroid on the co-processor alone (LE); BR/EDR once the USB dongle is there");
+    ESP_LOGV(TAG, "Bluedroid on the co-processor alone (LE); BR/EDR once the USB dongle is there");
   }
   return __real_esp_bluedroid_attach_hci_driver(&SPLIT_OPS);
 }

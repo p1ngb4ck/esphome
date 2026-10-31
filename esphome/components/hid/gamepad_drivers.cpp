@@ -521,7 +521,7 @@ class SwitchProDriver : public GamepadDriver {
       }
       case READY:
         this->cancel_timeout_();
-        ESP_LOGD(TAG, "Switch Pro Controller ready");
+        ESP_LOGV(TAG, "Switch Pro Controller ready");
         return;
     }
     // A command the pad dropped is sent once more, then the step is given up.

@@ -505,7 +505,7 @@ void HIDReportMap::esp_logd_report_map(const uint8_t *data, size_t length) {
     const uint8_t prefix = data[offset++];
     if (prefix == 0xFE) {
       if (length - offset < 2) {
-        ESP_LOGW(TAG, "HID_ITEM offset=%u status=truncated_long_header", static_cast<unsigned>(item_offset));
+        ESP_LOGV(TAG, "HID_ITEM offset=%u status=truncated_long_header", static_cast<unsigned>(item_offset));
         return;
       }
       const uint8_t size = data[offset++];
@@ -513,7 +513,7 @@ void HIDReportMap::esp_logd_report_map(const uint8_t *data, size_t length) {
       (void) item_offset;
       (void) tag;
       if (length - offset < size) {
-        ESP_LOGW(TAG, "HID_ITEM offset=%u status=truncated_long_payload", static_cast<unsigned>(item_offset));
+        ESP_LOGV(TAG, "HID_ITEM offset=%u status=truncated_long_payload", static_cast<unsigned>(item_offset));
         return;
       }
       ESP_LOGV(TAG, "HID_ITEM offset=%u kind=long tag=0x%02X size=%u", static_cast<unsigned>(item_offset), tag, size);
@@ -522,7 +522,7 @@ void HIDReportMap::esp_logd_report_map(const uint8_t *data, size_t length) {
     }
     const uint8_t size = hid_item_data_size(prefix);
     if (length - offset < size) {
-      ESP_LOGW(TAG, "HID_ITEM offset=%u status=truncated_short", static_cast<unsigned>(item_offset));
+      ESP_LOGV(TAG, "HID_ITEM offset=%u status=truncated_short", static_cast<unsigned>(item_offset));
       return;
     }
     ESP_LOGV(TAG, "HID_ITEM offset=%u prefix=0x%02X size=%u value=0x%08X", static_cast<unsigned>(item_offset), prefix,

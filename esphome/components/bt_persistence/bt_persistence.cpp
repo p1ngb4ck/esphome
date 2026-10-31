@@ -171,7 +171,7 @@ void BtPersistence::finish_read_() {
     this->fail_("the file is damaged");
     return;
   }
-  ESP_LOGI(TAG, "Loaded %u bytes from %s", static_cast<unsigned>(this->in_len_), this->path_.c_str());
+  ESP_LOGV(TAG, "Loaded %u bytes from %s", static_cast<unsigned>(this->in_len_), this->path_.c_str());
   this->set_ready_();
 }
 
@@ -183,7 +183,7 @@ void BtPersistence::recover_() {
       this->storage_, this->tmp_.c_str(), this->storage_, this->rel_.c_str(),
       [this](StorageError result) {
         if (result == StorageError::STORAGE_ERROR_OK) {
-          ESP_LOGW(TAG, "Recovered %s from an interrupted save", this->path_.c_str());
+          ESP_LOGV(TAG, "Recovered %s from an interrupted save", this->path_.c_str());
           this->start_open_();
         } else if (result == StorageError::STORAGE_ERROR_NOT_FOUND) {
           this->create_();
@@ -230,7 +230,7 @@ void BtPersistence::create_() {
             this->fail_("the file cannot be created");
             return;
           }
-          ESP_LOGI(TAG, "Created %s", this->path_.c_str());
+          ESP_LOGV(TAG, "Created %s", this->path_.c_str());
           this->set_ready_();
         });
       });
@@ -315,7 +315,7 @@ void BtPersistence::start_write_() {
                       }
                       this->saved_gen_ = this->write_gen_;
                       this->writing_ = false;
-                      ESP_LOGD(TAG, "Saved %u bytes to %s", static_cast<unsigned>(this->out_len_), this->path_.c_str());
+                      ESP_LOGV(TAG, "Saved %u bytes to %s", static_cast<unsigned>(this->out_len_), this->path_.c_str());
                     },
                     nullptr, true);
                 if (moved != StorageError::STORAGE_ERROR_OK)
@@ -376,12 +376,12 @@ void BtPersistence::apply_pending_path_() {
   global_preferences->sync();
 
   if (this->state_.load(std::memory_order_acquire) == State::READY) {
-    ESP_LOGI(TAG, "Moving the Bluetooth data to %s", this->path_.c_str());
+    ESP_LOGV(TAG, "Moving the Bluetooth data to %s", this->path_.c_str());
     this->saved_gen_ = esphome_nvs_store_generation() + 1;
     this->changed_ms_ = millis() - this->write_delay_;
     return;
   }
-  ESP_LOGI(TAG, "Loading the Bluetooth data from %s", this->path_.c_str());
+  ESP_LOGV(TAG, "Loading the Bluetooth data from %s", this->path_.c_str());
   this->status_clear_error();
   this->state_.store(State::WAITING, std::memory_order_release);
   this->wait_start_ = millis();
