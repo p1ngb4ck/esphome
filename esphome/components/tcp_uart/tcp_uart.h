@@ -40,6 +40,13 @@ class TcpUart : public uart::UARTComponent, public Component {
 #ifdef USE_NOISE_STREAM
   void set_noise_stream(noise::NoiseStream *stream) { this->noise_ = stream; }
 #endif
+#ifdef USE_NOISE_STREAM_RUNTIME_KEY
+  void set_encryption_key(const std::string &key) {
+    if (this->noise_ != nullptr && this->noise_->set_key(this->link_, key)) {
+      this->enable_loop();
+    }
+  }
+#endif
 #ifdef USE_SOCKET_TCP_LISTENER
   void set_server(bool server) { this->server_ = server; }
 #ifdef USE_SOCKET_IPV4_ALLOW

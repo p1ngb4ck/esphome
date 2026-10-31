@@ -31,6 +31,7 @@ CONF_TCP_UART_ID = "tcp_uart_id"
 
 tcp_uart_ns = cg.esphome_ns.namespace("tcp_uart")
 TcpUart = tcp_uart_ns.class_("TcpUart", uart.UARTComponent, cg.Component)
+noise.register_set_key_action(DOMAIN, TcpUart)
 
 
 BASE_SCHEMA = cv.Schema(
@@ -102,5 +103,6 @@ async def to_code(config: ConfigType) -> None:
     if (encryption := config.get(CONF_ENCRYPTION)) is not None:
         # The TCP client starts the handshake
         stream = noise.new_stream(
+            config[CONF_ID], encryption.get(CONF_KEY), config[CONF_ROLE] == "client"
         )
         cg.add(var.set_noise_stream(stream))

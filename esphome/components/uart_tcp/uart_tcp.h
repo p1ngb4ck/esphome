@@ -42,6 +42,11 @@ class UartTcp final : public Component, public uart::UARTDevice {
 #ifdef USE_NOISE_STREAM
   void set_noise_stream(noise::NoiseStream *stream) { this->noise_ = stream; }
 #endif
+#ifdef USE_NOISE_STREAM_RUNTIME_KEY
+  /// Save a base64 key for `encryption:` without a key in yaml; the link reconnects with it.
+  void set_encryption_key(const std::string &key) {
+    }
+  }
 #endif
 
   void setup() override;
