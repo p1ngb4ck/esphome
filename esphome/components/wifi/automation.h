@@ -6,6 +6,27 @@
 
 namespace esphome::wifi {
 
+#ifdef USE_WIFI_SCAN_RESULTS_TRIGGER
+/// on_scan_results: a scan finished; get_scan_result() holds what it found. The listener is called from
+/// inside the scan's event handling, whose frame is large (ESP-Hosted reads every record into a stack
+/// buffer): the automation runs from the next main loop pass instead, once for scans that came meanwhile.
+class ScanResultsTrigger final : public Trigger<>, public Component, public WiFiScanResultsListener {
+ public:
+  void on_wifi_scan_results(const wifi_scan_vector_t<WiFiScanResult> &results) override {
+    if (this->pending_)
+      return;
+    this->pending_ = true;
+    this->defer([this]() {
+      this->pending_ = false;
+      this->trigger();
+    });
+  }
+
+ protected:
+  bool pending_{false};
+};
+#endif
+
 template<typename... Ts> class WiFiConfigureAction final : public Action<Ts...>, public Component {
  public:
   TEMPLATABLE_VALUE(std::string, ssid)
