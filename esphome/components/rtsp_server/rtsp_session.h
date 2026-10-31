@@ -26,6 +26,8 @@ static constexpr uint16_t RTP_JPEG_MAX_DIMENSION = 255 * 8;
 // A frame whose packets make no write progress for this long is dropped, so a stalled client cannot hold
 // the camera image (esp32_camera captures nothing while any copy is held).
 static constexpr uint32_t FRAME_STALL_MS = 500;
+static constexpr size_t RTP_H264_PAYLOAD_SIZE = 1400;
+static constexpr size_t FU_HEADER_LEN = 2;
 
 /// The fields of a JPEG frame that an RFC 2435 RTP/JPEG payload needs. Pointers refer into the frame.
 struct JpegInfo {
@@ -49,10 +51,12 @@ class RTSPSession {
   bool is_active() const { return this->socket_ != nullptr; }
   bool is_playing() const { return this->state_ == State::PLAYING; }
 
-  void open(std::unique_ptr<socket::Socket> socket, uint32_t now);
+  void open(std::unique_ptr<socket::Socket> socket, uint32_t now, camera::ImageFormat format);
   void loop(uint32_t now, uint16_t port);
+  void close() { this->close_(); }
   /// Ignored unless playing with no output pending; packets of the frame being sent point into that frame.
   void on_new_frame(const std::shared_ptr<camera::CameraImage> &image, const JpegInfo &jpeg, uint32_t now);
+  bool on_new_h264_frame(const std::shared_ptr<camera::CameraImage> &image, uint32_t now);
 
  protected:
   enum class State : uint8_t { INIT, READY, PLAYING };
@@ -71,6 +75,8 @@ class RTSPSession {
       __attribute__((format(printf, 4, 5)));
   void stop_playing_();
   bool queue_next_packet_();
+  bool queue_next_h264_packet_();
+  void write_rtp_header_(uint8_t *buf, size_t rtp_len, bool marker, uint8_t payload_type);
   /// Releases the frame; the frame-backed rest of the current packet is sent as zeros to keep the framing.
   void drop_frame_();
   /// Writes what is queued; true once all of it is written, false while backlogged or after a failure.
@@ -81,6 +87,12 @@ class RTSPSession {
   std::shared_ptr<camera::CameraImage> frame_;
   JpegInfo jpeg_;
   size_t frame_sent_{0};
+  camera::ImageFormat format_{camera::IMAGE_FORMAT_JPEG};
+  bool need_key_{true};
+  bool nal_active_{false};
+  size_t nal_start_{0};
+  size_t nal_len_{0};
+  size_t nal_sent_{0};
 
   uint32_t cseq_{0};
   uint32_t rtp_timestamp_{0};

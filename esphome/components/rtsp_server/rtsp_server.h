@@ -27,6 +27,9 @@ class RTSPServer : public Component, public camera::CameraListener {
   float get_setup_priority() const override;
 
   void on_camera_image(const std::shared_ptr<camera::CameraImage> &image) override;
+  void set_initial_format(camera::ImageFormat format) { this->format_ = format; }
+  void set_format(camera::ImageFormat format);
+  camera::ImageFormat get_format() const { return this->format_; }
 #ifdef USE_SOCKET_IPV4_ALLOW
   void set_allow(const socket::Ipv4AllowEntry *entries, size_t count) { this->allow_.set(entries, count); }
 #endif
@@ -43,6 +46,8 @@ class RTSPServer : public Component, public camera::CameraListener {
   uint16_t port_;
   bool streaming_{false};
   bool frame_warned_{false};
+  camera::ImageFormat format_{camera::IMAGE_FORMAT_JPEG};
+  camera::ImageFormat stream_format_{camera::IMAGE_FORMAT_JPEG};
 };
 
 }  // namespace esphome::rtsp_server
