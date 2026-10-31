@@ -389,11 +389,63 @@ JSON_MESSAGE_AUTOMATION_SCHEMA = automation.validate_synchronous_automation(
     },
 )
 
+CONF_PUBLISH_DEFAULT = "publish_default"
+PUBLISH_WAYS = ("api", "mqtt", "both")
+_KEY_PUBLISH = "_publish"
+PublishWay = mqtt_ns.enum("PublishWay")
+PUBLISH_WAY_ENUM = {
+    "both": PublishWay.PUBLISH_BOTH,
+    "api": PublishWay.PUBLISH_API,
+    "mqtt": PublishWay.PUBLISH_MQTT,
+}
+
+
+def _entity_configs(value):
+    if isinstance(value, dict):
+        yield value
+        for item in value.values():
+            yield from _entity_configs(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _entity_configs(item)
+
+
+def _final_validate(config):
+    fconf = fv.full_config.get()
+    chosen = {}
+    for way in PUBLISH_WAYS:
+        for entity_id in config.get(f"publish_{way}", []):
+            if str(entity_id) in chosen:
+                raise cv.Invalid(f"{entity_id} is in more than one publish_ list", [f"publish_{way}"])
+            chosen[str(entity_id)] = way
+    if (chosen or config[CONF_PUBLISH_DEFAULT] != "both") and "api" not in fconf:
+        raise cv.Invalid("publishing per way needs the api: component next to mqtt:", [CONF_PUBLISH_DEFAULT])
+    publish = []
+    found = set()
+    for domain, conf in fconf.items():
+        if domain == "mqtt":
+            continue
+        for entity in _entity_configs(conf):
+            if CONF_MQTT_ID not in entity or CONF_ID not in entity:
+                continue
+            key = str(entity[CONF_ID])
+            found.add(key)
+            publish.append((entity[CONF_ID], entity[CONF_MQTT_ID], chosen.get(key, config[CONF_PUBLISH_DEFAULT])))
+    if missing := [key for key in chosen if key not in found]:
+        raise cv.Invalid(f"not an entity with MQTT support: {', '.join(missing)}")
+    config[_KEY_PUBLISH] = publish if "api" in fconf else []
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(MQTTClientComponent),
             cv.Required(CONF_BROKER): cv.string_strict,
+            cv.Optional(CONF_PUBLISH_DEFAULT, default="both"): cv.one_of(*PUBLISH_WAYS, lower=True),
+            cv.Optional("publish_api"): cv.ensure_list(cv.use_id(cg.EntityBase)),
+            cv.Optional("publish_mqtt"): cv.ensure_list(cv.use_id(cg.EntityBase)),
+            cv.Optional("publish_both"): cv.ensure_list(cv.use_id(cg.EntityBase)),
             cv.Optional(CONF_ENABLE_ON_BOOT, default=True): cv.boolean,
             cv.Optional(CONF_PORT): cv.port,
             cv.Optional(CONF_USERNAME, default=""): cv.string,
@@ -614,7 +666,7 @@ def _validate_topic_lengths(config: ConfigType) -> ConfigType:
     return config
 
 
-FINAL_VALIDATE_SCHEMA = _validate_topic_lengths
+FINAL_VALIDATE_SCHEMA = cv.All(_final_validate, _validate_topic_lengths)
 
 
 def exp_mqtt_message(
@@ -677,6 +729,13 @@ async def to_code(config):
         # The session fingerprint, a uint32_t kept in RTC memory
         preferences.reserve_preferences(1, 4, in_flash=False)
     cg.add_optional(var.set_client_id, config.get(CONF_CLIENT_ID))
+
+    if publish := config.get(_KEY_PUBLISH):
+        cg.add(var.set_publish_count(len(publish)))
+        for entity_id, mqtt_id, way in publish:
+            entity = await cg.get_variable(entity_id)
+            component = await cg.get_variable(mqtt_id)
+            cg.add(var.add_publish_entry(entity, component, PUBLISH_WAY_ENUM[way]))
 
     discovery = config[CONF_DISCOVERY]
     discovery_retain = config[CONF_DISCOVERY_RETAIN]
