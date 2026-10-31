@@ -1,4 +1,5 @@
 #ifdef USE_ESP32_VARIANT_ESP32P4
+#include <algorithm>
 #include <utility>
 #include "mipi_dsi.h"
 #include "esphome/core/helpers.h"
@@ -13,11 +14,25 @@ namespace esphome::mipi_dsi {
 // Maximum bytes to log for init commands (truncated if larger)
 static constexpr size_t MIPI_DSI_MAX_CMD_LOG_BYTES = 64;
 
-static bool notify_refresh_ready(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx) {
-  SemaphoreHandle_t sem = static_cast<SemaphoreHandle_t>(user_ctx);
+bool MipiDsi::notify_refresh_ready_(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata,
+                                    void *user_ctx) {
   BaseType_t need_yield = pdFALSE;
-  xSemaphoreGiveFromISR(sem, &need_yield);
+  xSemaphoreGiveFromISR(static_cast<MipiDsi *>(user_ctx)->io_lock_, &need_yield);
   return (need_yield == pdTRUE);
+}
+
+bool MipiDsi::notify_frame_started_(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata,
+                                    void *user_ctx) {
+  auto *self = static_cast<MipiDsi *>(user_ctx);
+  const uint32_t frames = self->scan_frames_.fetch_add(1, std::memory_order_acq_rel) + 1;
+  if (self->flip_waiting_.load(std::memory_order_acquire) &&
+      static_cast<int32_t>(frames - self->flip_frame_.load(std::memory_order_acquire)) >= 0) {
+    self->flip_waiting_.store(false, std::memory_order_release);
+    BaseType_t need_yield = pdFALSE;
+    xSemaphoreGiveFromISR(self->flip_sem_, &need_yield);
+    return need_yield == pdTRUE;
+  }
+  return false;
 }
 
 void MipiDsi::smark_failed(const LogString *message, esp_err_t err) {
@@ -79,7 +94,7 @@ void MipiDsi::setup() {
                                            .dpi_clock_freq_mhz = this->pclk_frequency_,
                                            .pixel_format = pixel_format,
 #endif
-                                           .num_fbs = 1,  // number of frame buffers to allocate
+                                           .num_fbs = this->num_fbs_,
                                            .video_timing =
                                                {
                                                    .h_size = this->width_,
@@ -134,17 +149,79 @@ void MipiDsi::setup() {
   if (!this->generic_commands_ && !this->send_init_sequence_(when))
     return;
   this->io_lock_ = xSemaphoreCreateBinary();
-  esp_lcd_dpi_panel_event_callbacks_t cbs = {
-      .on_color_trans_done = notify_refresh_ready,
-  };
+  this->flip_sem_ = xSemaphoreCreateBinary();
+  esp_lcd_dpi_panel_event_callbacks_t cbs = {};
+  cbs.on_color_trans_done = notify_refresh_ready_;
+  cbs.on_frame_buf_complete = notify_frame_started_;
 
-  err = (esp_lcd_dpi_panel_register_event_callbacks(this->handle_, &cbs, this->io_lock_));
+  err = (esp_lcd_dpi_panel_register_event_callbacks(this->handle_, &cbs, this));
   if (err != ESP_OK) {
     this->smark_failed(LOG_STR("Failed to register callbacks"), err);
     return;
   }
 
+  if (this->num_fbs_ >= 2) {
+    esp_err_t fberr;
+    if (this->num_fbs_ >= 3) {
+      fberr = esp_lcd_dpi_panel_get_frame_buffer(this->handle_, 3, &this->dsi_fbs_[0], &this->dsi_fbs_[1],
+                                                 &this->dsi_fbs_[2]);
+    } else {
+      fberr = esp_lcd_dpi_panel_get_frame_buffer(this->handle_, 2, &this->dsi_fbs_[0], &this->dsi_fbs_[1]);
+    }
+    if (fberr != ESP_OK) {
+      ESP_LOGW(TAG, "esp_lcd_dpi_panel_get_frame_buffer failed: %s", esp_err_to_name(fberr));
+      this->dsi_fbs_[0] = this->dsi_fbs_[1] = this->dsi_fbs_[2] = nullptr;
+    }
+    this->draw_fb_ = this->dsi_fbs_[0];
+  } else if (esp_lcd_dpi_panel_get_frame_buffer(this->handle_, 1, &this->draw_fb_) != ESP_OK) {
+    this->draw_fb_ = nullptr;
+  }
+
   ESP_LOGCONFIG(TAG, "MIPI DSI setup complete");
+}
+
+void MipiDsi::present_dsi_frame_buffer(void *fb) {
+  esp_lcd_panel_draw_bitmap(this->handle_, 0, 0, this->width_, this->height_, fb);
+  xSemaphoreTake(this->io_lock_, 0);
+  this->draw_fb_ = fb;
+}
+
+uint8_t MipiDsi::get_scanout_buffers(void **out, uint8_t max, display::ColorBitness *bitness) {
+  if (this->dsi_fbs_[0] == nullptr)
+    return 0;
+  const uint8_t count = std::min<uint8_t>(std::min<uint8_t>(this->num_fbs_, 3), max);
+  for (uint8_t i = 0; i < count; i++)
+    out[i] = this->dsi_fbs_[i];
+  *bitness = this->color_depth_;
+  return count;
+}
+
+void MipiDsi::present_scanout_buffer(void *buffer) {
+  esp_lcd_panel_draw_bitmap(this->handle_, 0, 0, 1, 1, buffer);
+  xSemaphoreTake(this->io_lock_, 0);
+  this->draw_fb_ = buffer;
+  this->flip_frame_.store(this->scan_frames_.load(std::memory_order_acquire) + 1, std::memory_order_release);
+}
+
+uint8_t *MipiDsi::get_draw_buffer(display::ColorBitness *bitness) {
+  *bitness = this->color_depth_;
+  return static_cast<uint8_t *>(this->draw_fb_);
+}
+
+bool MipiDsi::scanout_flipped() {
+  return static_cast<int32_t>(this->scan_frames_.load(std::memory_order_acquire) -
+                              this->flip_frame_.load(std::memory_order_acquire)) >= 0;
+}
+
+bool MipiDsi::wait_scanout_flipped(uint32_t timeout_ms) {
+  if (this->scanout_flipped() || this->flip_sem_ == nullptr)
+    return this->scanout_flipped();
+  xSemaphoreTake(this->flip_sem_, 0);
+  this->flip_waiting_.store(true, std::memory_order_release);
+  if (!this->scanout_flipped())
+    xSemaphoreTake(this->flip_sem_, pdMS_TO_TICKS(timeout_ms));
+  this->flip_waiting_.store(false, std::memory_order_release);
+  return this->scanout_flipped();
 }
 
 void MipiDsi::update() {
