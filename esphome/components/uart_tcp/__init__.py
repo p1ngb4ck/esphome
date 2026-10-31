@@ -18,6 +18,7 @@ from esphome.const import (
 )
 from esphome.core import CORE
 import esphome.final_validate as fv
+from esphome.helpers import fnv1_hash
 from esphome.types import ConfigType
 
 CODEOWNERS = ["@Bascht74"]
@@ -62,16 +63,6 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
-def _reject_dummy_receiver(uart_conf: ConfigType) -> ConfigType:
-    debug = uart_conf.get(CONF_DEBUG)
-    if isinstance(debug, dict) and debug.get(CONF_DUMMY_RECEIVER):
-        raise cv.Invalid(
-            "dummy_receiver reads this UART and drops the bytes uart_tcp should forward.",
-            [CONF_DEBUG, CONF_DUMMY_RECEIVER],
-        )
-    return uart_conf
-
-
 def _final_validate(config: ConfigType) -> ConfigType:
     # A second reader would split the bytes with this one, and every connect
     # discards what the other reader has not read yet.
@@ -107,14 +98,16 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 
 async def to_code(config: ConfigType) -> None:
     var = await uart.new_uart_component(config)
+    # Both roles and the allow list are compiled; the runtime settings switch them.
+    socket.require_tcp_listener()
+    cg.add_define("USE_SOCKET_IPV4_ALLOW")
     if config[CONF_ROLE] == "server":
-        socket.require_tcp_listener()
         cg.add(var.set_server(True))
         socket.add_ipv4_allow(
             var.set_allow, config.get(CONF_ALLOWED_IPS), config[CONF_ID]
         )
-    else:
-        socket.require_tcp_client_link()
+    settings_key = fnv1_hash(f"uart_tcp_settings:{config[CONF_ID].id}")
+    cg.add(var.set_settings_key(settings_key))
     cg.add(var.set_port(config[CONF_PORT]))
     cg.add(var.set_reconnect_interval(config[CONF_RECONNECT_INTERVAL]))
     if (timeout := config[CONF_TIMEOUT]).total_milliseconds > 0:

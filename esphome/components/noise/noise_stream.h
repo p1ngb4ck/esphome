@@ -43,6 +43,13 @@ class NoiseStream {
   /// tag names the owner's log lines.
   void set_log_tag(const char *tag) { this->tag_ = tag; }
   bool ready() const { return this->state_ == State::STATE_READY; }
+  /// Which side starts the handshake; change it only while the link is closed.
+  void set_initiator(bool initiator) {
+    this->reset();
+    this->hold_ms_ = 0;
+    this->backoff_ms_ = 0;
+    this->initiator_ = initiator;
+  }
 
 #ifdef USE_NOISE_STREAM_RUNTIME_KEY
   /// Keys a runtime key must differ from, because the peer device holds it: the api's, also one it gets at
