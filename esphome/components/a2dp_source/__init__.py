@@ -7,7 +7,7 @@ from esphome.components.esp32 import (
     add_idf_sdkconfig_option,
     get_esp32_variant,
 )
-from esphome.components.esp32.const import VARIANT_ESP32
+from esphome.components.esp32.const import VARIANT_ESP32, VARIANT_ESP32S31
 from esphome.components.psram import DOMAIN as PSRAM_DOMAIN
 import esphome.config_validation as cv
 from esphome.const import (
@@ -168,6 +168,10 @@ def _external_host(full_config) -> bool:
     return any(c.get("bluedroid") for c in full_config.get("usb_bluetooth") or [])
 
 
+def _shared_host(full_config) -> bool:
+    return get_esp32_variant() == VARIANT_ESP32S31 and "esp32_ble" in full_config
+
+
 # The helper validates a microphone source block, not a whole component config,
 # so it has to be addressed at the key it belongs to.
 _MICROPHONE_FINAL_VALIDATE = cv.Schema(
@@ -185,11 +189,12 @@ _MICROPHONE_FINAL_VALIDATE = cv.Schema(
 def _final_validate(config):
     if (
         not _external_host(fv.full_config.get())
+        and not _shared_host(fv.full_config.get())
         and get_esp32_variant() != VARIANT_ESP32
     ):
         raise cv.Invalid(
-            "a2dp_source needs the original ESP32's Classic radio, or a usb_bluetooth "
-            "dongle with bluedroid: true"
+            "a2dp_source needs the original ESP32's Classic radio, the ESP32-S31's with "
+            "esp32_ble, or a usb_bluetooth dongle with bluedroid: true"
         )
     return _MICROPHONE_FINAL_VALIDATE(config)
 
@@ -263,7 +268,7 @@ async def to_code(config):
         # in caps-only mode is internal RAM: a slow sink then starves the device.
         add_idf_sdkconfig_option("CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST", True)
 
-    if _external_host(CORE.config):
+    if _external_host(CORE.config) or _shared_host(CORE.config):
         # Bluedroid and the controller are usb_bluetooth's (BLE may be the
         # co-processor's): only the profile is added here.
         cg.add_define("USE_A2DP_SOURCE_EXTERNAL_HOST")
