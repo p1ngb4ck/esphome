@@ -2,10 +2,10 @@
 
 ESPHome `dev` plus the Bluetooth host and HID parts of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome)
 `testing_dev` as they are today: Classic GAP dispatch, pairing records and slots, Bluedroid data persistence,
-Classic and BLE HID, BLE advertisement data, the Bluedroid start order, the C6 offload. One branch per change;
+Classic and BLE HID, BLE advertisement data, Bluetooth audio (A2DP source), the Bluedroid start order, the C6 offload. One branch per change;
 `main` contains every branch. Base: ESPHome `dev` at `1f70f86b47`. The code is taken over unchanged from
 `testing_dev` (components identical; the lines in esp32_ble, ble_client, api and esp32_hosted assigned by
-`git blame`). Bluetooth audio (`a2dp_source`) is in esphome-bt-audio, the USB dongle (`usb_bluetooth`) in
+`git blame`). The USB dongle (`usb_bluetooth`) is in
 [esphome-usb-drivers](https://github.com/p1ngb4ck/esphome-usb-drivers).
 
 A rework into one host component (scan, pairing, security, bonding for BLE and Classic) with the profiles as drivers
@@ -21,6 +21,9 @@ is planned with Olli; these branches are the state it starts from.
 | `pr/bt-classic` | `bt_classic`: one Classic GAP callback with handlers and fallbacks, the shared IO capability and PIN type, BTDM dual mode on the ESP32-S31 | S31 on chip; others with a dongle | - |
 | `pr/bt-persistence` | `bt_persistence`: Bluedroid's pairing data and GATT cache in PSRAM, saved to a storage file (`backend: storage`) or NVS | with esp32_ble or usb_bluetooth | `pr/storage` |
 | `pr/bt-pairing-hid` | `bt_pairing` (pairing records, slots, device list, status events), `bt_hid` (Classic HID host), `ble_client_hid` (BLE HID), `ble_broadcast` (BLE advertisement data) with the ble_client / esp32_ble / api hooks they use; one branch because `bt_pairing` creates the slots of the other three | see below | `pr/bt-classic`, `pr/hid`, `pr/storage` |
+| `pr/esp32-ble-tracker-classic-scan-window` | the defaulted BLE scan window stays 30 ms when Bluetooth Classic runs on the same radio | ESP32, S31 | - |
+| `pr/esp32-ble-tracker-pause-scan` | `pause_scan` / `resume_scan`: BLE scanning paused while A2DP streams on the chip's own radio | ESP32, S31 | - |
+| `pr/a2dp-source` | `a2dp_source`: A2DP source with AVRCP (vendored ESP32-A2DP library) - speaker, device select, volume, microphone source, reconnect, `idle_timeout` | ESP32 on chip; S31 on chip (with esp32_ble); others with a usb_bluetooth bluedroid dongle | `pr/bt-pairing-hid`, `pr/esp32-ble-tracker-pause-scan` |
 | `pr/bt-offload` | `bt_offload`: Bluetooth HID input and speaker offloaded to the C6 (custom firmware), the 16 peer data handlers of esp32_hosted on the P4 | P4 with C6 | `pr/usb-bluetooth` |
 
 Chips as the code declares today: `ble_client_hid` and `ble_broadcast` on every chip with BLE (the P4 through the
@@ -39,7 +42,7 @@ That is one of the points of the planned rework.
 external_components:
   - source: github://p1ngb4ck/esphome-bluetooth@main
     components: [esp32, esp32_ble, ble_client, bt_classic, bt_pairing, bt_hid, ble_client_hid, ble_broadcast,
-                 bt_persistence, hid, storage, wifi]
+                 bt_persistence, hid, storage, wifi, esp32_ble_tracker, a2dp_source]
 
 esp32_ble:
   enable_on_boot: true
