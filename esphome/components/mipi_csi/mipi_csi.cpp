@@ -8,6 +8,8 @@
 #include <cstring>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <esp_cache.h>
+#include <esp_heap_caps.h>
 #include <unistd.h>
 
 #include <driver/i2c_master.h>
@@ -65,10 +67,14 @@ static void format_fourcc(uint32_t fourcc, FourccName out) {
 /* ---------------- MipiCsiCamera: setup ---------------- */
 
 void MipiCsiCamera::setup() {
+  if (this->alloc_ == nullptr || this->free_ == nullptr) {
   }
+  if (!this->start_external_clock_()) {
     this->mark_failed();
     return;
   }
+  // Nothing more until an image or a stream is asked for (start_capture_)
+  this->disable_loop();
 }
 
 bool MipiCsiCamera::start_external_clock_() {
@@ -267,6 +273,7 @@ bool MipiCsiCamera::configure_device_() {
   if (!this->read_back_format_(mapping.fourcc, mapping.bytes_per_pixel, mapping.name))
     return false;
 
+  return true;
 }
 
 bool MipiCsiCamera::read_back_format_(uint32_t expected_fourcc, uint8_t bytes_per_pixel, const char *name) {
@@ -317,14 +324,84 @@ void MipiCsiCamera::apply_control_(uint32_t id, int32_t value, const char *name)
   }
 }
 
+static size_t align_piece(size_t size) { return (size + 127) & ~static_cast<size_t>(127); }
+
+bool MipiCsiCamera::open_jpeg_() {
+  if (this->encoder_.is_open())
+    return true;
+  jpeg_encoder_handle_t engine = this->jpeg_engine_ != nullptr ? this->jpeg_engine_() : nullptr;
+  if (engine == nullptr) {
     return false;
   }
+  const size_t jpeg_size = align_piece(JpegEncoder::output_size_for(this->expected_frame_size_));
+  this->jpeg_output_ = this->alloc_(jpeg_size);
+  if (this->jpeg_output_ == nullptr) {
+    ESP_LOGE(TAG, "No room for the JPEG output (%zu bytes)", jpeg_size);
+    return false;
+  }
+  const FormatMapping mapping = get_format_mapping(this->pixel_format_);
+  this->encoder_.open(engine, this->width_, this->height_, mapping.jpeg_input, mapping.sub_sample, this->jpeg_quality_,
+                      this->jpeg_output_, jpeg_size);
+  return true;
+}
+
+void MipiCsiCamera::close_jpeg_() {
+  this->encoder_.close();
+  if (this->jpeg_output_ != nullptr) {
+    this->free_(this->jpeg_output_);
+    this->jpeg_output_ = nullptr;
+  }
+}
+
+bool MipiCsiCamera::queue_buffer_(uint32_t index) {
+  v4l2_buffer buffer{};
+  buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  buffer.memory = V4L2_MEMORY_USERPTR;
+  buffer.index = index;
+  buffer.m.userptr = reinterpret_cast<unsigned long>(this->buffers_[index].data);
+  buffer.length = this->buffers_[index].length;
+  return ioctl(this->fd_, VIDIOC_QBUF, &buffer) == 0;
+}
+
+bool MipiCsiCamera::start_capture_() {
+  if (!this->init_video_()) {
+    this->finish_stop_();
+    return false;
+  }
+  this->video_ready_ = true;
+  if (!this->configure_device_()) {
+    this->finish_stop_();
     return false;
   }
 
+  // The frames (one of them the driver's reserve: its own backup buffer is off), all from the allocator
+  const size_t frame_piece = align_piece(this->expected_frame_size_);
+  if (!this->buffers_.try_init(this->frame_buffer_count_)) {
+    this->finish_stop_();
+    return false;
+  }
+  for (uint8_t i = 0; i < this->frame_buffer_count_; i++) {
+    uint8_t *data = this->alloc_(frame_piece);
+    if (data == nullptr) {
+      ESP_LOGE(TAG, "No room for frame buffer %u (%zu bytes)", i, frame_piece);
+      this->finish_stop_();
       return false;
     }
+    this->buffers_.push_back({data, frame_piece});
+  }
+  v4l2_requestbuffers request{};
+  request.count = this->frame_buffer_count_;
+  request.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  request.memory = V4L2_MEMORY_USERPTR;
+  if (ioctl(this->fd_, VIDIOC_REQBUFS, &request) != 0 || request.count != this->frame_buffer_count_) {
+    ESP_LOGE(TAG, "Requesting %u frame buffers failed: %s", this->frame_buffer_count_, strerror(errno));
+    this->finish_stop_();
+    return false;
+  }
+  for (uint32_t i = 0; i < request.count; i++) {
+    if (!this->queue_buffer_(i)) {
       ESP_LOGE(TAG, "Queueing frame buffer %" PRIu32 " failed: %s", i, strerror(errno));
+      this->finish_stop_();
       return false;
     }
   }
@@ -332,18 +409,79 @@ void MipiCsiCamera::apply_control_(uint32_t id, int32_t value, const char *name)
   int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   if (ioctl(this->fd_, VIDIOC_STREAMON, &type) != 0) {
     ESP_LOGE(TAG, "Starting the video stream failed: %s", strerror(errno));
+    this->finish_stop_();
     return false;
   }
+
+  // The capture task: its stack from the allocator, its TCB internal (FreeRTOS needs it there); both only while
+  // streaming
+  this->capture_tcb_ =
+      static_cast<StaticTask_t *>(heap_caps_calloc(1, sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  this->capture_stack_ = this->alloc_(CAPTURE_TASK_STACK_SIZE);
+  if (this->capture_tcb_ != nullptr && this->capture_stack_ != nullptr) {
+    this->capture_task_handle_ = xTaskCreateStaticPinnedToCore(
+        &MipiCsiCamera::capture_task, "mipi_csi", CAPTURE_TASK_STACK_SIZE, this, CAPTURE_TASK_PRIORITY,
+        reinterpret_cast<StackType_t *>(this->capture_stack_), this->capture_tcb_, CAPTURE_TASK_CORE);
+  }
+  if (this->capture_task_handle_ == nullptr) {
+    ESP_LOGE(TAG, "No room for the capture task");
+    this->finish_stop_();
+    return false;
+  }
+  this->state_ = State::RUNNING;
+  ESP_LOGD(TAG, "Streaming: %u frames of %zu bytes", this->frame_buffer_count_, frame_piece);
   return true;
 }
 
+void MipiCsiCamera::finish_stop_() {
+  // The task has parked itself (suspended, nothing left to do): deleting it is safe; its stack and TCB go after
   if (this->capture_task_handle_ != nullptr) {
     vTaskDelete(this->capture_task_handle_);
     this->capture_task_handle_ = nullptr;
   }
+  if (this->fd_ >= 0) {
+    // Ignored if the stream was never turned on
+    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    ioctl(this->fd_, VIDIOC_STREAMOFF, &type);
+    v4l2_requestbuffers release{};
+    release.count = 0;
+    release.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    release.memory = V4L2_MEMORY_USERPTR;
+    ioctl(this->fd_, VIDIOC_REQBUFS, &release);
+    close(this->fd_);
+    this->fd_ = -1;
+  }
+  this->close_jpeg_();
+  if (this->capture_tcb_ != nullptr) {
+    heap_caps_free(this->capture_tcb_);
+    this->capture_tcb_ = nullptr;
+  }
+  if (this->capture_stack_ != nullptr) {
+    this->free_(this->capture_stack_);
+    this->capture_stack_ = nullptr;
+  }
   for (auto &buffer : this->buffers_) {
+    this->free_(buffer.data);
   }
   this->buffers_.release();
+  if (this->video_ready_) {
+    esp_video_deinit_with_flags(ESP_VIDEO_INIT_FLAGS_MIPI_CSI | ESP_VIDEO_INIT_FLAGS_ISP);
+    this->video_ready_ = false;
+  }
+  this->current_image_.reset();
+  if (this->preview_released_ != nullptr) {
+    uint8_t *released = this->preview_released_;
+    this->preview_released_ = nullptr;
+    this->preview_released_callback_.call(released);
+  }
+  this->preview_wanted_.store(false);
+  this->preview_ready_.store(false);
+  this->frame_wanted_.store(false);
+  this->result_ready_.store(false);
+  this->stop_wanted_.store(false);
+  this->parked_.store(false);
+  this->failed_.store(false);
+  this->state_ = State::IDLE;
 }
 
 static const char *flip_state(const optional<bool> &flip) {
@@ -374,21 +512,103 @@ void MipiCsiCamera::dump_config() {
 void MipiCsiCamera::capture_task(void *param) {
   auto *self = static_cast<MipiCsiCamera *>(param);
 
+  // The stream runs while anything is asked for, so that the ISP's auto exposure and white balance stay
+  // converged. Frames nobody asked for go straight back to the driver.
+  while (!self->stop_wanted_.load()) {
     v4l2_buffer buffer{};
     buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buffer.memory = V4L2_MEMORY_USERPTR;
     if (ioctl(self->fd_, VIDIOC_DQBUF, &buffer) != 0) {
       ESP_LOGW(TAG, "Dequeueing a frame failed: %s", strerror(errno));
+      self->failed_.store(true);
+      break;
     }
 
+      // The encoder is handed the whole buffer, as Espressif's reference does: the length is what
+      // bounds the cache invalidation before the JPEG engine's DMA reads it.
+      const FrameBuffer &frame = self->buffers_[buffer.index];
+      // 0 tells the main loop that the request was not served, so a still image request is not dropped
+      self->result_length_.store(self->encoder_.encode(frame.data, frame.length));
+      self->result_ready_.store(true);
+      // Cleared last, so that an unset flag always means the result is already there
       self->frame_wanted_.store(false);
+      self->enable_loop_soon_any_context();
+      App.wake_loop_threadsafe();
     }
 
+    // Busy first, then the buffer read: a buffer ended meanwhile is either seen as gone or waited for (loop)
+    self->preview_busy_.store(true);
+    uint8_t *target = self->preview_buffer_.load();
+    if (target != nullptr && self->preview_wanted_.load() && (buffer.flags & V4L2_BUF_FLAG_ERROR) == 0) {
+      const FrameBuffer &frame = self->buffers_[buffer.index];
+      // The frame came by DMA: the cache lines over it are dropped before the CPU reads it
+      esp_cache_msync(frame.data, frame.length, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+      memcpy(target, frame.data, std::min(self->preview_size_, self->expected_frame_size_));
+      self->preview_wanted_.store(false);
+      self->preview_ready_.store(true);
+    }
+    self->preview_busy_.store(false);
+    if (self->preview_ready_.load() || self->preview_released_ != nullptr) {
+      self->enable_loop_soon_any_context();
+      App.wake_loop_threadsafe();
+    }
+
+    if (!self->queue_buffer_(buffer.index)) {
       ESP_LOGW(TAG, "Returning a frame buffer failed: %s", strerror(errno));
     }
   }
+  // Parked: the main loop deletes this task and gives back its stack, the buffers and esp_video
+  self->parked_.store(true);
+  self->enable_loop_soon_any_context();
+  App.wake_loop_threadsafe();
+  vTaskSuspend(nullptr);
 }
 
 void MipiCsiCamera::loop() {
+  // Event driven: woken by a request, a finished frame, an image given back or the task parking
+  if (this->state_ == State::IDLE) {
+    if (!this->has_requested_image_()) {
+      this->disable_loop();
+      return;
+    }
+    if (!this->start_capture_()) {
+      ESP_LOGE(TAG, "The camera could not start; the requests are dropped");
+      this->single_requesters_ = 0;
+      this->stream_requesters_ = 0;
+      this->disable_loop();
+      return;
+    }
+  }
+
+  if (this->state_ == State::STOPPING || this->parked_.load()) {
+    if (!this->parked_.load()) {
+      this->disable_loop();  // the task wakes the loop once it has parked
+      return;
+    }
+    const bool failed = this->failed_.load();
+    this->finish_stop_();
+    if (failed) {
+      ESP_LOGE(TAG, "The stream failed; the requests are dropped");
+      this->single_requesters_ = 0;
+      this->stream_requesters_ = 0;
+    }
+    if (!this->has_requested_image_())
+      this->disable_loop();
+    return;
+  }
+
+  if (this->preview_released_ != nullptr && !this->preview_busy_.load()) {
+    uint8_t *released = this->preview_released_;
+    this->preview_released_ = nullptr;
+    this->preview_released_callback_.call(released);
+  }
+  if (this->preview_ready_.load()) {
+    this->preview_ready_.store(false);
+    if (this->preview_buffer_.load() != nullptr)
+      this->preview_callback_.call();
+  }
+  if (this->preview_buffer_.load() != nullptr && !this->preview_wanted_.load())
+    this->preview_wanted_.store(true);
 
   // Release the previous image once every consumer has finished reading it, which frees the
   // encoder's output buffer for the next frame.
@@ -396,24 +616,82 @@ void MipiCsiCamera::loop() {
     this->current_image_.reset();
   }
 
+  if (!this->current_image_ && this->result_ready_.load()) {
+    this->result_ready_.store(false);
+    const size_t length = this->result_length_.load();
+    if (length == 0) {
+      // Encoding failed. Hand the one-shot requests back so the clients waiting for a still image
+      // are served by the next frame instead of waiting forever. Streams ask again on their own.
+      this->single_requesters_ |= static_cast<uint8_t>(this->pending_requesters_ & ~this->stream_requesters_.load());
+      this->pending_requesters_ = 0;
+    } else {
       this->current_image_ =
           std::make_shared<MipiCsiImage>(this->encoder_.get_output_buffer(), length, this->pending_requesters_);
       this->pending_requesters_ = 0;
       for (auto *listener : this->listeners_) {
         listener->on_camera_image(this->current_image_);
       }
+      // Nobody kept it (no reader took it): free for the next frame at once
+      if (this->current_image_.use_count() == 1)
+        this->current_image_.reset();
     }
   }
 
+  // An image still being read, or a frame on its way: the reader / the task wakes the loop again
+  if (this->current_image_ || this->frame_wanted_.load()) {
+    this->disable_loop();
     return;
+  }
+    this->close_jpeg_();   // no API image wanted: the JPEG output back to the pool
     return;
+  }
+  if (!this->has_requested_image_()) {
+    // Nothing asked for: the task stops taking frames and parks, then everything is given back
+    this->state_ = State::STOPPING;
+    this->stop_wanted_.store(true);
+    this->disable_loop();
+    return;
+  }
+  if (!this->open_jpeg_()) {
+    ESP_LOGE(TAG, "No JPEG for the image requests; they are dropped");
+    this->single_requesters_ = 0;
+    this->stream_requesters_ = 0;
+    this->enable_loop();  // the stop (or the preview) follows on the next pass
+    return;
+  }
   this->pending_requesters_ = this->single_requesters_ | this->stream_requesters_;
   this->single_requesters_ = 0;
   this->frame_wanted_.store(true);
+  this->disable_loop();
 }
 
 /* ---------------- MipiCsiCamera: requests ---------------- */
 
+uint8_t MipiCsiCamera::bytes_per_pixel_() const { return get_format_mapping(this->pixel_format_).bytes_per_pixel; }
+
+void MipiCsiCamera::set_preview_buffer(uint8_t *buffer, size_t size) {
+  uint8_t *old = this->preview_buffer_.exchange(buffer);
+  this->preview_size_ = size;
+  this->preview_wanted_.store(false);
+  this->preview_ready_.store(false);
+  if (old != nullptr && old != buffer) {
+    if (this->state_ == State::IDLE) {
+      this->preview_released_callback_.call(old);  // no task: nothing copies into it
+    } else {
+      // An earlier one still waiting is not the task's target any more: back at once; this one once the task is not
+      // copying (loop)
+      if (this->preview_released_ != nullptr)
+        this->preview_released_callback_.call(this->preview_released_);
+      this->preview_released_ = old;
+    }
+  }
+  this->enable_loop_soon_any_context();
+}
+
+
+void MipiCsiCamera::request_image(camera::CameraRequester requester) {
+  this->single_requesters_ |= (1U << requester);
+  this->enable_loop_soon_any_context();
 }
 
 void MipiCsiCamera::start_stream(camera::CameraRequester requester) {
@@ -421,6 +699,7 @@ void MipiCsiCamera::start_stream(camera::CameraRequester requester) {
     listener->on_stream_start();
   }
   this->stream_requesters_ |= (1U << requester);
+  this->enable_loop_soon_any_context();
 }
 
 void MipiCsiCamera::stop_stream(camera::CameraRequester requester) {
@@ -428,6 +707,7 @@ void MipiCsiCamera::stop_stream(camera::CameraRequester requester) {
     listener->on_stream_stop();
   }
   this->stream_requesters_ &= ~(1U << requester);
+  this->enable_loop_soon_any_context();
 }
 
 /* ---------------- MipiCsiImageReader ---------------- */
@@ -447,6 +727,10 @@ uint8_t *MipiCsiImageReader::peek_data_buffer() { return this->image_->get_data_
 
 void MipiCsiImageReader::consume_data(size_t consumed) { this->offset_ += consumed; }
 
+void MipiCsiImageReader::return_image() {
+  this->image_.reset();
+  this->parent_->on_image_returned();
+}
 
 }  // namespace esphome::mipi_csi
 

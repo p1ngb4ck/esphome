@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 import re
 
 from esphome import automation, pins
@@ -18,6 +19,7 @@ from esphome.const import (
     CONF_TRIGGER_ID,
     Framework,
 )
+from esphome.core import CORE
 from esphome.core.entity_helpers import setup_entity
 from esphome.types import ConfigType
 
@@ -30,6 +32,8 @@ from .const import (
     CONF_JPEG_QUALITY,
     CONF_ON_IMAGE,
     CONF_ON_STREAM_START,
+    CONF_ON_PREVIEW_FRAME,
+    CONF_ON_PREVIEW_RELEASED,
     CONF_ON_STREAM_STOP,
     CONF_PIXEL_FORMAT,
     CONF_POWER_PIN,
@@ -58,6 +62,12 @@ MipiCsiStreamStartTrigger = mipi_csi_ns.class_(
 )
 MipiCsiStreamStopTrigger = mipi_csi_ns.class_(
     "MipiCsiStreamStopTrigger", automation.Trigger.template()
+)
+MipiCsiPreviewFrameTrigger = mipi_csi_ns.class_(
+    "MipiCsiPreviewFrameTrigger", automation.Trigger.template()
+)
+MipiCsiPreviewReleasedTrigger = mipi_csi_ns.class_(
+    "MipiCsiPreviewReleasedTrigger", automation.Trigger.template(cg.uint8.operator("ptr"))
 )
 
 PixelFormat = mipi_csi_ns.enum("PixelFormat", is_class=True)
@@ -117,6 +127,8 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_FRAMERATE, default="10 fps"): cv.All(
                 cv.framerate, cv.Range(min=1, max=60)
             ),
+            # One of them is the driver's reserve (its own backup buffer is off): all from the buffer allocator
+            cv.Optional(CONF_FRAME_BUFFER_COUNT, default=4): cv.int_range(min=2, max=4),
             cv.Optional(CONF_INIT_LDO, default=True): cv.boolean,
             cv.Optional(CONF_HORIZONTAL_FLIP): cv.boolean,
             cv.Optional(CONF_VERTICAL_FLIP): cv.boolean,
@@ -150,6 +162,13 @@ CONFIG_SCHEMA = cv.All(
             ),
             cv.Optional(CONF_ON_IMAGE): automation.validate_automation(
                 {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(MipiCsiImageTrigger)}
+            ),
+            # set_preview_buffer(): each frame copied into it; the buffer handed back when the preview ends
+            cv.Optional(CONF_ON_PREVIEW_FRAME): automation.validate_automation(
+                {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(MipiCsiPreviewFrameTrigger)}
+            ),
+            cv.Optional(CONF_ON_PREVIEW_RELEASED): automation.validate_automation(
+                {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(MipiCsiPreviewReleasedTrigger)}
             ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
@@ -200,6 +219,8 @@ async def to_code(config: ConfigType) -> None:
         (CONF_ON_STREAM_START, []),
         (CONF_ON_STREAM_STOP, []),
         (CONF_ON_IMAGE, [(CameraImageData, "image")]),
+        (CONF_ON_PREVIEW_FRAME, []),
+        (CONF_ON_PREVIEW_RELEASED, [(cg.uint8.operator("ptr"), "buffer")]),
     ):
         for conf in config.get(conf_key, []):
             trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
@@ -208,7 +229,68 @@ async def to_code(config: ConfigType) -> None:
     _add_idf_config(config)
 
 
+_ESP_VIDEO_OVERRIDE_MARKER = ".esphome_mipi_csi_patch"
+
+
+def _sync_esp_video_override() -> str:
+    """esp_video downloaded, its UVC device removed (idf_video_patch.py), in the build's components-src."""
+    import io
+    import shutil
+    import zipfile
+
+    from esphome.external_files import compute_local_file_path, download_content
+
+    from . import idf_video_patch as patch
+
+    dest = Path(CORE.build_path) / "components-src" / "espressif__esp_video"
+    marker = dest / _ESP_VIDEO_OVERRIDE_MARKER
+    if marker.is_file() and marker.read_text() == patch.PATCH_STAMP:
+        return str(dest)
+
+    archive = download_content(
+        patch.ESP_VIDEO_URL,
+        compute_local_file_path("mipi_csi", patch.ESP_VIDEO_URL),
+    )
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        zf.extractall(dest)
+
+    for rel in patch.REMOVED:
+        target = dest / rel
+        if not target.exists():
+            raise cv.Invalid(
+                f"mipi_csi: {rel} is missing from esp_video {patch.ESP_VIDEO_VERSION}; "
+                f"the UVC removal does not fit this version"
+            )
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+    for rel, old, new in patch.PATCHES:
+        target = dest / rel
+        text = target.read_text(encoding="utf-8") if target.is_file() else ""
+        if text.count(old) != 1:
+            raise cv.Invalid(
+                f"mipi_csi: the UVC removal no longer applies to {rel} in esp_video "
+                f"{patch.ESP_VIDEO_VERSION} -- the code it anchors on is missing or appears more than once"
+            )
+        target.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+    marker.write_text(patch.PATCH_STAMP)
+    return str(dest)
+
+
 def _add_idf_config(config: ConfigType) -> None:
+    # A copy without its USB UVC device (idf_video_patch.py): USB cameras are usb_uvc's
+    from . import idf_video_patch as patch
+
+    add_idf_component(
+        name="espressif/esp_video",
+        ref=patch.ESP_VIDEO_VERSION,
+        override_path=_sync_esp_video_override(),
+    )
 
     sensor = config[CONF_SENSOR]
     if (formats := SENSOR_FORMATS.get(sensor)) is not None:
@@ -225,6 +307,9 @@ def _add_idf_config(config: ConfigType) -> None:
         # (auto exposure, auto white balance, denoise) and is off by default.
         "CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE": True,
         "CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER": True,
+        # The driver's own backup buffer would be allocated outside the buffer allocator: off, and one of the
+        # frame buffers is its reserve instead (frame_buffer_count counts it).
+        "CONFIG_ESP_VIDEO_DISABLE_MIPI_CSI_DRIVER_BACKUP_BUFFER": True,
         # The video devices are reached as /dev/videoN, so open(), ioctl() and mmap() all go
         # through VFS. Select support is deliberately not requested: the capture task blocks in
         # VIDIOC_DQBUF and esp_video registers no select handlers, so ESPHome is free to leave
