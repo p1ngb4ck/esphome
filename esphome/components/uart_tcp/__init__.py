@@ -1,5 +1,5 @@
 import esphome.codegen as cg
-from esphome.components import noise, socket, uart
+from esphome.components import socket, uart
 from esphome.components.const import (
     CONF_ALLOWED_IPS,
     CONF_HOST,
@@ -9,11 +9,10 @@ from esphome.components.const import (
 from esphome.components.tcp_uart import DOMAIN as TCP_UART_DOMAIN
 import esphome.config_validation as cv
 from esphome.const import (
-    CONF_ENCRYPTION,
+    CONF_DEBUG,
+    CONF_DUMMY_RECEIVER,
     CONF_ID,
-    CONF_KEY,
     CONF_PORT,
-    CONF_TIMEOUT,
     CONF_UART_ID,
 )
 from esphome.core import CORE
@@ -23,14 +22,13 @@ from esphome.types import ConfigType
 CODEOWNERS = ["@Bascht74"]
 DOMAIN = "uart_tcp"
 DEPENDENCIES = ["network", "uart"]
-AUTO_LOAD = noise.stream_auto_load(DOMAIN, ["socket"])
+AUTO_LOAD = ["socket"]
 MULTI_CONF = True
 
 CONF_UART_TCP_ID = "uart_tcp_id"
 
 uart_tcp_ns = cg.esphome_ns.namespace("uart_tcp")
 UartTcp = uart_tcp_ns.class_("UartTcp", cg.Component, uart.UARTDevice)
-noise.register_set_key_action(DOMAIN, UartTcp)
 
 
 BASE_SCHEMA = cv.Schema(
@@ -41,8 +39,6 @@ BASE_SCHEMA = cv.Schema(
         cv.Optional(
             CONF_RECONNECT_INTERVAL, default="5s"
         ): cv.positive_time_period_milliseconds,
-        cv.Optional(CONF_TIMEOUT, default="0s"): cv.positive_time_period_milliseconds,
-        cv.Optional(CONF_ENCRYPTION): noise.STREAM_ENCRYPTION_SCHEMA,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -77,26 +73,7 @@ def _final_validate(config: ConfigType) -> ConfigType:
     # discards what the other reader has not read yet.
     full_config = fv.full_config.get()
     data = full_config.data.setdefault(DOMAIN, {})
-    uart_id = str(config[CONF_UART_ID])
-    used = data.setdefault(CONF_UART_ID, set())
-    if uart_id in used:
-        raise cv.Invalid(
-            f"The UART '{uart_id}' is already used by another 'uart_tcp' entry. "
-            "Each uart_tcp needs its own UART.",
-            [CONF_UART_ID],
-        )
-    used.add(uart_id)
-    # Grouped CI builds share one bus between components, like uart's pin check.
-    # Bare `id:` references (a uart.write action) and lambdas are not caught.
-    if not CORE.testing_mode:
-        for domain, domain_conf in full_config.items():
-            if domain != DOMAIN and uart.subtree_references_uart(domain_conf, uart_id):
-                raise cv.Invalid(
-                    f"The UART '{uart_id}' is also used by '{domain}'. "
-                    "uart_tcp requires exclusive use of that UART.",
-                    [CONF_UART_ID],
-                )
-    fv.id_declaration_match_schema(_reject_dummy_receiver)(config[CONF_UART_ID])
+    uart.claim_exclusive(config, DOMAIN)
 
     if config[CONF_ROLE] == "server":
         # Two listeners on one port cannot both serve it. Only uart_tcp and
@@ -117,11 +94,6 @@ def _final_validate(config: ConfigType) -> ConfigType:
 
 
 FINAL_VALIDATE_SCHEMA = _final_validate
-    socket.final_validate_idle_timeout,
-    noise.final_validate_reconnect_interval,
-    noise.final_validate_stream_key(DOMAIN),
-    _final_validate,
-)
 
 
 async def to_code(config: ConfigType) -> None:
@@ -136,12 +108,4 @@ async def to_code(config: ConfigType) -> None:
         socket.require_tcp_client_link()
     cg.add(var.set_port(config[CONF_PORT]))
     cg.add(var.set_reconnect_interval(config[CONF_RECONNECT_INTERVAL]))
-    if (timeout := config[CONF_TIMEOUT]).total_milliseconds > 0:
-        cg.add(var.set_timeout(timeout))
     cg.add_optional(var.set_host, config.get(CONF_HOST))
-    if (encryption := config.get(CONF_ENCRYPTION)) is not None:
-        # The TCP client starts the handshake
-        stream = noise.new_stream(
-            config[CONF_ID], encryption.get(CONF_KEY), config[CONF_ROLE] == "client"
-        )
-        cg.add(var.set_noise_stream(stream))

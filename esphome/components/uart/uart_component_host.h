@@ -39,4 +39,5 @@ class HostUartComponent final : public UARTComponent, public Component {
 };
 
 }  // namespace esphome::uart
+
 #endif  // USE_HOST

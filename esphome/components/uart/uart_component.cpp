@@ -59,4 +59,51 @@ void UARTComponent::write_array_progmem(const uint8_t *data, size_t len) {
 }
 #endif
 
+#if defined(USE_ESP8266) || defined(USE_ESP32)
+struct SavedLineSettings {
+  uint32_t baud_rate;
+  uint8_t data_bits;
+  uint8_t parity;
+  uint8_t stop_bits;
+};
+
+static bool line_settings_valid(uint32_t baud_rate, uint8_t data_bits, uint8_t parity, uint8_t stop_bits) {
+  return baud_rate != 0 && data_bits >= 5 && data_bits <= 8 && parity <= UART_CONFIG_PARITY_SPACE &&
+         (stop_bits == 1 || stop_bits == 2);
+}
+
+bool UARTComponent::set_line_settings(uint32_t baud_rate, uint8_t data_bits, UARTParityOptions parity,
+                                      uint8_t stop_bits) {
+  if (!line_settings_valid(baud_rate, data_bits, parity, stop_bits)) {
+    ESP_LOGW(TAG, "Invalid line settings");
+    return false;
+  }
+  this->baud_rate_ = baud_rate;
+  this->data_bits_ = data_bits;
+  this->parity_ = parity;
+  this->stop_bits_ = stop_bits;
+  this->load_settings(false);
+  SavedLineSettings saved{baud_rate, data_bits, static_cast<uint8_t>(parity), stop_bits};
+  if (!this->line_pref_.save(&saved)) {
+    ESP_LOGW(TAG, "Line settings not saved");
+    return false;
+  }
+  global_preferences->sync();
+  return true;
+}
+
+void UARTComponent::restore_line_settings(uint32_t key) {
+  this->line_pref_ = global_preferences->make_preference<SavedLineSettings>(key, true);
+  SavedLineSettings saved{};
+  if (!this->line_pref_.load(&saved) ||
+      !line_settings_valid(saved.baud_rate, saved.data_bits, saved.parity, saved.stop_bits)) {
+    return;
+  }
+  this->baud_rate_ = saved.baud_rate;
+  this->data_bits_ = saved.data_bits;
+  this->parity_ = static_cast<UARTParityOptions>(saved.parity);
+  this->stop_bits_ = saved.stop_bits;
+}
+#endif
+
 }  // namespace esphome::uart
