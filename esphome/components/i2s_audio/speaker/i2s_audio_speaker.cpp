@@ -173,8 +173,8 @@ void I2SAudioSpeakerBase::loop() {
       // from wherever the previous run left off. Posted here, not in the task: the ramp's mailbox
       // allows one writer, and that is the main loop.
       this->post_software_gain_(0);
-      xTaskCreate(I2SAudioSpeakerBase::speaker_task, "speaker_task", TASK_STACK_SIZE, (void *) this, TASK_PRIORITY,
-                  &this->speaker_task_handle_);
+      xTaskCreatePinnedToCore(I2SAudioSpeakerBase::speaker_task, "speaker_task", TASK_STACK_SIZE, (void *) this,
+                              TASK_PRIORITY, &this->speaker_task_handle_, LOOP_TASK_CORE);
 
       if (this->speaker_task_handle_ == nullptr) {
         ESP_LOGE(TAG, "Task failed to start, retrying in 1 second");
