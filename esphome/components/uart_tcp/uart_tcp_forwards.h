@@ -37,6 +37,12 @@ class UartTcpForwards : public Component {
     if (this->uart_count_ < this->uart_capacity_)
       this->uarts_[this->uart_count_++] = Uart{uart, name};
   }
+#ifdef USE_UART_TCP_MODEM_CONTROL
+  void add_uart(usb_uart::USBUartChannelBase *uart, const char *name) {
+    if (this->uart_count_ < this->uart_capacity_)
+      this->uarts_[this->uart_count_++] = Uart{uart, name, uart};
+  }
+#endif
   void set_runners_default(uint8_t count) { this->runners_default_ = count; }
   void set_settings_file_default(const char *path) { this->path_default_ = path; }
   void set_settings_key(uint32_t key) { this->settings_key_ = key; }
@@ -94,6 +100,9 @@ class UartTcpForwards : public Component {
   struct Uart {
     uart::UARTComponent *uart;
     const char *name;
+#ifdef USE_UART_TCP_MODEM_CONTROL
+    usb_uart::USBUartChannelBase *modem{nullptr};
+#endif
   };
   struct Prefs {
     uint8_t runners;

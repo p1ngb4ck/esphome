@@ -180,6 +180,9 @@ bool UartTcpForwards::set_runner_uart(size_t index, int uart) {
   }
   this->lines_[index].uart = static_cast<int8_t>(uart);
   this->apply_line_(index);
+#ifdef USE_UART_TCP_MODEM_CONTROL
+  this->runners_[index].set_modem(uart >= 0 ? this->uarts_[uart].modem : nullptr);
+#endif
   this->runners_[index].set_uart(uart >= 0 ? this->uarts_[uart].uart : nullptr);
   this->save();
   return true;
@@ -197,6 +200,9 @@ bool UartTcpForwards::set_line_settings(size_t index, uint32_t baud_rate, uint8_
   line.parity = static_cast<uint8_t>(parity);
   line.stop_bits = stop_bits;
   this->apply_line_(index);
+#ifdef USE_UART_TCP_RFC2217
+  this->runners_[index].line_settings_changed();
+#endif
   this->save();
   return true;
 }
@@ -335,9 +341,9 @@ void UartTcpForwards::parse_() {
     if (next != nullptr) {
       *next++ = '\0';
     }
-    char *fields[13] = {};
+    char *fields[14] = {};
     size_t count = 0;
-    for (char *field = line; field != nullptr && count < 13;) {
+    for (char *field = line; field != nullptr && count < 14;) {
       fields[count++] = field;
       field = std::strchr(field, '\t');
       if (field != nullptr) {
@@ -372,6 +378,9 @@ void UartTcpForwards::parse_() {
     runner.apply_allowed_ips(fields[6]);
     runner.apply_timeout(std::strtoul(fields[7], nullptr, 10));
     runner.apply_reconnect_interval(std::strtoul(fields[8], nullptr, 10));
+#ifdef USE_UART_TCP_RFC2217
+    runner.apply_protocol(count > 13 && std::strcmp(fields[13], "rfc2217") == 0);
+#endif
     if (!this->set_runner_uart(index, uart)) {
       ESP_LOGW(TAG, "Runner %lu: %s is forwarded by another runner", index, fields[1]);
     }
@@ -408,9 +417,14 @@ void UartTcpForwards::write_() {
                       runner.is_server() ? "server" : "client", runner.get_port(), runner.get_host()));
     runner.format_allowed_ips(out + len, FILE_SIZE - len);
     len = std::min(len + std::strlen(out + len), FILE_SIZE);
-    put(std::snprintf(out + len, FILE_SIZE - len, "\t%" PRIu32 "\t%" PRIu32 "\t%" PRIu32 "\t%u\t%c\t%u\n",
+#ifdef USE_UART_TCP_RFC2217
+    const char *protocol = runner.is_rfc2217() ? "rfc2217" : "raw";
+#else
+    const char *protocol = "raw";
+#endif
+    put(std::snprintf(out + len, FILE_SIZE - len, "\t%" PRIu32 "\t%" PRIu32 "\t%" PRIu32 "\t%u\t%c\t%u\t%s\n",
                       runner.get_timeout(), runner.get_reconnect_interval(), line.baud_rate, line.data_bits,
-                      PARITY_CHARS[line.parity], line.stop_bits));
+                      PARITY_CHARS[line.parity], line.stop_bits, protocol));
   }
   this->buf_len_ = len;
   this->busy_ = true;
