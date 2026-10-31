@@ -12,6 +12,8 @@ class APIConnection;
 // Calls schedule_message_ which dispatches to try_send_*_info
 #define LIST_ENTITIES_HANDLER(entity_type, EntityClass, ResponseType) \
   bool ListEntitiesIterator::on_##entity_type(EntityClass *entity) { /* NOLINT(bugprone-macro-parentheses) */ \
+    if (global_api_server->is_hidden(entity)) \
+      return true; \
     return this->client_->schedule_message_(entity, ResponseType::MESSAGE_TYPE, ResponseType::ESTIMATED_SIZE); \
   }
 

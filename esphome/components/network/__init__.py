@@ -6,7 +6,7 @@ from typing import Any
 
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components.esp32 import add_idf_sdkconfig_option
+from esphome.components.esp32 import add_idf_sdkconfig_option, idf_version
 from esphome.components.psram import is_guaranteed as psram_is_guaranteed
 from esphome.components.zephyr import zephyr_add_prj_conf
 import esphome.config_validation as cv
@@ -76,13 +76,13 @@ KEY_NETWORK_PRIORITY = "network_priority"
 # accepted in the priority list. openthread and modem will be added here when
 # they wire up their setup-priority consumer in their own to_code — see
 # NETWORK_PLAN.md for the full multi-interface roadmap.
-VALID_NETWORK_TYPES = ["ethernet", "wifi"]
+VALID_NETWORK_TYPES = ["ethernet", "wifi", "usb_ethernet"]
 
 # Interfaces NetworkComponent::loop() knows how to arbitrate the default route
 # for. Deliberately NOT derived from VALID_NETWORK_TYPES: extending that list
 # without extending the C++ arbitration (and then this set) is caught in
 # _final_validate() as a config error instead of a silently mis-routed interface.
-ARBITRATED_NETWORK_TYPES = frozenset({"ethernet", "wifi"})
+ARBITRATED_NETWORK_TYPES = frozenset({"ethernet", "wifi", "usb_ethernet"})
 
 # Setup priority base values — first in list gets the highest priority.
 #
@@ -152,6 +152,7 @@ NetworkInterface = network_ns.enum("NetworkInterface", is_class=True)
 NETWORK_INTERFACES = {
     "ethernet": NetworkInterface.NETWORK_INTERFACE_ETHERNET,
     "wifi": NetworkInterface.NETWORK_INTERFACE_WIFI,
+    "usb_ethernet": NetworkInterface.NETWORK_INTERFACE_USB_ETHERNET,
 }
 ActiveInterfaceTrigger = network_ns.class_(
     "ActiveInterfaceTrigger", automation.Trigger.template()
@@ -726,7 +727,8 @@ async def to_code(config: ConfigType) -> None:
         )
     if CORE.is_esp32:
         add_idf_sdkconfig_option("CONFIG_LWIP_IPV6", enable_ipv6)
-        add_idf_sdkconfig_option("CONFIG_LWIP_IPV6_AUTOCONFIG", enable_ipv6)
+        if idf_version() < cv.Version(6, 1, 0):
+            add_idf_sdkconfig_option("CONFIG_LWIP_IPV6_AUTOCONFIG", enable_ipv6)
     elif enable_ipv6:
         cg.add_build_flag("-DCONFIG_LWIP_IPV6")
         cg.add_build_flag("-DCONFIG_LWIP_IPV6_AUTOCONFIG")

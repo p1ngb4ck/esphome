@@ -1,6 +1,9 @@
 #include "wifi_component.h"
 #include "expected_disconnect.h"
 #include "esphome/components/network/util.h"
+#ifdef USE_NETWORK_DEFAULT_ROUTE
+#include "esphome/components/network/network_component.h"
+#endif
 
 #ifdef USE_WIFI
 #ifdef USE_ESP32
@@ -277,7 +280,7 @@ void WiFiComponent::wifi_lazy_init_() {
   }
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-  if (global_preferences->nvs_handle == 0) {
+  if (!global_preferences->nvs_ready) {
     ESP_LOGW(TAG, "starting wifi without nvs");
     cfg.nvs_enable = false;
   }
@@ -780,6 +783,9 @@ bool WiFiComponent::wifi_sta_ip_config_(const optional<ManualIP> &manual_ip) {
       if (err != ESP_OK) {
         ESP_LOGV(TAG, "Starting DHCP client failed: %d", err);
       }
+#ifdef USE_NETWORK_DEFAULT_ROUTE
+      network::restore_default_dns(s_sta_netif);  // the DHCP start cleared the routing interface's
+#endif
       return err == ESP_OK;
     }
     return true;
@@ -808,6 +814,10 @@ bool WiFiComponent::wifi_sta_ip_config_(const optional<ManualIP> &manual_ip) {
     dns.ip = effective_ip->dns2;
     esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_BACKUP, &dns);
   }
+#ifdef USE_NETWORK_DEFAULT_ROUTE
+  // The static address cleared the DNS servers of the interface that routes (Ethernet).
+  network::restore_default_dns(s_sta_netif);
+#endif
 
   return true;
 }
@@ -1441,7 +1451,11 @@ bool WiFiComponent::wifi_scan_start_(bool passive) {
   // When scanning while connected (roaming), return to home channel between
   // each scanned channel to maintain the connection (helps with BLE/WiFi coexistence)
 #ifdef CONFIG_SOC_WIFI_SUPPORTED
-  if (this->is_roaming_scan_active()) {
+  if (this->is_roaming_scan_active()
+#ifdef USE_WIFI_SAVED_NETWORKS
+      || this->browse_scan_
+#endif
+  ) {
     config.coex_background_scan = true;
   }
 #endif
