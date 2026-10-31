@@ -196,6 +196,8 @@ class MipiCsiCamera final : public camera::Camera {
     return this->single_requesters_ != 0 || this->stream_requesters_ != 0 || this->preview_buffer_.load() != nullptr ||
   }
   uint8_t bytes_per_pixel_() const;
+  bool settled_(uint32_t index);
+  int32_t frame_level_(const FrameBuffer &frame) const;
 
   static void capture_task(void *param);
 
@@ -243,6 +245,8 @@ class MipiCsiCamera final : public camera::Camera {
   uint8_t *capture_stack_{nullptr};
   /// Set by the main loop to ask the capture task for one frame, cleared by the task when done.
   std::atomic<bool> frame_wanted_{false};
+  uint16_t settle_count_{0};
+  int32_t settle_level_{-1};
   /// The capture task's result for the main loop: valid once result_ready_ is set (0 = encoding failed).
   std::atomic<size_t> result_length_{0};
   std::atomic<bool> result_ready_{false};
