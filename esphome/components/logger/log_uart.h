@@ -22,6 +22,8 @@ class LogUART : public uart::VirtualUARTComponent, public Component {
  public:
   LogUART(size_t boot_buffer_size, size_t live_buffer_size)
       : VirtualUARTComponent(boot_buffer_size), boot_size_(boot_buffer_size), live_size_(live_buffer_size) {}
+  /// The object in PSRAM. Without PSRAM a plain one that fails its setup; no working copy in internal RAM.
+  static LogUART *create(size_t boot_buffer_size, size_t live_buffer_size);
 
   /// Register with the logger; call before Logger::pre_setup() so its first line is kept.
   void attach(Logger *logger);
@@ -67,6 +69,8 @@ class LogUART : public uart::VirtualUARTComponent, public Component {
   // The ring is still the boot ring.
   bool boot_ring_{true};
   bool connected_{false};
+  // create() found no PSRAM: setup() fails.
+  bool no_psram_{false};
 };
 
 }  // namespace esphome::logger
