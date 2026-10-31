@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 import esphome.codegen as cg
-from esphome.components.esp32 import add_idf_sdkconfig_option
+from esphome.components.esp32 import add_idf_sdkconfig_option, idf_version
 from esphome.components.psram import is_guaranteed as psram_is_guaranteed
 from esphome.components.zephyr import zephyr_add_prj_conf
 import esphome.config_validation as cv
@@ -661,7 +661,8 @@ async def to_code(config: ConfigType) -> None:
         )
     if CORE.is_esp32:
         add_idf_sdkconfig_option("CONFIG_LWIP_IPV6", enable_ipv6)
-        add_idf_sdkconfig_option("CONFIG_LWIP_IPV6_AUTOCONFIG", enable_ipv6)
+        if idf_version() < cv.Version(6, 1, 0):
+            add_idf_sdkconfig_option("CONFIG_LWIP_IPV6_AUTOCONFIG", enable_ipv6)
     elif enable_ipv6:
         cg.add_build_flag("-DCONFIG_LWIP_IPV6")
         cg.add_build_flag("-DCONFIG_LWIP_IPV6_AUTOCONFIG")
