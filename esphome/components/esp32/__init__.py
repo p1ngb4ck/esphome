@@ -58,6 +58,7 @@ from esphome.core.config import BOARD_MAX_LENGTH
 from esphome.coroutine import CoroPriority, coroutine_with_priority
 from esphome.espidf import sbom
 from esphome.espidf.component import IDFComponent, generate_idf_components
+from esphome.espidf.toolchain import _get_idf_path
 import esphome.final_validate as fv
 from esphome.helpers import copy_file_if_changed, rmtree, write_file_if_changed
 from esphome.schema_extractors import SCHEMA_EXTRACT, schema_extractor
@@ -2888,7 +2889,16 @@ async def _reconcile_network_sdkconfig() -> None:
         set_idf_sdkconfig_default("CONFIG_ESP_COEX_SW_COEXIST_ENABLE", False)
 
     # SoftAP support: drop it when WiFi is used without AP mode (IDF only).
-    if not is_arduino and net.wifi and not net.wifi_ap:
+    # Skip on esp32_hosted — symbol is owned by the co-processor component.
+    # Skip on IDF >= 6.1.0 — the symbol's Kconfig dependency is no longer satisfied there,
+    # so IDF disables it and flags any user-set value as a "disabled symbol" warning.
+    if (
+        not is_arduino
+        and net.wifi
+        and not net.wifi_ap
+        and "esp32_hosted" not in CORE.config
+        and idf_version() < cv.Version(6, 1, 0)
+    ):
         set_idf_sdkconfig_default("CONFIG_ESP_WIFI_SOFTAP_SUPPORT", False)
 
     # LWIP DHCP server: a WiFi-AP-mode / enable_lwip_dhcp_server concern (not
@@ -2913,6 +2923,47 @@ async def _add_yaml_idf_components(components: list[ConfigType]):
             ref=component.get(CONF_REF),
             path=component.get(CONF_PATH),
         )
+
+
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _patch_idf_kconfig_files():
+    """Patch IDF 6.1.0 Kconfig files that use 'default 0' for bool symbols.
+
+    Newer Kconfig parsers reject 'default 0' for boolean symbols and emit
+    warnings. Patch in-place before cmake runs.
+    """
+    if idf_version() < cv.Version(6, 1, 0):
+        return
+    idf_base = _get_idf_path()
+    if idf_base is None:
+        return
+    # Each entry: (glob_pattern, old_string, new_string)
+    # Exact surrounding context prevents accidental matches on other symbols.
+    fixes = [
+        (
+            "components/bt/**/Kconfig.in",
+            'config BT_NIMBLE_MESH_PROVISIONER\n        bool "Enable BLE mesh provisioner"\n        default 0\n',
+            'config BT_NIMBLE_MESH_PROVISIONER\n        bool "Enable BLE mesh provisioner"\n        default n\n',
+        ),
+        (
+            "components/fatfs/Kconfig",
+            '        bool "Make fatfs f_printf() support long long argument"\n        default 0\n',
+            '        bool "Make fatfs f_printf() support long long argument"\n        default n\n',
+        ),
+        (
+            "components/fatfs/Kconfig",
+            '        bool "Make fatfs f_printf() support floating point argument"\n        default 0\n',
+            '        bool "Make fatfs f_printf() support floating point argument"\n        default n\n',
+        ),
+    ]
+    for pattern, old, new in fixes:
+        for kconfig_path in idf_base.glob(pattern):
+            if not kconfig_path.is_file():
+                continue
+            original = kconfig_path.read_text()
+            if old in original:
+                kconfig_path.write_text(original.replace(old, new, 1))
+                _LOGGER.debug("Patched Kconfig default in %s", kconfig_path)
 
 
 @coroutine_with_priority(CoroPriority.FINAL)
@@ -3296,7 +3347,11 @@ async def to_code(config):
     add_idf_sdkconfig_option("CONFIG_LOG_TAG_LEVEL_IMPL_NONE", True)
 
     # Reduce PHY TX power in the event of a brownout
-    add_idf_sdkconfig_option("CONFIG_ESP_PHY_REDUCE_TX_POWER", True)
+    # Not applicable on esp32_hosted — PHY lives on the co-processor
+    # Not applicable on IDF >= 6.1.0 — the symbol's Kconfig dependency is no longer
+    # satisfied there, so IDF disables it and flags any user-set value as a warning.
+    if "esp32_hosted" not in CORE.config and idf_version() < cv.Version(6, 1, 0):
+        add_idf_sdkconfig_option("CONFIG_ESP_PHY_REDUCE_TX_POWER", True)
 
     # Set default CPU frequency
     add_idf_sdkconfig_option(
@@ -3570,8 +3625,8 @@ async def to_code(config):
     # FINAL priority: runs after every network/coexistence request_*() call
     CORE.add_job(_reconcile_network_sdkconfig)
 
-    # FINAL priority: runs after every require_certificate_bundle() call
-    CORE.add_job(_reconcile_certificate_bundle_sdkconfig)
+    # FINAL priority: patch IDF 6.1.0 Kconfig 'default 0' bool symbols before cmake runs
+    CORE.add_job(_patch_idf_kconfig_files)
 
     # FINAL priority: runs after every request_tls() / require_mbedtls_*() call
     mbedtls = _mbedtls_sdkconfig()
