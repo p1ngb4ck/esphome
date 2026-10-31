@@ -22,6 +22,12 @@
 
 namespace esphome::resampler {
 
+class PositionResampler : public esp_audio_libs::resampler::Resampler {
+ public:
+  using Resampler::Resampler;
+  float get_position() { return esp_audio_libs::art_resampler::resampleGetPosition(this->resampler_); }
+};
+
 /// @brief Microphone that converts the audio of a source microphone to a different sample rate.
 /// The bits per sample and channels are selected by the source's ``MicrophoneSource``; only the sample rate changes.
 /// Resampling runs in the source microphone's data callback, so it needs no task or ring buffer of its own.
@@ -93,14 +99,16 @@ class ResamplerMicrophone final : public Component, public microphone::Microphon
   }
 
   /// @brief Resamples a chunk of source audio and passes it to the data callbacks. Source microphone task only.
-  void process_audio_(microphone::MicrophoneSource *source, std::span<const uint8_t> data);
-  void process_chunk_(microphone::MicrophoneSource *source, std::span<const uint8_t> data);
-  void emit_(const audio::AudioStreamInfo &input_stream_info, const uint8_t *data, size_t len, bool from_source);
-  void publish_source_(const uint8_t *data, size_t len);
+  void process_audio_(microphone::MicrophoneSource *source, std::span<const uint8_t> data, int64_t capture_time_us);
+  void process_chunk_(microphone::MicrophoneSource *source, std::span<const uint8_t> data, int64_t capture_time_us);
+  void emit_(const audio::AudioStreamInfo &input_stream_info, const uint8_t *data, size_t len, bool from_source,
+             int64_t capture_time_us);
+  void publish_source_(const uint8_t *data, size_t len, int64_t capture_time_us);
 #ifdef USE_RESAMPLER_MICROPHONE_AEC
   bool aec_wanted_() const;
   bool aec_update_();
-  void aec_input_(const audio::AudioStreamInfo &input_stream_info, std::span<const uint8_t> data);
+  void aec_input_(const audio::AudioStreamInfo &input_stream_info, std::span<const uint8_t> data,
+                  int64_t capture_time_us);
   void aec_release_();
   static void aec_task_entry_(void *param);
   void aec_run_();
@@ -141,7 +149,7 @@ class ResamplerMicrophone final : public Component, public microphone::Microphon
   // A switch can let the old source's task and the new one's overlap for one chunk: the second is dropped
   std::atomic<bool> processing_{false};
   std::atomic<bool> emitting_{false};
-  std::unique_ptr<esp_audio_libs::resampler::Resampler> resampler_;
+  std::unique_ptr<PositionResampler> resampler_;
   // Reused for every chunk so resampling does not allocate
   std::vector<uint8_t> output_buffer_;
 
