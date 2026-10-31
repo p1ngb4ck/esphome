@@ -17,7 +17,7 @@ capture, players): [the esp-video plan](https://github.com/p1ngb4ck/p4-panel-wor
 | `pr/esp32-require-hw-jpeg` | esp32 `require_hw_jpeg()`: the JPEG codec for the chip (P4 HW JPEG, S2 / S3 esp_new_jpeg, others JPEGDEC) | - | all |
 | `pr/runtime-image-jpeg-decoder` | runtime_image: the JPEG decoder on the selected backend | `pr/esp32-require-hw-jpeg` | all |
 | `pr/online-image-path-source` | online_image: url / path sources, a local path through the storage interface | `pr/storage` ([esphome-storage-interface](https://github.com/p1ngb4ck/esphome-storage-interface)) | all |
-| `pr/camera-encoder-h264` | camera, camera_encoder: H.264 streams on the P4's hardware encoder (also in [esphome-usb-drivers](https://github.com/p1ngb4ck/esphome-usb-drivers)) | - | P4 |
+| `pr/camera-encoder-h264` | camera, camera_encoder: H.264 streams on the P4's hardware encoder (contained in [esphome-usb-drivers](https://github.com/p1ngb4ck/esphome-usb-drivers) `main`, usb_uvc builds on it) | - | P4 |
 | `pr/api-camera-jpeg-only` | api: camera images to clients only when JPEG | `pr/camera-encoder-h264` | all |
 | `pr/rtsp-server-h264` | rtsp_server: H.264 streams (RFC 6184), any camera | `pr/camera-encoder-h264` | P4 (H.264) |
 | `pr/mipi-csi` | mipi_csi: the MIPI-CSI camera of esphome/esphome#19480, unchanged | - | P4 |
