@@ -15,7 +15,7 @@ None of them needs `cert_store`. The USB drivers (usb_storage, usb_cdrom) are in
 |---|---|---|---|
 | `pr/sd-storage` | `sd_storage`: SD card over SD-MMC (1 / 4 bit) or SPI | SPI: all ESP32; SD-MMC: S3, S31, P4 | `pr/storage` |
 | `pr/nfs-client` | `nfs_client`: an NFS export as a network storage | all ESP32 | `pr/storage` |
-| `pr/firmware-update` | `firmware_update`: main firmware update from a manifest on a storage, non-blocking through the storage worker | ESP-IDF | `pr/storage` |
+| `pr/firmware-update` | `firmware_update`: main firmware update from a manifest on a storage, non-blocking through the storage worker | all ESP32 | `pr/storage` |
 | `pr/store-yaml` | `store_yaml`: the firmware's YAML embedded and exported to a storage | ESP32, host | `pr/storage` |
 | `pr/spi-nvs-pins` | `spi`: bus pins, SPI flash CS and data lines 2 / 3 read from the internal NVS (`nvs_pins`, `nvs_cs_pin`) | all ESP32 | - |
 | `pr/binary-storage` | `binary_storage`: EEPROM, FRAM, MRAM and SPI flash on I2C / SPI / 1-Wire as raw or filesystem storages, flash partitions, littlefs regions, an NVS region, prefill | all ESP32 | `pr/storage`, `pr/spi-nvs-pins` |
