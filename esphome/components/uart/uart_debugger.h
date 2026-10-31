@@ -46,6 +46,10 @@ class UARTDebugger final : public Component, public Trigger<UARTDirection, std::
 
   void set_debug_prefix(const char *prefix) { this->debug_prefix_ = StringRef(prefix); }
 
+#ifdef UART_DEBUGGER_ADD_SETTINGS
+  void set_debug_add_settings(bool debug_add_settings) { this->debug_add_settings_ = debug_add_settings; }
+#endif
+
  protected:
   UARTDirection for_direction_;
   UARTDirection last_direction_{};
@@ -57,7 +61,11 @@ class UARTDebugger final : public Component, public Trigger<UARTDirection, std::
   uint8_t after_delimiter_len_{0};
   uint8_t after_delimiter_pos_{0};
   bool is_triggering_{false};
+  UARTComponent *parent_;
   StringRef debug_prefix_{};
+#ifdef UART_DEBUGGER_ADD_SETTINGS
+  bool debug_add_settings_{false};
+#endif
 
   bool is_my_direction_(UARTDirection direction);
   bool is_recursive_();

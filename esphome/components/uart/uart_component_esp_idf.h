@@ -126,4 +126,5 @@ class IDFUARTComponent final : public UARTComponent, public Component {
 };
 
 }  // namespace esphome::uart
+
 #endif  // USE_ESP32

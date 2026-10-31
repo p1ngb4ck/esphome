@@ -264,7 +264,7 @@ class UARTComponent {
   ESPPreferenceObject line_pref_;
 #endif
 #ifdef USE_UART_DEBUGGER
-  CallbackManager<void(UARTDirection, uint8_t)> debug_callback_{};
+  CallbackManager<void(UARTDirection, uint8_t, StringRef)> debug_callback_{};
 #endif
 };
 
