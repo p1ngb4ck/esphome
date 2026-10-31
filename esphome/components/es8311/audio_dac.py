@@ -13,6 +13,7 @@ ES8311 = es8311_ns.class_("ES8311", AudioDac, cg.Component, i2c.I2CDevice)
 
 CONF_USE_MCLK = "use_mclk"
 CONF_USE_MICROPHONE = "use_microphone"
+CONF_DAC_REFERENCE = "dac_reference"
 
 es8311_resolution = es8311_ns.enum("ES8311Resolution")
 ES8311_BITS_PER_SAMPLE_ENUM = {
@@ -50,6 +51,7 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_SAMPLE_RATE, default=16000): cv.int_range(min=1),
             cv.Optional(CONF_USE_MCLK, default=True): cv.boolean,
             cv.Optional(CONF_USE_MICROPHONE, default=False): cv.boolean,
+            cv.Optional(CONF_DAC_REFERENCE, default=False): cv.boolean,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -65,3 +67,5 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_sample_frequency(config[CONF_SAMPLE_RATE]))
     cg.add(var.set_use_mclk(config[CONF_USE_MCLK]))
     cg.add(var.set_use_mic(config[CONF_USE_MICROPHONE]))
+    if config[CONF_DAC_REFERENCE]:
+        cg.add(var.set_dac_reference(True))
