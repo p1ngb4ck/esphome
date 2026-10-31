@@ -9,6 +9,7 @@ from esphome.components.esp32 import (
     allow_insecure_tls,
     idf_version,
     include_builtin_idf_component,
+    require_mbedtls_sha512,
     request_tls,
     require_certificate_bundle,
 )
@@ -748,6 +749,9 @@ async def to_code(config):
     transport = config.get(CONF_TRANSPORT)
     if config.get(CONF_TLS):
         cg.add_define("USE_MQTT_TLS")
+        # The broker's chain may be signed with SHA-384, and the suites both ends settle on
+        # (ECDHE-RSA-AES256-GCM-SHA384, TLS_AES_256_GCM_SHA384) derive their keys from it.
+        require_mbedtls_sha512()
         if (client_certificate := config.get(CONF_CLIENT_CERTIFICATE)) is not None:
             cg.add(var.set_cl_certificate(client_certificate))
             cg.add(var.set_cl_key(config[CONF_CLIENT_CERTIFICATE_KEY]))
