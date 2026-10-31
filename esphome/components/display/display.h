@@ -401,6 +401,22 @@ class Display : public PollingComponent {
 #pragma GCC diagnostic pop
   }
 
+  /// Frame buffers the panel is scanned out from, in native orientation and packed rows of the
+  /// native width, for a caller drawing into one while another is shown. Writes up to `max` into
+  /// `out` and returns how many; 0 when the display offers none.
+  virtual uint8_t get_scanout_buffers(void **out, uint8_t max, ColorBitness *bitness) { return 0; }
+  /// Scans out `buffer`, one of get_scanout_buffers(), from the next frame on. CPU writes to it must
+  /// be written back from the cache before.
+  virtual void present_scanout_buffer(void *buffer) {}
+  /// True once the buffer presented last is the one scanned out, so the previous one is free.
+  virtual bool scanout_flipped() { return true; }
+  /// Waits at most `timeout_ms` until scanout_flipped(), woken by the display at the frame the flip
+  /// took effect (no polling); the result of scanout_flipped() then.
+  virtual bool wait_scanout_flipped(uint32_t timeout_ms) { return this->scanout_flipped(); }
+  /// The frame buffer draw_pixels_at() writes into, native orientation, packed rows of the native
+  /// width, for a caller that reads back what is shown; nullptr when the display has none.
+  virtual uint8_t *get_draw_buffer(ColorBitness *bitness) { return nullptr; }
+
   /// Draw a straight line from the point [x1,y1] to [x2,y2] with the given color.
   void line(int x1, int y1, int x2, int y2, Color color = COLOR_ON);
 

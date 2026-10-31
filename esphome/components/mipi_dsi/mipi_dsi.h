@@ -21,6 +21,7 @@
 
 #include "esp_lcd_mipi_dsi.h"
 
+#include <atomic>
 #include <utility>
 
 namespace esphome::mipi_dsi {
@@ -56,6 +57,7 @@ class MipiDsi final : public display::Display {
   void set_pclk_frequency(float pclk_frequency) { this->pclk_frequency_ = pclk_frequency; }
   int get_width_internal() override { return this->width_; }
   int get_height_internal() override { return this->height_; }
+  uint8_t get_bytes_per_pixel() const { return 3 - static_cast<uint8_t>(this->color_depth_); }
   void set_hsync_back_porch(uint16_t hsync_back_porch) { this->hsync_back_porch_ = hsync_back_porch; }
   void set_hsync_front_porch(uint16_t hsync_front_porch) { this->hsync_front_porch_ = hsync_front_porch; }
   void set_hsync_pulse_width(uint16_t hsync_pulse_width) { this->hsync_pulse_width_ = hsync_pulse_width; }
@@ -69,8 +71,10 @@ class MipiDsi final : public display::Display {
   void set_model(const char *model) { this->model_ = model; }
   void set_lane_bit_rate(float lane_bit_rate) { this->lane_bit_rate_ = lane_bit_rate; }
   void set_lanes(uint8_t lanes) { this->lanes_ = lanes; }
+  void set_frame_buffers(uint8_t n) { this->num_fbs_ = n; }
   void set_frame_ack(bool frame_ack) { this->frame_ack_ = frame_ack; }
   void set_continuous_clock(bool continuous) { this->continuous_clock_ = continuous; }
+  void set_video_mode_only(bool video_mode_only) { this->video_mode_only_ = video_mode_only; }
   void set_eotp(bool eotp) { this->eotp_ = eotp; }
   void set_lp_horizontal_blanking(bool lp) { this->lp_horizontal_blanking_ = lp; }
   void set_lp_vertical_active(bool lp) { this->lp_vertical_active_ = lp; }
@@ -82,6 +86,19 @@ class MipiDsi final : public display::Display {
 #ifdef USE_I2C
   void set_i2c_bus(i2c::I2CBus *bus) { this->i2c_device_.set_i2c_bus(bus); }
 #endif
+
+  void get_dsi_frame_buffers(void **out, uint8_t *count) const {
+    *count = this->dsi_fbs_[0] != nullptr ? this->num_fbs_ : 0;
+    for (uint8_t i = 0; i < *count && i < 3; i++)
+      out[i] = this->dsi_fbs_[i];
+  }
+  void present_dsi_frame_buffer(void *fb);
+
+  uint8_t get_scanout_buffers(void **out, uint8_t max, display::ColorBitness *bitness) override;
+  void present_scanout_buffer(void *buffer) override;
+  bool scanout_flipped() override;
+  bool wait_scanout_flipped(uint32_t timeout_ms) override;
+  uint8_t *get_draw_buffer(display::ColorBitness *bitness) override;
 
   void smark_failed(const LogString *message, esp_err_t err);
 
@@ -103,6 +120,10 @@ class MipiDsi final : public display::Display {
   void write_to_display_(int x_start, int y_start, int w, int h, const uint8_t *ptr, int x_offset, int y_offset,
                          int x_pad);
   bool check_buffer_();
+  static bool notify_refresh_ready_(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata,
+                                    void *user_ctx);
+  static bool notify_frame_started_(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata,
+                                    void *user_ctx);
   /// Send the region touched since the last flush to the panel.
   void flush_dirty_();
   // Maps drawn coordinates to the buffer the way draw_pixel_at() stores them
@@ -150,8 +171,10 @@ class MipiDsi final : public display::Display {
   float pclk_frequency_ = 16;  // in MHz
   float lane_bit_rate_{1500};  // in Mbps
   uint8_t lanes_{2};           // 1, 2, 3 or 4 lanes
+  uint8_t num_fbs_{1};
   bool frame_ack_{true};
   bool continuous_clock_{false};
+  bool video_mode_only_{false};
   bool eotp_{true};
   bool lp_horizontal_blanking_{true};
   bool lp_vertical_active_{true};
@@ -169,9 +192,15 @@ class MipiDsi final : public display::Display {
   uint8_t pixel_mode_{};
 
   esp_lcd_panel_handle_t handle_{};
+  void *dsi_fbs_[3]{};
+  void *draw_fb_{nullptr};
   esp_lcd_dsi_bus_handle_t bus_handle_{};
   esp_lcd_panel_io_handle_t io_handle_{};
   SemaphoreHandle_t io_lock_{};
+  std::atomic<uint32_t> scan_frames_{0};
+  std::atomic<uint32_t> flip_frame_{0};
+  SemaphoreHandle_t flip_sem_{};
+  std::atomic<bool> flip_waiting_{false};
   uint8_t *buffer_{nullptr};
   uint16_t x_low_{1};
   uint16_t y_low_{1};
