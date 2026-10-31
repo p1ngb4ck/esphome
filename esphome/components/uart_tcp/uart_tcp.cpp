@@ -210,11 +210,16 @@ void UartTcp::sync_link_(bool up) {
   PUBLISH_STATE(this->connected_binary_sensor_, up);
 #endif
   // Only edges get here, so down is the falling edge.
-  if (!up && this->disconnects_sensor_ != nullptr) {
+  if (up) {
+    this->connected_ms_ = App.get_loop_component_start_time();
+  } else {
     this->disconnects_++;
-    this->disconnects_sensor_->publish_state(this->disconnects_);
-  }
+#ifdef USE_SENSOR
+    if (this->disconnects_sensor_ != nullptr) {
+      this->disconnects_sensor_->publish_state(this->disconnects_);
+    }
 #endif
+  }
 }
 
 void UartTcp::read_socket_() {
