@@ -157,6 +157,7 @@ void A2DPSource::setup() {
         xRingbufferSend(this->ring_, data.data(), data.size(), 0);
       }
       this->fed_.store(true);
+      this->produced_.store(true);
     });
     this->mic_source_->start();
   }
@@ -619,6 +620,7 @@ size_t A2DPSource::write_audio(const uint8_t *data, size_t length, TickType_t ti
   if (xRingbufferSend(this->ring_, data, chunk, ticks_to_wait) != pdTRUE)
     return 0;
   this->fed_.store(true);
+  this->produced_.store(true);
   return chunk;
 }
 
@@ -641,12 +643,8 @@ bool A2DPSource::has_audio() const {
 void A2DPSource::update_media_() {
   if (this->idle_timeout_ms_ == 0)
     return;
-  bool producer = this->speaker_active_.load();
-#ifdef USE_MICROPHONE
-  producer = producer || this->mic_source_ != nullptr;
-#endif
   const uint32_t now = millis();
-  if (producer || this->has_audio())
+  if (this->produced_.exchange(false) || this->has_audio())
     this->idle_since_ms_ = now;
   const bool wanted = now - this->idle_since_ms_ < this->idle_timeout_ms_;
   if (wanted == this->media_wanted_)
