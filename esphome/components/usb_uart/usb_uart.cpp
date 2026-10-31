@@ -901,7 +901,7 @@ struct DefaultType {
 };
 // An adapter without a YAML entry: its type by vid:pid (the types of __init__.py), else CDC ACM
 constexpr DefaultType DEFAULT_TYPES[] = {
-    {0x1A86, 0x55D5, UartType::CH34X},
+    {0x1A86, 0xE018, UartType::CH934X}, {0x1A86, 0x55D9, UartType::CH934X}, {0x1A86, 0x55D5, UartType::CH34X},
     {0x1A86, 0x7523, UartType::CH34X},  {0x10C4, 0xEA60, UartType::CP210X}, {0x0403, 0x6001, UartType::FT23XX},
     {0x0403, 0x6010, UartType::FT23XX}, {0x0403, 0x6011, UartType::FT23XX}, {0x067B, 0x2303, UartType::PL2303},
     {0x067B, 0x23B3, UartType::PL2303}, {0x067B, 0x23A3, UartType::PL2303}, {0x067B, 0x23E3, UartType::PL2303},
@@ -976,6 +976,9 @@ void USBUartClient::on_device_connected(usb_host::UsbDevice &dev) {
     case UartType::CH34X:
       adapter = new USBUartTypeCH34X(this, &dev);
       break;
+    case UartType::CH934X:
+      adapter = new USBUartTypeCH934X(this, &dev);
+      break;
     case UartType::CP210X:
       adapter = new USBUartTypeCP210X(this, &dev);
       break;
@@ -995,7 +998,9 @@ void USBUartClient::on_device_connected(usb_host::UsbDevice &dev) {
       channel->set_parent(adapter);
       adapter->channels_.push_back(channel);
     }
-    if (type != UartType::CH34X && !entry->claim_comm_interface) {
+    if (type == UartType::CH934X) {
+      static_cast<USBUartTypeCH934X *>(adapter)->set_init_lanes(entry->init_lanes);
+    } else if (type != UartType::CH34X && !entry->claim_comm_interface) {
       static_cast<USBUartTypeCdcAcm *>(adapter)->set_claim_comm_interface(false);
     }
   }

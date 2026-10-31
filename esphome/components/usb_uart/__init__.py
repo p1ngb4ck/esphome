@@ -19,6 +19,7 @@ from esphome.components.usb_host import (
     CONF_PID,
     CONF_VID,
     get_max_packet_size,
+    get_max_transfer_requests,
     register_usb_client,
     usb_device_schema,
     validate_usb_clients,
@@ -51,11 +52,13 @@ UartType = usb_uart_ns.enum("UartType", is_class=True)
 UART_TYPES = {
     "CdcAcm": UartType.CDC_ACM,
     "CH34X": UartType.CH34X,
+    "CH934X": UartType.CH934X,
     "CP210X": UartType.CP210X,
     "FT23XX": UartType.FT23XX,
     "PL2303": UartType.PL2303,
 }
 USBUartChannel = usb_uart_ns.class_("USBUartChannel", UARTComponent)
+CH934XChannel = usb_uart_ns.class_("CH934XChannel", USBUartChannel)
 
 
 def is_usb_uart_channel(uart_id: ID, full_config: ConfigType) -> bool:
@@ -76,6 +79,9 @@ UART_STOP_BITS_OPTIONS = UARTStopBitsOptions.options(
 )
 
 DEFAULT_BAUD_RATE = 9600
+# CH934x TX packets carry a 3-byte header ([port, len_lo, len_hi]) inside every chunk, so the
+# usable payload per chunk is that much smaller. Kept in sync with CH934XChannel::TX_HEADER_SIZE.
+CH934X_TX_HEADER_SIZE = 3
 CONF_CLAIM_NOTIFICATION_EP = "claim_notification_ep"
 CONF_CLAIM_COMM_INTERFACE = "claim_comm_interface"
 
@@ -120,7 +126,20 @@ class Type:
         )
 
 
+class MpxType(Type):
+    @property
+    def max_channels(self):
+        # Multiplexed devices aren't restricted by the number of available USB endpoints
+        return self._max_channels
+
+
 uart_types = (
+    MpxType("CH9344", 0x1A86, 0xE018, "CH934X", 4, channel_cls=CH934XChannel),
+    MpxType("CH9344L", 0x1A86, 0xE018, "CH934X", 4, channel_cls=CH934XChannel),
+    MpxType("CH9344Q", 0x1A86, 0xE018, "CH934X", 4, channel_cls=CH934XChannel),
+    MpxType("CH348", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
+    MpxType("CH348L", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
+    MpxType("CH348Q", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
     Type(
         "CDC_ACM", 0, 0, "CdcAcm", 1, baud_rate_required=False, has_comm_interface=True
     ),
@@ -307,19 +326,36 @@ async def to_code(config: ConfigType) -> None:
     # one entry.
     type_by_name = {t.name: t for t in uart_types}
     mps = get_max_packet_size()
+    payload = mps - CH934X_TX_HEADER_SIZE
 
     output_chunk_count = 3
     for device in devices:
         device_type = type_by_name.get(device[CONF_TYPE])
-        device_max = max(
-            channel[CONF_BUFFER_SIZE] for channel in device[CONF_CHANNELS]
-        )
-        need = max(device_max // mps, 2) + 1
+        if isinstance(device_type, MpxType) and payload > 0:
+            # A multiplexed device routes every channel's TX through the shared queue on
+            # channel 0, and that queue only drains between loops -- so the pool has to hold
+            # ceil(buffer / payload) chunks for EVERY channel at once, not just the largest.
+            need = (
+                sum(
+                    -(-channel[CONF_BUFFER_SIZE] // payload)
+                    for channel in device[CONF_CHANNELS]
+                )
+                + 1
+            )
+        else:
+            device_max = max(
+                channel[CONF_BUFFER_SIZE] for channel in device[CONF_CHANNELS]
+            )
+            need = max(device_max // mps, 2) + 1
         output_chunk_count = max(output_chunk_count, need)
     # LockFreeQueue/EventPool index slots with a uint8_t, so the count cannot exceed 255.
     output_chunk_count = min(output_chunk_count, 255)
     cg.add_define("USB_UART_OUTPUT_CHUNK_COUNT", output_chunk_count)
 
+    # Multiplexed (CH934x) drivers initialise their channels in parallel over a single shared
+    # command endpoint. Cap the concurrent init "lanes" at the transfer-request pool size so a
+    # wide device cannot exhaust it during setup.
+    max_init_lanes = get_max_transfer_requests()
     cg.add_define("USE_USB_BULK_TRANSFERS")
     cg.add_define("USE_USB_CONTROL_TRANSFERS")
 
@@ -330,6 +366,8 @@ async def to_code(config: ConfigType) -> None:
     for device in devices:
         device_type = type_by_name[device[CONF_TYPE]]
         lanes = 1
+        if isinstance(device_type, MpxType):
+            lanes = min(len(device[CONF_CHANNELS]), max_init_lanes)
         cg.add(
             var.add_entry(
                 device.get(CONF_VID, 0),

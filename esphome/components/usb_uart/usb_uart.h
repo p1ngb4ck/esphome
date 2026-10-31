@@ -18,6 +18,7 @@
 namespace esphome::usb_uart {
 
 class USBUartTypeCdcAcm;
+class USBUartTypeCH934X;
 class USBUartClient;
 class USBUartComponent;
 class USBUartChannel;
@@ -78,6 +79,24 @@ enum CH34xChipType : uint8_t {
   CHIP_CH346C_M2,
   CHIP_UNKNOWN = 0xFF,
 };
+
+struct Ch934xEps {
+  const usb_ep_desc_t *in_ep{nullptr};
+  const usb_ep_desc_t *out_ep{nullptr};
+  const usb_ep_desc_t *ep_cmd_read{nullptr};
+  const usb_ep_desc_t *ep_cmd_write{nullptr};
+  uint8_t data_interface{0};
+};
+
+// clang-format off
+enum CH934xChipType : uint8_t {
+  CHIP_CH9344L = 0,
+  CHIP_CH9344Q,
+  CHIP_CH348L,
+  CHIP_CH348Q,
+  CHIP_CH934X_UNKNOWN = 0xFF,
+};
+// clang-format on
 
 // 1 and 2 are the stop bit count the uart component uses, so a count set through the
 // UARTComponent API (as serial_proxy does) means the same here. 1.5 has no count.
@@ -262,9 +281,11 @@ class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartCo
   friend class USBUartTypeCdcAcm;
   friend class USBUartTypeCP210X;
   friend class USBUartTypeCH34X;
+  friend class USBUartTypeCH934X;
   friend class USBUartTypeFT23XX;
   friend class USBUartTypePL2303;
   friend class USBUartChannel;
+  friend class CH934XChannel;
 
  public:
   // Number of output chunk slots per channel, derived from buffer_size config.
@@ -363,7 +384,7 @@ class USBUartChannel final : public USBUartChannelBase {
 };
 
 /// The serial adapter types; an adapter without a YAML entry gets its type from its vid:pid, else CDC ACM.
-enum class UartType : uint8_t { CDC_ACM, CH34X, CP210X, FT23XX, PL2303 };
+enum class UartType : uint8_t { CDC_ACM, CH34X, CH934X, CP210X, FT23XX, PL2303 };
 
 /// An optional YAML entry: an adapter it names (vid / pid) gets its type and its channels (with ids that
 /// consumers bind by uart_id).
@@ -553,6 +574,81 @@ class USBUartTypeCH34X : public USBUartTypeCdcAcm {
   CH34xChipType chiptype_{CHIP_UNKNOWN};
   const char *chip_name_{"unknown"};
   uint8_t num_ports_{1};
+};
+
+class USBUartTypeCH934X : public USBUartComponent {
+ public:
+  USBUartTypeCH934X(USBUartClient *client, usb_host::UsbDevice *dev) : USBUartComponent(client, dev) {}
+
+  void start_input(USBUartChannelBase *channel) override;
+  // Max number of channels initialised in parallel (one in-flight command write each).
+  // Set from codegen and capped at the usb_host transfer-request pool size.
+  void set_init_lanes(uint8_t lanes) { this->init_lanes_ = lanes; }
+
+ protected:
+  void on_connected() override;
+  void on_disconnected() override;
+  // Chip detection + one-time device/channel register setup. The CH934x configures its
+  // ports via fire-and-forget bulk writes on a command endpoint (not control transfers),
+  // so all init work is done here once detection completes; config_step() only re-applies
+  // per-channel settings for load_settings().
+  bool config_device_step(uint8_t step, bool ok, const uint8_t *response) override;
+  bool config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok, const uint8_t *response) override;
+  // DTR and RTS as two command writes (not a control transfer); the second one's completion ends the step.
+  void modem_control_transfer(USBUartChannelBase *channel) override;
+
+  bool parse_descriptors_(usb_device_handle_t dev_hdl);
+  USBUartChannelBase *make_channel_(uint8_t index, uint16_t buffer_size) override;
+  // Build the idx-th init register write for a channel into a stack buffer. Stateless and
+  // deterministic, so the paced config machine can re-derive any write per round without
+  // storing them. Returns false when idx is past this chip's per-channel write count.
+  bool build_channel_write_(USBUartChannelBase *channel, uint8_t idx, uint8_t *buffer, uint8_t *len);
+  // Submit one init command write on the shared command endpoint as part of a paced round:
+  // records per-port failure, and the write that finishes the round releases the config
+  // machine (cfg_done_). Returns false if submission failed (no free transfer slot).
+  bool config_bulk_write_(USBUartChannelBase *channel, const uint8_t *data, uint16_t len);
+  // Wire the shared TX endpoint/routing, mark successfully-configured channels initialised,
+  // and start the RX/CMD readers. Runs once, after every channel's registers are written.
+  void finalize_init_();
+  uint8_t get_reg_address_(uint8_t portnum);
+
+  void start_rx_reader_();
+  bool demux_rx_data_(const uint8_t *data, size_t len);
+  void start_command_reader_();
+  void handle_command_data_(const uint8_t *data, size_t len);
+
+  Ch934xEps uart_host_dev_{};
+  CH934xChipType chiptype_{CHIP_CH934X_UNKNOWN};
+  uint8_t num_ports_{0};
+  uint8_t port_offset_{0};
+  std::atomic<bool> rx_running_{false};
+  std::atomic<bool> cmd_running_{false};
+
+  // Paced parallel init state (see config_device_step()).
+  uint8_t init_lanes_{1};                        // max channels configured in parallel per round
+  uint8_t channel_write_count_{0};               // register writes per channel for the detected chip
+  uint8_t init_group_start_{0};                  // first channel index of the current parallel group
+  uint8_t init_write_idx_{0};                    // write index within the current group's lockstep rounds
+  std::atomic<int> init_pending_{0};             // command writes still outstanding in the current round
+  std::atomic<uint8_t> init_failed_mask_{0};     // per-port failure bits (bit N = port N failed)
+  std::atomic<bool> init_device_failed_{false};  // a device-level init write failed
+};
+
+class CH934XChannel final : public USBUartChannelBase {
+  friend class USBUartTypeCH934X;
+
+ public:
+  // TX header is 3 bytes: [port, len_lo, len_hi] — max data per packet is reduced accordingly
+  static constexpr size_t TX_HEADER_SIZE = 3;
+  static constexpr size_t TX_MAX_DATA = UsbOutputChunk::MAX_CHUNK_SIZE - TX_HEADER_SIZE;
+
+  CH934XChannel(uint8_t index, uint16_t buffer_size) : USBUartChannelBase(index, buffer_size) {}
+  void write_array(const uint8_t *data, size_t len) override;
+  uart::UARTFlushResult flush() override;
+
+ protected:
+  USBUartChannelBase *tx_shared_channel_{nullptr};
+  uint8_t tx_port_byte_{0};
 };
 
 class USBUartTypeFT23XX : public USBUartTypeCdcAcm {
