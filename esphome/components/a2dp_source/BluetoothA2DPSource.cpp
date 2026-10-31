@@ -982,6 +982,17 @@ void BluetoothA2DPSource::bt_app_av_state_connected_hdlr(uint16_t event,
       a2d = (esp_a2d_cb_param_t *)(param);
       if (ESP_A2D_AUDIO_STATE_STARTED == a2d->audio_stat.state) {
         s_pkt_cnt = 0;
+        if (s_media_state != APP_AV_MEDIA_STATE_SUSPENDING) {
+          s_media_state = APP_AV_MEDIA_STATE_STARTED;
+          if (!media_wanted.load()) {
+            a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_SUSPEND);
+            s_media_state = APP_AV_MEDIA_STATE_SUSPENDING;
+          }
+        }
+      } else if (s_media_state == APP_AV_MEDIA_STATE_STARTED) {
+        s_media_state = APP_AV_MEDIA_STATE_IDLE;
+        if (media_wanted.load())
+          a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
       }
       break;
     }
