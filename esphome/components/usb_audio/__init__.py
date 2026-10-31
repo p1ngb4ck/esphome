@@ -184,7 +184,12 @@ def _service_intervals_per_second() -> int:
     against its real limits in hcd_pipe_alloc(), which is where a device that asks for more
     than the buffer holds is refused, with the reason in the log.
     """
-    return 8000 if esp32.get_esp32_variant() == esp32.const.VARIANT_ESP32P4 else 1000
+    return (
+        8000
+        if esp32.get_esp32_variant()
+        in (esp32.const.VARIANT_ESP32P4, esp32.const.VARIANT_ESP32S31)
+        else 1000
+    )
 
 
 def _endpoint_mps(stream) -> int:

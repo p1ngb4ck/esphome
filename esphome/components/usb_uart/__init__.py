@@ -2,7 +2,11 @@ from collections.abc import Callable
 
 import esphome.codegen as cg
 from esphome.components.const import CONF_DATA_BITS, CONF_PARITY, CONF_STOP_BITS
-from esphome.components.esp32 import VARIANT_ESP32P4, get_esp32_variant
+from esphome.components.esp32 import (
+    VARIANT_ESP32P4,
+    VARIANT_ESP32S31,
+    get_esp32_variant,
+)
 from esphome.components.uart import (
     CONF_DEBUG_PREFIX,
     CONF_FLUSH_TIMEOUT,
@@ -117,7 +121,7 @@ class Type:
         return (
             3
             if CORE.is_esp32
-            and get_esp32_variant() != VARIANT_ESP32P4
+            and get_esp32_variant() not in (VARIANT_ESP32P4, VARIANT_ESP32S31)
             and self._max_channels > 3
             else self._max_channels
         )

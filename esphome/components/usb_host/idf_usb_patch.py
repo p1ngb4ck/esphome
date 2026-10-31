@@ -336,7 +336,7 @@ _FSLS_RESET_ANCHOR = """    // Place the bus into the reset state. If the port w
     usb_dwc_hal_port_toggle_reset(port->hal, true);"""
 
 _FSLS_RESET_REPLACEMENT = """    // Place the bus into the reset state. If the port was previously enabled, a disabled event will occur after this
-#if CONFIG_IDF_TARGET_ESP32P4
+#if CONFIG_IDF_TARGET_ESP32P4 || CONFIG_IDF_TARGET_ESP32S31
     if (port->fsls_only) {
         usb_dwc_ll_hcfg_set_fsls_supp_only(port->hal->dev);
     }

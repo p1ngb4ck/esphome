@@ -3,6 +3,7 @@ from esphome.components.esp32 import (
     VARIANT_ESP32P4,
     VARIANT_ESP32S2,
     VARIANT_ESP32S3,
+    VARIANT_ESP32S31,
     only_on_variant,
 )
 from esphome.components.camera_encoder import H264Encoder
@@ -64,7 +65,9 @@ CONFIG_SCHEMA = cv.All(
             ).extend(cv.COMPONENT_SCHEMA),
         }
     ),
-    only_on_variant(supported=[VARIANT_ESP32S2, VARIANT_ESP32S3, VARIANT_ESP32P4]),
+    only_on_variant(
+        supported=[VARIANT_ESP32S2, VARIANT_ESP32S3, VARIANT_ESP32P4, VARIANT_ESP32S31]
+    ),
 )
 
 

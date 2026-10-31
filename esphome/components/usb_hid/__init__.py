@@ -23,6 +23,7 @@ SUPPORTED_VARIANTS = [
     esp32.const.VARIANT_ESP32S2,
     esp32.const.VARIANT_ESP32S3,
     esp32.const.VARIANT_ESP32P4,
+    esp32.const.VARIANT_ESP32S31,
 ]
 
 CONF_DEVICE_NAME = "device_name"

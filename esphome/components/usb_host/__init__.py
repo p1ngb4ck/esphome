@@ -363,8 +363,8 @@ def _validate_full_speed_only(config: dict) -> dict:
     """full_speed_only: the high-speed controller as a full/low-speed host."""
     if not config.get(CONF_FULL_SPEED_ONLY):
         return config
-    if get_esp32_variant() != VARIANT_ESP32P4:
-        raise cv.Invalid(f"{CONF_FULL_SPEED_ONLY} is only supported on ESP32-P4")
+    if get_esp32_variant() not in (VARIANT_ESP32P4, VARIANT_ESP32S31):
+        raise cv.Invalid(f"{CONF_FULL_SPEED_ONLY} is only supported on ESP32-P4 and ESP32-S31")
     if not per_port_fifo_bias_available():
         raise cv.Invalid(f"{CONF_FULL_SPEED_ONLY} requires IDF >= 5.4.0")
     if config.get(CONF_CONTROLLERS) == CONTROLLERS_FULL_SPEED:
@@ -541,7 +541,7 @@ def _default_max_packet_size() -> int:
     512 byte bulk packets, so a flat 64 leaves mass storage transfers unable to carry a
     sector. Full-speed variants stay at 64.
     """
-    return 512 if get_esp32_variant() == VARIANT_ESP32P4 else 64
+    return 512 if get_esp32_variant() in (VARIANT_ESP32P4, VARIANT_ESP32S31) else 64
 
 
 CONFIG_SCHEMA = cv.All(
