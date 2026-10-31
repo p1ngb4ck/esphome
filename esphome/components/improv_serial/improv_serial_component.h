@@ -99,6 +99,9 @@ class ImprovSerialComponent final : public Component, public improv_base::Improv
   bool parse_improv_serial_byte_(uint8_t byte);
   bool parse_improv_payload_(improv::ImprovCommand &command);
   bool network_rpc_(uint8_t code);
+#ifdef IMPROV_SERIAL_IDENTITY_NAMESPACE
+  bool identity_rpc_(uint8_t code);
+#endif
   std::vector<std::string> rpc_strings_() const;
   void send_ack_(uint8_t code);
 #ifdef USE_WIFI
