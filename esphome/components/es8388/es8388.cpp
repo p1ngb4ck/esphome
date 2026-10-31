@@ -102,6 +102,7 @@ void ES8388::setup() {
   this->set_mute_state_(false);
 
   ES8388_ERROR_FAILED(this->write_registers(ES8388_UNMUTE));
+  ES8388_ERROR_FAILED(this->set_mute_state_(this->is_muted_));
 
 #ifdef USE_ES8388_SELECT
   if (this->dac_output_select_ != nullptr) {
@@ -169,7 +170,19 @@ bool ES8388::set_mute_state_(bool mute_state) {
 
   // Only toggle the DACMute bit; the other bits of this register hold unrelated DAC settings
   return this->update_register(ES8388_DACCONTROL3, ES8388_DACCONTROL3_DAC_MUTE,
-                               mute_state ? ES8388_DACCONTROL3_DAC_MUTE : 0);
+                               (mute_state || !this->clocked_) ? ES8388_DACCONTROL3_DAC_MUTE : 0);
+}
+
+void ES8388::on_audio_started() {
+  this->clocked_ = true;
+  if (!this->is_failed())
+    this->set_mute_state_(this->is_muted_);
+}
+
+void ES8388::on_audio_stopping() {
+  this->clocked_ = false;
+  if (!this->is_failed())
+    this->set_mute_state_(this->is_muted_);
 }
 
 // Set dac power output

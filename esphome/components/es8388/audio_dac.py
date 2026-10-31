@@ -21,4 +21,5 @@ CONFIG_SCHEMA = (
 
 
 async def to_code(config: ConfigType) -> None:
+    cg.add_define("USE_AUDIO_DAC_STOPPING")
     await i2c.new_i2c_component(config)
