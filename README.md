@@ -1,16 +1,69 @@
-# ESPHome [![Discord Chat](https://img.shields.io/discord/429907082951524364.svg)](https://discord.gg/KhAMKrd) [![GitHub release](https://img.shields.io/github/release/esphome/esphome.svg)](https://GitHub.com/esphome/esphome/releases/) [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/esphome/esphome)
+# esphome-bluetooth
 
-<a href="https://esphome.io/">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://media.esphome.io/logo/logo-text-on-dark.svg">
-    <img src="https://media.esphome.io/logo/logo-text-on-light.svg" alt="ESPHome Logo">
-  </picture>
-</a>
+ESPHome `dev` plus the Bluetooth host and HID parts of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome)
+`testing_dev` as they are today: Classic GAP dispatch, pairing records and slots, Bluedroid data persistence,
+Classic and BLE HID, BLE advertisement data, the Bluedroid start order, the C6 offload. One branch per change;
+`main` contains every branch. Base: ESPHome `dev` at `1f70f86b47`. The code is taken over unchanged from
+`testing_dev` (components identical; the lines in esp32_ble, ble_client, api and esp32_hosted assigned by
+`git blame`). Bluetooth audio (`a2dp_source`) is in esphome-bt-audio, the USB dongle (`usb_bluetooth`) in
+[esphome-usb-drivers](https://github.com/p1ngb4ck/esphome-usb-drivers).
 
----
+A rework into one host component (scan, pairing, security, bonding for BLE and Classic) with the profiles as drivers
+is planned with Olli; these branches are the state it starts from.
 
-[Documentation](https://esphome.io) -- [Issues](https://github.com/esphome/esphome/issues) -- [Feature requests](https://github.com/orgs/esphome/discussions)
+## Branches
 
----
+| Branch | Change | Chips | Needs |
+|---|---|---|---|
+| `pr/esp32-ble-start-order` | Bluedroid starts once WiFi reports its start-up done and, with a usb_bluetooth bluedroid dongle, once the dongle is ready; `restart()` | ESP32 with BLE | `pr/wifi-startup-done-callback` |
+| `pr/esp32-ble-bt-logs` | `disable_bt_logs` also quiets the Bluedroid layers the build keeps (ERROR instead of their defaults) | ESP32 with BLE | - |
+| `pr/esp32-ble-nvs-ready` | esp32_ble waits for `nvs_ready` | ESP32 with BLE | `pr/esp32-nvs-ready` |
+| `pr/bt-classic` | `bt_classic`: one Classic GAP callback with handlers and fallbacks, the shared IO capability and PIN type, BTDM dual mode on the ESP32-S31 | S31 on chip; others with a dongle | - |
+| `pr/bt-persistence` | `bt_persistence`: Bluedroid's pairing data and GATT cache in PSRAM, saved to a storage file (`backend: storage`) or NVS | with esp32_ble or usb_bluetooth | `pr/storage` |
+| `pr/bt-pairing-hid` | `bt_pairing` (pairing records, slots, device list, status events), `bt_hid` (Classic HID host), `ble_client_hid` (BLE HID), `ble_broadcast` (BLE advertisement data) with the ble_client / esp32_ble / api hooks they use; one branch because `bt_pairing` creates the slots of the other three | see below | `pr/bt-classic`, `pr/hid`, `pr/storage` |
+| `pr/bt-offload` | `bt_offload`: Bluetooth HID input and speaker offloaded to the C6 (custom firmware), the 16 peer data handlers of esp32_hosted on the P4 | P4 with C6 | `pr/usb-bluetooth` |
 
-[![ESPHome - A project from the Open Home Foundation](https://www.openhomefoundation.org/badges/esphome.png)](https://www.openhomefoundation.org/)
+Chips as the code declares today: `ble_client_hid` and `ble_broadcast` on every chip with BLE (the P4 through the
+C6); `bt_hid` (Classic HID) needs a `usb_bluetooth` dongle with `bluedroid: true` on every chip, the ESP32 and
+ESP32-S31 included, although both have Classic on chip [seen bt_hid/__init__.py:106, bt_pairing/__init__.py:313].
+That is one of the points of the planned rework.
+
+`pr/storage` is in [esphome-storage-interface](https://github.com/p1ngb4ck/esphome-storage-interface), `pr/hid` in
+[esphome-hid](https://github.com/p1ngb4ck/esphome-hid), `pr/esp32-nvs-ready` in
+[esphome-esp32-platform](https://github.com/p1ngb4ck/esphome-esp32-platform), `pr/wifi-startup-done-callback` in
+[esphome-network](https://github.com/p1ngb4ck/esphome-network), `pr/usb-bluetooth` in esphome-usb-drivers.
+
+## Use
+
+```yaml
+external_components:
+  - source: github://p1ngb4ck/esphome-bluetooth@main
+    components: [esp32, esp32_ble, ble_client, bt_classic, bt_pairing, bt_hid, ble_client_hid, ble_broadcast,
+                 bt_persistence, hid, storage, wifi]
+
+esp32_ble:
+  enable_on_boot: true
+  io_capability: display_only
+
+esp32_ble_tracker:
+
+bt_pairing:
+  id: bt_pairing_db
+  file: /sdcard/bluetooth/bt_pairing.bin
+  max_devices: 32
+  max_hid_devices: 7
+  max_broadcast_devices: 1
+  layout: de
+
+bt_persistence:
+  id: bt_store
+  backend: storage
+  path: /sdcard/bluetooth/bt_store.bin
+  write_delay: 2s
+  storage_timeout: 20s
+  gatt_cache: true
+```
+
+From the Waveshare ESP32-P4 Pi board's config (BLE on the C6, Classic on a USB dongle). `external_components`
+replaces components only; the ESPHome core of the build host stays as installed. With the other topics together
+use the combined branch `github://p1ngb4ck/esphome@topics-combined`.
