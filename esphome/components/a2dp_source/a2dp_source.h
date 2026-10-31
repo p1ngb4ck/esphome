@@ -17,6 +17,9 @@
 #ifdef USE_BT_PAIRING
 #include "esphome/components/bt_pairing/bt_pairing.h"
 #endif
+#ifdef USE_A2DP_SOURCE_PAUSE_BLE_SCAN
+#include "esphome/components/esp32_ble_tracker/esp32_ble_tracker.h"
+#endif
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/ringbuf.h>

@@ -225,6 +225,8 @@ class ESP32BLETracker final : public Component,
       this->start_scan();
   }
   void stop_scan();
+  void pause_scan();
+  void resume_scan();
 
   void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
   void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
@@ -360,6 +362,9 @@ class ESP32BLETracker final : public Component,
 #ifdef USE_OTA_STATE_LISTENER
   bool scan_continuous_before_ota_ : 1 {false};
 #endif
+  bool scan_paused_ : 1 {false};
+  bool scan_continuous_before_pause_ : 1 {false};
+  bool stop_when_started_ : 1 {false};
   bool ble_was_disabled_ : 1 {true};
   bool parse_advertisements_ : 1 {false};
 #ifdef ESPHOME_ESP32_BLE_TRACKER_CLIENT_COUNT

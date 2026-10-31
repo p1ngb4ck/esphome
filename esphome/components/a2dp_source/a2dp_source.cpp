@@ -60,8 +60,11 @@ void A2DPSource::connection_state_(esp_a2d_connection_state_t state, void *self)
   } else if (!connected && was) {
     component->disconnect_pending_.store(true);
   }
-  if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED)
+  if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
     component->reported_delay_ms_.store(0, std::memory_order_relaxed);
+    if (component->streaming_.exchange(false))
+      component->streaming_stop_pending_.store(true);
+  }
 }
 
 void A2DPSource::delay_report_(uint16_t delay, void *self) {
@@ -808,12 +811,18 @@ void A2DPSource::loop() {
   }
   if (this->streaming_start_pending_.exchange(false)) {
     ESP_LOGI(TAG, "Streaming");
+#ifdef USE_A2DP_SOURCE_PAUSE_BLE_SCAN
+    esp32_ble_tracker::global_esp32_ble_tracker->pause_scan();
+#endif
     for (auto *trigger : this->streaming_start_triggers_) {
       trigger->trigger();
     }
   }
   if (this->streaming_stop_pending_.exchange(false)) {
     ESP_LOGI(TAG, "Streaming stopped");
+#ifdef USE_A2DP_SOURCE_PAUSE_BLE_SCAN
+    esp32_ble_tracker::global_esp32_ble_tracker->resume_scan();
+#endif
     for (auto *trigger : this->streaming_stop_triggers_) {
       trigger->trigger();
     }

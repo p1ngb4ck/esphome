@@ -268,6 +268,9 @@ async def to_code(config):
         # in caps-only mode is internal RAM: a slow sink then starves the device.
         add_idf_sdkconfig_option("CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST", True)
 
+    if not _external_host(CORE.config) and "esp32_ble_tracker" in CORE.config:
+        cg.add_define("USE_A2DP_SOURCE_PAUSE_BLE_SCAN")
+
     if _external_host(CORE.config) or _shared_host(CORE.config):
         # Bluedroid and the controller are usb_bluetooth's (BLE may be the
         # co-processor's): only the profile is added here.

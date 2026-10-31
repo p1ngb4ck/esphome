@@ -222,6 +222,35 @@ void ESP32BLETracker::stop_scan() {
   this->stop_scan_();
 }
 
+void ESP32BLETracker::pause_scan() {
+  if (this->scan_paused_)
+    return;
+  this->scan_paused_ = true;
+  this->scan_continuous_before_pause_ = this->scan_continuous_;
+  ESP_LOGD(TAG, "Scanning paused");
+  if (this->scanner_state_ != ScannerState::STARTING) {
+    this->stop_scan();
+    return;
+  }
+  this->scan_continuous_ = false;
+#ifdef ESPHOME_ESP32_BLE_TRACKER_CLIENT_COUNT
+  this->skip_next_scan_end_ = false;
+#endif
+  this->stop_when_started_ = true;
+}
+
+void ESP32BLETracker::resume_scan() {
+  if (!this->scan_paused_)
+    return;
+  this->scan_paused_ = false;
+  this->stop_when_started_ = false;
+  ESP_LOGD(TAG, "Scanning resumed");
+  if (this->scan_continuous_before_pause_) {
+    this->scan_continuous_ = true;
+    this->state_version_++;
+  }
+}
+
 void ESP32BLETracker::ble_before_disabled_event_handler() {
   // Tell the controller to stop; a scan still starting has nothing to stop yet.
   if (this->scanner_state_ == ScannerState::RUNNING || this->scanner_state_ == ScannerState::FAILED) {
@@ -409,6 +438,10 @@ void ESP32BLETracker::gap_scan_start_complete_(const esp_ble_gap_cb_param_t::ble
   if (param.status == ESP_BT_STATUS_SUCCESS) {
     this->scan_start_fail_count_ = 0;
     this->set_scanner_state_(ScannerState::RUNNING);
+    if (this->stop_when_started_) {
+      this->stop_when_started_ = false;
+      this->stop_scan_();
+    }
   } else {
     this->set_scanner_state_(ScannerState::FAILED);
     if (this->scan_start_fail_count_ != std::numeric_limits<uint8_t>::max()) {
