@@ -45,6 +45,7 @@ from esphome.const import (
 )
 from esphome.core import CORE, CoroPriority, TimePeriod, coroutine_with_priority
 from esphome.enum import StrEnum
+import esphome.final_validate as fv
 from esphome.types import ConfigType
 
 DOMAIN = "esp32_ble_tracker"
@@ -154,6 +155,7 @@ class TrackerData:
 
     scan_window_defaulted: bool = False
     connection_window_injected: bool = False
+    scan_window_raised: bool = False
 
 
 def _get_data() -> TrackerData:
@@ -194,6 +196,7 @@ def _raise_defaulted_scan_window(config: ConfigType) -> ConfigType:
         # Copy so the config dump shows a plain value instead of a YAML
         # anchor/alias pair pointing at the interval.
         params[CONF_WINDOW] = copy.copy(params[CONF_INTERVAL])
+        _get_data().scan_window_raised = True
         # Arm the connection-time fallback unless the user set one. Injected
         # after validation; safe because it equals the validated window default.
         if CONF_CONNECTION_SCAN_WINDOW not in params:
@@ -318,7 +321,26 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
-FINAL_VALIDATE_SCHEMA = esp32_ble.validate_variant
+def _classic_on_own_radio(full_config: ConfigType) -> bool:
+    return "bt_classic" in full_config and not any(
+        c.get("bluedroid") for c in full_config.get("usb_bluetooth") or []
+    )
+
+
+def _final_validate(config: ConfigType) -> None:
+    esp32_ble.validate_variant(config)
+    data = _get_data()
+    if not data.scan_window_raised or not _classic_on_own_radio(fv.full_config.get()):
+        return
+    params = config[CONF_SCAN_PARAMETERS]
+    params[CONF_WINDOW] = cv.positive_time_period(ble_device_base.DEFAULT_SCAN_WINDOW)
+    data.scan_window_raised = False
+    if data.connection_window_injected:
+        params.pop(CONF_CONNECTION_SCAN_WINDOW, None)
+        data.connection_window_injected = False
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate
 
 ESP_BLE_DEVICE_SCHEMA = cv.Schema(
     {
