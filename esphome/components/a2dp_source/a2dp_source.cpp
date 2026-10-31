@@ -156,6 +156,7 @@ void A2DPSource::setup() {
         }
         xRingbufferSend(this->ring_, data.data(), data.size(), 0);
       }
+      this->fed_.store(true);
     });
     this->mic_source_->start();
   }
@@ -590,10 +591,14 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
 #endif
   if (this->speaker_active_.load())
     this->played_frames_.fetch_add((uint32_t) (filled / BYTES_PER_FRAME));
+  const bool fed = this->fed_.exchange(false);
+  if (fed && this->pending_gap_frames_ != 0)
+    this->underrun_frames_.fetch_add(this->pending_gap_frames_);
+  this->pending_gap_frames_ = 0;
   if (filled < wanted) {
     memset(out + filled, 0, wanted - filled);
-    if (producer)
-      this->underrun_frames_.fetch_add((uint32_t) ((wanted - filled) / BYTES_PER_FRAME));
+    if (producer && fed)
+      this->pending_gap_frames_ = (uint32_t) ((wanted - filled) / BYTES_PER_FRAME);
   }
   return frame_count;
 }
@@ -611,7 +616,10 @@ size_t A2DPSource::write_audio(const uint8_t *data, size_t length, TickType_t ti
   chunk -= chunk % BYTES_PER_FRAME;
   if (chunk == 0)
     return 0;
-  return xRingbufferSend(this->ring_, data, chunk, ticks_to_wait) == pdTRUE ? chunk : 0;
+  if (xRingbufferSend(this->ring_, data, chunk, ticks_to_wait) != pdTRUE)
+    return 0;
+  this->fed_.store(true);
+  return chunk;
 }
 
 void A2DPSource::clear_audio() {

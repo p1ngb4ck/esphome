@@ -293,6 +293,8 @@ class A2DPSource : public Component
   std::string paired_name_;
 
   std::atomic<uint32_t> underrun_frames_{0};
+  std::atomic<bool> fed_{false};
+  uint32_t pending_gap_frames_{0};
   uint32_t last_report_ms_{0};
   uint32_t idle_timeout_ms_{0};
   uint32_t idle_since_ms_{0};
