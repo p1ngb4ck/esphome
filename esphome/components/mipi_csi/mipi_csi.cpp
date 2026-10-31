@@ -465,6 +465,13 @@ bool MipiCsiCamera::start_capture_() {
 }
 
 void MipiCsiCamera::finish_stop_() {
+  if (this->direct_given_) {
+    this->direct_given_ = false;
+    this->direct_callback_.call(nullptr, 0, 0);
+  }
+  this->direct_held_.store(-1);
+  this->direct_returned_.store(-1);
+  this->direct_ready_.store(false);
   // The task has parked itself (suspended, nothing left to do): deleting it is safe; its stack and TCB go after
   if (this->capture_task_handle_ != nullptr) {
     vTaskDelete(this->capture_task_handle_);
@@ -554,6 +561,10 @@ void MipiCsiCamera::capture_task(void *param) {
       self->failed_.store(true);
       break;
     }
+    const int8_t returned = self->direct_returned_.exchange(-1);
+    if (returned >= 0 && !self->queue_buffer_(static_cast<uint32_t>(returned))) {
+      ESP_LOGW(TAG, "Returning a frame buffer failed: %s", strerror(errno));
+    }
 
       // The encoder is handed the whole buffer, as Espressif's reference does: the length is what
       // bounds the cache invalidation before the JPEG engine's DMA reads it.
@@ -582,6 +593,17 @@ void MipiCsiCamera::capture_task(void *param) {
     if (self->preview_ready_.load() || self->preview_released_ != nullptr) {
       self->enable_loop_soon_any_context();
       App.wake_loop_threadsafe();
+    }
+
+    // Direct: this buffer is the reader's until it comes back (direct_returned_), the driver has the others; one
+    // returned and not re-queued yet goes first (two returns between frames would lose one)
+    if (self->direct_.load() && self->direct_held_.load() < 0 && self->direct_returned_.load() < 0 &&
+        (buffer.flags & V4L2_BUF_FLAG_ERROR) == 0) {
+      self->direct_held_.store(static_cast<int8_t>(buffer.index));
+      self->direct_ready_.store(true);
+      self->enable_loop_soon_any_context();
+      App.wake_loop_threadsafe();
+      continue;
     }
 
     if (!self->queue_buffer_(buffer.index)) {
@@ -640,6 +662,15 @@ void MipiCsiCamera::loop() {
   }
   if (this->preview_buffer_.load() != nullptr && !this->preview_wanted_.load())
     this->preview_wanted_.store(true);
+  if (this->direct_ready_.exchange(false)) {
+    const int8_t held = this->direct_held_.load();
+    if (held >= 0 && this->direct_.load()) {
+      this->direct_given_ = true;
+      this->direct_callback_.call(this->buffers_[held].data, this->width_, this->height_);
+    } else {
+      this->release_direct_frame();
+    }
+  }
 
   // Release the previous image once every consumer has finished reading it, which frees the
   // encoder's output buffer for the next frame.
@@ -674,6 +705,7 @@ void MipiCsiCamera::loop() {
     return;
   }
     this->close_jpeg_();   // no API image wanted: the JPEG output back to the pool
+    this->disable_loop();  // only the preview / direct frames: the task wakes the loop with each frame
     return;
   }
   if (!this->has_requested_image_()) {
@@ -719,6 +751,27 @@ void MipiCsiCamera::set_preview_buffer(uint8_t *buffer, size_t size) {
   this->enable_loop_soon_any_context();
 }
 
+void MipiCsiCamera::set_direct(bool on) {
+  this->direct_.store(on);
+  if (!on) {
+    if (this->direct_given_) {
+      this->direct_given_ = false;
+      this->direct_callback_.call(nullptr, 0, 0);
+    }
+    this->release_direct_frame();
+  }
+  this->enable_loop_soon_any_context();
+}
+
+void MipiCsiCamera::release_direct_frame() {
+  const int8_t held = this->direct_held_.load();
+  if (held < 0)
+    return;
+  this->direct_given_ = false;
+  // Returned first: the task, seeing nothing held, may take the next one; it re-queues this one after its next frame
+  this->direct_returned_.store(held);
+  this->direct_held_.store(-1);
+}
 
 void MipiCsiCamera::request_image(camera::CameraRequester requester) {
   this->single_requesters_ |= (1U << requester);
