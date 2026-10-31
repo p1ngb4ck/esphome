@@ -20,6 +20,12 @@ namespace esphome::esp32 {}
 
 namespace esphome {
 
+#if CONFIG_FREERTOS_UNICORE
+static constexpr BaseType_t LOOP_TASK_CORE = tskNO_AFFINITY;
+#else
+static constexpr BaseType_t LOOP_TASK_CORE = 1;
+#endif
+
 // Forward decl from helpers.h (esphome/core/helpers.h) — kept here so this
 // header does not need to pull the rest of helpers.h.
 // NOLINTNEXTLINE(readability-redundant-declaration)
