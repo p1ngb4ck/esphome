@@ -2,9 +2,8 @@
 
 ESPHome `dev` plus the `usb_host` rework of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome) `testing_dev`,
 in three branches. `main` contains all three and is identical to `testing_dev`'s `usb_host`. Base: ESPHome `dev`
-at `1f70f86b47`. The USB drivers (usb_hid, usb_storage, usb_uvc, usb_audio, usb_bluetooth, usb_ethernet) are in
-[esphome-usb-drivers](https://github.com/p1ngb4ck/esphome-usb-drivers), usb_uart in
-[esphome-usb-uart](https://github.com/p1ngb4ck/esphome-usb-uart).
+at `1f70f86b47`. The USB drivers (usb_hid, usb_storage, usb_cdrom, usb_uvc, usb_audio, usb_bluetooth, usb_uart,
+usb_ethernet) are in [esphome-usb-drivers](https://github.com/p1ngb4ck/esphome-usb-drivers).
 
 ## Why
 
