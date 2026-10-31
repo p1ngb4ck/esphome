@@ -18,6 +18,7 @@ from esphome.components.const import (
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ADVANCED,
+    CONF_API,
     CONF_BOARD,
     CONF_COMPONENTS,
     CONF_DISABLED,
@@ -25,6 +26,7 @@ from esphome.const import (
     CONF_ENABLE_OTA_ROLLBACK,
     CONF_ESPHOME,
     CONF_FRAMEWORK,
+    CONF_ID,
     CONF_IGNORE_EFUSE_CUSTOM_MAC,
     CONF_IGNORE_EFUSE_MAC_CRC,
     CONF_LOG_LEVEL,
@@ -53,13 +55,14 @@ from esphome.const import (
     Toolchain,
     __version__,
 )
-from esphome.core import CORE, EsphomeError, HexInt
+from esphome.core import CORE, ID, EsphomeError, HexInt, TimePeriod
 from esphome.core.config import BOARD_MAX_LENGTH
 from esphome.coroutine import CoroPriority, coroutine_with_priority
 from esphome.espidf import sbom
 from esphome.espidf.component import IDFComponent, generate_idf_components
+from esphome.espidf.toolchain import _get_idf_path
 import esphome.final_validate as fv
-from esphome.helpers import copy_file_if_changed, rmtree, write_file_if_changed
+from esphome.helpers import copy_file_if_changed, fnv1_hash, rmtree, write_file_if_changed
 from esphome.schema_extractors import SCHEMA_EXTRACT, schema_extractor
 from esphome.types import ConfigType
 from esphome.writer import clean_build, clean_cmake_cache
@@ -79,6 +82,7 @@ from .const import (
     KEY_IDF_VERSION,
     KEY_MBEDTLS_SDKCONFIG,
     KEY_NETWORK_SDKCONFIG,
+    KEY_OVERRIDE_PATH,
     KEY_PATH,
     KEY_REF,
     KEY_REPO,
@@ -100,12 +104,30 @@ from .const import (
     VARIANT_ESP32S31,
     VARIANT_FRIENDLY,
     VARIANTS,
+    esp32_ns,
 )
 
 # force import gpio to register pin schema
 from .gpio import esp32_pin_to_code  # noqa: F401
 
 _LOGGER = logging.getLogger(__name__)
+
+CHIP_REVISION_ACTION = "chip_revision"
+ChipRevisionAction = esp32_ns.class_("ChipRevisionAction")
+NVS_ACTIONS = {
+    "nvs_list": esp32_ns.class_("NvsListAction"),
+    "nvs_erase": esp32_ns.class_("NvsEraseAction"),
+}
+FLASH_ACTIONS = {
+    "flash_info": esp32_ns.class_("FlashInfoAction"),
+    "flash_verify": esp32_ns.class_("FlashVerifyAction"),
+}
+COREDUMP_ACTIONS = {
+    "coredump_info": esp32_ns.class_("CoredumpInfoAction"),
+    "coredump_read": esp32_ns.class_("CoredumpReadAction"),
+    "coredump_erase": esp32_ns.class_("CoredumpEraseAction"),
+}
+
 AUTO_LOAD = ["preferences"]
 CODEOWNERS = ["@esphome/core"]
 DOMAIN = "esp32"
@@ -501,6 +523,16 @@ ESP32_CHIP_REVISIONS = {
     "3.0": "CONFIG_ESP32_REV_MIN_3",
     "3.1": "CONFIG_ESP32_REV_MIN_3_1",
 }
+ESP32P4_CHIP_REVISIONS = {
+    "0.0": "CONFIG_ESP32P4_REV_MIN_0",
+    "0.1": "CONFIG_ESP32P4_REV_MIN_1",
+    "1.0": "CONFIG_ESP32P4_REV_MIN_100",
+    "3.0": "CONFIG_ESP32P4_REV_MIN_300",
+    "3.1": "CONFIG_ESP32P4_REV_MIN_301",
+}
+ESP32P4_LESS_V3_REVISIONS = ("0.0", "0.1", "1.0")
+CHIP_REVISION_ENV = "ESPHOME_CHIP_REVISION"
+P4_MIN_REVISION_FAST_FLASH = ("80MHZ", "120MHZ")
 
 # Flash vendor drivers ESP-IDF can link; each costs IRAM plus a 124 B table in DRAM
 # and only the one matching the flash ID is ever used
@@ -515,6 +547,21 @@ ESP32_FLASH_CHIPS = {
 }
 FLASH_CHIP_GENERIC = "generic"
 FLASH_CHIP_OPI = "mxic_opi"  # the octal driver, ESP32-S3 only
+FLASH_ID_ENV = "ESPHOME_FLASH_ID"
+FLASH_MAX_FREQUENCY_ENV = "ESPHOME_FLASH_MAX_FREQUENCY"
+FLASH_VENDOR_IDS = {
+    0xC8: "gd",
+    0x9D: "issi",
+    0xC2: "mxic",
+    0xEF: "winbond",
+    0x68: "boya",
+    0xCD: "th",
+}
+FLASH_AUTO_FREQUENCY = "80MHZ"
+KEY_NVS_DEFAULTS = "nvs_defaults"
+NVS_DEFAULTS_CSV = "nvs_defaults.csv"
+NVS_DEFAULTS_PARTITION = "nvs"
+FLASH_SAFE_FREQUENCY = "40MHZ"
 
 # Socket limit configuration for ESP-IDF
 # ESP-IDF CONFIG_LWIP_MAX_SOCKETS has range 1-253, default 10
@@ -602,6 +649,15 @@ def _get_sdkconfig_cpu_frequencies(
     return selected, disabled
 
 
+def _warn_once(message: str, *args: Any) -> None:
+    warned = CORE.data.setdefault("esp32_config_warnings", set())
+    key = (message, *(str(arg) for arg in args))
+    if key in warned:
+        return
+    warned.add(key)
+    _LOGGER.warning(message, *args)
+
+
 def set_core_data(config):
     cpu_frequency = config.get(CONF_CPU_FREQUENCY)
     variant = config[CONF_VARIANT]
@@ -622,7 +678,7 @@ def set_core_data(config):
                 f"sdkconfig_options selects {sdkconfig_cpu_frequency}, which {variant} does not support",
                 path=sdkconfig_path,
             )
-        _LOGGER.warning(
+        _warn_once(
             "sdkconfig_options contains a CPU frequency setting; using %s. "
             "Set 'esp32.cpu_frequency' to configure it directly.",
             sdkconfig_cpu_frequency,
@@ -657,7 +713,7 @@ def set_core_data(config):
     config[CONF_CPU_FREQUENCY] = cpu_frequency
 
     if variant == VARIANT_ESP32P4 and cpu_frequency == "400MHZ":
-        _LOGGER.warning(
+        _warn_once(
             "400MHz on ESP32-P4 is experimental and may not boot. "
             "Consider using 360MHz instead. See https://github.com/esphome/esphome/issues/13425"
         )
@@ -1008,24 +1064,63 @@ def add_idf_component(
     repo: str | None = None,
     ref: str | None = None,
     path: str | None = None,
+    override_path: str | None = None,
+    refresh: TimePeriod | None = None,
+    components: list[str] | None = None,
+    submodules: list[str] | None = None,
 ):
-    """Add an esp-idf component to the project."""
-    if not repo and not ref and not path:
-        raise ValueError("Requires at least one of repo, ref or path")
-    components_registry = CORE.data[KEY_ESP32][KEY_COMPONENTS]
-    existing = components_registry.get(name)
-    if existing and existing.get(KEY_REF) != ref:
+    """Add an esp-idf component to the project.
+
+    Args:
+        name: Component name
+        repo: Git repository URL
+        ref: Git ref (tag/branch/commit)
+        path: Path within repository
+        override_path: Override path for built-in components (to replace ESP-IDF built-in components)
+        refresh: Deprecated
+        components: Deprecated
+        submodules: Deprecated
+    """
+    if not repo and not ref and not path and not override_path:
+        raise ValueError("Requires at least one of repo, ref, path, or override_path")
+    if refresh or submodules or components:
         _LOGGER.warning(
-            "IDF component %s version conflict %s replaced by %s",
-            name,
-            existing.get(KEY_REF),
-            ref,
+            "The refresh, components and submodules parameters in add_idf_component() are "
+            "deprecated and will be removed in ESPHome 2026.1. If you are seeing this, report "
+            "an issue to the external_component author and ask them to update it."
         )
-    components_registry[name] = {
-        KEY_REPO: repo,
-        KEY_REF: ref,
-        KEY_PATH: path,
-    }
+    components_registry = CORE.data[KEY_ESP32][KEY_COMPONENTS]
+    if components:
+        for comp in components:
+            existing = components_registry.get(comp)
+            if existing and existing.get(KEY_REF) != ref:
+                _LOGGER.warning(
+                    "IDF component %s version conflict %s replaced by %s",
+                    comp,
+                    existing.get(KEY_REF),
+                    ref,
+                )
+            components_registry[comp] = {
+                KEY_REPO: repo,
+                KEY_REF: ref,
+                KEY_PATH: f"{path}/{comp}" if path else comp,
+                KEY_OVERRIDE_PATH: override_path,
+            }
+    else:
+        existing = components_registry.get(name)
+        if existing and existing.get(KEY_REF) != ref:
+            _LOGGER.warning(
+                "IDF component %s version conflict %s replaced by %s",
+                name,
+                existing.get(KEY_REF),
+                ref,
+            )
+        components_registry[name] = {
+            KEY_REPO: repo,
+            KEY_REF: ref,
+            KEY_PATH: path,
+            KEY_OVERRIDE_PATH: override_path,
+        }
 
 
 def get_managed_component_require_names() -> list[str]:
@@ -1122,6 +1217,25 @@ def add_src_cmake(block: str) -> None:
     ``idf_component_register`` so the block never runs in script mode.
     """
     CORE.data[KEY_ESP32][KEY_SRC_CMAKE].append(block)
+
+
+def add_nvs_default(namespace: str, key: str, data: bytes) -> None:
+    defaults = CORE.data[KEY_ESP32].setdefault(KEY_NVS_DEFAULTS, {})
+    if not defaults:
+        CORE.add_job(_write_nvs_defaults)
+    defaults.setdefault(namespace, {})[key] = data
+
+
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _write_nvs_defaults() -> None:
+    lines = ["key,type,encoding,value"]
+    for namespace, entries in CORE.data[KEY_ESP32][KEY_NVS_DEFAULTS].items():
+        lines.append(f"{namespace},namespace,,")
+        lines.extend(f"{key},data,hex2bin,{data.hex()}" for key, data in entries.items())
+    write_file_if_changed(CORE.relative_build_path(NVS_DEFAULTS_CSV), "\n".join(lines) + "\n")
+    add_src_cmake(
+        f"nvs_create_partition_image({NVS_DEFAULTS_PARTITION} ${{CMAKE_SOURCE_DIR}}/{NVS_DEFAULTS_CSV})"
+    )
 
 
 def add_extra_build_file(filename: str, path: Path) -> bool:
@@ -1309,7 +1423,7 @@ def _resolve_framework_version(value: ConfigType) -> cv.Version:
         recommended = ESP_IDF_FRAMEWORK_VERSION_LOOKUP["recommended"]
 
     if version != recommended:
-        _LOGGER.warning(
+        _warn_once(
             "The selected framework version is not the recommended one. "
             "If there are connectivity or build issues please remove the manual version."
         )
@@ -1369,7 +1483,7 @@ def _check_pio_versions(config: ConfigType) -> ConfigType:
     if value[CONF_PLATFORM_VERSION] != _parse_pio_platform_version(
         str(PLATFORM_VERSION_LOOKUP["recommended"])
     ):
-        _LOGGER.warning(
+        _warn_once(
             "The selected platform version is not the recommended one. "
             "If there are connectivity or build issues please remove the manual version."
         )
@@ -1390,7 +1504,7 @@ def _check_esp_idf_versions(config: ConfigType) -> ConfigType:
     version = _resolve_framework_version(value)
 
     if CONF_SOURCE in value:
-        _LOGGER.warning(
+        _warn_once(
             "A custom framework source is set. "
             "If there are connectivity or build issues please remove the manual source."
         )
@@ -1427,11 +1541,41 @@ def _parse_pio_platform_version(value):
         return value
 
 
+def detected_chip_revision() -> int | None:
+    try:
+        revision = int(os.environ.get(CHIP_REVISION_ENV, ""))
+    except ValueError:
+        return None
+    return revision if 0 <= revision <= 9999 else None
+
+
+def _revision_text(revision: int) -> str:
+    return f"{revision // 100}.{revision % 100}"
+
+
+def _revision_key(text: str) -> int:
+    major, minor = text.split(".")
+    return int(major) * 100 + int(minor)
+
+
 def _normalize_p4_engineering_sample(value: ConfigType) -> bool:
     """Fill in CONF_ENGINEERING_SAMPLE when unset, warning that production
     silicon (rev3) is assumed. Returns the normalized flag."""
+    if (detected := detected_chip_revision()) is not None:
+        engineering_sample = detected < 300
+        if (explicit := value.get(CONF_ENGINEERING_SAMPLE)) is None:
+            value[CONF_ENGINEERING_SAMPLE] = engineering_sample
+            return engineering_sample
+        if explicit != engineering_sample:
+            _warn_once(
+                "'%s: %s' does not match the detected chip revision v%s; the configured value is used",
+                CONF_ENGINEERING_SAMPLE,
+                explicit,
+                _revision_text(detected),
+            )
+        return explicit
     if (engineering_sample := value.get(CONF_ENGINEERING_SAMPLE)) is None:
-        _LOGGER.warning(
+        _warn_once(
             "Defaulting to ESP32-P4 production silicon (rev3).\n"
             "If you have an early engineering sample (pre-rev3), add this to your config:\n"
             "\n"
@@ -1445,6 +1589,97 @@ def _normalize_p4_engineering_sample(value: ConfigType) -> bool:
         engineering_sample = False
         value[CONF_ENGINEERING_SAMPLE] = engineering_sample
     return engineering_sample
+
+
+def _apply_detected_chip_revision(value: ConfigType) -> ConfigType:
+    if (detected := detected_chip_revision()) is None:
+        return value
+    variant = value[CONF_VARIANT]
+    if variant == VARIANT_ESP32:
+        choices = list(ESP32_CHIP_REVISIONS)
+    elif variant == VARIANT_ESP32P4:
+        choices = [
+            rev
+            for rev in ESP32P4_CHIP_REVISIONS
+            if (rev in ESP32P4_LESS_V3_REVISIONS) == bool(value.get(CONF_ENGINEERING_SAMPLE))
+        ]
+    else:
+        return value
+    fitting = [rev for rev in choices if _revision_key(rev) <= detected]
+    if not fitting:
+        return value
+    auto = max(fitting, key=_revision_key)
+    framework = value.get(CONF_FRAMEWORK, {})
+    advanced = framework.get(CONF_ADVANCED, {})
+    if (explicit := advanced.get(CONF_MINIMUM_CHIP_REVISION)) is None:
+        value = value.copy()
+        value[CONF_FRAMEWORK] = {
+            **framework,
+            CONF_ADVANCED: {**advanced, CONF_MINIMUM_CHIP_REVISION: auto},
+        }
+    elif explicit != auto:
+        _warn_once(
+            "'%s: %s' does not match the detected chip revision v%s (auto: %s); the configured value is used",
+            CONF_MINIMUM_CHIP_REVISION,
+            explicit,
+            _revision_text(detected),
+            auto,
+        )
+    return value
+
+
+def detected_flash_id() -> int | None:
+    try:
+        flash_id = int(os.environ.get(FLASH_ID_ENV, ""), 16)
+    except ValueError:
+        return None
+    return flash_id if 0 < flash_id <= 0xFFFFFF else None
+
+
+def _apply_detected_flash(value: ConfigType) -> ConfigType:
+    if (flash_id := detected_flash_id()) is None:
+        return value
+    vendor = FLASH_VENDOR_IDS.get(flash_id >> 16)
+    auto_chip = vendor or FLASH_CHIP_GENERIC
+    framework = value.get(CONF_FRAMEWORK, {})
+    advanced = framework.get(CONF_ADVANCED, {})
+    value = value.copy()
+    if (explicit_chip := advanced.get(CONF_FLASH_CHIP)) is None:
+        advanced = {**advanced, CONF_FLASH_CHIP: auto_chip}
+        value[CONF_FRAMEWORK] = {**framework, CONF_ADVANCED: advanced}
+    elif explicit_chip != auto_chip:
+        _warn_once(
+            "'%s: %s' does not match the detected flash %06X (auto: %s); the configured value is used",
+            CONF_FLASH_CHIP,
+            explicit_chip,
+            flash_id,
+            auto_chip,
+        )
+    if value[CONF_VARIANT] != VARIANT_ESP32P4:
+        return value
+    limited = os.environ.get(FLASH_MAX_FREQUENCY_ENV, "").upper() == FLASH_SAFE_FREQUENCY
+    fast = (
+        vendor is not None
+        and advanced.get(CONF_MINIMUM_CHIP_REVISION) not in (None, "0.0")
+        and not limited
+    )
+    auto_frequency = FLASH_AUTO_FREQUENCY if fast else FLASH_SAFE_FREQUENCY
+    if limited:
+        _warn_once(
+            "The flash check of this device failed at a higher speed; auto is %s",
+            FLASH_SAFE_FREQUENCY,
+        )
+    if (explicit_frequency := value.get(CONF_FLASH_FREQUENCY)) is None:
+        value[CONF_FLASH_FREQUENCY] = auto_frequency
+    elif explicit_frequency != auto_frequency:
+        _warn_once(
+            "'%s: %s' does not match the detected flash %06X (auto: %s); the configured value is used",
+            CONF_FLASH_FREQUENCY,
+            explicit_frequency,
+            flash_id,
+            auto_frequency,
+        )
+    return value
 
 
 def _detect_variant(value):
@@ -1497,7 +1732,7 @@ def _detect_variant(value):
             path=[CONF_BOARD],
         )
     else:
-        _LOGGER.warning(
+        _warn_once(
             "This board is unknown; the specified variant '%s' will be used but this may not work as expected.",
             variant,
         )
@@ -1780,15 +2015,51 @@ def final_validate(config) -> None:
                 path=[CONF_FRAMEWORK, CONF_ADVANCED, CONF_IGNORE_EFUSE_MAC_CRC],
             )
         )
-    if (
-        config[CONF_VARIANT] != VARIANT_ESP32
-        and advanced.get(CONF_MINIMUM_CHIP_REVISION) is not None
-    ):
+    min_rev = advanced.get(CONF_MINIMUM_CHIP_REVISION)
+    if min_rev is not None and config[CONF_VARIANT] == VARIANT_ESP32P4:
+        if min_rev not in ESP32P4_CHIP_REVISIONS:
+            errs.append(
+                cv.Invalid(
+                    f"'{CONF_MINIMUM_CHIP_REVISION}' on {VARIANT_ESP32P4} is one of "
+                    f"{', '.join(ESP32P4_CHIP_REVISIONS)}",
+                    path=[CONF_FRAMEWORK, CONF_ADVANCED, CONF_MINIMUM_CHIP_REVISION],
+                )
+            )
+        elif (min_rev in ESP32P4_LESS_V3_REVISIONS) != bool(config.get(CONF_ENGINEERING_SAMPLE)):
+            errs.append(
+                cv.Invalid(
+                    f"'{CONF_MINIMUM_CHIP_REVISION}: {min_rev}' does not match "
+                    f"'{CONF_ENGINEERING_SAMPLE}: {bool(config.get(CONF_ENGINEERING_SAMPLE))}'",
+                    path=[CONF_FRAMEWORK, CONF_ADVANCED, CONF_MINIMUM_CHIP_REVISION],
+                )
+            )
+    elif min_rev is not None and config[CONF_VARIANT] == VARIANT_ESP32:
+        if min_rev not in ESP32_CHIP_REVISIONS:
+            errs.append(
+                cv.Invalid(
+                    f"'{CONF_MINIMUM_CHIP_REVISION}' on {VARIANT_ESP32} is one of "
+                    f"{', '.join(ESP32_CHIP_REVISIONS)}",
+                    path=[CONF_FRAMEWORK, CONF_ADVANCED, CONF_MINIMUM_CHIP_REVISION],
+                )
+            )
+    elif min_rev is not None:
         errs.append(
             cv.Invalid(
-                f"'{CONF_MINIMUM_CHIP_REVISION}' is only supported on {VARIANT_ESP32}",
+                f"'{CONF_MINIMUM_CHIP_REVISION}' is only supported on {VARIANT_ESP32} and {VARIANT_ESP32P4}",
                 path=[CONF_FRAMEWORK, CONF_ADVANCED, CONF_MINIMUM_CHIP_REVISION],
             )
+        )
+    if (
+        config[CONF_VARIANT] == VARIANT_ESP32P4
+        and config.get(CONF_FLASH_FREQUENCY) in P4_MIN_REVISION_FAST_FLASH
+        and min_rev in (None, "0.0")
+    ):
+        _LOGGER.warning(
+            "'%s: %s' needs '%s' 0.1 or higher on %s; ESP-IDF builds with 40MHz otherwise",
+            CONF_FLASH_FREQUENCY,
+            config[CONF_FLASH_FREQUENCY],
+            CONF_MINIMUM_CHIP_REVISION,
+            VARIANT_ESP32P4,
         )
     if config[CONF_VARIANT] != VARIANT_ESP32S3 and config.get(CONF_FLASH_MODE) == "opi":
         errs.append(
@@ -2052,6 +2323,34 @@ CONF_FREERTOS_IN_IRAM = "freertos_in_iram"
 CONF_RINGBUF_IN_IRAM = "ringbuf_in_iram"
 CONF_HEAP_IN_IRAM = "heap_in_iram"
 CONF_LOOP_TASK_STACK_SIZE = "loop_task_stack_size"
+CONF_BOOT_RAM_PROBE = "boot_ram_probe"
+CONF_COMPONENTS_IN_PSRAM = "components_in_psram"
+KEY_COMPONENTS_IN_PSRAM = "components_in_psram"
+# The .bss of the generated main.cpp (every component object's static storage) in PSRAM: an IDF
+# component holding only this linker fragment. ESP-IDF's PSRAM noinit section (extram_noinit), not its
+# PSRAM .bss: turning that on moves Bluetooth's and lwIP's .bss too (they get slower there). Noinit is not
+# zeroed at startup, so app_main() zeroes the range between the SURROUND symbols first.
+_COMPONENTS_IN_PSRAM_LF = """[sections:esphome_main_bss]
+entries:
+    .bss+
+
+[sections:esphome_main_common]
+entries:
+    COMMON
+
+[scheme:esphome_main_extram_noinit]
+entries:
+    esphome_main_bss -> extram_noinit
+    esphome_main_common -> extram_noinit
+
+[mapping:esphome_main_bss_psram]
+archive: libsrc.a
+entries:
+    if SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY = y:
+        main (esphome_main_extram_noinit);
+            esphome_main_bss -> extram_noinit ALIGN(4) ALIGN(4, post) SURROUND(esphome_main_bss),
+            esphome_main_common -> extram_noinit ALIGN(4) ALIGN(4, post) SURROUND(esphome_main_common)
+"""
 CONF_USE_FULL_CERTIFICATE_BUNDLE = "use_full_certificate_bundle"
 CONF_DISABLE_DEBUG_STUBS = "disable_debug_stubs"
 CONF_DISABLE_OCD_AWARE = "disable_ocd_aware"
@@ -2127,6 +2426,10 @@ def require_certificate_bundle() -> None:
     # esp_crt_bundle.c lives in the mbedtls component and calls
     # mbedtls_ssl_conf_*, so a bundle needs the TLS role but not esp-tls.
     require_mbedtls_tls()
+    # A TLS client verifying a server via the bundle needs SHA-384/SHA-512: servers commonly
+    # negotiate SHA-384 cipher suites and present certs signed with SHA-384, so requesting the
+    # bundle implies requiring SHA-384/SHA-512.
+    _mbedtls_sdkconfig().sha512_required = True
     CORE.data[KEY_ESP32][KEY_CERT_BUNDLE] = True
 
 
@@ -2307,7 +2610,7 @@ FRAMEWORK_SCHEMA = cv.Schema(
                 cv.Optional(CONF_IGNORE_EFUSE_CUSTOM_MAC, default=False): cv.boolean,
                 cv.Optional(CONF_IGNORE_EFUSE_MAC_CRC, default=False): cv.boolean,
                 cv.Optional(CONF_MINIMUM_CHIP_REVISION): cv.one_of(
-                    *ESP32_CHIP_REVISIONS, string=True
+                    *dict.fromkeys([*ESP32_CHIP_REVISIONS, *ESP32P4_CHIP_REVISIONS]), string=True
                 ),
                 cv.Optional(CONF_SRAM1_AS_IRAM, default=False): cv.boolean,
                 cv.Optional(CONF_FLASH_CHIP): cv.one_of(
@@ -2341,6 +2644,13 @@ FRAMEWORK_SCHEMA = cv.Schema(
                 cv.Optional(CONF_LOOP_TASK_STACK_SIZE, default=8192): cv.int_range(
                     min=8192, max=32768
                 ),
+                # A measurement: internal and internal DMA free RAM sampled every millisecond for the
+                # first 90 s, its changes logged afterwards (a task with its stack in PSRAM, gone then).
+                cv.Optional(CONF_BOOT_RAM_PROBE, default=False): cv.boolean,
+                # The component objects (their static storage, often 100 KB and more) in PSRAM instead
+                # of internal RAM. Needs PSRAM executing the firmware (execute_from_psram): a flash
+                # operation then does not turn the PSRAM cache off, so interrupts may still use them.
+                cv.Optional(CONF_COMPONENTS_IN_PSRAM, default=False): cv.boolean,
                 cv.Optional(CONF_ENABLE_OTA_ROLLBACK, default=True): cv.boolean,
                 cv.Optional(
                     CONF_ENABLE_OTA_DOWNGRADE_PROTECTION, default=False
@@ -2520,6 +2830,8 @@ CONFIG_SCHEMA = cv.All(
     _resolve_toolchain,
     _detect_variant,
     _set_default_framework,
+    _apply_detected_chip_revision,
+    _apply_detected_flash,
     _check_versions,
     set_core_data,
     _require_ipv4_on_arduino,
@@ -2601,6 +2913,53 @@ def register_exclude_components_cmake_arg() -> None:
     """Register the current exclusion set as the EXCLUDE_COMPONENTS cmake arg."""
     if excluded := get_excluded_builtin_components():
         cg.add_cmake_arg("EXCLUDE_COMPONENTS", ";".join(excluded))
+
+
+def has_coredump_partition(config: ConfigType) -> bool:
+    partitions = config.get(CONF_PARTITIONS)
+    if isinstance(partitions, list):
+        return any(partition[CONF_SUBTYPE] == "coredump" for partition in partitions)
+    if partitions is None:
+        return False
+    try:
+        text = Path(CORE.relative_config_path(partitions)).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        cells = [cell.strip() for cell in line.split("#", 1)[0].split(",")]
+        if len(cells) >= 3 and cells[1] == "data" and cells[2] == "coredump":
+            return True
+    return False
+
+
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _add_api_actions() -> None:
+    if CONF_API not in CORE.config:
+        return
+    cg.add_define("USE_ESP32_CHIP_REVISION_ACTION")
+    cg.add_define("USE_API_USER_DEFINED_ACTIONS")
+    cg.add_define("USE_API_CUSTOM_SERVICES")
+    cg.add_define("USE_API_USER_DEFINED_ACTION_RESPONSES")
+    cg.add_define("USE_API_USER_DEFINED_ACTION_RESPONSES_JSON")
+    api = await cg.get_variable(CORE.config[CONF_API][CONF_ID])
+    action = cg.new_Pvariable(
+        ID("esp32_chip_revision_action", True, ChipRevisionAction),
+        fnv1_hash(CHIP_REVISION_ACTION),
+    )
+    cg.add(api.register_user_service(action))
+    cg.add_define("USE_ESP32_FLASH_ACTIONS")
+    for name, action_class in FLASH_ACTIONS.items():
+        action = cg.new_Pvariable(ID(f"esp32_{name}_action", True, action_class), fnv1_hash(name))
+        cg.add(api.register_user_service(action))
+    cg.add_define("USE_ESP32_NVS_ACTIONS")
+    for name, action_class in NVS_ACTIONS.items():
+        action = cg.new_Pvariable(ID(f"esp32_{name}_action", True, action_class), fnv1_hash(name))
+        cg.add(api.register_user_service(action))
+    if has_coredump_partition(CORE.config[PLATFORM_ESP32]):
+        cg.add_define("USE_ESP32_COREDUMP_ACTIONS")
+        for name, action_class in COREDUMP_ACTIONS.items():
+            action = cg.new_Pvariable(ID(f"esp32_{name}_action", True, action_class), fnv1_hash(name))
+            cg.add(api.register_user_service(action))
 
 
 @coroutine_with_priority(CoroPriority.FINAL)
@@ -2888,7 +3247,16 @@ async def _reconcile_network_sdkconfig() -> None:
         set_idf_sdkconfig_default("CONFIG_ESP_COEX_SW_COEXIST_ENABLE", False)
 
     # SoftAP support: drop it when WiFi is used without AP mode (IDF only).
-    if not is_arduino and net.wifi and not net.wifi_ap:
+    # Skip on esp32_hosted — symbol is owned by the co-processor component.
+    # Skip on IDF >= 6.1.0 — the symbol's Kconfig dependency is no longer satisfied there,
+    # so IDF disables it and flags any user-set value as a "disabled symbol" warning.
+    if (
+        not is_arduino
+        and net.wifi
+        and not net.wifi_ap
+        and "esp32_hosted" not in CORE.config
+        and idf_version() < cv.Version(6, 1, 0)
+    ):
         set_idf_sdkconfig_default("CONFIG_ESP_WIFI_SOFTAP_SUPPORT", False)
 
     # LWIP DHCP server: a WiFi-AP-mode / enable_lwip_dhcp_server concern (not
@@ -2913,6 +3281,47 @@ async def _add_yaml_idf_components(components: list[ConfigType]):
             ref=component.get(CONF_REF),
             path=component.get(CONF_PATH),
         )
+
+
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _patch_idf_kconfig_files():
+    """Patch IDF 6.1.0 Kconfig files that use 'default 0' for bool symbols.
+
+    Newer Kconfig parsers reject 'default 0' for boolean symbols and emit
+    warnings. Patch in-place before cmake runs.
+    """
+    if idf_version() < cv.Version(6, 1, 0):
+        return
+    idf_base = _get_idf_path()
+    if idf_base is None:
+        return
+    # Each entry: (glob_pattern, old_string, new_string)
+    # Exact surrounding context prevents accidental matches on other symbols.
+    fixes = [
+        (
+            "components/bt/**/Kconfig.in",
+            'config BT_NIMBLE_MESH_PROVISIONER\n        bool "Enable BLE mesh provisioner"\n        default 0\n',
+            'config BT_NIMBLE_MESH_PROVISIONER\n        bool "Enable BLE mesh provisioner"\n        default n\n',
+        ),
+        (
+            "components/fatfs/Kconfig",
+            '        bool "Make fatfs f_printf() support long long argument"\n        default 0\n',
+            '        bool "Make fatfs f_printf() support long long argument"\n        default n\n',
+        ),
+        (
+            "components/fatfs/Kconfig",
+            '        bool "Make fatfs f_printf() support floating point argument"\n        default 0\n',
+            '        bool "Make fatfs f_printf() support floating point argument"\n        default n\n',
+        ),
+    ]
+    for pattern, old, new in fixes:
+        for kconfig_path in idf_base.glob(pattern):
+            if not kconfig_path.is_file():
+                continue
+            original = kconfig_path.read_text()
+            if old in original:
+                kconfig_path.write_text(original.replace(old, new, 1))
+                _LOGGER.debug("Patched Kconfig default in %s", kconfig_path)
 
 
 @coroutine_with_priority(CoroPriority.FINAL)
@@ -2994,6 +3403,15 @@ async def _finalize_arduino_aware_flags():
 
 async def to_code(config):
     framework_ver: cv.Version = CORE.data[KEY_CORE][KEY_FRAMEWORK_VERSION]
+    if get_esp32_variant() == VARIANT_ESP32P4:
+        # esp_restart_noos() resets the other core before stalling it; a cache sync of that core in flight then
+        # faults the restart's own Cache_WriteBack_All (store access fault on CACHE_SYNC_MAP_REG) or hangs it
+        # (espressif/esp-idf#19171). restart_fix.cpp stalls it and waits for the sync engine first.
+        cg.add_build_flag("-Wl,--wrap=esp_restart_noos")
+        cg.add_define("USE_ESP32_P4_RESTART_FIX")
+        cg.add_build_flag("-Wl,--wrap=heap_caps_malloc_default")
+        cg.add_build_flag("-Wl,--undefined=__wrap_heap_caps_malloc_default")
+        cg.add_define("USE_ESP32_P4_SMALL_ALLOC_RETENTION")
     conf = config[CONF_FRAMEWORK]
 
     # Check if using ESP-IDF toolchain
@@ -3219,6 +3637,11 @@ async def to_code(config):
             for rev, flag in ESP32_CHIP_REVISIONS.items():
                 add_idf_sdkconfig_option(flag, rev == min_rev)
             cg.add_define("USE_ESP32_MIN_CHIP_REVISION_SET")
+    elif variant == VARIANT_ESP32P4:
+        min_rev = conf[CONF_ADVANCED].get(CONF_MINIMUM_CHIP_REVISION)
+        if min_rev is not None:
+            for rev, flag in ESP32P4_CHIP_REVISIONS.items():
+                add_idf_sdkconfig_option(flag, rev == min_rev)
 
     # Keep only the flash vendor driver the board needs; the boot log names it
     if (flash_chip := conf[CONF_ADVANCED].get(CONF_FLASH_CHIP)) is not None:
@@ -3296,7 +3719,11 @@ async def to_code(config):
     add_idf_sdkconfig_option("CONFIG_LOG_TAG_LEVEL_IMPL_NONE", True)
 
     # Reduce PHY TX power in the event of a brownout
-    add_idf_sdkconfig_option("CONFIG_ESP_PHY_REDUCE_TX_POWER", True)
+    # Not applicable on esp32_hosted — PHY lives on the co-processor
+    # Not applicable on IDF >= 6.1.0 — the symbol's Kconfig dependency is no longer
+    # satisfied there, so IDF disables it and flags any user-set value as a warning.
+    if "esp32_hosted" not in CORE.config and idf_version() < cv.Version(6, 1, 0):
+        add_idf_sdkconfig_option("CONFIG_ESP_PHY_REDUCE_TX_POWER", True)
 
     # Set default CPU frequency
     add_idf_sdkconfig_option(
@@ -3358,6 +3785,11 @@ async def to_code(config):
 
     if use_platformio:
         cg.add_platformio_option("board_build.partitions", "partitions.csv")
+    if has_coredump_partition(config):
+        include_builtin_idf_component("espcoredump")
+        add_idf_sdkconfig_option("CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH", True)
+        add_idf_sdkconfig_option("CONFIG_ESP_COREDUMP_ENABLE_TO_NONE", False)
+        add_idf_sdkconfig_option("CONFIG_ESP_COREDUMP_LOGS", False)
     if CONF_PARTITIONS in config:
         if isinstance(config[CONF_PARTITIONS], list):
             for partition in config[CONF_PARTITIONS]:
@@ -3531,6 +3963,14 @@ async def to_code(config):
         )
 
     cg.add_define("ESPHOME_LOOP_TASK_STACK_SIZE", advanced[CONF_LOOP_TASK_STACK_SIZE])
+    if advanced[CONF_BOOT_RAM_PROBE]:
+        cg.add_define("USE_ESP32_BOOT_RAM_PROBE")
+    if advanced[CONF_COMPONENTS_IN_PSRAM]:
+        if not advanced[CONF_EXECUTE_FROM_PSRAM]:
+            raise cv.Invalid(f"{CONF_COMPONENTS_IN_PSRAM} needs {CONF_EXECUTE_FROM_PSRAM}")
+        add_idf_sdkconfig_option("CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY", True)
+        cg.add_define("USE_ESP32_COMPONENTS_IN_PSRAM")
+        CORE.data[KEY_ESP32][KEY_COMPONENTS_IN_PSRAM] = True
 
     cg.add_define(
         "USE_ESP_IDF_VERSION_CODE",
@@ -3570,8 +4010,8 @@ async def to_code(config):
     # FINAL priority: runs after every network/coexistence request_*() call
     CORE.add_job(_reconcile_network_sdkconfig)
 
-    # FINAL priority: runs after every require_certificate_bundle() call
-    CORE.add_job(_reconcile_certificate_bundle_sdkconfig)
+    # FINAL priority: patch IDF 6.1.0 Kconfig 'default 0' bool symbols before cmake runs
+    CORE.add_job(_patch_idf_kconfig_files)
 
     # FINAL priority: runs after every request_tls() / require_mbedtls_*() call
     mbedtls = _mbedtls_sdkconfig()
@@ -3621,6 +4061,7 @@ async def to_code(config):
     if conf[CONF_COMPONENTS]:
         CORE.add_job(_add_yaml_idf_components, conf[CONF_COMPONENTS])
 
+    CORE.add_job(_add_api_actions)
     # Write EXCLUDE_COMPONENTS at FINAL priority after all components have had
     # a chance to call include_builtin_idf_component() to re-enable components they need.
     # Default exclusions are added in set_core_data() during config validation.
@@ -3988,7 +4429,16 @@ def _write_idf_component_yml():
                 dependency["git"] = component[KEY_REPO]
             if component[KEY_PATH]:
                 dependency["path"] = component[KEY_PATH]
+            if component.get(KEY_OVERRIDE_PATH):
+                dependency["override_path"] = component[KEY_OVERRIDE_PATH]
             dependencies[name] = dependency
+
+    if CORE.data[KEY_ESP32].get(KEY_COMPONENTS_IN_PSRAM):
+        lf_dir = CORE.relative_build_path("component_stubs") / "esphome_bss_psram"
+        lf_dir.mkdir(parents=True, exist_ok=True)
+        write_file_if_changed(lf_dir / "linker.lf", _COMPONENTS_IN_PSRAM_LF)
+        write_file_if_changed(lf_dir / "CMakeLists.txt", 'idf_component_register(LDFRAGMENTS "linker.lf")' + chr(10))
+        dependencies["esphome_bss_psram"] = {"override_path": str(lf_dir)}
 
     contents = yaml_util.dump({"dependencies": dependencies}) if dependencies else ""
     if write_file_if_changed(yml_path, contents):
