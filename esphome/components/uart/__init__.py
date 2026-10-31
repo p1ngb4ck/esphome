@@ -79,6 +79,8 @@ LibreTinyUARTComponent = uart_ns.class_(
     "LibreTinyUARTComponent", UARTComponent, cg.Component
 )
 HostUartComponent = uart_ns.class_("HostUartComponent", UARTComponent, cg.Component)
+# Base of UARTs without a wire; see require_virtual_uart().
+VirtualUARTComponent = uart_ns.class_("VirtualUARTComponent", UARTComponent)
 
 
 NATIVE_UART_CLASSES = (
@@ -248,6 +250,7 @@ AFTER_DEFAULTS = {CONF_BYTES: 150, CONF_TIMEOUT: "100ms"}
 CONF_DEBUG_PREFIX = "debug_prefix"
 
 # By default, log in hex format when no specific sequence is provided.
+CONF_DEBUG_ADD_UART_SETTINGS = "debug_add_uart_settings"
 DEFAULT_DEBUG_OUTPUT = "UARTDebug::log_hex(direction, bytes, ':', debug_prefix);"
 DEFAULT_SEQUENCE = [{CONF_LAMBDA: make_data_base(DEFAULT_DEBUG_OUTPUT)}]
 
@@ -289,6 +292,7 @@ DEBUG_SCHEMA = cv.Schema(
         cv.Optional(CONF_DUMMY_RECEIVER, default=False): cv.boolean,
         cv.GenerateID(CONF_DUMMY_RECEIVER_ID): cv.declare_id(UARTDummyReceiver),
         cv.Optional(CONF_DEBUG_PREFIX, default=""): cv.string,
+        cv.Optional(CONF_DEBUG_ADD_UART_SETTINGS, default=False): cv.boolean,
     }
 )
 
@@ -361,6 +365,9 @@ async def debug_to_code(config, parent):
         await cg.register_component(dummy, {})
     if debug_prefix := config[CONF_DEBUG_PREFIX]:
         cg.add(trigger.set_debug_prefix(debug_prefix))
+    if config[CONF_DEBUG_ADD_UART_SETTINGS]:
+        cg.add(trigger.set_debug_add_settings(True))
+        cg.add_define("UART_DEBUGGER_ADD_SETTINGS")
     cg.add_define("USE_UART_DEBUGGER")
 
 
@@ -577,11 +584,61 @@ def subtree_references_uart(
     return False
 
 
+def claim_exclusive(
+    config: ConfigType, owner: str, conf_key: str = CONF_UART_ID
+) -> None:
+    """Claim the UART in config[conf_key] for owner alone; call it from final validation.
+
+    Fails on a second owner entry for that UART, on another domain that names it by
+    uart_id or conf_key (skipped in testing mode) and on a dummy_receiver in its debug.
+    owner must be the caller's top-level config key: the scan skips that domain, and
+    the claims are kept in full_config.data[owner][conf_key], one set per key.
+    """
+    full_config = fv.full_config.get()
+    uart_id = str(config[conf_key])
+    used = full_config.data.setdefault(owner, {}).setdefault(conf_key, set())
+    if uart_id in used:
+        raise cv.Invalid(
+            f"The UART '{uart_id}' is already used by another '{owner}' entry. "
+            f"Each {owner} needs its own UART.",
+            [conf_key],
+        )
+    used.add(uart_id)
+    # Grouped CI builds share buses, like final_validate_device_schema()'s pin check.
+    if not CORE.testing_mode:
+        for domain, domain_conf in full_config.items():
+            if domain != owner and any(
+                subtree_references_uart(domain_conf, uart_id, key)
+                for key in (CONF_UART_ID, conf_key)
+            ):
+                raise cv.Invalid(
+                    f"The UART '{uart_id}' is also used by '{domain}'. "
+                    f"{owner} requires exclusive use of that UART.",
+                    [conf_key],
+                )
+
+    def reject_dummy_receiver(uart_conf: ConfigType) -> ConfigType:
+        debug = uart_conf.get(CONF_DEBUG)
+        if isinstance(debug, dict) and debug.get(CONF_DUMMY_RECEIVER):
+            raise cv.Invalid(
+                f"dummy_receiver reads this UART and drops the bytes {owner} should forward.",
+                [CONF_DEBUG, CONF_DUMMY_RECEIVER],
+            )
+        return uart_conf
+
+    fv.id_declaration_match_schema(reject_dummy_receiver)(config[conf_key])
+
+
 def restore_line_settings(var: cg.MockObj, uart_id: ID) -> None:
     """Let saved runtime line settings replace the yaml ones; call after the line setters."""
     if CORE.is_esp32 or CORE.is_esp8266:
         key = fnv1_hash(f"uart_line_settings:{uart_id.id}")
         cg.add(var.restore_line_settings(key))
+
+
+def require_virtual_uart() -> None:
+    """Compile the VirtualUARTComponent base; call from the to_code of a class that derives from it."""
+    cg.add_define("USE_UART_VIRTUAL")
 
 
 async def register_uart_device(var, config):
@@ -647,9 +704,12 @@ _platform_filter = filter_source_files_from_platform(
 )
 
 # uart_debugger.cpp is fully #ifdef'd on USE_UART_DEBUGGER, set only when a
-# debug block is configured.
+# debug block is configured; uart_virtual.cpp on USE_UART_VIRTUAL.
 _define_filter = filter_source_files_from_defines(
-    {"uart_debugger.cpp": "USE_UART_DEBUGGER"}
+    {
+        "uart_debugger.cpp": "USE_UART_DEBUGGER",
+        "uart_virtual.cpp": "USE_UART_VIRTUAL",
+    }
 )
 
 

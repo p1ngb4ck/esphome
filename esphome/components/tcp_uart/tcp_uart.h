@@ -4,6 +4,9 @@
 #ifdef USE_BINARY_SENSOR
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #endif
+#ifdef USE_NOISE_STREAM
+#include "esphome/components/noise/noise_stream.h"
+#endif
 #ifdef USE_SENSOR
 #include "esphome/components/sensor/sensor.h"
 #endif
@@ -36,11 +39,22 @@ class TcpUart : public uart::UARTComponent, public Component {
   void set_host(const char *host) { this->link_.set_host(host); }
   void set_port(uint16_t port) { this->link_.set_port(port); }
   void set_reconnect_interval(uint32_t ms) { this->link_.set_reconnect_interval(ms); }
+  void set_timeout(uint32_t ms) { this->link_.set_idle_timeout(ms); }
+#ifdef USE_NOISE_STREAM
+  void set_noise_stream(noise::NoiseStream *stream) { this->noise_ = stream; }
+#endif
+#ifdef USE_NOISE_STREAM_RUNTIME_KEY
   /// Save a base64 key for `encryption:` without a key in yaml; every connection reconnects with it.
+  void set_encryption_key(const std::string &key) {
+    if (this->noise_ != nullptr && this->noise_->set_key(this->link_, key)) {
 #ifdef USE_TCP_UART_MAX_CONNECTIONS
       for (auto &link : this->extra_) {
         link.close();
       }
+#endif
+      this->enable_loop();
+    }
+  }
 #endif
 #ifdef USE_SOCKET_TCP_LISTENER
   void set_server(bool server) { this->server_ = server; }
@@ -83,13 +97,18 @@ class TcpUart : public uart::UARTComponent, public Component {
   bool read_array(uint8_t *data, size_t len) override;
   size_t available() override { return static_cast<size_t>(this->rx_end_ - this->rx_start_); }
   // Same room write_array() grants, so consumers can apply backpressure.
+  size_t available_for_write() override {
     const uint8_t i = this->tx_index_();
     if (i == NO_SLOT) {
       return 0;
     }
+#ifdef USE_NOISE_STREAM
     if (noise::NoiseStream *stream = this->noise_of_(i)) {
       return stream->tx_free(this->slot_(i));
+    }
+#endif
     return this->slot_(i).tx_free();
+  }
   uart::UARTFlushResult flush() override;
   bool is_connected() override;
 #if defined(USE_ESP8266) || defined(USE_ESP32)
@@ -123,17 +142,29 @@ class TcpUart : public uart::UARTComponent, public Component {
 #endif
   /// The slot's link is up and, with encryption, its session is secure.
   bool link_up_(uint8_t i) {
+#ifdef USE_NOISE_STREAM
     if (noise::NoiseStream *stream = this->noise_of_(i)) {
       return stream->up(this->slot_(i));
+    }
+#endif
     return this->slot_(i).connected();
+  }
+  /// The state link_up_() last reached, without driving the handshake.
   bool session_up_(uint8_t i) {
+#ifdef USE_NOISE_STREAM
     if (noise::NoiseStream *stream = this->noise_of_(i)) {
       return stream->ready() && this->slot_(i).connected();
+    }
+#endif
     return this->slot_(i).connected();
+  }
   /// Send what is queued; true once the slot's buffer is empty.
   ESPHOME_ALWAYS_INLINE bool flush_link_(uint8_t i) {
+#ifdef USE_NOISE_STREAM
     if (noise::NoiseStream *stream = this->noise_of_(i)) {
       return stream->flush(this->slot_(i));
+    }
+#endif
     return this->slot_(i).flush_tx();
   }
   /// The slot that writes go to, or NO_SLOT.
@@ -144,6 +175,8 @@ class TcpUart : public uart::UARTComponent, public Component {
     }
 #endif
     return 0;
+  }
+  void sync_link_(bool up);
   /// True when bytes arrived.
   bool read_socket_(uint8_t i);
   void publish_connected_(bool up);
@@ -168,7 +201,10 @@ class TcpUart : public uart::UARTComponent, public Component {
 #ifdef USE_SOCKET_TCP_LISTENER
   socket::TcpListener listener_;
 #endif
+#ifdef USE_NOISE_STREAM
   // Slot 0's session; it owns the key.
+  noise::NoiseStream *noise_{nullptr};
+#endif
 #ifdef USE_SENSOR
   uint32_t disconnects_{0};
 #endif

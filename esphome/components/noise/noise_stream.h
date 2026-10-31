@@ -35,6 +35,8 @@ class NoiseStream {
   /// No key from yaml: set_key() saves one under key_hash, and no session starts without it.
   NoiseStream(uint32_t key_hash, bool initiator) : key_hash_(key_hash), initiator_(initiator) {}
 #endif
+  /// Another session under key_owner's key, from yaml or set at runtime; only key_owner loads and saves it.
+  NoiseStream(const NoiseStream *key_owner, bool initiator) : key_owner_(key_owner), initiator_(initiator) {}
   NoiseStream(const NoiseStream &) = delete;
   NoiseStream &operator=(const NoiseStream &) = delete;
 
@@ -351,6 +353,8 @@ class NoiseStream {
 #endif
 
   NoiseContext ctx_;
+  // Set: ctx_ takes this stream's key at every handshake start.
+  const NoiseStream *key_owner_{nullptr};
   NoiseResponderHandshake handshake_;
   NoiseCipherState *send_{nullptr};
   NoiseCipherState *recv_{nullptr};

@@ -45,6 +45,10 @@ void NoiseStream::reset() {
 }
 
 const LogString *NoiseStream::start_() {
+  if (this->key_owner_ != nullptr) {
+    // The owner's runtime key may have been set or changed since the last session
+    this->ctx_ = this->key_owner_->ctx_;
+  }
 #ifdef USE_NOISE_STREAM_RUNTIME_KEY
   // Without a key the handshake would use the all-zeros key, which anyone holds
   if (!this->ctx_.has_psk()) {

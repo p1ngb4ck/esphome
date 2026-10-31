@@ -55,6 +55,17 @@ void TcpUart::setup() {
     link.set_idle_timeout(this->link_.idle_timeout());
   }
 #endif
+#ifdef USE_NOISE_STREAM
+  if (this->noise_ != nullptr) {
+    this->noise_->set_log_tag(TAG);
+#ifdef USE_NOISE_STREAM_RUNTIME_KEY
+    // Without a key the link stays closed: a client does not dial, a server does not listen
+    if (!this->noise_->load_key()) {
+      this->disable_loop();
+    }
+#endif
+  }
+#endif
 #ifdef USE_SOCKET_TCP_LISTENER
   this->listener_.begin(TAG);
 #endif
@@ -74,12 +85,25 @@ void TcpUart::dump_config() {
                 this->server_ ? LOG_STR_LITERAL("Listen") : LOG_STR_LITERAL("Host"),
                 this->server_ ? LOG_STR_LITERAL("*") : this->link_.host(), this->link_.port(),
                 this->link_.reconnect_interval());
+  if (this->link_.idle_timeout() != 0) {
+    ESP_LOGCONFIG(TAG, "  Timeout: %" PRIu32 "ms", this->link_.idle_timeout());
+  }
 #ifdef USE_TCP_UART_MAX_CONNECTIONS
   if (!this->extra_.empty()) {
     ESP_LOGCONFIG(TAG,
                   "  Max Connections: %u\n"
                   "  Turn Timeout: %" PRIu32 "ms",
                   this->slot_count_(), this->turn_timeout_ms_);
+  }
+#endif
+#ifdef USE_NOISE_STREAM
+  if (this->noise_ != nullptr) {
+#ifdef USE_NOISE_STREAM_RUNTIME_KEY
+    ESP_LOGCONFIG(TAG, "  Encryption: Noise%s",
+                  this->noise_->has_key() ? LOG_STR_LITERAL("") : LOG_STR_LITERAL(", key: none"));
+#else
+    ESP_LOGCONFIG(TAG, "  Encryption: Noise");
+#endif
   }
 #endif
 #ifdef USE_SOCKET_TCP_LISTENER
@@ -131,12 +155,27 @@ void TcpUart::count_disconnect_() {
 #endif
 }
 
-void TcpUart::read_socket_() {
+void TcpUart::sync_link_(bool up) {
+  this->link_was_up_ = up;
   // Each session is a turn of its own.
   this->turn_++;
+  if (up) {
+    // Unread bytes of the last session stay readable while down, never into the next one.
+    this->rx_start_ = this->rx_end_ = 0;
+#ifdef USE_NOISE_STREAM
+    // The handshake's last read can leave session bytes the socket's ready flag does not show
+    if (this->noise_ != nullptr) {
+      this->rx_pending_ = true;
+    }
+#endif
+  }
   this->publish_connected_(up);
+  // Only edges get here, so down is the falling edge.
   if (!up) {
     this->count_disconnect_();
+  }
+}
+
 bool TcpUart::read_socket_(uint8_t i) {
   socket::TcpClientLink &link = this->slot_(i);
   if (this->rx_start_ != 0) {
@@ -146,13 +185,17 @@ bool TcpUart::read_socket_(uint8_t i) {
   }
   size_t room = RX_BUFFER_SIZE - this->rx_end_;
   if (room == 0) {
+    // Unread bytes are waiting on the consumer. The peer is not idle.
     link.note_io();
     return false;
   }
+#ifdef USE_NOISE_STREAM
   noise::NoiseStream *stream = this->noise_of_(i);
   ssize_t count = stream != nullptr ? stream->read(link, this->rx_ + this->rx_end_, room)
                                     : link.read(this->rx_ + this->rx_end_, room);
+#else
   ssize_t count = link.read(this->rx_ + this->rx_end_, room);
+#endif
   if (count <= 0) {
     // A dropped link (-1) is seen by the edge check on the next loop.
     if (count == 0) {
@@ -194,17 +237,19 @@ void TcpUart::loop() {
 #else
   this->link_.poll();
 #endif
-  if (this->link_.connected() != this->link_was_up_) {
-    this->sync_link_();
   bool up = this->link_up_(0);
+  if (up != this->link_was_up_) {
+    this->sync_link_(up);
   }
   if (!this->link_was_up_) {
     return;
   }
+  // A byte moved in this pass resets the clock before the timeout can close.
   if (this->rx_pending_ || this->link_.ready()) {
     this->read_socket_(0);
   }
   this->flush_link_(0);
+  this->link_.check_idle();
 }
 
 #ifdef USE_TCP_UART_MAX_CONNECTIONS
@@ -373,8 +418,10 @@ void TcpUart::write_array(const uint8_t *data, size_t len) {
   const uint8_t i = this->tx_index_();
   size_t queued = 0;
   if (i != NO_SLOT) {
+#ifdef USE_NOISE_STREAM
     noise::NoiseStream *stream = this->noise_of_(i);
     queued = stream != nullptr ? stream->queue(this->slot_(i), data, len) : this->slot_(i).queue(data, len);
+#else
     queued = this->slot_(i).queue(data, len);
 #endif
   }
@@ -382,6 +429,7 @@ void TcpUart::write_array(const uint8_t *data, size_t len) {
   if (queued != 0 && this->holder_ != NO_SLOT) {
     this->last_traffic_ms_ = App.get_loop_component_start_time();
   }
+#endif
   if (queued < len) {
     uint32_t now = App.get_loop_component_start_time();
     if (this->last_drop_log_ms_ == 0 || now - this->last_drop_log_ms_ >= DROP_LOG_INTERVAL_MS) {
