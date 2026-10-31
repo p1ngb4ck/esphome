@@ -2994,6 +2994,10 @@ async def _finalize_arduino_aware_flags():
 
 async def to_code(config):
     framework_ver: cv.Version = CORE.data[KEY_CORE][KEY_FRAMEWORK_VERSION]
+    if get_esp32_variant() == VARIANT_ESP32P4:
+        cg.add_build_flag("-Wl,--wrap=heap_caps_malloc_default")
+        cg.add_build_flag("-Wl,--undefined=__wrap_heap_caps_malloc_default")
+        cg.add_define("USE_ESP32_P4_SMALL_ALLOC_RETENTION")
     conf = config[CONF_FRAMEWORK]
 
     # Check if using ESP-IDF toolchain
