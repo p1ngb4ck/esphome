@@ -4,6 +4,9 @@
 #ifdef USE_BINARY_SENSOR
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #endif
+#ifdef USE_NOISE_STREAM
+#include "esphome/components/noise/noise_stream.h"
+#endif
 #ifdef USE_SENSOR
 #include "esphome/components/sensor/sensor.h"
 #endif
@@ -34,6 +37,9 @@ class TcpUart : public uart::UARTComponent, public Component {
   void set_port(uint16_t port) { this->link_.set_port(port); }
   void set_reconnect_interval(uint32_t ms) { this->link_.set_reconnect_interval(ms); }
   void set_timeout(uint32_t ms) { this->link_.set_idle_timeout(ms); }
+#ifdef USE_NOISE_STREAM
+  void set_noise_stream(noise::NoiseStream *stream) { this->noise_ = stream; }
+#endif
 #ifdef USE_SOCKET_TCP_LISTENER
   void set_server(bool server) { this->server_ = server; }
 #ifdef USE_SOCKET_IPV4_ALLOW
@@ -53,6 +59,11 @@ class TcpUart : public uart::UARTComponent, public Component {
   size_t available() override { return static_cast<size_t>(this->rx_end_ - this->rx_start_); }
   // Same room write_array() grants, so consumers can apply backpressure.
   size_t available_for_write() override { return this->link_.tx_free(); }
+  size_t available_for_write() override {
+#ifdef USE_NOISE_STREAM
+    }
+#endif
+  }
   uart::UARTFlushResult flush() override;
   bool is_connected() override { return this->link_.connected(); }
 #if defined(USE_ESP8266) || defined(USE_ESP32)
@@ -64,12 +75,29 @@ class TcpUart : public uart::UARTComponent, public Component {
   void check_logger_conflict() override {}
   void sync_link_();
   void read_socket_();
+#ifdef USE_NOISE_STREAM
+    }
+#endif
+  }
+  /// The state link_up_() last reached, without driving the handshake.
+#ifdef USE_NOISE_STREAM
+    }
+#endif
+  }
+#ifdef USE_NOISE_STREAM
+    }
+#endif
+  }
+  void sync_link_(bool up);
 
   static constexpr size_t RX_BUFFER_SIZE = 1024;
 
   socket::TcpClientLink link_;
 #ifdef USE_SOCKET_TCP_LISTENER
   socket::TcpListener listener_;
+#endif
+#ifdef USE_NOISE_STREAM
+  noise::NoiseStream *noise_{nullptr};
 #endif
 #ifdef USE_SENSOR
   uint32_t disconnects_{0};
