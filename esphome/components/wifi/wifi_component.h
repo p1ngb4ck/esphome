@@ -1069,9 +1069,6 @@ class WiFiComponent final : public Component {
     this->startup_done_callback_.call();
   }
   LazyCallbackManager<void()> startup_done_callback_;
-#ifdef USE_WIFI_AP
-  LazyCallbackManager<void(bool)> ap_state_callback_;
-#endif
   bool startup_done_{false};
 #ifdef USE_WIFI_DPP
   const char *dpp_key_{nullptr};
