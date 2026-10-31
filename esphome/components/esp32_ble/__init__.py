@@ -46,6 +46,9 @@ DOMAIN = "esp32_ble"
 _LOGGER = logging.getLogger(__name__)
 
 
+_CONTROLLER_LOG_TAGS = ("OLM_LMP", "OLM_CONN", "OLM_PROC", "OLM_SYNC")
+
+
 class BTLoggers(Enum):
     """Bluetooth logger categories available in ESP-IDF.
 
@@ -571,8 +574,15 @@ async def to_code(config: ConfigType) -> None:
         # Disable all Bluetooth loggers that are not required
         required_loggers = _get_required_loggers()
         for logger in BTLoggers:
-            if logger not in required_loggers:
-                add_idf_sdkconfig_option(f"{logger.value}_NONE", True)
+            level = "ERROR" if logger in required_loggers else "NONE"
+            add_idf_sdkconfig_option(f"{logger.value}_{level}", True)
+        if "logger" in CORE.config:
+            from esphome.components.logger import LOG_LEVELS
+
+            log = await cg.get_variable(CORE.config["logger"][CONF_ID])
+            cg.add_define("USE_LOGGER_RUNTIME_TAG_LEVELS")
+            for tag in _CONTROLLER_LOG_TAGS:
+                cg.add(log.set_log_level(tag, LOG_LEVELS["NONE"]))
 
     # Set BLE connection establishment timeout to match aioesphomeapi/bleak-retry-connector
     # Default is 20 seconds instead of ESP-IDF's 30 seconds. Because there is no way to
