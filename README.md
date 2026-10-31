@@ -14,7 +14,7 @@ particular device to one particular block, `blacklist` to keep a device away fro
 
 | Branch | Change | Chips | Needs |
 |---|---|---|---|
-| `pr/usb-storage` | `usb_storage`: USB mass storage (bulk-only, SCSI) on the storage interface, several devices and LUNs, FAT / exFAT | S2, S3, S31, P4, H4 | `pr/storage`, `pr/usb-host-refactor` |
+| `pr/usb-storage` | `usb_storage`: USB mass storage (bulk-only, SCSI, LUN 0) on the storage interface, FAT / exFAT | S2, S3, S31, P4, H4 | `pr/storage`, `pr/usb-host-refactor` |
 | `pr/usb-cdrom` | `usb_cdrom`: USB optical drives, ISO 9660 through the storage interface | S2, S3, S31, P4, H4 | `pr/usb-storage` |
 | `pr/usb-hid` | `usb_hid`: keyboards, mice, gamepads, remotes, any number at once, through the `hid` component | S2, S3, S31, P4 | `pr/usb-host-refactor`, `pr/hid` |
 | `pr/usb-uvc` | `usb_uvc`: USB video class cameras (MJPEG over isochronous streams), any number at once | S2, S3, S31, P4 | `pr/usb-host-refactor`, `pr/camera-encoder-h264` |
