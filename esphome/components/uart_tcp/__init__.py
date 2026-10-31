@@ -13,6 +13,7 @@ from esphome.const import (
     CONF_ID,
     CONF_KEY,
     CONF_PORT,
+    CONF_PROTOCOL,
     CONF_TIMEOUT,
     CONF_UART_ID,
 )
@@ -51,6 +52,9 @@ BASE_SCHEMA = cv.Schema(
         ): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_TIMEOUT, default="0s"): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_ENCRYPTION): noise.STREAM_ENCRYPTION_SCHEMA,
+        cv.Optional(CONF_PROTOCOL, default="raw"): cv.one_of(
+            "raw", "rfc2217", lower=True
+        ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -186,6 +190,7 @@ async def _forwards_to_code(config: ConfigType) -> None:
     cg.add_define("USE_UART_TCP_FORWARDS")
     socket.require_tcp_listener()
     cg.add_define("USE_SOCKET_IPV4_ALLOW")
+    cg.add_define("USE_UART_TCP_RFC2217")
     request_storage_worker()
     cg.add(var.set_runners_default(config[CONF_RUNNERS]))
     cg.add(var.set_settings_file_default(config[CONF_SETTINGS_FILE]))
@@ -195,7 +200,15 @@ async def _forwards_to_code(config: ConfigType) -> None:
     cg.add(var.init_uarts(len(uarts)))
     for uart_id in uarts:
         uart_var = await cg.get_variable(uart_id)
+        if _is_usb_uart_channel(uart_id):
+            cg.add_define("USE_UART_TCP_MODEM_CONTROL")
         cg.add(var.add_uart(uart_var, uart_id.id))
+
+
+def _is_usb_uart_channel(uart_id: ID) -> bool:
+    from esphome.components import usb_uart
+
+    return uart_id.type.inherits_from(usb_uart.USBUartChannel)
 
 
 async def to_code(config: ConfigType) -> None:
@@ -210,6 +223,12 @@ async def to_code(config: ConfigType) -> None:
     uart_id, uart_var = await cg.get_variable_with_full_id(config[CONF_UART_ID])
     if uart_id.type.inherits_from(uart.VirtualUARTComponent):
         cg.add(var.set_virtual_uart(uart_var))
+    if _is_usb_uart_channel(uart_id):
+        cg.add_define("USE_UART_TCP_MODEM_CONTROL")
+        cg.add(var.set_modem(uart_var))
+    if config[CONF_PROTOCOL] == "rfc2217":
+        cg.add_define("USE_UART_TCP_RFC2217")
+        cg.add(var.set_rfc2217(True))
     # Both roles and the allow list are compiled; the runtime settings switch them.
     socket.require_tcp_listener()
     cg.add_define("USE_SOCKET_IPV4_ALLOW")
