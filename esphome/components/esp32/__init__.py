@@ -79,6 +79,7 @@ from .const import (
     KEY_IDF_VERSION,
     KEY_MBEDTLS_SDKCONFIG,
     KEY_NETWORK_SDKCONFIG,
+    KEY_OVERRIDE_PATH,
     KEY_PATH,
     KEY_REF,
     KEY_REPO,
@@ -1008,24 +1009,63 @@ def add_idf_component(
     repo: str | None = None,
     ref: str | None = None,
     path: str | None = None,
+    override_path: str | None = None,
+    refresh: TimePeriod | None = None,
+    components: list[str] | None = None,
+    submodules: list[str] | None = None,
 ):
-    """Add an esp-idf component to the project."""
-    if not repo and not ref and not path:
-        raise ValueError("Requires at least one of repo, ref or path")
-    components_registry = CORE.data[KEY_ESP32][KEY_COMPONENTS]
-    existing = components_registry.get(name)
-    if existing and existing.get(KEY_REF) != ref:
+    """Add an esp-idf component to the project.
+
+    Args:
+        name: Component name
+        repo: Git repository URL
+        ref: Git ref (tag/branch/commit)
+        path: Path within repository
+        override_path: Override path for built-in components (to replace ESP-IDF built-in components)
+        refresh: Deprecated
+        components: Deprecated
+        submodules: Deprecated
+    """
+    if not repo and not ref and not path and not override_path:
+        raise ValueError("Requires at least one of repo, ref, path, or override_path")
+    if refresh or submodules or components:
         _LOGGER.warning(
-            "IDF component %s version conflict %s replaced by %s",
-            name,
-            existing.get(KEY_REF),
-            ref,
+            "The refresh, components and submodules parameters in add_idf_component() are "
+            "deprecated and will be removed in ESPHome 2026.1. If you are seeing this, report "
+            "an issue to the external_component author and ask them to update it."
         )
-    components_registry[name] = {
-        KEY_REPO: repo,
-        KEY_REF: ref,
-        KEY_PATH: path,
-    }
+    components_registry = CORE.data[KEY_ESP32][KEY_COMPONENTS]
+    if components:
+        for comp in components:
+            existing = components_registry.get(comp)
+            if existing and existing.get(KEY_REF) != ref:
+                _LOGGER.warning(
+                    "IDF component %s version conflict %s replaced by %s",
+                    comp,
+                    existing.get(KEY_REF),
+                    ref,
+                )
+            components_registry[comp] = {
+                KEY_REPO: repo,
+                KEY_REF: ref,
+                KEY_PATH: f"{path}/{comp}" if path else comp,
+                KEY_OVERRIDE_PATH: override_path,
+            }
+    else:
+        existing = components_registry.get(name)
+        if existing and existing.get(KEY_REF) != ref:
+            _LOGGER.warning(
+                "IDF component %s version conflict %s replaced by %s",
+                name,
+                existing.get(KEY_REF),
+                ref,
+            )
+        components_registry[name] = {
+            KEY_REPO: repo,
+            KEY_REF: ref,
+            KEY_PATH: path,
+            KEY_OVERRIDE_PATH: override_path,
+        }
 
 
 def get_managed_component_require_names() -> list[str]:
@@ -3988,6 +4028,8 @@ def _write_idf_component_yml():
                 dependency["git"] = component[KEY_REPO]
             if component[KEY_PATH]:
                 dependency["path"] = component[KEY_PATH]
+            if component.get(KEY_OVERRIDE_PATH):
+                dependency["override_path"] = component[KEY_OVERRIDE_PATH]
             dependencies[name] = dependency
 
     contents = yaml_util.dump({"dependencies": dependencies}) if dependencies else ""
