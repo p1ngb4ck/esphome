@@ -3,7 +3,7 @@
 ESPHome `dev` plus the UART-over-network changes of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome)
 `testing_dev`: the virtual UART, the exclusive UART claim, the encrypted noise stream for `tcp_uart` / `uart_tcp`,
 several links per listener and several connections per port, `uart_tcp` runtime settings and forwards, the log as a
-virtual UART and the log ring. One branch per change; `main` contains every branch. Base: ESPHome `dev` at
+virtual UART, the log ring and RFC 2217 in `uart_tcp`. One branch per change; `main` contains every branch. Base: ESPHome `dev` at
 `1f70f86b47`. The code is taken over unchanged from `testing_dev`: the lines of uart, uart_tcp, tcp_uart, noise,
 socket and logger assigned by `git blame`; `main` equals `testing_dev` for all of them.
 
@@ -44,9 +44,12 @@ This fork's own changes, stacked in commit order on all of the above and `pr/uar
 | `pr/socket-loop-interval` | socket, noise: `get_loop_interval()` in socket, not from core |
 | `pr/uart-tcp-logger-psram` | uart_tcp, logger: objects in PSRAM, no callback vectors, the UART list in PSRAM |
 | `pr/logger-log-ring` | logger `log_ring_size`: the recent lines in a PSRAM ring for viewers |
+| `pr/uart-tcp-rfc2217` | uart_tcp `protocol: rfc2217`: RFC 2217 (Telnet COM-PORT-OPTION) as server and client; line settings from the peer for the session, DTR / RTS to a usb_uart channel's modem control; forwards: the protocol per runner (settings file field 14) |
 
 Each own branch contains the one before it. `uart_tcp` forwards' settings file lives on a storage
-([esphome-storage-interface](https://github.com/p1ngb4ck/esphome-storage-interface)).
+([esphome-storage-interface](https://github.com/p1ngb4ck/esphome-storage-interface)). DTR / RTS forwarding needs
+`usb_uart` ([esphome-usb-drivers](https://github.com/p1ngb4ck/esphome-usb-drivers)); without it they are kept and
+reported to the peer.
 
 ## Contributions
 
