@@ -14,6 +14,12 @@
 #ifdef USE_WIFI
 #include "esphome/components/wifi/wifi_component.h"
 #endif
+#ifdef USE_ETHERNET
+#include "esphome/components/ethernet/ethernet_component.h"
+#endif
+#if defined(USE_NETWORK) && defined(USE_ESP32)
+#include "esphome/components/network/network_component.h"
+#endif
 
 #ifdef USE_IMPROV_SERIAL_UART
 #include "esphome/components/uart/uart_component.h"
@@ -92,6 +98,12 @@ class ImprovSerialComponent final : public Component, public improv_base::Improv
  protected:
   bool parse_improv_serial_byte_(uint8_t byte);
   bool parse_improv_payload_(improv::ImprovCommand &command);
+  bool network_rpc_(uint8_t code);
+  std::vector<std::string> rpc_strings_() const;
+  void send_ack_(uint8_t code);
+#ifdef USE_WIFI
+  void provision_(const wifi::WiFiAP &sta);
+#endif
 
   void set_state_(improv::State state);
   void send_current_state_(improv::State state);
