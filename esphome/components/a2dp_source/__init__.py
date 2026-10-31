@@ -99,7 +99,7 @@ CONFIG_SCHEMA = cv.All(
             # Suspend the stream (no packets, link kept) once nothing has played
             # this long; 0s keeps it running. A microphone source never idles.
             cv.Optional(
-                CONF_IDLE_TIMEOUT, default="30s"
+                CONF_IDLE_TIMEOUT, default="1s"
             ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_VOLUME, default=60): cv.int_range(0, 127),
             # Slack between the microphone and the Bluetooth stack. The two run
