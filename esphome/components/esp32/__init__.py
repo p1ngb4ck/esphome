@@ -109,6 +109,11 @@ from .const import (
 from .gpio import esp32_pin_to_code  # noqa: F401
 
 _LOGGER = logging.getLogger(__name__)
+COREDUMP_ACTIONS = {
+    "coredump_info": esp32_ns.class_("CoredumpInfoAction"),
+    "coredump_read": esp32_ns.class_("CoredumpReadAction"),
+    "coredump_erase": esp32_ns.class_("CoredumpEraseAction"),
+}
 
 CHIP_REVISION_ACTION = "chip_revision"
 ChipRevisionAction = esp32_ns.class_("ChipRevisionAction")
@@ -2774,6 +2779,26 @@ def register_exclude_components_cmake_arg() -> None:
         cg.add_cmake_arg("EXCLUDE_COMPONENTS", ";".join(excluded))
 
 
+def has_coredump_partition(config: ConfigType) -> bool:
+    partitions = config.get(CONF_PARTITIONS)
+    if isinstance(partitions, list):
+        return any(partition[CONF_SUBTYPE] == "coredump" for partition in partitions)
+    if partitions is None:
+        return False
+    try:
+        text = Path(CORE.relative_config_path(partitions)).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        cells = [cell.strip() for cell in line.split("#", 1)[0].split(",")]
+        if len(cells) >= 3 and cells[1] == "data" and cells[2] == "coredump":
+            return True
+    return False
+    if has_coredump_partition(CORE.config[PLATFORM_ESP32]):
+        cg.add_define("USE_ESP32_COREDUMP_ACTIONS")
+        for name, action_class in COREDUMP_ACTIONS.items():
+            action = cg.new_Pvariable(ID(f"esp32_{name}_action", True, action_class), fnv1_hash(name))
+            cg.add(api.register_user_service(action))
 
 
 @coroutine_with_priority(CoroPriority.FINAL)
@@ -3553,6 +3578,11 @@ async def to_code(config):
 
     if use_platformio:
         cg.add_platformio_option("board_build.partitions", "partitions.csv")
+    if has_coredump_partition(config):
+        include_builtin_idf_component("espcoredump")
+        add_idf_sdkconfig_option("CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH", True)
+        add_idf_sdkconfig_option("CONFIG_ESP_COREDUMP_ENABLE_TO_NONE", False)
+        add_idf_sdkconfig_option("CONFIG_ESP_COREDUMP_LOGS", False)
     if CONF_PARTITIONS in config:
         if isinstance(config[CONF_PARTITIONS], list):
             for partition in config[CONF_PARTITIONS]:
