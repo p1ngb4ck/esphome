@@ -1,0 +1,53 @@
+Four of the files in this directory are third-party code:
+
+    file-explorer.js
+    file-explorer.css
+    fileexplorer_sprites.png
+    fileexplorer_actions.woff
+
+They are the CubicleSoft File Explorer widget, carried here unmodified from
+https://github.com/cubiclesoft/js-fileexplorer (accessed 23rd July 2026).
+They are used as-is: nothing in ESPHome patches them, so the copy here can be
+replaced with a newer upstream one without touching anything else.
+
+The other two files, adapter.js and adapter.css, are ESPHome's. They bind the
+widget to the /files/* endpoints and are not derived from it. Please see the
+top-level LICENSE for information about ESPHome's license.
+
+Upstream offers the widget under a choice of two licenses. That choice is
+stated in the project's README.md ("Choose from a MIT or LGPL license.") and
+in the license field of its package.json ("MIT or LGPL (your choice)"). The
+upstream repository carries no LICENSE file of its own, which is why the terms
+are reproduced below rather than pointed at: this file is what makes them
+travel with the code.
+
+ESPHome takes the MIT option.
+
+One inconsistency, recorded rather than resolved: the header of
+file-explorer.js carries a bare copyright line ending in "All Rights
+Reserved". The explicit grant is the dual-license statement in README.md and
+package.json. The header is left exactly as upstream ships it, because these
+files are carried unmodified -- and because that header survives into the
+served asset, the copyright notice reaches the browser along with the code.
+
+=================================================================
+
+Copyright (c) 2020 CubicleSoft
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import base64
 import gzip
+import json
 import logging
+from pathlib import Path
 import re
 from typing import Any
 
 import esphome.codegen as cg
-from esphome.components import web_server_base
+from esphome.components import storage, web_server_base
+from esphome.components.esp32 import add_idf_component
 from esphome.components.json import enable_arena
 from esphome.components.logger import request_log_listener
 from esphome.components.web_server_base import CONF_WEB_SERVER_BASE_ID
@@ -51,27 +54,13 @@ from esphome.const import (  # noqa: F401
     PLATFORM_RP2,
     PLATFORM_RTL87XX,
 )
-from esphome.core import CORE, CoroPriority, coroutine_with_priority
+from esphome.core import CORE, ID, CoroPriority, coroutine_with_priority
 from esphome.core.entity_helpers import WEBSERVER_SORTING_SCHEMA  # noqa: F401
 from esphome.cpp_generator import MockObj
 import esphome.final_validate as fv
 from esphome.types import ConfigType
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def AUTO_LOAD() -> list[str]:
-    # No config parameter: a dynamic auto-load would satisfy ota.web_server's dependency too late
-    auto_load = ["json", "web_server_base"]
-    # The AP mode DNS server needs socket; CORE.raw_config already has a wifi block from a package
-    wifi = CORE.raw_config.get(CONF_WIFI) if CORE.raw_config else None
-    if (
-        CORE.is_esp32
-        and wifi is not None
-        and (not isinstance(wifi, dict) or CONF_AP in wifi)
-    ):
-        auto_load.append("socket")
-    return auto_load
 
 
 DOMAIN = "web_server"
@@ -82,13 +71,120 @@ AUTH_TYPE_DIGEST = "digest"
 CONF_SORTING_GROUPS = "sorting_groups"
 CONF_ALLOWED_ORIGINS = "allowed_origins"
 
+# Not yet in esphome/const.py
+CONF_FILE_API = "file_api"
+
+FILE_API_DEFAULTS = {
+    "max_dir_entries": 64,
+    "enable_list": True,
+    "enable_read": True,
+    "enable_write": True,
+    "enable_delete": True,
+    "enable_mount": True,
+    "enable_unmount": True,
+    "enable_format": False,
+}
+CONF_FILE_BROWSER = "file_browser"
+CONF_ACTIONS_AS_ICONS = "actions_as_icons"
+CONF_CHANGE_POLL_INTERVAL = "change_poll_interval"
+CONF_VARIANT = "variant"
+CONF_ASSET_SOURCE = "asset_source"
+CONF_ASSET_PATH = "asset_path"
+CONF_TEXT_FILE_FORMATS = "text_file_formats"
+
+BROWSER_SIMPLE = "simple"
+BROWSER_ADVANCED = "advanced"
+ASSETS_FLASH = "flash"
+ASSETS_STORAGE = "storage"
+
+# The adapter is ours and versioned with the component: it talks to whatever /files/* this
+# firmware exposes. Putting it on removable media would let a firmware update move the API
+# while the adapter stayed behind, so it is always compiled in -- roughly 4 kB gzipped.
+# (file in this directory, URL, content type, compress)
+_ADAPTER_ASSETS = (
+    ("file_explorer/adapter.js", "/file-explorer/adapter.js", "text/javascript", True),
+    ("file_explorer/adapter.css", "/file-explorer/adapter.css", "text/css", True),
+)
+
+# The widget itself (cubiclesoft/js-fileexplorer, unmodified) is what asset_source decides
+# about. With asset_source: storage these files are not read at codegen time at all -- they
+# live on the medium and the paths below are just strings -- so a user who does not want ~56 kB
+# of third-party code in the repository does not need it there. Either way the widget is MIT,
+# and its terms are in file_explorer/LICENSE.txt -- upstream ships no LICENSE file, so that
+# copy is the one that travels with the code.
+_WIDGET_ASSETS = (
+    (
+        "file_explorer/file-explorer.js",
+        "/file-explorer/file-explorer.js",
+        "text/javascript",
+        True,
+    ),
+    (
+        "file_explorer/file-explorer.css",
+        "/file-explorer/file-explorer.css",
+        "text/css",
+        True,
+    ),
+    (
+        "file_explorer/fileexplorer_sprites.png",
+        "/file-explorer/fileexplorer_sprites.png",
+        "image/png",
+        False,
+    ),
+    (
+        "file_explorer/fileexplorer_actions.woff",
+        "/file-explorer/fileexplorer_actions.woff",
+        "font/woff",
+        False,
+    ),
+)
+CONF_MAX_DIR_ENTRIES = "max_dir_entries"
+CONF_STORAGE_ID = "storage_id"
+# file_api per-operation access options. Each gates a group of endpoints server-side (a
+# disallowed call is rejected with 403) and is advertised to the browser so it never renders a
+# button that could only fail. All default to True (no behaviour change for existing configs).
+CONF_ENABLE_LIST = "enable_list"  # /files/list, /files/stat
+CONF_ENABLE_READ = "enable_read"  # /files/download, /files/copy (copy is a read)
+CONF_ENABLE_WRITE = "enable_write"  # /files/upload, /files/mkdir (shared with raw_api)
+CONF_ENABLE_DELETE = "enable_delete"  # /files/delete, /files/move (move deletes source)
+CONF_ENABLE_MOUNT = "enable_mount"  # /files/mount
+CONF_ENABLE_UNMOUNT = "enable_unmount"  # /files/unmount
+CONF_ENABLE_FORMAT = "enable_format"  # /files/format (destructive; default off)
+CONF_RAW_API = "raw_api"
+CONF_DEVICE_ID = "device_id"
+
 # Schema default that also matches the C++ initializer in web_server_base.h; codegen
 # skips the setter when the config equals it.
 DEFAULT_PORT = 80
 
 
+def AUTO_LOAD() -> list[str]:
+    # No config parameter: a dynamic auto-load would satisfy ota.web_server's dependency too late
+    auto_load = ["json", "web_server_base"]
+    raw = CORE.raw_config or {}
+    # The AP mode DNS server needs socket; CORE.raw_config already has a wifi block from a package
+    wifi = raw.get(CONF_WIFI)
+    if (
+        CORE.is_esp32
+        and wifi is not None
+        and (not isinstance(wifi, dict) or CONF_AP in wifi)
+    ):
+        auto_load.append("socket")
+    # storage only for the optional file_api:, file_browser: and raw_api: blocks
+    web_server = raw.get(DOMAIN)
+    if isinstance(web_server, dict) and any(
+        key in web_server for key in (CONF_FILE_API, CONF_FILE_BROWSER, CONF_RAW_API)
+    ):
+        auto_load.append("storage")
+    return auto_load
+
+
 web_server_ns = cg.esphome_ns.namespace("web_server")
 WebServer = web_server_ns.class_("WebServer", cg.Component)
+
+WebServerFileApi = web_server_ns.class_("WebServerFileApi", cg.Component)
+WebServerRawApi = web_server_ns.class_("WebServerRawApi", cg.Component)
+FileExplorerAssets = web_server_ns.class_("FileExplorerAssets", cg.Component)
 
 sorting_groups = {}
 
@@ -221,6 +317,32 @@ def _final_validate_sorting(config: ConfigType) -> None:
         )
 
 
+def _final_validate_file_explorer(config: ConfigType) -> None:
+    """The advanced browser serves its assets out of external RAM in both modes.
+
+    There is no variant that trades PSRAM away -- flash and storage differ in where the bytes
+    come from, not in where they are served from -- so psram is required either way. Same shape
+    of check as storage's transfer_buffer, and for the same reason: the option promises
+    something only the hardware can deliver.
+    """
+    browser = config.get(CONF_FILE_BROWSER)
+    if browser is None or browser.get(CONF_VARIANT) != BROWSER_ADVANCED:
+        return
+    full = fv.full_config.get()
+    if "psram" not in full:
+        raise cv.Invalid(
+            f"'{CONF_FILE_BROWSER}: {CONF_VARIANT}: {BROWSER_ADVANCED}' serves its assets from "
+            f"external RAM and needs the 'psram' component configured",
+            path=[CONF_FILE_BROWSER, CONF_VARIANT],
+        )
+    if browser.get(CONF_ASSET_SOURCE) == ASSETS_STORAGE and "storage" not in full:
+        raise cv.Invalid(
+            f"'{CONF_ASSET_SOURCE}: {ASSETS_STORAGE}' needs the 'storage' component to read the "
+            f"assets from",
+            path=[CONF_FILE_BROWSER, CONF_ASSET_SOURCE],
+        )
+
+
 def _consume_web_server_sockets(config: ConfigType) -> ConfigType:
     """Register socket needs for web_server component."""
     from esphome.components import socket
@@ -238,6 +360,38 @@ sorting_group = {
     cv.Required(CONF_NAME): cv.string,
     cv.Optional(CONF_SORTING_WEIGHT): cv.float_,
 }
+
+def _text_file_format(value):
+    value = cv.string(value).strip().lower()
+    return value if value.startswith(".") else "." + value
+
+
+def _validate_file_browser(config):
+    # text_file_formats decides which files the advanced widget treats as text (its editor
+    # and the "monitor" tail button). It has no effect on the simple browser, so it is
+    # advanced-only.
+    if config[CONF_VARIANT] == BROWSER_ADVANCED:
+        config.setdefault(CONF_TEXT_FILE_FORMATS, [".txt", ".log"])
+    elif CONF_TEXT_FILE_FORMATS in config:
+        raise cv.Invalid(
+            f"'{CONF_TEXT_FILE_FORMATS}' only applies to '{CONF_VARIANT}: {BROWSER_ADVANCED}'",
+            path=[CONF_TEXT_FILE_FORMATS],
+        )
+    return config
+
+
+def _validate_file_api(config):
+    """file_api/file_browser are ESP-IDF + web_server version 3 only: the REST handlers use
+    the IDF httpd backend directly (chunked responses, multipart upload), and the browser
+    module hooks into the v3 page."""
+    if CONF_FILE_API not in config and CONF_FILE_BROWSER not in config:
+        return config
+    if CORE.target_framework != "esp-idf":
+        raise cv.Invalid("file_api/file_browser require the esp-idf framework")
+    if config[CONF_VERSION] != 3:
+        raise cv.Invalid("file_api/file_browser require web_server version: 3")
+    return config
+
 
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
@@ -278,6 +432,88 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_LOCAL): cv.boolean,
             cv.Optional(CONF_COMPRESSION, default="gzip"): cv.one_of("gzip", "br"),
             cv.Optional(CONF_SORTING_GROUPS): cv.ensure_list(sorting_group),
+            # Optional compile-time opt-in blocks. Presence alone drives AUTO_LOAD() above
+            # to pull in storage; absence costs nothing (zero-cost gating via defines).
+            # ESP-IDF + web_server version 3 only — enforced in _validate_file_api below.
+            # Address-based counterpart to file_api for raw media. Reading is what a
+            # browser needs; writing and erasing are opt-in because neither is undoable.
+            cv.Optional(CONF_RAW_API): cv.Schema(
+                {
+                    cv.Optional(CONF_DEVICE_ID): cv.use_id(storage.RawStorage),
+                    # One flag: erase is a technical necessity of some media (NOR flash
+                    # erases before it writes), not a feature of its own — a device you may
+                    # write is a device you may erase.
+                    cv.Optional(CONF_ENABLE_WRITE, default=True): cv.boolean,
+                }
+            ),
+            cv.Optional(CONF_FILE_API): cv.Schema(
+                {
+                    cv.Optional(CONF_STORAGE_ID): cv.use_id(storage.PathStorage),
+                    cv.Optional(CONF_MAX_DIR_ENTRIES, default=64): cv.int_range(
+                        min=1, max=1024
+                    ),
+                    # Per-operation access. Each defaults to True (no change for existing
+                    # configs); set to False to have the API reject that group with 403 and
+                    # the browser hide the corresponding buttons.
+                    cv.Optional(CONF_ENABLE_LIST, default=True): cv.boolean,
+                    cv.Optional(CONF_ENABLE_READ, default=True): cv.boolean,
+                    cv.Optional(CONF_ENABLE_WRITE, default=True): cv.boolean,
+                    cv.Optional(CONF_ENABLE_DELETE, default=True): cv.boolean,
+                    cv.Optional(CONF_ENABLE_MOUNT, default=True): cv.boolean,
+                    cv.Optional(CONF_ENABLE_UNMOUNT, default=True): cv.boolean,
+                    cv.Optional(CONF_ENABLE_FORMAT, default=False): cv.boolean,
+                }
+            ),
+            # The browser is a module INSIDE the existing v3 page (a card next to <esp-app>),
+            # not a separate page; it implies file_api (defaults applied when absent).
+            cv.Optional(CONF_FILE_BROWSER): cv.All(
+                lambda value: {} if value is None else value,
+                cv.Schema(
+                    {
+                        # Compile-time choice: the embedded browser JS contains exactly one
+                        # action-button variant — flat uppercase v3 text buttons (default)
+                        # or icons. Type/medium icons are identification, not actions, and
+                        # ship in both variants.
+                        cv.Optional(CONF_ACTIONS_AS_ICONS, default=False): cv.boolean,
+                        # How often the browser polls /files/changes to auto-refresh
+                        # directories that changed behind its back (other clients, plain
+                        # API calls). 0s disables the poll.
+                        cv.Optional(
+                            CONF_CHANGE_POLL_INTERVAL, default="5s"
+                        ): cv.positive_time_period_milliseconds,
+                        # simple   the browser embedded in this component, ~13 kB
+                        # advanced the vendored js-fileexplorer widget with an image
+                        #          preview, a plain-textarea editor and a tail -f style
+                        #          follower, ~60 kB. Needs psram either way; see
+                        #          _final_validate_file_explorer().
+                        cv.Optional(CONF_VARIANT, default=BROWSER_SIMPLE): cv.one_of(
+                            BROWSER_SIMPLE, BROWSER_ADVANCED, lower=True
+                        ),
+                        # Where the widget's assets come from before they are copied into
+                        # PSRAM. flash compiles them in (~56 kB) and they are there from the
+                        # first boot; storage reads them off the medium instead, costs no
+                        # flash, and answers 503 until that storage is mounted. The adapter
+                        # is compiled in either way. With storage the widget files are not
+                        # needed in the repository at all.
+                        cv.Optional(CONF_ASSET_SOURCE, default=ASSETS_FLASH): cv.one_of(
+                            ASSETS_FLASH, ASSETS_STORAGE, lower=True
+                        ),
+                        # Directory the widget files are read from with
+                        # asset_source: storage. The widget files live on the medium RAW
+                        # (no gzip, no .gz suffix) and are served as-is; flash compresses.
+                        cv.Optional(
+                            CONF_ASSET_PATH, default="/sdcard/file-explorer"
+                        ): cv.string_strict,
+                        # Which files the advanced widget opens in its text editor and
+                        # offers the "monitor" (tail) button for. advanced-only; the
+                        # default is applied in _validate_file_browser().
+                        cv.Optional(CONF_TEXT_FILE_FORMATS): cv.ensure_list(
+                            _text_file_format
+                        ),
+                    }
+                ),
+                _validate_file_browser,
+            ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     cv.only_on(
@@ -297,6 +533,7 @@ CONFIG_SCHEMA = cv.All(
     validate_ota,
     validate_private_network_access,
     _consume_web_server_sockets,
+    _validate_file_api,
 )
 
 
@@ -423,6 +660,7 @@ def _final_validate(config: ConfigType) -> None:
     # Called one after the other rather than via cv.All: these return None.
     _final_validate_sorting(config)
     _final_validate_ap_mode(config)
+    _final_validate_file_explorer(config)
 
 
 FINAL_VALIDATE_SCHEMA = _final_validate
@@ -440,6 +678,25 @@ def build_index_html(config: ConfigType) -> str:
     if js_include:
         html += "<script type=module src=/0.js></script>"
     html += "<esp-app></esp-app>"
+    if (browser := config.get(CONF_FILE_BROWSER)) is not None:
+        if browser.get(CONF_VARIANT) == BROWSER_ADVANCED:
+            # Only the scripts go here. The adapter builds the card and mounts it into the v3
+            # app's shadow root, so both stylesheets have to be linked from INSIDE that card --
+            # document-level <link>s do not cross a shadow boundary. The adapter does that.
+            # text_file_formats is handed to the adapter as a global it reads before running.
+            html += (
+                "<script>window.ESPHFE={textFormats:"
+                + json.dumps(browser[CONF_TEXT_FILE_FORMATS])
+                + ",changePollMs:"
+                + str(int(browser[CONF_CHANGE_POLL_INTERVAL].total_milliseconds))
+                + "}</script>"
+            )
+            html += '<script src="/file-explorer/file-explorer.js"></script>'
+            html += '<script src="/file-explorer/adapter.js"></script>'
+        else:
+            # Injected module renders a "Files" card inside this same page (next to
+            # <esp-app>).
+            html += "<script src=/file_browser.js></script>"
     if config[CONF_JS_URL]:
         html += f'<script src="{config[CONF_JS_URL]}"></script>'
     html += "</body></html>"
@@ -459,6 +716,118 @@ def add_resource_as_progmem(
     cg.add_global(
         cg.RawExpression(
             f"constexpr size_t ESPHOME_WEBSERVER_{resource_name}_SIZE = {len(content_encoded)}"
+        )
+    )
+
+
+def add_bytes_as_progmem(resource_name: str, data: bytes) -> None:
+    """Like add_resource_as_progmem(), for content that is already bytes.
+
+    The widget's sprite sheet and icon font are binary and must not go through a utf-8 encode,
+    and the gzipping is decided per asset rather than for all of them.
+    """
+    bytes_as_int = ", ".join(str(x) for x in data)
+    cg.add_global(
+        cg.RawExpression(
+            f"constexpr uint8_t ESPHOME_WEBSERVER_{resource_name}[{len(data)}] "
+            f"PROGMEM = {{{bytes_as_int}}}"
+        )
+    )
+    cg.add_global(
+        cg.RawExpression(
+            f"constexpr size_t ESPHOME_WEBSERVER_{resource_name}_SIZE = {len(data)}"
+        )
+    )
+
+
+def _asset_symbol(name: str) -> str:
+    return "FE_" + name.replace(".", "_").replace("-", "_").upper()
+
+
+def _flash_row(here: Path, rel: str, url: str, ctype: str, compress: bool) -> str:
+    """Compiles one asset in and returns its table row."""
+    data = (here / rel).read_bytes()
+    if compress:
+        data = gzip.compress(data, 9)
+    symbol = _asset_symbol(Path(rel).name)
+    add_bytes_as_progmem(symbol, data)
+    return (
+        f'{{"{url}", "{ctype}", ESPHOME_WEBSERVER_{symbol}, '
+        f"ESPHOME_WEBSERVER_{symbol}_SIZE, nullptr, "
+        f"{'true' if compress else 'false'}, nullptr, 0}}"
+    )
+
+
+async def _add_file_explorer(config, var, api_var) -> None:
+    """Emits the advanced browser: an asset table plus the component that serves it.
+
+    Serving is always out of PSRAM. asset_source only decides how the widget's bytes get
+    there -- compiled in gzipped and copied at setup(), or read off a PathStorage RAW once
+    it mounts. Either way the browser receives the same widget. The adapter is always
+    compiled in.
+    """
+    browser = config[CONF_FILE_BROWSER]
+    source = browser[CONF_ASSET_SOURCE]
+    base_dir = browser[CONF_ASSET_PATH].rstrip("/")
+    here = Path(__file__).parent
+
+    cg.add_define("USE_WEBSERVER_FILE_EXPLORER")
+
+    if source == ASSETS_STORAGE:
+        # Reading the assets off the medium goes through the worker's stream API (chunked, no
+        # max_blocking_transfer_size ceiling), so the worker has to be compiled in. A path-based
+        # driver normally requests it; asking here as well makes it independent of which driver
+        # the user happened to configure.
+        from esphome.components.storage import request_storage_worker
+
+        request_storage_worker()
+
+    assets_id = ID(f"{var}_file_explorer", is_declaration=True, type=FileExplorerAssets)
+    CORE.component_ids.add(str(assets_id))
+    assets_var = cg.new_Pvariable(assets_id)
+    await cg.register_component(assets_var, {})
+    # The assets are served by the file_api handler, not by a handler of their own -- see
+    # WebServerFileApi::set_file_explorer(). This is the only wire between the two.
+    cg.add(api_var.set_file_explorer(assets_var))
+
+    rows = [_flash_row(here, *entry) for entry in _ADAPTER_ASSETS]
+
+    missing = []
+    for rel, url, ctype, compress in _WIDGET_ASSETS:
+        name = Path(rel).name
+        if source == ASSETS_FLASH:
+            if not (here / rel).is_file():
+                missing.append(name)
+                continue
+            rows.append(_flash_row(here, rel, url, ctype, compress))
+        else:
+            # External storage has room to spare, so the widget files live there RAW -- no
+            # gzip and no .gz suffix -- and are served as-is out of PSRAM. Flash still
+            # compresses itself in, where the KB matter; storage does not bother. The URL, the
+            # on-disk name and the served bytes are all the same plain file.
+            disk = f"{base_dir}/{name}"
+            rows.append(
+                f'{{"{url}", "{ctype}", nullptr, 0, "{disk}", false, nullptr, 0}}'
+            )
+
+    if missing:
+        raise cv.Invalid(
+            f"'{CONF_ASSET_SOURCE}: {ASSETS_FLASH}' compiles the file explorer widget in, but "
+            f"{', '.join(missing)} is not in {here / 'file_explorer'}. Either place the "
+            f"widget files there, or use '{CONF_ASSET_SOURCE}: {ASSETS_STORAGE}' and put them "
+            f"on the medium instead."
+        )
+
+    table = ",\n    ".join(rows)
+    cg.add_global(
+        cg.RawExpression(
+            "static esphome::web_server::FileExplorerAssets::Asset "
+            f"ESPHOME_WEBSERVER_FE_ASSETS[] = {{\n    {table}\n}}"
+        )
+    )
+    cg.add(
+        assets_var.set_assets(
+            cg.RawExpression("ESPHOME_WEBSERVER_FE_ASSETS"), len(rows)
         )
     )
 
@@ -559,6 +928,94 @@ async def to_code(config: ConfigType) -> None:
     if (sorting_group_config := config.get(CONF_SORTING_GROUPS)) is not None:
         cg.add_define("USE_WEBSERVER_SORTING")
         add_sorting_groups(var, sorting_group_config)
+
+    file_api_config = config.get(CONF_FILE_API)
+    file_browser = config.get(CONF_FILE_BROWSER) is not None
+    if file_browser and file_api_config is None:
+        # file_browser implies file_api with defaults
+        file_api_config = FILE_API_DEFAULTS
+    if file_api_config is not None:
+        cg.add_define("USE_WEBSERVER_FILE_API")
+        # The registry-level directory-change feed behind /files/changes: fed by the
+        # storage worker and the raw API too, but only worth its RAM when something
+        # serves it — and that something is the file_api.
+        cg.add_define("USE_STORAGE_CHANGE_FEED")
+        # /files/upload uses the same multipart machinery as web_server OTA; without OTA
+        # configured nothing else pulls the parser library in. file_api is validated as
+        # esp-idf-only, so no framework check is needed here.
+        add_idf_component(name="zorxx/multipart-parser", ref="1.0.1")
+        # No YAML-visible id — this instance exists purely to back this web_server's
+        # file_api sub-block. It is a real Component (setup() registers the handler).
+        api_id = ID(f"{var}_file_api", is_declaration=True, type=WebServerFileApi)
+        # register_component() consumes the id from CORE.component_ids — manually created
+        # IDs (no cv.declare_id) must be added there first (same pattern as the storage
+        # worker instantiation).
+        CORE.component_ids.add(str(api_id))
+        api_var = cg.new_Pvariable(api_id)
+        await cg.register_component(api_var, {})
+        cg.add(api_var.set_web_server_base(paren))
+        cg.add(api_var.set_max_dir_entries(file_api_config[CONF_MAX_DIR_ENTRIES]))
+        cg.add(api_var.set_enable_list(file_api_config[CONF_ENABLE_LIST]))
+        cg.add(api_var.set_enable_read(file_api_config[CONF_ENABLE_READ]))
+        cg.add(api_var.set_enable_write(file_api_config[CONF_ENABLE_WRITE]))
+        cg.add(api_var.set_enable_delete(file_api_config[CONF_ENABLE_DELETE]))
+        cg.add(api_var.set_enable_mount(file_api_config[CONF_ENABLE_MOUNT]))
+        cg.add(api_var.set_enable_unmount(file_api_config[CONF_ENABLE_UNMOUNT]))
+        cg.add(api_var.set_enable_format(file_api_config[CONF_ENABLE_FORMAT]))
+        if storage_id := file_api_config.get(CONF_STORAGE_ID):
+            cg.add(api_var.set_scoped_storage(await cg.get_variable(storage_id)))
+        if file_browser and config[CONF_FILE_BROWSER][CONF_VARIANT] == BROWSER_ADVANCED:
+            await _add_file_explorer(config, var, api_var)
+        elif file_browser:
+            cg.add_define("USE_WEBSERVER_FILE_BROWSER")
+            # Two prebuilt variants differing only in action-button rendering; the option
+            # decides at codegen which one is embedded — the other never reaches the build.
+            fb_conf = config[CONF_FILE_BROWSER]
+            js_name = (
+                "file_browser_icons.js"
+                if fb_conf[CONF_ACTIONS_AS_ICONS]
+                else "file_browser.js"
+            )
+            js_path = Path(__file__).parent / js_name
+            with js_path.open(encoding="utf-8") as js_file:
+                js = js_file.read()
+            # Both variants carry the schema default; only a deviation needs the rewrite.
+            poll_ms = int(fb_conf[CONF_CHANGE_POLL_INTERVAL].total_milliseconds)
+            if poll_ms != 5000:
+                js = js.replace(
+                    "const CHANGE_POLL_MS = 5000;",
+                    f"const CHANGE_POLL_MS = {poll_ms};",
+                    1,
+                )
+            add_resource_as_progmem("FILE_BROWSER_JS", js)
+
+    raw_api_config = config.get(CONF_RAW_API)
+    # A configured device node needs an API to talk to, exactly like file_browser implies
+    # file_api above. Read-only: showing a node is not consent to write or erase.
+    # binary_storage's final validation resolves the node name into its config, so the
+    # presence of that key is the reliable signal here — and needs no import of a component
+    # that may not even be vendored.
+    if (
+        raw_api_config is None
+        and file_browser
+        and any(
+            "device_node_name" in device
+            for device in CORE.config.get("binary_storage", [])
+        )
+    ):
+        raw_api_config = {CONF_ENABLE_WRITE: True}
+    if raw_api_config is not None:
+        cg.add_define("USE_WEBSERVER_RAW_API")
+        # Same pattern as the file api above: no YAML-visible id, a real Component whose
+        # setup() registers the handler.
+        raw_id = ID(f"{var}_raw_api", is_declaration=True, type=WebServerRawApi)
+        CORE.component_ids.add(str(raw_id))
+        raw_var = cg.new_Pvariable(raw_id)
+        await cg.register_component(raw_var, {})
+        cg.add(raw_var.set_web_server_base(paren))
+        cg.add(raw_var.set_enable_write(raw_api_config[CONF_ENABLE_WRITE]))
+        if device_id := raw_api_config.get(CONF_DEVICE_ID):
+            cg.add(raw_var.set_scoped_device(await cg.get_variable(device_id)))
 
 
 def FILTER_SOURCE_FILES() -> list[str]:
