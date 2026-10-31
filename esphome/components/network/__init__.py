@@ -75,13 +75,13 @@ KEY_NETWORK_PRIORITY = "network_priority"
 # accepted in the priority list. openthread and modem will be added here when
 # they wire up their setup-priority consumer in their own to_code — see
 # NETWORK_PLAN.md for the full multi-interface roadmap.
-VALID_NETWORK_TYPES = ["ethernet", "wifi"]
+VALID_NETWORK_TYPES = ["ethernet", "wifi", "usb_ethernet"]
 
 # Interfaces NetworkComponent::loop() knows how to arbitrate the default route
 # for. Deliberately NOT derived from VALID_NETWORK_TYPES: extending that list
 # without extending the C++ arbitration (and then this set) is caught in
 # _final_validate() as a config error instead of a silently mis-routed interface.
-ARBITRATED_NETWORK_TYPES = frozenset({"ethernet", "wifi"})
+ARBITRATED_NETWORK_TYPES = frozenset({"ethernet", "wifi", "usb_ethernet"})
 
 # Setup priority base values — first in list gets the highest priority.
 #
@@ -151,6 +151,7 @@ NetworkInterface = network_ns.enum("NetworkInterface", is_class=True)
 NETWORK_INTERFACES = {
     "ethernet": NetworkInterface.NETWORK_INTERFACE_ETHERNET,
     "wifi": NetworkInterface.NETWORK_INTERFACE_WIFI,
+    "usb_ethernet": NetworkInterface.NETWORK_INTERFACE_USB_ETHERNET,
 }
 ActiveInterfaceTrigger = network_ns.class_(
     "ActiveInterfaceTrigger", automation.Trigger.template()
