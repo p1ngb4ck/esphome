@@ -43,6 +43,10 @@ Branches from other topics, contained as merges:
 for Bluetooth audio; `usb_bluetooth` is allowed on the S31 as well (an external radio instead of the onboard one).
 The 8-channel path of `audio` / `speaker` / `mixer` is in esphome-audio.
 
+## Contributions
+
+- [NonaSuomy](https://github.com/NonaSuomy): parts of `usb_hid`, and ideas behind the USB HID work.
+
 ## Use
 
 ```yaml
