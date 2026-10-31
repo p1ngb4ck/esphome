@@ -1,5 +1,7 @@
 #pragma once
 
+#include "esphome/core/defines.h"
+
 #ifdef USE_ESP32
 
 #include "audio.h"
@@ -10,6 +12,10 @@
 #include "esp_err.h"
 
 #include <esp_http_client.h>
+
+#ifdef USE_STORAGE
+#include "esphome/components/storage/storage.h"
+#endif
 
 namespace esphome::audio {
 
@@ -22,7 +28,10 @@ enum class AudioReaderState : uint8_t {
 class AudioReader {
   /*
    * @brief Class that facilitates reading a raw audio file.
-   * Files can be read from flash (stored in a AudioFile struct) or from an http source.
+   * Files can be read from flash (stored in a AudioFile struct), from an http source, or —
+   * with the storage component in the build — from any mounted storage via file:// URIs
+   * (file:///sdcard/music/track.flac). Storage reads use the DATA-PLANE handle API and are
+   * therefore safe from the speaker task.
    * The file data is sent to a ring buffer sink.
    */
  public:
@@ -58,6 +67,9 @@ class AudioReader {
   static esp_err_t http_event_handler(esp_http_client_event_t *evt);
 
   AudioReaderState file_read_();
+#ifdef USE_STORAGE
+  AudioReaderState storage_read_();
+#endif
   AudioReaderState http_read_();
 
   std::shared_ptr<ring_buffer::RingBuffer> file_ring_buffer_;
@@ -72,6 +84,14 @@ class AudioReader {
   const AudioFile *current_audio_file_{nullptr};
   AudioFileType audio_file_type_{AudioFileType::NONE};
   const uint8_t *file_current_{nullptr};
+#ifdef USE_STORAGE
+  // FILESYSTEM storages stream through a handle; NETWORK storages (NFS) are
+  // stateless by design — chunked reads by path + self-tracked offset.
+  storage::PathStorage *storage_{nullptr};
+  storage::FileHandle *storage_handle_{nullptr};  // FILESYSTEM only
+  std::string storage_path_;                      // NETWORK only (owned copy)
+  uint64_t storage_offset_{0};                    // NETWORK only
+#endif
 };
 }  // namespace esphome::audio
 

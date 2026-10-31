@@ -43,6 +43,10 @@ bool AudioStreamInfo::operator==(const AudioStreamInfo &rhs) const {
 
 const char *audio_file_type_to_string(AudioFileType file_type) {
   switch (file_type) {
+#ifdef USE_AUDIO_AAC_SUPPORT
+    case AudioFileType::AAC:
+      return "AAC";
+#endif
 #ifdef USE_AUDIO_FLAC_SUPPORT
     case AudioFileType::FLAC:
       return "FLAC";
@@ -87,7 +91,7 @@ AudioFileType detect_audio_file_type(const char *content_type, const char *url) 
     // Match "audio/ogg" with a codecs parameter containing "opus"
     // Valid forms: audio/ogg;codecs=opus, audio/ogg; codecs="opus", etc.
     // Plain "audio/ogg" without opus is not matched (almost always Ogg Vorbis)
-    if (strncasecmp(content_type, "audio/ogg", 9) == 0 && str_contains_ignore_case(content_type + 9, "opus")) {
+    if (strncasecmp(content_type, "audio/ogg", 9) == 0 && str_endswith_ignore_case(content_type + 9, "opus")) {
       return AudioFileType::OPUS;
     }
 #endif
@@ -111,8 +115,13 @@ AudioFileType detect_audio_file_type(const char *content_type, const char *url) 
     }
 #endif
 #ifdef USE_AUDIO_OPUS_SUPPORT
-    if (str_endswith_ignore_case(url, ".opus")) {
+    if (str_endswith_ignore_case(url, ".opus") || str_endswith_ignore_case(url, ".ogg")) {
       return AudioFileType::OPUS;
+    }
+#endif
+#ifdef USE_AUDIO_AAC_SUPPORT
+    if (str_endswith_ignore_case(url, ".aac") || str_endswith_ignore_case(url, ".m4a")) {
+      return AudioFileType::AAC;
     }
 #endif
   }

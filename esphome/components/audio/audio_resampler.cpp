@@ -9,7 +9,6 @@
 namespace esphome::audio {
 
 static const uint32_t READ_WRITE_TIMEOUT_MS = 20;
-
 AudioResampler::AudioResampler(size_t input_buffer_size, size_t output_buffer_size)
     : input_buffer_size_(input_buffer_size), output_buffer_size_(output_buffer_size) {
   this->output_transfer_buffer_ = AudioSinkTransferBuffer::create(output_buffer_size);
