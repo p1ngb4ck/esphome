@@ -5,6 +5,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstring>
 
@@ -108,6 +109,38 @@ std::vector<CdcEps> USBUartTypeCdcAcm::parse_descriptors(usb_device_handle_t dev
   return cdc_devs;
 }
 
+void RingBuffer::push(uint8_t item) {
+  if (this->buffer_ == nullptr || this->get_free_space() == 0)
+    return;
+  this->buffer_[this->insert_pos_] = item;
+  this->insert_pos_ = (this->insert_pos_ + 1) % this->buffer_size_;
+}
+void RingBuffer::push(const uint8_t *data, size_t len) {
+  if (this->buffer_ == nullptr)
+    return;
+  size_t free = this->get_free_space();
+  if (len > free)
+    len = free;
+  for (size_t i = 0; i != len; i++) {
+    this->buffer_[this->insert_pos_] = *data++;
+    this->insert_pos_ = (this->insert_pos_ + 1) % this->buffer_size_;
+  }
+}
+
+uint8_t RingBuffer::pop() {
+  uint8_t item = this->buffer_[this->read_pos_];
+  this->read_pos_ = (this->read_pos_ + 1) % this->buffer_size_;
+  return item;
+}
+size_t RingBuffer::pop(uint8_t *data, size_t len) {
+  len = std::min(len, this->get_available());
+  for (size_t i = 0; i != len; i++) {
+    *data++ = this->buffer_[this->read_pos_];
+    this->read_pos_ = (this->read_pos_ + 1) % this->buffer_size_;
+  }
+  return len;
+}
+
 void USBUartChannelBase::write_array(const uint8_t *data, size_t len) {
   if (!this->initialised_.load()) {
     ESP_LOGD(TAG, "Channel not initialised - write ignored");
@@ -116,7 +149,7 @@ void USBUartChannelBase::write_array(const uint8_t *data, size_t len) {
 #ifdef USE_UART_DEBUGGER
   if (this->debug_) {
     constexpr size_t batch = 16;
-    char buf[format_hex_pretty_size(batch)];  // "XX,XX,...,XX\0"
+    char buf[format_hex_pretty_size(batch)];
     for (size_t off = 0; off < len; off += batch) {
       size_t n = std::min(len - off, batch);
       format_hex_pretty_to(buf, data + off, n, ',');
@@ -139,7 +172,8 @@ void USBUartChannelBase::write_array(const uint8_t *data, size_t len) {
     data += chunk_len;
     len -= chunk_len;
   }
-  this->parent_->start_output(this);
+  if (this->parent_ != nullptr)
+    this->parent_->start_output(this);
 }
 
 uart::UARTFlushResult USBUartChannelBase::flush() {
@@ -147,6 +181,8 @@ uart::UARTFlushResult USBUartChannelBase::flush() {
   // Safe to call from the main loop only.
   // The flush_timeout_ms_ timeout guards against a device that stops responding mid-flush;
   // in that case the main loop is blocked for the full duration.
+  if (this->parent_ == nullptr)
+    return uart::UARTFlushResult::UART_FLUSH_RESULT_SUCCESS;
   uint32_t start = millis();
   while ((!this->output_queue_.empty() || this->output_started_.load()) && millis() - start < this->flush_timeout_ms_) {
     // Kick start_output() in case data arrived but no transfer is in flight yet.
@@ -159,28 +195,33 @@ uart::UARTFlushResult USBUartChannelBase::flush() {
 }
 
 bool USBUartChannelBase::peek_byte(uint8_t *data) {
-  if (this->input_buffer_.empty()) {
+  if (this->input_buffer_.is_empty()) {
     return false;
   }
-  *data = this->input_buffer_.front();
+  *data = this->input_buffer_.peek();
   return true;
 }
 bool USBUartChannelBase::read_array(uint8_t *data, size_t len) {
-  if (!this->initialised_.load()) {
+  if (!this->initialised_.load() && !this->destroying_.load()) {
     ESP_LOGV(TAG, "Channel not initialised - read ignored");
     return false;
   }
-  const size_t got = this->input_buffer_.pop(data, len);
-  if (got < len) {
-    ESP_LOGV(TAG, "underflow: requested %zu but returned %zu bytes", len, got);
+  auto available = this->available();
+  bool status = true;
+  if (len > available) {
+    ESP_LOGV(TAG, "underflow: requested %zu but returned %d, bytes", len, available);
+    len = available;
+    status = false;
   }
-  this->parent_->start_input(this);
-  return got == len;
+  for (size_t i = 0; i != len; i++) {
+    *data++ = this->input_buffer_.pop();
+  }
+  if (this->parent_ != nullptr)
+    this->parent_->start_input(this);
+  return status;
 }
-void USBUartComponent::setup() { USBClient::setup(); }
-void USBUartComponent::loop() {
-  bool had_work = this->process_usb_events_();
-  had_work |= this->run_config_machine_();
+bool USBUartComponent::loop() {
+  bool had_work = this->run_config_machine_();
 
   // Process USB data from the lock-free queue
   UsbDataChunk *chunk;
@@ -190,15 +231,18 @@ void USBUartComponent::loop() {
 
 #ifdef USE_UART_DEBUGGER
     if (channel->debug_) {
-      char buf[format_hex_pretty_size(usb_host::USB_MAX_PACKET_SIZE)];  // "XX,XX,...,XX\0"
-      format_hex_pretty_to(buf, chunk->data, chunk->length, ',');
+      // The hex buffer is a build-time constant while the packet size comes from the device,
+      // so a device whose packets are larger than the configured max_packet_size has its
+      // debug line truncated. Only the log line is affected, never the data itself.
+      char buf[format_hex_pretty_size(usb_host::USB_MAX_PACKET_SIZE)];
+      format_hex_pretty_to(buf, chunk->data, std::min<uint16_t>(chunk->length, usb_host::USB_MAX_PACKET_SIZE), ',');
       ESP_LOGD(TAG, "%s<<< %s", channel->debug_prefix_.c_str(), buf);
     }
 #endif
 
     // If there is not enough space for the full chunk, let the device subclass
     // handle it (e.g. FTDI clears the buffer to prevent mid-telegram corruption).
-    if (channel->input_buffer_.free_space() < chunk->length) {
+    if (channel->input_buffer_.get_free_space() < chunk->length) {
       this->on_rx_overflow(channel);
     }
     // Push data to ring buffer (now safe in main loop)
@@ -221,13 +265,24 @@ void USBUartComponent::loop() {
     ESP_LOGW(TAG, "Dropped %u USB data chunks due to buffer overflow", dropped);
   }
 
-  // Disable loop when idle. Callbacks re-enable via enable_loop_soon_any_context().
-  if (!had_work) {
-    this->disable_loop();
+  // Deferred RX buffer free: once the shared queue is empty and a disconnecting channel's
+  // input_buffer_ has been fully consumed by the application, release its backing memory.
+  if (this->usb_data_queue_.empty()) {
+    for (auto *channel : this->channels_) {
+      if (channel->destroying_.load() && channel->input_buffer_.is_empty()) {
+        channel->input_buffer_.free_buffer();
+        channel->destroying_.store(false);
+      }
+    }
+    // Same deferral for the receive chunk storage: chunks stay valid until the queue that
+    // carries them is empty. The next device gets storage sized for its own endpoints.
+    if (!this->connected_ && this->chunk_pool_.has_storage())
+      this->chunk_pool_.free_storage();
   }
+  return had_work;
 }
 void USBUartComponent::dump_config() {
-  USBClient::dump_config();
+  ESP_LOGCONFIG(TAG, "USB UART adapter %04X:%04X", this->vid_, this->pid_);
   for (auto &channel : this->channels_) {
     ESP_LOGCONFIG(TAG,
                   "  UART Channel %d\n"
@@ -360,20 +415,6 @@ void USBUartComponent::start_output(USBUartChannelBase *channel) {
   ESP_LOGV(TAG, "Output %u bytes started", len);
 }
 
-/**
- * Hacky fix for some devices that report incorrect MPS values
- * @param ep The endpoint descriptor
- */
-static void fix_mps(const usb_ep_desc_t *ep) {
-  if (ep != nullptr) {
-    auto *ep_mutable = const_cast<usb_ep_desc_t *>(ep);
-    if (ep->wMaxPacketSize > usb_host::USB_MAX_PACKET_SIZE) {
-      ESP_LOGW(TAG, "Corrected MPS of EP 0x%02X from %u to %u", static_cast<uint8_t>(ep->bEndpointAddress & 0xFF),
-               ep->wMaxPacketSize, usb_host::USB_MAX_PACKET_SIZE);
-      ep_mutable->wMaxPacketSize = usb_host::USB_MAX_PACKET_SIZE;
-    }
-  }
-}
 void USBUartTypeCdcAcm::on_connected() {
   auto cdc_devs = this->parse_descriptors(this->device_handle_);
   if (cdc_devs.empty()) {
@@ -382,6 +423,8 @@ void USBUartTypeCdcAcm::on_connected() {
     return;
   }
   ESP_LOGD(TAG, "Found %zu CDC-ACM devices", cdc_devs.size());
+  if (this->channels_.empty())
+    this->add_default_channels_(static_cast<uint8_t>(cdc_devs.size()));
   size_t i = 0;
   for (auto *channel : this->channels_) {
     if (i == cdc_devs.size()) {
@@ -389,14 +432,22 @@ void USBUartTypeCdcAcm::on_connected() {
       this->status_set_warning(LOG_STR("No configuration found for channel"));
       break;
     }
+    if (!channel->input_buffer_.has_buffer()) {
+      if (!channel->input_buffer_.allocate()) {
+        ESP_LOGE(TAG, "Channel %d: out of memory for RX buffer", channel->index_);
+        this->status_set_error(LOG_STR("Out of memory for RX buffer"));
+        this->disconnect();
+        return;
+      }
+    }
+    channel->destroying_.store(false);
     channel->cdc_dev_ = cdc_devs[i++];
-    fix_mps(channel->cdc_dev_.in_ep);
-    fix_mps(channel->cdc_dev_.out_ep);
     channel->initialised_.store(true);
     // Claim the communication (interrupt) interface so CDC class requests are accepted
     // by the device. Some CDC ACM implementations (e.g. EFR32 NCP) require this before
     // they enable data flow on the bulk endpoints.
-    if (channel->cdc_dev_.interrupt_interface_number != 0xFF &&
+    // Skipped when claim_notification_ep is false to conserve HCD channels.
+    if (channel->claim_notification_ep_ && channel->cdc_dev_.interrupt_interface_number != 0xFF &&
         channel->cdc_dev_.interrupt_interface_number != channel->cdc_dev_.bulk_interface_number) {
       if (!this->claim_comm_interface_) {
         ESP_LOGD(TAG, "Comm interface %d left unclaimed", channel->cdc_dev_.interrupt_interface_number);
@@ -412,6 +463,8 @@ void USBUartTypeCdcAcm::on_connected() {
           channel->cdc_dev_.interrupt_interface_claimed = true;
         }
       }
+    } else if (!channel->claim_notification_ep_) {
+      channel->cdc_dev_.interrupt_interface_number = 0xFF;
     }
     auto err =
         usb_host_interface_claim(this->handle_, this->device_handle_, channel->cdc_dev_.bulk_interface_number, 0);
@@ -422,6 +475,20 @@ void USBUartTypeCdcAcm::on_connected() {
       this->disconnect();
       return;
     }
+  }
+  // One receive chunk has to hold one whole packet of the IN endpoint, so the storage is
+  // sized from the endpoints of the device that is actually attached. Taking the widest of
+  // them covers every channel out of the one shared pool.
+  uint16_t rx_packet_size = 0;
+  for (auto *channel : this->channels_) {
+    if (channel->cdc_dev_.in_ep != nullptr)
+      rx_packet_size = std::max<uint16_t>(rx_packet_size, USB_EP_DESC_GET_MPS(channel->cdc_dev_.in_ep));
+  }
+  if (!this->chunk_pool_.allocate_storage(rx_packet_size)) {
+    ESP_LOGE(TAG, "Out of memory for %u byte receive chunks", rx_packet_size);
+    this->status_set_error(LOG_STR("Out of memory for receive chunks"));
+    this->disconnect();
+    return;
   }
   this->status_clear_error();
   this->enable_channels();
@@ -453,7 +520,6 @@ void USBUartTypeCdcAcm::on_disconnected() {
     // Reset the input and output started flags to their initial state to avoid the possibility of spurious restarts
     channel->input_started_.store(true);
     channel->output_started_.store(true);
-    channel->input_buffer_.clear();
     // Drain any pending output chunks and return them to the pool
     {
       UsbOutputChunk *chunk;
@@ -462,12 +528,13 @@ void USBUartTypeCdcAcm::on_disconnected() {
       }
     }
     channel->initialised_.store(false);
+    // Signal loop() to free the RX buffer once usb_data_queue_ and input_buffer_ are drained.
+    channel->destroying_.store(true);
     // The descriptors these point into are freed with the device
     channel->cdc_dev_ = {};
     channel->dtr_ = true;
     channel->rts_ = true;
   }
-  USBClient::on_disconnected();
 }
 
 static constexpr uint8_t CDC_REQUEST_TYPE = usb_host::USB_TYPE_CLASS | usb_host::USB_RECIP_INTERFACE;
@@ -680,8 +747,6 @@ bool USBUartComponent::run_config_machine_() {
     this->cfg_single_ = nullptr;
   } else if (++this->cfg_channel_idx_ >= this->channels_.size()) {
     this->cfg_active_ = false;
-    // Init is done and the line settings are on the wire: now the device is ready to use
-    this->report_connected_();
   }
 
   // If the machine just went idle and a run was requested while it was busy, start it now.
@@ -734,11 +799,12 @@ LineParity USBUartChannelBase::line_parity_() const {
 
 void USBUartChannelBase::load_settings(bool /*dump_config*/) {
   // The per-channel control transfers already log their values at debug level.
-  this->parent_->apply_channel_settings(this);
+  if (this->parent_ != nullptr)
+    this->parent_->apply_channel_settings(this);
 }
 
 bool USBUartChannelBase::set_modem_control(bool dtr, bool rts) {
-  if (!this->initialised_.load())
+  if (!this->initialised_.load() || this->parent_ == nullptr)
     return false;
   const bool changed = dtr != this->dtr_ || rts != this->rts_;
   this->dtr_ = dtr;
@@ -747,6 +813,209 @@ bool USBUartChannelBase::set_modem_control(bool dtr, bool rts) {
   if (changed)
     this->parent_->apply_modem_control(this);
   return true;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USBUartComponent: the client's calls for this adapter's device
+// ─────────────────────────────────────────────────────────────────────────────
+
+USBUartComponent::USBUartComponent(USBUartClient *client, usb_host::UsbDevice *dev)
+    : client_(client),
+      dev_(dev),
+      handle_(client->handle_),
+      device_handle_(dev->handle),
+      vid_(dev->desc->idVendor),
+      pid_(dev->desc->idProduct) {}
+
+USBUartComponent::~USBUartComponent() {
+  this->chunk_pool_.free_storage();
+  for (auto *channel : this->channels_) {
+    if (this->own_channels_) {
+      channel->input_buffer_.free_buffer();
+      delete channel;  // NOLINT: made by add_default_channels_()
+    } else {
+      // A YAML entry's channel stays for its consumers; its next adapter sets the parent again
+      channel->set_parent(nullptr);
+    }
+  }
+}
+
+USBUartChannelBase *USBUartComponent::make_channel_(uint8_t index, uint16_t buffer_size) {
+  return new USBUartChannel(index, buffer_size);  // NOLINT: deleted with the adapter
+}
+
+void USBUartComponent::add_default_channels_(uint8_t count) {
+  static constexpr uint16_t DEFAULT_BUFFER_SIZE = 256;
+  static constexpr uint32_t DEFAULT_BAUD_RATE = 115200;
+  this->own_channels_ = true;
+  for (uint8_t i = 0; i < count; i++) {
+    USBUartChannelBase *channel = this->make_channel_(i, DEFAULT_BUFFER_SIZE);
+    channel->set_parent(this);
+    channel->set_baud_rate(DEFAULT_BAUD_RATE);
+    channel->set_data_bits(8);
+    channel->set_stop_bits(UART_CONFIG_STOP_BITS_1);
+    channel->set_parity(uart::UART_CONFIG_PARITY_NONE);
+    this->channels_.push_back(channel);
+  }
+  ESP_LOGI(TAG, "Adapter %04X:%04X: %u channels, 115200 8N1", this->vid_, this->pid_, count);
+}
+
+#ifdef USE_USB_BULK_TRANSFERS
+bool USBUartComponent::transfer_in(uint8_t ep_address, const usb_host::transfer_cb_t &callback, uint16_t length) {
+  return this->client_->transfer_in(*this->dev_, ep_address, callback, length);
+}
+
+bool USBUartComponent::transfer_out(uint8_t ep_address, const usb_host::transfer_cb_t &callback, const uint8_t *data,
+                                    uint16_t length) {
+  return this->client_->transfer_out(*this->dev_, ep_address, callback, data, length);
+}
+#endif
+
+bool USBUartComponent::control_transfer(uint8_t type, uint8_t request, uint16_t value, uint16_t index,
+                                        const usb_host::transfer_cb_t &callback, const std::vector<uint8_t> &data) {
+  return this->client_->control_transfer(*this->dev_, type, request, value, index, callback, data);
+}
+
+void USBUartComponent::enable_loop() { this->client_->enable_loop(); }
+
+void USBUartComponent::enable_loop_soon_any_context() { this->client_->enable_loop_soon_any_context(); }
+
+void USBUartComponent::disconnect() { this->client_->close_device(*this->dev_); }
+
+void USBUartComponent::status_set_error(const LogString *message) { this->client_->status_set_error(message); }
+
+void USBUartComponent::status_set_warning(const LogString *message) { this->client_->status_set_warning(message); }
+
+void USBUartComponent::status_clear_error() { this->client_->status_clear_error(); }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USBUartClient: every adapter
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+struct DefaultType {
+  uint16_t vid;
+  uint16_t pid;
+  UartType type;
+};
+// An adapter without a YAML entry: its type by vid:pid (the types of __init__.py), else CDC ACM
+constexpr DefaultType DEFAULT_TYPES[] = {
+    {0x1A86, 0x55D5, UartType::CH34X},
+    {0x1A86, 0x7523, UartType::CH34X},  {0x10C4, 0xEA60, UartType::CP210X}, {0x0403, 0x6001, UartType::FT23XX},
+    {0x0403, 0x6010, UartType::FT23XX}, {0x0403, 0x6011, UartType::FT23XX}, {0x067B, 0x2303, UartType::PL2303},
+    {0x067B, 0x23B3, UartType::PL2303}, {0x067B, 0x23A3, UartType::PL2303}, {0x067B, 0x23E3, UartType::PL2303},
+    {0x067B, 0x23D3, UartType::PL2303}, {0x067B, 0x23F3, UartType::PL2303}, {0x067B, 0x23C3, UartType::PL2303},
+};
+}  // namespace
+
+USBUartClient::USBUartClient(uint16_t vid, uint16_t pid) : usb_host::USBClient(vid, pid) {
+  // Any device with a CDC ACM communication interface (class 02/02), and the vendor adapters
+  this->add_class_match(0x02, 0x02);
+  for (const auto &t : DEFAULT_TYPES)
+    this->add_vendor_match(t.vid, t.pid);
+}
+
+void USBUartClient::loop() {
+  bool had_work = this->process_usb_events_();
+  for (auto *adapter : this->adapters_)
+    had_work |= adapter->loop();
+  // A YAML entry's channel of a gone adapter: its RX buffer goes once the application read it
+  for (auto &entry : this->entries_) {
+    for (auto *channel : entry.channels) {
+      if (channel->destroying_.load() && channel->get_parent() == nullptr && channel->input_buffer_.is_empty()) {
+        channel->input_buffer_.free_buffer();
+        channel->destroying_.store(false);
+      }
+    }
+  }
+  // Disable loop when idle. Callbacks re-enable via enable_loop_soon_any_context().
+  if (!had_work)
+    this->disable_loop();
+}
+
+void USBUartClient::dump_config() {
+  USBClient::dump_config();
+  for (const auto &entry : this->entries_) {
+    ESP_LOGCONFIG(TAG, "  Entry %04X:%04X, %u channels", entry.vid, entry.pid,
+                  static_cast<unsigned>(entry.channels.size()));
+  }
+}
+
+USBUartEntry *USBUartClient::find_entry_(uint16_t vid, uint16_t pid) {
+  for (auto &entry : this->entries_) {
+    if ((entry.vid != 0 && entry.vid != vid) || (entry.pid != 0 && entry.pid != pid))
+      continue;
+    bool free = !entry.channels.empty();
+    for (auto *adapter : this->adapters_) {
+      if (!adapter->own_channels_ && !adapter->channels_.empty() && adapter->channels_[0] == entry.channels[0])
+        free = false;
+    }
+    if (free)
+      return &entry;
+  }
+  return nullptr;
+}
+
+void USBUartClient::on_device_connected(usb_host::UsbDevice &dev) {
+  const uint16_t vid = dev.desc->idVendor;
+  const uint16_t pid = dev.desc->idProduct;
+  USBUartEntry *entry = this->find_entry_(vid, pid);
+  UartType type = UartType::CDC_ACM;
+  if (entry != nullptr) {
+    type = entry->type;
+  } else {
+    for (const auto &t : DEFAULT_TYPES) {
+      if (t.vid == vid && t.pid == pid)
+        type = t.type;
+    }
+  }
+  USBUartComponent *adapter = nullptr;
+  // NOLINTBEGIN: deleted in free_device_context
+  switch (type) {
+    case UartType::CH34X:
+      adapter = new USBUartTypeCH34X(this, &dev);
+      break;
+    case UartType::CP210X:
+      adapter = new USBUartTypeCP210X(this, &dev);
+      break;
+    case UartType::FT23XX:
+      adapter = new USBUartTypeFT23XX(this, &dev);
+      break;
+    case UartType::PL2303:
+      adapter = new USBUartTypePL2303(this, &dev);
+      break;
+    default:
+      adapter = new USBUartTypeCdcAcm(this, &dev);
+      break;
+  }
+  // NOLINTEND
+  if (entry != nullptr) {
+    for (auto *channel : entry->channels) {
+      channel->set_parent(adapter);
+      adapter->channels_.push_back(channel);
+    }
+    if (type != UartType::CH34X && !entry->claim_comm_interface) {
+      static_cast<USBUartTypeCdcAcm *>(adapter)->set_claim_comm_interface(false);
+    }
+  }
+  dev.context = adapter;
+  this->adapters_.push_back(adapter);
+  adapter->on_connected();  // on failure the adapter is closed again (on_device_disconnected follows)
+}
+
+void USBUartClient::on_device_disconnected(usb_host::UsbDevice &dev) {
+  auto *adapter = static_cast<USBUartComponent *>(dev.context);
+  if (adapter == nullptr)
+    return;
+  adapter->connected_ = false;
+  adapter->on_disconnected();
+  this->adapters_.erase(std::remove(this->adapters_.begin(), this->adapters_.end(), adapter), this->adapters_.end());
+}
+
+void USBUartClient::free_device_context(usb_host::UsbDevice &dev) {
+  delete static_cast<USBUartComponent *>(dev.context);  // NOLINT
+  dev.context = nullptr;
 }
 
 }  // namespace esphome::usb_uart

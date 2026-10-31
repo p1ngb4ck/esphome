@@ -2,6 +2,7 @@
 
 #if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || \
     defined(USE_ESP32_VARIANT_ESP32S31) || defined(USE_ESP32_VARIANT_ESP32H4)
+#include "esphome/core/defines.h"
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/string_ref.h"
@@ -17,7 +18,9 @@
 namespace esphome::usb_uart {
 
 class USBUartTypeCdcAcm;
+class USBUartClient;
 class USBUartComponent;
+class USBUartChannel;
 class USBUartChannelBase;
 class USBUartTypePL2303;
 
@@ -112,17 +115,62 @@ enum class ConfigMode : uint8_t {
   CONFIG_MODE_MODEM,   ///< Apply the DTR/RTS state of one already-open channel
 };
 
-// Structure for queuing received USB data chunks
-struct UsbDataChunk {
-  uint8_t data[usb_host::USB_MAX_PACKET_SIZE];
-  uint16_t length;
-  USBUartChannelBase *channel;
+class RingBuffer {
+ public:
+  RingBuffer(uint16_t buffer_size) : buffer_size_(buffer_size), buffer_(nullptr) {}
+  bool allocate() {
+    this->buffer_ = new (std::nothrow) uint8_t[this->buffer_size_];
+    return this->buffer_ != nullptr;
+  }
+  void free_buffer() {
+    delete[] this->buffer_;
+    this->buffer_ = nullptr;
+    this->read_pos_ = this->insert_pos_ = 0;
+  }
+  bool has_buffer() const { return this->buffer_ != nullptr; }
+  bool is_empty() const { return this->buffer_ == nullptr || this->read_pos_ == this->insert_pos_; }
+  size_t get_available() const {
+    if (this->buffer_ == nullptr)
+      return 0;
+    return (this->insert_pos_ + this->buffer_size_ - this->read_pos_) % this->buffer_size_;
+  };
+  size_t get_free_space() const {
+    if (this->buffer_ == nullptr)
+      return 0;
+    return this->buffer_size_ - 1 - this->get_available();
+  }
+  uint8_t peek() const { return this->buffer_[this->read_pos_]; }
+  void push(uint8_t item);
+  void push(const uint8_t *data, size_t len);
+  uint8_t pop();
+  size_t pop(uint8_t *data, size_t len);
+  void clear() { this->read_pos_ = this->insert_pos_ = 0; }
 
-  // Required for EventPool - no cleanup needed for POD types
-  void release() {}
+ protected:
+  uint16_t insert_pos_ = 0;
+  uint16_t read_pos_ = 0;
+  uint16_t buffer_size_;
+  uint8_t *buffer_;
 };
 
-// Structure for queuing outgoing USB data chunks (one per USB packet)
+// Structure for queuing received USB data chunks.
+//
+// The payload is not stored inline. One chunk holds one packet of the IN endpoint, and
+// wMaxPacketSize is a property of that endpoint: 64 bytes on a full-speed device, 512 on a
+// high-speed one, and on a chip with two host controllers both can be attached at the same
+// time. A compile-time array would force the endpoint to fit the buffer, which is backwards.
+// The payload therefore points into a slab that RxChunkPool sizes from the endpoint once the
+// device is open.
+struct UsbDataChunk {
+  uint8_t *data;
+  uint16_t length;
+  USBUartChannelBase *channel;
+};
+
+// Structure for queuing outgoing USB data chunks. Unlike IN, a bulk OUT transfer may be any
+// length up to the host's transfer buffer -- a short packet is legal and simply ends the
+// transfer -- so an OUT chunk does not have to hold a whole wMaxPacketSize and stays a
+// compile-time buffer.
 struct UsbOutputChunk {
   static constexpr size_t MAX_CHUNK_SIZE = usb_host::USB_MAX_PACKET_SIZE;
   uint8_t data[MAX_CHUNK_SIZE];
@@ -132,17 +180,91 @@ struct UsbOutputChunk {
   void release() {}
 };
 
+// Fixed set of receive chunks whose payloads are equal slices of a single allocation.
+//
+// The slice size is the IN endpoint's wMaxPacketSize, so the storage cannot exist before a
+// device is attached: it is allocated when the endpoints are known and released once the
+// queue has drained after a disconnect. Slots are handed out with the same atomic bitmask as
+// the USB host's transfer pool, because allocate() runs in USB-task context while release()
+// runs on the main loop.
+template<uint8_t COUNT> class RxChunkPool {
+  static_assert(COUNT >= 1 && COUNT <= 32, "RxChunkPool tracks its slots in a 32 bit mask");
+
+ public:
+  bool allocate_storage(uint16_t slice_size) {
+    this->free_storage();
+    if (slice_size == 0)
+      return false;
+    RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_INTERNAL);
+    this->base_ = allocator.allocate(static_cast<size_t>(slice_size) * COUNT);
+    if (this->base_ == nullptr)
+      return false;
+    this->slice_size_ = slice_size;
+    for (uint8_t i = 0; i < COUNT; i++)
+      this->chunks_[i].data = this->base_ + static_cast<size_t>(i) * slice_size;
+    return true;
+  }
+
+  // Only safe once nothing holds a chunk any more: the queue is drained and the USB task is
+  // no longer submitting. See the deferred free in USBUartComponent::loop().
+  void free_storage() {
+    if (this->base_ != nullptr) {
+      RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_INTERNAL);
+      allocator.deallocate(this->base_, static_cast<size_t>(this->slice_size_) * COUNT);
+      this->base_ = nullptr;
+    }
+    for (auto &chunk : this->chunks_)
+      chunk.data = nullptr;
+    this->slice_size_ = 0;
+    this->in_use_.store(0, std::memory_order_release);
+  }
+
+  bool has_storage() const { return this->base_ != nullptr; }
+  uint16_t slice_size() const { return this->slice_size_; }
+
+  UsbDataChunk *allocate() {
+    if (this->base_ == nullptr)
+      return nullptr;
+    uint32_t mask = this->in_use_.load(std::memory_order_acquire);
+    for (;;) {
+      if (mask == ALL_IN_USE)
+        return nullptr;
+      const uint32_t lsb = ~mask & (mask + 1);
+      if (this->in_use_.compare_exchange_weak(mask, mask | lsb, std::memory_order_acquire))
+        return &this->chunks_[__builtin_ctz(lsb)];
+    }
+  }
+
+  void release(UsbDataChunk *chunk) {
+    if (chunk == nullptr)
+      return;
+    const size_t index = chunk - this->chunks_;
+    if (index >= COUNT)
+      return;
+    this->in_use_.fetch_and(~(static_cast<uint32_t>(1) << index), std::memory_order_release);
+  }
+
+ protected:
+  static constexpr uint32_t ALL_IN_USE = COUNT == 32 ? ~0U : (1U << COUNT) - 1;
+  UsbDataChunk chunks_[COUNT]{};
+  std::atomic<uint32_t> in_use_{0};
+  uint8_t *base_{nullptr};
+  uint16_t slice_size_{0};
+};
+
 // Common, non-final base for all USB UART channel implementations.
 // Concrete channel types (USBUartChannel for CDC-style devices, vendor-specific
 // multiplexed channels like CH934X) derive from this and are themselves final,
 // per the "configurable classes are final" convention.
 class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartComponent> {
+  friend class USBUartClient;
   friend class USBUartComponent;
   friend class USBUartTypeCdcAcm;
   friend class USBUartTypeCP210X;
   friend class USBUartTypeCH34X;
   friend class USBUartTypeFT23XX;
   friend class USBUartTypePL2303;
+  friend class USBUartChannel;
 
  public:
   // Number of output chunk slots per channel, derived from buffer_size config.
@@ -152,7 +274,7 @@ class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartCo
   void write_array(const uint8_t *data, size_t len) override;
   bool peek_byte(uint8_t *data) override;
   bool read_array(uint8_t *data, size_t len) override;
-  size_t available() override { return this->input_buffer_.size(); }
+  size_t available() override { return this->input_buffer_.get_available(); }
   bool is_connected() override { return this->initialised_.load(); }
   uart::UARTFlushResult flush() override;
   // Re-apply the current line settings (baud, parity, etc) to this already-open channel.
@@ -160,6 +282,7 @@ class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartCo
   using UARTComponent::load_settings;  // also bring in the no-arg overload for convenience
   void set_debug(bool debug) { this->debug_ = debug; }
   void set_dummy_receiver(bool dummy_receiver) { this->dummy_receiver_ = dummy_receiver; }
+  void set_claim_notification_ep(bool claim) { this->claim_notification_ep_ = claim; }
   void set_debug_prefix(const char *prefix) { this->debug_prefix_ = StringRef(prefix); }
   void set_flush_timeout(uint32_t flush_timeout_ms) override { this->flush_timeout_ms_ = flush_timeout_ms; }
 
@@ -193,13 +316,18 @@ class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartCo
 
  protected:
   // Not directly instantiable; construct a concrete channel type instead.
-  USBUartChannelBase(uint8_t index, uint16_t buffer_size) : index_(index) { this->input_buffer_.init(buffer_size); }
+  USBUartChannelBase(uint8_t index, uint16_t buffer_size) : input_buffer_(RingBuffer(buffer_size)), index_(index) {}
+
+ public:
+  // A channel made for an adapter without a YAML entry is deleted with it
+  virtual ~USBUartChannelBase() = default;
+
+ protected:
   void check_logger_conflict() override {}
   LineStopBits line_stop_bits_() const;
   LineParity line_parity_() const;
   // Larger structures first (8+ bytes)
-  // Only the main loop touches it; the USB task hands data over through usb_data_queue_
-  FixedRingBuffer<uint8_t> input_buffer_;
+  RingBuffer input_buffer_;
   LockFreeQueue<UsbOutputChunk, USB_OUTPUT_CHUNK_COUNT> output_queue_;
   // Pool sized to queue capacity (SIZE-1) because LockFreeQueue<T,N> is a ring
   // buffer that holds N-1 elements. This guarantees allocate() returns nullptr
@@ -214,9 +342,11 @@ class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartCo
   std::atomic<bool> input_started_{true};
   std::atomic<bool> output_started_{true};
   std::atomic<bool> initialised_{false};
+  std::atomic<bool> destroying_{false};
   const uint8_t index_;
   bool debug_{};
   bool dummy_receiver_{};
+  bool claim_notification_ep_{false};
   // Asserted whenever a device connects, as a host driver does when it opens the port
   bool dtr_{true};
   bool rts_{true};
@@ -232,12 +362,30 @@ class USBUartChannel final : public USBUartChannelBase {
   USBUartChannel(uint8_t index, uint16_t buffer_size) : USBUartChannelBase(index, buffer_size) {}
 };
 
-class USBUartComponent : public usb_host::USBClient {
+/// The serial adapter types; an adapter without a YAML entry gets its type from its vid:pid, else CDC ACM.
+enum class UartType : uint8_t { CDC_ACM, CH34X, CP210X, FT23XX, PL2303 };
+
+/// An optional YAML entry: an adapter it names (vid / pid) gets its type and its channels (with ids that
+/// consumers bind by uart_id).
+struct USBUartEntry {
+  uint16_t vid;
+  uint16_t pid;
+  UartType type;
+  uint8_t init_lanes;
+  bool claim_comm_interface;
+  std::vector<USBUartChannelBase *> channels;
+};
+
+// One plugged serial adapter: the driver of its type on one UsbDevice of the USBUartClient. Made when the
+// adapter connects, deleted once it is gone and none of its transfers is out any more. The client's calls
+// for this device are behind the same names the type drivers have always used (transfer_in, disconnect ...).
+class USBUartComponent {
+  friend class USBUartClient;
+
  public:
-  USBUartComponent(uint16_t vid, uint16_t pid) : usb_host::USBClient(vid, pid) {}
-  void setup() override;
-  void loop() override;
-  void dump_config() override;
+  USBUartComponent(USBUartClient *client, usb_host::UsbDevice *dev);
+  virtual ~USBUartComponent();
+  virtual void dump_config();
   std::vector<USBUartChannelBase *> get_channels() { return this->channels_; }
 
   void add_channel(USBUartChannelBase *channel) { this->channels_.push_back(channel); }
@@ -246,13 +394,23 @@ class USBUartComponent : public usb_host::USBClient {
   void start_output(USBUartChannelBase *channel);
 
   // Begin configuring all channels (full initialisation). Called from on_connected().
-  void enable_channels();
+  virtual void enable_channels();
   // Re-apply line settings to a single, already-open channel (used by
   // USBUartChannelBase::load_settings()).
   void apply_channel_settings(USBUartChannelBase *channel);
   // Apply the DTR/RTS state of a single, already-open channel (used by
   // USBUartChannelBase::set_modem_control()).
   void apply_modem_control(USBUartChannelBase *channel);
+
+  // The client's calls for this adapter's device
+#ifdef USE_USB_BULK_TRANSFERS
+  bool transfer_in(uint8_t ep_address, const usb_host::transfer_cb_t &callback, uint16_t length);
+  bool transfer_out(uint8_t ep_address, const usb_host::transfer_cb_t &callback, const uint8_t *data, uint16_t length);
+#endif
+  bool control_transfer(uint8_t type, uint8_t request, uint16_t value, uint16_t index,
+                        const usb_host::transfer_cb_t &callback, const std::vector<uint8_t> &data = {});
+  void enable_loop();
+  void enable_loop_soon_any_context();
 
   // Called from loop() when input_buffer_ has insufficient space for the incoming chunk.
   // Default is a no-op; override in device-specific subclasses that need resync on overflow.
@@ -262,7 +420,8 @@ class USBUartComponent : public usb_host::USBClient {
   static constexpr int USB_DATA_QUEUE_SIZE = 32;
   LockFreeQueue<UsbDataChunk, USB_DATA_QUEUE_SIZE> usb_data_queue_;
   // Pool sized to queue capacity (SIZE-1) — see USBUartChannelBase::output_pool_ comment.
-  EventPool<UsbDataChunk, USB_DATA_QUEUE_SIZE - 1> chunk_pool_;
+  // Its payload storage is sized from the IN endpoint when the device is opened.
+  RxChunkPool<USB_DATA_QUEUE_SIZE - 1> chunk_pool_;
 
  protected:
   // Issue one control transfer as part of the setup state machine. The completion
@@ -279,6 +438,19 @@ class USBUartComponent : public usb_host::USBClient {
   // Advance the config state machine; called from loop(). Returns true if it did work.
   bool run_config_machine_();
 
+  // The client's main loop: queued data, the config machine. False when there was nothing to do.
+  bool loop();
+  virtual void on_connected() = 0;
+  virtual void on_disconnected() {}
+  /// No YAML entry: @p count channels with the defaults (115200 8N1, 256 byte buffers), deleted with the adapter.
+  void add_default_channels_(uint8_t count);
+  virtual USBUartChannelBase *make_channel_(uint8_t index, uint16_t buffer_size);
+  /// The adapter is given up (closed; deleted once nothing of it is out).
+  void disconnect();
+  void status_set_error(const LogString *message);
+  void status_set_warning(const LogString *message);
+  void status_clear_error();
+
   // Per-subclass per-channel settings sequence. For the given zero-based step, issue the
   // next control transfer via config_transfer_() and return true, or return false when the
   // channel has no more steps. reload=true ⇒ apply only baud/parity/stop/data (skip
@@ -292,9 +464,14 @@ class USBUartComponent : public usb_host::USBClient {
   // and rts_ on the wire.
   virtual void modem_control_transfer(USBUartChannelBase *channel) = 0;
 
-  // The device is only usable once the config machine has applied every channel's line
-  // settings, so the connected report waits for run_config_machine_() to finish the init
-  bool reports_connection_itself() const override { return true; }
+  USBUartClient *client_;
+  usb_host::UsbDevice *dev_;
+  usb_host_client_handle_t handle_;
+  usb_device_handle_t device_handle_;
+  uint16_t vid_;
+  uint16_t pid_;
+  bool connected_{true};
+  bool own_channels_{false};  // made by add_default_channels_(), deleted with the adapter
 
   std::vector<USBUartChannelBase *> channels_{};
 
@@ -316,7 +493,7 @@ class USBUartComponent : public usb_host::USBClient {
 
 class USBUartTypeCdcAcm : public USBUartComponent {
  public:
-  USBUartTypeCdcAcm(uint16_t vid, uint16_t pid) : USBUartComponent(vid, pid) {}
+  USBUartTypeCdcAcm(USBUartClient *client, usb_host::UsbDevice *dev) : USBUartComponent(client, dev) {}
   void set_claim_comm_interface(bool claim) { this->claim_comm_interface_ = claim; }
 
  protected:
@@ -340,7 +517,7 @@ struct CP210xFlowBlock {
 
 class USBUartTypeCP210X : public USBUartTypeCdcAcm {
  public:
-  USBUartTypeCP210X(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
+  USBUartTypeCP210X(USBUartClient *client, usb_host::UsbDevice *dev) : USBUartTypeCdcAcm(client, dev) {}
 
  protected:
   // Matches max_channels of the CP210X type in __init__.py
@@ -359,7 +536,7 @@ class USBUartTypeCP210X : public USBUartTypeCdcAcm {
 };
 class USBUartTypeCH34X : public USBUartTypeCdcAcm {
  public:
-  USBUartTypeCH34X(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {
+  USBUartTypeCH34X(USBUartClient *client, usb_host::UsbDevice *dev) : USBUartTypeCdcAcm(client, dev) {
     // ch34x doesn't use the interrupt endpoint, and we don't have endpoints to spare. The
     // comm interface is left in place unclaimed: on the CDC-style chips it is still the
     // interface a host binds, and so the one the port is identified by.
@@ -380,7 +557,7 @@ class USBUartTypeCH34X : public USBUartTypeCdcAcm {
 
 class USBUartTypeFT23XX : public USBUartTypeCdcAcm {
  public:
-  USBUartTypeFT23XX(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
+  USBUartTypeFT23XX(USBUartClient *client, usb_host::UsbDevice *dev) : USBUartTypeCdcAcm(client, dev) {}
 
   void start_input(USBUartChannelBase *channel) override;
   void on_rx_overflow(USBUartChannelBase *channel) override;
@@ -407,7 +584,7 @@ class USBUartTypePL2303 : public USBUartTypeCdcAcm {
   friend class USBUartChannelBase;
 
  public:
-  USBUartTypePL2303(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
+  USBUartTypePL2303(USBUartClient *client, usb_host::UsbDevice *dev) : USBUartTypeCdcAcm(client, dev) {}
 
  protected:
   std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override;
@@ -415,6 +592,39 @@ class USBUartTypePL2303 : public USBUartTypeCdcAcm {
   void modem_control_transfer(USBUartChannelBase *channel) override;
 
   Pl2303ChipType chip_type_{PL2303_TYPE_UNKNOWN};
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USBUartClient: one usb_host client for every serial adapter (accepts_more_devices_()). An adapter gets
+// the channels of the YAML entry naming it, else its type from its vid:pid and default channels.
+// ─────────────────────────────────────────────────────────────────────────────
+class USBUartClient : public usb_host::USBClient {
+  friend class USBUartComponent;
+
+ public:
+  USBUartClient(uint16_t vid, uint16_t pid);
+  void loop() override;
+  void dump_config() override;
+
+  /// A YAML entry; its channels follow with add_entry_channel().
+  void add_entry(uint16_t vid, uint16_t pid, UartType type, uint8_t init_lanes, bool claim_comm_interface) {
+    this->entries_.push_back({vid, pid, type, init_lanes, claim_comm_interface, {}});
+    if (vid != 0)
+      this->add_vendor_match(vid, pid);  // routed here even when its class does not say serial
+  }
+  void add_entry_channel(USBUartChannelBase *channel) { this->entries_.back().channels.push_back(channel); }
+
+ protected:
+  bool accepts_more_devices_() const override { return true; }
+  void on_device_connected(usb_host::UsbDevice &dev) override;
+  void on_device_disconnected(usb_host::UsbDevice &dev) override;
+  void free_device_context(usb_host::UsbDevice &dev) override;
+
+  /// The entry naming this adapter whose channels are free (nullptr: none).
+  USBUartEntry *find_entry_(uint16_t vid, uint16_t pid);
+
+  std::vector<USBUartEntry> entries_{};
+  std::vector<USBUartComponent *> adapters_{};
 };
 
 }  // namespace esphome::usb_uart
