@@ -71,6 +71,7 @@ class MipiDsi final : public display::Display {
   void set_lanes(uint8_t lanes) { this->lanes_ = lanes; }
   void set_frame_ack(bool frame_ack) { this->frame_ack_ = frame_ack; }
   void set_continuous_clock(bool continuous) { this->continuous_clock_ = continuous; }
+  void set_video_mode_only(bool video_mode_only) { this->video_mode_only_ = video_mode_only; }
   void set_eotp(bool eotp) { this->eotp_ = eotp; }
   void set_lp_horizontal_blanking(bool lp) { this->lp_horizontal_blanking_ = lp; }
   void set_lp_vertical_active(bool lp) { this->lp_vertical_active_ = lp; }
@@ -147,6 +148,7 @@ class MipiDsi final : public display::Display {
   uint8_t lanes_{2};           // 1, 2, 3 or 4 lanes
   bool frame_ack_{true};
   bool continuous_clock_{false};
+  bool video_mode_only_{false};
   bool eotp_{true};
   bool lp_horizontal_blanking_{true};
   bool lp_vertical_active_{true};
