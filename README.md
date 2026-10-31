@@ -26,6 +26,11 @@ None of them needs `cert_store`. The USB drivers (usb_storage, usb_cdrom) are in
 contains the branches it needs (as merges). `binary_storage`'s prefill with OTA partition access
 (`USE_OTA_PARTITIONS`) uses the OTA data-partition listener of the OTA system topic.
 
+## Contributions
+
+- Mallow ([youkorr](https://github.com/youkorr)): the first versions of `sd_storage` (before the storage interface);
+  little of that code is left, the component grew out of it.
+
 ## Use
 
 ```yaml
