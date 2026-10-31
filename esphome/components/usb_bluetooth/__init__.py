@@ -5,6 +5,7 @@ from esphome.components.esp32 import (
     VARIANT_ESP32P4,
     VARIANT_ESP32S2,
     VARIANT_ESP32S3,
+    VARIANT_ESP32S31,
     add_idf_sdkconfig_option,
     request_bluetooth,
 )
@@ -79,7 +80,7 @@ CONFIG_SCHEMA = cv.All(
     ),
     _validate_firmware,
     esp32.only_on_variant(
-        supported=[VARIANT_ESP32P4, VARIANT_ESP32S2, VARIANT_ESP32S3]
+        supported=[VARIANT_ESP32P4, VARIANT_ESP32S2, VARIANT_ESP32S3, VARIANT_ESP32S31]
     ),
 )
 
