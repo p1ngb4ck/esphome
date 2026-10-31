@@ -6,6 +6,7 @@
 #include "hal/mipi_dsi_host_ll.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cstring>
 
 namespace esphome::mipi_dsi {
@@ -125,6 +126,7 @@ void MipiDsi::setup() {
     mipi_dsi_host_ll_enable_cmd_ack(MIPI_DSI_LL_GET_HOST(0), false);
     if (!this->send_init_sequence_(when))
       return;
+    this->log_read_registers_();
   }
   err = esp_lcd_panel_init(this->handle_);
   if (err != ESP_OK) {
@@ -456,6 +458,33 @@ void MipiDsi::write_generic_(uint8_t cmd, const uint8_t *args, uint8_t num_args)
     payload[0] = cmd;
     memcpy(payload + 1, args, num_args);
     mipi_dsi_hal_host_gen_write_long_packet(&hal, 0, MIPI_DSI_DT_GENERIC_LONG_WRITE, payload, num_args + 1);
+  }
+}
+
+void MipiDsi::log_read_registers_() {
+  auto *host = MIPI_DSI_LL_GET_HOST(0);
+  mipi_dsi_hal_context_t hal{};
+  hal.host = host;
+  for (uint8_t i = 0; i < this->read_registers_count_; i++) {
+    const uint16_t reg = this->read_registers_[i];
+    mipi_dsi_hal_host_gen_write_short_packet(&hal, 0, MIPI_DSI_DT_SET_MAXIMUM_RETURN_PKT, 4);
+    mipi_dsi_host_ll_enable_bta(host, true);
+    mipi_dsi_host_ll_gen_set_rx_vcid(host, 0);
+    mipi_dsi_hal_host_gen_write_short_packet(&hal, 0, MIPI_DSI_DT_GENERIC_READ_REQUEST_2, reg);
+    uint8_t waited = 0;
+    while ((mipi_dsi_host_ll_gen_is_read_cmd_busy(host) || mipi_dsi_host_ll_gen_is_read_fifo_empty(host)) &&
+           waited < 20) {
+      delay(1);
+      waited++;
+    }
+    if (mipi_dsi_host_ll_gen_is_read_fifo_empty(host)) {
+      ESP_LOGW(TAG, "Register 0x%04X: no answer", reg);
+      continue;
+    }
+    uint32_t value = mipi_dsi_host_ll_gen_read_payload_fifo(host);
+    while (!mipi_dsi_host_ll_gen_is_read_fifo_empty(host))
+      mipi_dsi_host_ll_gen_read_payload_fifo(host);
+    ESP_LOGI(TAG, "Register 0x%04X = 0x%08" PRIX32, reg, value);
   }
 }
 

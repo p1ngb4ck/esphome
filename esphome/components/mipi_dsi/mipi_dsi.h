@@ -75,6 +75,10 @@ class MipiDsi final : public display::Display {
   void set_lp_horizontal_blanking(bool lp) { this->lp_horizontal_blanking_ = lp; }
   void set_lp_vertical_active(bool lp) { this->lp_vertical_active_ = lp; }
   void set_generic_commands(bool generic) { this->generic_commands_ = generic; }
+  void set_read_registers(const uint16_t *registers, uint8_t count) {
+    this->read_registers_ = registers;
+    this->read_registers_count_ = count;
+  }
 #ifdef USE_I2C
   void set_i2c_bus(i2c::I2CBus *bus) { this->i2c_device_.set_i2c_bus(bus); }
 #endif
@@ -123,6 +127,7 @@ class MipiDsi final : public display::Display {
   void mark_dirty_(int x_start, int y_start, int w, int h);
   bool send_init_sequence_(uint32_t when);
   void write_generic_(uint8_t cmd, const uint8_t *args, uint8_t num_args);
+  void log_read_registers_();
   /// Pack a colour as the 565 value the panel's byte order expects in memory.
   uint16_t to_panel_565_(Color color) const {
     const uint16_t rgb565 = display::ColorUtil::color_to_565(color);
@@ -151,6 +156,8 @@ class MipiDsi final : public display::Display {
   bool lp_horizontal_blanking_{true};
   bool lp_vertical_active_{true};
   bool generic_commands_{false};
+  uint8_t read_registers_count_{0};
+  const uint16_t *read_registers_{nullptr};
 #ifdef USE_I2C
   i2c::I2CDevice i2c_device_;
 #endif

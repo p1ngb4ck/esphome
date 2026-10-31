@@ -78,6 +78,7 @@ CONF_LANE_BIT_RATE = "lane_bit_rate"
 CONF_LANES = "lanes"
 CONF_FRAME_ACK = "frame_ack"
 CONF_CONTINUOUS_CLOCK = "continuous_clock"
+CONF_READ_REGISTERS = "read_registers"
 CONF_EOTP = "eotp"
 CONF_LP_HORIZONTAL_BLANKING = "lp_horizontal_blanking"
 CONF_LP_VERTICAL_ACTIVE = "lp_vertical_active"
@@ -142,6 +143,9 @@ def model_schema(config: ConfigType) -> cv.Schema:
             model.option(CONF_LP_VERTICAL_ACTIVE, True): cv.boolean,
             model.option(CONF_COMMAND_MODE, COMMAND_MODE_DCS): cv.one_of(
                 COMMAND_MODE_DCS, COMMAND_MODE_GENERIC, lower=True
+            ),
+            model.option(CONF_READ_REGISTERS, []): cv.All(
+                cv.ensure_list(cv.uint16_t), cv.Length(max=32)
             ),
             model.option(CONF_LANE_BIT_RATE, None): cv.All(
                 cv.bps, cv.Range(min=100e6, max=3200e6)
@@ -240,6 +244,9 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_lp_horizontal_blanking(config[CONF_LP_HORIZONTAL_BLANKING]))
     cg.add(var.set_lp_vertical_active(config[CONF_LP_VERTICAL_ACTIVE]))
     cg.add(var.set_generic_commands(config[CONF_COMMAND_MODE] == COMMAND_MODE_GENERIC))
+    if registers := config[CONF_READ_REGISTERS]:
+        table = cg.shared_progmem_array("mipi_dsi_read_registers", cg.uint16, registers)
+        cg.add(var.set_read_registers(table, len(registers)))
     cg.add(var.set_lane_bit_rate(config[CONF_LANE_BIT_RATE] / 1.0e6))
     if CONF_I2C_ID in config:
         cg.add(var.set_i2c_bus(await cg.get_variable(config[CONF_I2C_ID])))
