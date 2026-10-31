@@ -47,7 +47,7 @@ The whole topic:
 
 ```yaml
 external_components:
-  - source: github://p1ngb4ck/p1ngb4ck-esphome-esp32-platform@main
+  - source: github://p1ngb4ck/esphome-esp32-platform@main
     components: [esp32, psram]
 ```
 
@@ -55,7 +55,7 @@ One change only:
 
 ```yaml
 external_components:
-  - source: github://p1ngb4ck/p1ngb4ck-esphome-esp32-platform@pr/esp32-coredump
+  - source: github://p1ngb4ck/esphome-esp32-platform@pr/esp32-coredump
     components: [esp32]
 ```
 
