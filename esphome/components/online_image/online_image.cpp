@@ -524,7 +524,7 @@ bool OnlineImage::start_storage_read_() {
   }
   storage::FileStat st;
   storage::StorageError serr = this->storage_->stat(rel, &st);
-  if (serr != storage::StorageError::STORAGE_ERROR_OK || st.is_directory) {
+  if (serr != storage::StorageError::STORAGE_ERROR_OK || st.is_dir) {
     ESP_LOGE(TAG, "'%s' not found on storage (%s)", path, storage::error_to_string(serr));
     this->storage_ = nullptr;
     return false;
