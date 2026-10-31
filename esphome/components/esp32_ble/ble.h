@@ -90,6 +90,7 @@ enum BLEComponentState : uint8_t {
 class ESP32BLE final : public Component {
  public:
   void set_io_capability(IoCapability io_capability) { this->io_cap_ = (esp_ble_io_cap_t) io_capability; }
+  esp_ble_io_cap_t get_io_capability() const { return this->io_cap_; }
 
 #ifdef ESPHOME_ESP32_BLE_EXTENDED_AUTH_PARAMS
   void set_max_key_size(uint8_t key_size) { this->max_key_size_ = key_size; }
