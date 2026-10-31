@@ -57,6 +57,7 @@ from esphome.const import (
 )
 from esphome.core import CORE, ID, CoroPriority, coroutine_with_priority
 import esphome.final_validate as fv
+from esphome.helpers import fnv1_hash
 from esphome.types import ConfigType
 from esphome.yaml_util import make_data_base
 
@@ -247,6 +248,7 @@ AFTER_DEFAULTS = {CONF_BYTES: 150, CONF_TIMEOUT: "100ms"}
 CONF_DEBUG_PREFIX = "debug_prefix"
 
 # By default, log in hex format when no specific sequence is provided.
+CONF_DEBUG_ADD_UART_SETTINGS = "debug_add_uart_settings"
 DEFAULT_DEBUG_OUTPUT = "UARTDebug::log_hex(direction, bytes, ':', debug_prefix);"
 DEFAULT_SEQUENCE = [{CONF_LAMBDA: make_data_base(DEFAULT_DEBUG_OUTPUT)}]
 
@@ -288,6 +290,7 @@ DEBUG_SCHEMA = cv.Schema(
         cv.Optional(CONF_DUMMY_RECEIVER, default=False): cv.boolean,
         cv.GenerateID(CONF_DUMMY_RECEIVER_ID): cv.declare_id(UARTDummyReceiver),
         cv.Optional(CONF_DEBUG_PREFIX, default=""): cv.string,
+        cv.Optional(CONF_DEBUG_ADD_UART_SETTINGS, default=False): cv.boolean,
     }
 )
 
@@ -360,6 +363,9 @@ async def debug_to_code(config, parent):
         await cg.register_component(dummy, {})
     if debug_prefix := config[CONF_DEBUG_PREFIX]:
         cg.add(trigger.set_debug_prefix(debug_prefix))
+    if config[CONF_DEBUG_ADD_UART_SETTINGS]:
+        cg.add(trigger.set_debug_add_settings(True))
+        cg.add_define("UART_DEBUGGER_ADD_SETTINGS")
     cg.add_define("USE_UART_DEBUGGER")
 
 
@@ -400,6 +406,7 @@ async def to_code(config):
     # Skip the setter when the config matches the C++ initializer (UART_CONFIG_PARITY_NONE).
     if (parity := config[CONF_PARITY]) != "NONE":
         cg.add(var.set_parity(parity))
+    restore_line_settings(var, config[CONF_ID])
 
     if CONF_DEBUG in config:
         await debug_to_code(config[CONF_DEBUG], var)
@@ -573,6 +580,13 @@ def subtree_references_uart(
     if isinstance(node, list):
         return any(subtree_references_uart(item, uart_id, conf_key) for item in node)
     return False
+
+
+def restore_line_settings(var: cg.MockObj, uart_id: ID) -> None:
+    """Let saved runtime line settings replace the yaml ones; call after the line setters."""
+    if CORE.is_esp32 or CORE.is_esp8266:
+        key = fnv1_hash(f"uart_line_settings:{uart_id.id}")
+        cg.add(var.restore_line_settings(key))
 
 
 async def register_uart_device(var, config):
