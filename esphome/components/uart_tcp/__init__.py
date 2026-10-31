@@ -73,26 +73,7 @@ def _final_validate(config: ConfigType) -> ConfigType:
     # discards what the other reader has not read yet.
     full_config = fv.full_config.get()
     data = full_config.data.setdefault(DOMAIN, {})
-    uart_id = str(config[CONF_UART_ID])
-    used = data.setdefault(CONF_UART_ID, set())
-    if uart_id in used:
-        raise cv.Invalid(
-            f"The UART '{uart_id}' is already used by another 'uart_tcp' entry. "
-            "Each uart_tcp needs its own UART.",
-            [CONF_UART_ID],
-        )
-    used.add(uart_id)
-    # Grouped CI builds share one bus between components, like uart's pin check.
-    # Bare `id:` references (a uart.write action) and lambdas are not caught.
-    if not CORE.testing_mode:
-        for domain, domain_conf in full_config.items():
-            if domain != DOMAIN and uart.subtree_references_uart(domain_conf, uart_id):
-                raise cv.Invalid(
-                    f"The UART '{uart_id}' is also used by '{domain}'. "
-                    "uart_tcp requires exclusive use of that UART.",
-                    [CONF_UART_ID],
-                )
-    fv.id_declaration_match_schema(_reject_dummy_receiver)(config[CONF_UART_ID])
+    uart.claim_exclusive(config, DOMAIN)
 
     if config[CONF_ROLE] == "server":
         # Two listeners on one port cannot both serve it. Only uart_tcp and
