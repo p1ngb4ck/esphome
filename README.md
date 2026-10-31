@@ -36,6 +36,11 @@ That is one of the points of the planned rework.
 [esphome-esp32-platform](https://github.com/p1ngb4ck/esphome-esp32-platform), `pr/wifi-startup-done-callback` in
 [esphome-network](https://github.com/p1ngb4ck/esphome-network), `pr/usb-bluetooth` in esphome-usb-drivers.
 
+## Contributions
+
+- [NonaSuomy](https://github.com/NonaSuomy): ideas behind the Bluetooth work, among them the C6 offload firmware
+  (`bt_offload`).
+
 ## Use
 
 ```yaml
