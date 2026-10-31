@@ -3,6 +3,9 @@
 #if defined(USE_ETHERNET) && defined(USE_ESP32)
 
 #include "esphome/components/network/util.h"
+#ifdef USE_NETWORK_DEFAULT_ROUTE
+#include "esphome/components/network/network_component.h"
+#endif
 #include "esphome/core/application.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
@@ -931,11 +934,9 @@ void EthernetComponent::start_connect_() {
       ESP_LOGE(TAG, "Set backup DNS failed: %s", esp_err_to_name(err));
     }
   }
-#else
-  err = esp_netif_dhcpc_start(this->eth_netif_);
-  if (err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED) {
-    ESPHL_ERROR_CHECK(err, "DHCPC start error");
-  }
+#ifdef USE_NETWORK_DEFAULT_ROUTE
+  // The address change above cleared the DNS servers of the interface that routes (WiFi).
+  network::restore_default_dns(this->eth_netif_);
 #endif
 #if USE_NETWORK_IPV6
   // Attempt to create IPv6 link-local address

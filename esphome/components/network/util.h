@@ -18,6 +18,9 @@
 #ifdef USE_OPENTHREAD
 #include "esphome/components/openthread/openthread.h"
 #endif
+#ifdef USE_USB_ETHERNET
+#include "esphome/components/usb_ethernet/usb_ethernet.h"
+#endif
 #ifdef USE_ESP32
 #include "esp_netif.h"
 #endif
@@ -49,6 +52,11 @@ ESPHOME_ALWAYS_INLINE inline bool is_connected() {
 
 #ifdef USE_WIFI
   if (wifi::global_wifi_component != nullptr && wifi::global_wifi_component->is_connected())
+    return true;
+#endif
+
+#ifdef USE_USB_ETHERNET
+  if (usb_ethernet::global_usb_ethernet != nullptr && usb_ethernet::global_usb_ethernet->is_connected())
     return true;
 #endif
 
