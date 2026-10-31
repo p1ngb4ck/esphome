@@ -227,7 +227,7 @@ void ESP32BLETracker::pause_scan() {
     return;
   this->scan_paused_ = true;
   this->scan_continuous_before_pause_ = this->scan_continuous_;
-  ESP_LOGD(TAG, "Scanning paused");
+  ESP_LOGV(TAG, "Scanning paused");
   if (this->scanner_state_ != ScannerState::STARTING) {
     this->stop_scan();
     return;
@@ -244,7 +244,7 @@ void ESP32BLETracker::resume_scan() {
     return;
   this->scan_paused_ = false;
   this->stop_when_started_ = false;
-  ESP_LOGD(TAG, "Scanning resumed");
+  ESP_LOGV(TAG, "Scanning resumed");
   if (this->scan_continuous_before_pause_) {
     this->scan_continuous_ = true;
     this->state_version_++;

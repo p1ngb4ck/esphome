@@ -215,7 +215,7 @@ void A2DPSource::setup() {
   } else if (stored) {
     ESP_LOGD(TAG, "Connecting to the stored device");
   } else {
-    ESP_LOGI(TAG, "No device stored, call a2dp_source.start_pairing to add one");
+    ESP_LOGI(TAG, "No device stored");
   }
 
 #ifdef USE_A2DP_SOURCE_EXTERNAL_HOST
@@ -262,7 +262,7 @@ void A2DPSource::start_pairing() {
 
   ESP_LOGI(TAG, "Pairing window open");
   if (this->device_select_ != nullptr) {
-    ESP_LOGD(TAG, "Found devices appear in the select");
+    ESP_LOGV(TAG, "Found devices appear in the select");
   }
 }
 
@@ -421,13 +421,13 @@ void A2DPSource::load_output_delay_() {
   if (!this->delay_pref_.load(&ms))
     ms = 0;
   this->delay_ms_.store(std::min(ms, MAX_OUTPUT_DELAY_MS), std::memory_order_relaxed);
-  ESP_LOGD(TAG, "Output delay of this device: %" PRIu32 " ms", this->delay_ms_.load(std::memory_order_relaxed));
+  ESP_LOGV(TAG, "Output delay of this device: %" PRIu32 " ms", this->delay_ms_.load(std::memory_order_relaxed));
   this->publish_output_delay_();
 }
 
 void A2DPSource::set_output_delay_ms(uint32_t ms) {
   if (!this->connected_.load() || !this->delay_pref_valid_) {
-    ESP_LOGW(TAG, "No device connected, the output delay is kept per device");
+    ESP_LOGW(TAG, "No device connected");
     this->publish_output_delay_();
     return;
   }
@@ -678,14 +678,14 @@ void A2DPSource::loop() {
 #endif
   uint8_t conn_state = this->pending_connection_state_.exchange(0xFF);
   if (conn_state != 0xFF) {
-    ESP_LOGD(TAG, "Connection state: %s", this->source_.to_str((esp_a2d_connection_state_t) conn_state));
+    ESP_LOGV(TAG, "Connection state: %s", this->source_.to_str((esp_a2d_connection_state_t) conn_state));
   }
 #ifdef USE_BT_PAIRING
   this->check_pick_failed_(conn_state);
 #endif
   uint8_t audio_state = this->pending_audio_state_.exchange(0xFF);
   if (audio_state != 0xFF) {
-    ESP_LOGD(TAG, "Audio state: %s", this->source_.to_str((esp_a2d_audio_state_t) audio_state));
+    ESP_LOGV(TAG, "Audio state: %s", this->source_.to_str((esp_a2d_audio_state_t) audio_state));
   }
 
   if (this->devices_changed_.exchange(false)) {
@@ -693,14 +693,14 @@ void A2DPSource::loop() {
   }
   conn_state = this->pending_connection_state_.exchange(0xFF);
   if (conn_state != 0xFF) {
-    ESP_LOGD(TAG, "Connection state: %s", this->source_.to_str((esp_a2d_connection_state_t) conn_state));
+    ESP_LOGV(TAG, "Connection state: %s", this->source_.to_str((esp_a2d_connection_state_t) conn_state));
   }
 #ifdef USE_BT_PAIRING
   this->check_pick_failed_(conn_state);
 #endif
   audio_state = this->pending_audio_state_.exchange(0xFF);
   if (audio_state != 0xFF) {
-    ESP_LOGD(TAG, "Audio state: %s", this->source_.to_str((esp_a2d_audio_state_t) audio_state));
+    ESP_LOGV(TAG, "Audio state: %s", this->source_.to_str((esp_a2d_audio_state_t) audio_state));
   }
 
   if (this->paired_pending_.exchange(false)) {
@@ -785,7 +785,7 @@ void A2DPSource::loop() {
     record.name[sizeof(record.name) - 1] = '\0';
     this->keep_pending_ = false;
     if (this->pairing_->store(record)) {
-      ESP_LOGI(TAG, "Kept %s '%s' in the paired devices", this->source_.to_str(this->name_addr_), record.name);
+      ESP_LOGV(TAG, "Kept %s '%s' in the paired devices", this->source_.to_str(this->name_addr_), record.name);
       this->pairing_->on_connection(this, this->connected_.load());
     }
   }

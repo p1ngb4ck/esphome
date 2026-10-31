@@ -422,14 +422,14 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   virtual bool is_valid_cod_service(uint32_t cod);
 
   esp_err_t esp_a2d_connect(esp_bd_addr_t peer) override {
-    ESP_LOGI(BT_AV_TAG, "==> a2dp connecting to: %s", to_str(peer));
+    ESP_LOGV(BT_AV_TAG, "==> a2dp connecting to: %s", to_str(peer));
     s_media_state = 0;
     s_a2d_state = APP_AV_STATE_CONNECTING;
     return esp_a2d_source_connect(peer);
   }
 
   esp_err_t esp_a2d_disconnect(esp_bd_addr_t peer) override {
-    ESP_LOGI(BT_AV_TAG, "==> a2dp esp_a2d_source_disconnect from: %s",
+    ESP_LOGV(BT_AV_TAG, "==> a2dp esp_a2d_source_disconnect from: %s",
              to_str(peer));
     //esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_SUSPEND);
     return source_disconnect(peer);

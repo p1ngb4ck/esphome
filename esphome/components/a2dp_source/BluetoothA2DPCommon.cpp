@@ -113,7 +113,7 @@ bool BluetoothA2DPCommon::reconnect() {
 }
 
 bool BluetoothA2DPCommon::connect_to(esp_bd_addr_t peer) {
-  ESP_LOGW(BT_AV_TAG, "connect_to to %s", to_str(peer));
+  ESP_LOGV(BT_AV_TAG, "connect_to to %s", to_str(peer));
 #ifndef A2DP_EXTERNAL_HOST  // ESPHome: other devices (HID) still connect on their own
   set_scan_mode_connectable_default();
 #endif
@@ -135,7 +135,7 @@ void BluetoothA2DPCommon::set_connected(bool active) {
 
 /// Closes the connection
 void BluetoothA2DPCommon::disconnect() {
-  ESP_LOGI(BT_AV_TAG, "disconect a2d: %s", to_str(last_connection));
+  ESP_LOGV(BT_AV_TAG, "disconect a2d: %s", to_str(last_connection));
 
   is_target_status_active = false;
   // Prevent automatic reconnect
@@ -265,7 +265,7 @@ void BluetoothA2DPCommon::init_nvs() {
     err = nvs_flash_init();
   }
   if (err == ESP_ERR_NOT_FOUND || err == ESP_ERR_NVS_PART_NOT_FOUND) {
-    ESP_LOGW(BT_AV_TAG, "No internal NVS partition: the last connection is not kept there");
+    ESP_LOGV(BT_AV_TAG, "No internal NVS partition: the last connection is not kept there");
     return;
   }
   ESP_ERROR_CHECK(err);
@@ -551,7 +551,7 @@ void BluetoothA2DPCommon::app_task_handler(void* arg) {
           app_work_dispatched(&msg);
           break;
         default:
-          ESP_LOGW(BT_APP_TAG, "%s, unhandled signal: %d", __func__, msg.sig);
+          ESP_LOGV(BT_APP_TAG, "%s, unhandled signal: %d", __func__, msg.sig);
           break;
       }
 
