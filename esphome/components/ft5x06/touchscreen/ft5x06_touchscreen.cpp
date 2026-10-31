@@ -40,6 +40,7 @@ void FT5x06Touchscreen::continue_setup_() {
     case FT5X06_ID_1:
     case FT5X06_ID_2:
     case FT5X06_ID_3:
+    case FT5X06_ID_4:
       this->vendor_id_ = (VendorId) data[0];
       ESP_LOGD(TAG, "Read vendor ID 0x%X", data[0]);
       break;
@@ -55,11 +56,11 @@ void FT5x06Touchscreen::update_touches() {
   uint8_t touch_cnt;
   uint8_t data[MAX_TOUCHES][6];
 
-  if (!this->read_byte(FT5X06_TD_STATUS, &touch_cnt) || touch_cnt > MAX_TOUCHES) {
+  if (!this->read_byte(FT5X06_TD_STATUS, &touch_cnt)) {
     ESP_LOGW(TAG, "Failed to read status");
     return;
   }
-  if (touch_cnt == 0)
+  if (touch_cnt == 0 || touch_cnt > MAX_TOUCHES)
     return;
 
   if (!this->read_bytes(FT5X06_TOUCH_DATA, (uint8_t *) data, touch_cnt * 6)) {
