@@ -704,6 +704,7 @@ void WiFiComponent::setup() {
     this->start();
   } else {
     this->state_ = WIFI_COMPONENT_STATE_DISABLED;
+    this->finish_startup_();  // disabled at boot: nothing to wait for
   }
 }
 
@@ -1158,6 +1159,7 @@ void WiFiComponent::setup_ap_config_() {
   // state until the AP pauses.
   if (!this->has_sta() || (WIFI_AP_EXCLUSIVE && this->ap_setup_)) {
     this->state_ = WIFI_COMPONENT_STATE_AP;
+    this->finish_startup_();
   }
 }
 
@@ -1399,6 +1401,7 @@ void WiFiComponent::start_connecting(const WiFiAP &ap) {
 
 void WiFiComponent::start_cooldown_() {
   this->state_ = WIFI_COMPONENT_STATE_COOLDOWN;
+  this->finish_startup_();  // the first attempt ended without a connection
   this->action_started_ = millis();
 #ifdef USE_WIFI_DPP
   // The cooldown is the configurator's window; the attempt that ends it stops the listen again
@@ -1517,6 +1520,7 @@ void WiFiComponent::disable() {
 
   ESP_LOGD(TAG, "Disabling");
   this->state_ = WIFI_COMPONENT_STATE_DISABLED;
+  this->finish_startup_();  // disabled while starting: nothing more to wait for
 #ifdef USE_WIFI_LEASE_CACHE
   this->cancel_timeout(LEASE_RENEW_TIMEOUT_ID);
 #endif
@@ -1849,6 +1853,7 @@ void WiFiComponent::check_connecting_finished(uint32_t now) {
     // The fallback and reboot checks later in this pass must see the connection, not the old timestamp
     this->set_last_connected_(now);
     this->state_ = WIFI_COMPONENT_STATE_STA_CONNECTED;
+    this->finish_startup_();
     // Refresh is_connected() cache; loop()'s refresh ran before this transition.
     this->update_connected_state_();
     this->num_retried_ = 0;

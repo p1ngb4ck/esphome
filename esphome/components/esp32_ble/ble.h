@@ -102,8 +102,33 @@ class ESP32BLE final : public Component {
   }
   uint32_t get_advertising_cycle_time() const { return this->advertising_cycle_time_; }
 
-  void enable() { this->request_state_(true); }
-  void disable() { this->request_state_(false); }
+  /// A start before its conditions (WiFi's start-up done; with usb_bluetooth in the config, its dongle fully
+  /// initialized) waits for them: Bluedroid then starts once, on every controller it is meant to have.
+  void enable() {
+    if (!this->start_allowed_()) {
+      this->start_pending_ = true;
+      return;
+    }
+    this->request_state_(true);
+  }
+  /// Codegen: usb_bluetooth (bluedroid: true) is in the config - Bluedroid starts only with its dongle ready.
+  void set_wait_for_usb_bluetooth(bool wait) { this->wait_usb_bt_ = wait; }
+  /// usb_bluetooth: its dongle is fully initialized (firmware loaded, HCI attached).
+  void usb_bluetooth_ready() {
+    this->usb_bt_ready_ = true;
+    this->start_if_allowed_();
+  }
+  void disable() {
+    this->start_pending_ = false;
+    this->request_state_(false);
+  }
+  /// Tears the stack down and brings it up again (e.g. for another controller); a no-op unless active.
+  void restart() {
+    if (this->state_ == BLE_COMPONENT_STATE_ACTIVE) {
+      this->restart_requested_ = true;
+      this->state_ = BLE_COMPONENT_STATE_DISABLE;
+    }
+  }
   ESPHOME_ALWAYS_INLINE bool is_active() { return this->state_ == BLE_COMPONENT_STATE_ACTIVE; }
   void setup() override;
   void loop() override;
@@ -246,7 +271,19 @@ class ESP32BLE final : public Component {
   // 1-byte aligned members (grouped together to minimize padding)
   esp_ble_io_cap_t io_cap_{ESP_IO_CAP_NONE};          // 1 byte (uint8_t typedef)
   BLEComponentState state_{BLE_COMPONENT_STATE_OFF};  // 1 byte (uint8_t enum)
+  bool restart_requested_{false};                     // restart(): brought up again once down
   bool enable_on_boot_{};                             // 1 byte
+  bool start_allowed_() const { return this->wifi_done_ && (!this->wait_usb_bt_ || this->usb_bt_ready_); }
+  void start_if_allowed_() {
+    if (this->start_pending_ && this->start_allowed_()) {
+      this->start_pending_ = false;
+      this->request_state_(true);
+    }
+  }
+  bool wifi_done_{true};        // false in setup() until WiFi's start-up is done (USE_WIFI)
+  bool wait_usb_bt_{false};     // usb_bluetooth in the config: wait for its dongle
+  bool usb_bt_ready_{false};
+  bool start_pending_{false};   // an enable() came before the conditions were met
   // Peers already warned about a failed conn param update, one per connection; all-zero is free
   esp_bd_addr_t conn_param_failed_bdas_[USE_ESP32_BLE_MAX_CONNECTIONS]{};
 #ifdef USE_ESP32_BLE_ADVERTISING
