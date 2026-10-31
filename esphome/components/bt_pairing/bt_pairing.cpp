@@ -1012,8 +1012,9 @@ storage::PathStorage *BTPairing::resolve_file_(const char **rel) {
   if (storage::global_storage_registry == nullptr)
     return nullptr;
   storage::PathStorage *storage = storage::global_storage_registry->resolve_path(this->file_, rel);
-  if (storage == nullptr)
+  if (storage == nullptr) {
     ESP_LOGV(TAG, "No storage mounted for %s yet", this->file_);
+  }
   return storage;
 }
 

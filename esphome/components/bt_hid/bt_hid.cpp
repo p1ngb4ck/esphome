@@ -519,8 +519,9 @@ void handle_event(HostEvent &e) {
         h.scan_requested = false;
       // Without a device found the window stays open until it times out: a device in pairing
       // mode may still connect on its own.
-      if (!h.discovering && h.pairing != nullptr && !h.pairing->has_address())
+      if (!h.discovering && h.pairing != nullptr && !h.pairing->has_address()) {
         ESP_LOGV(TAG, "No device in pairing mode found; waiting for one to connect");
+      }
       break;
     case HostEvent::AUTH:
       format_mac_addr_upper(e.bda, mac);

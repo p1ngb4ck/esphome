@@ -866,8 +866,9 @@ void BLEClientHID::select_profile_() {
     ESP_LOGV(TAG, "HID_PROFILE source=cache sha256=%s", this->gatt_profile_hash_.c_str());
     return;
   }
-  if (this->cache_valid_)
+  if (this->cache_valid_) {
     ESP_LOGV(TAG, "HID_PROFILE source=rebuild reason=gatt_database_changed");
+  }
   this->cache_valid_ = false;
   this->hid_services_.clear();
   this->handle_report_source_.clear();
@@ -1748,8 +1749,9 @@ void BLEClientHID::write_leds_(uint8_t leds) {
     const esp_err_t status = esp_ble_gattc_write_char(
         this->parent()->get_gattc_if(), this->parent()->get_conn_id(), handle, payload.size(), payload.data(),
         with_response ? ESP_GATT_WRITE_TYPE_RSP : ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
-    if (status != ESP_OK)
+    if (status != ESP_OK) {
       ESP_LOGV(TAG, "HID_LEDS handle=%u status=write_failed code=%d", handle, status);
+    }
     return;
   }
 }
