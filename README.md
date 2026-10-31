@@ -35,8 +35,8 @@ Branches from other topics, contained as merges:
 | `pr/esp32-ble-start-order` | esphome-bluetooth | Bluedroid starts after WiFi's start-up and, with a bluedroid dongle, once the dongle is ready |
 
 `usb_bluetooth` is the dongle path. Chips with Bluetooth Classic and BLE on chip (ESP32, ESP32-S31) need no dongle
-for Bluetooth audio; on the S31 a dongle works as well, for example for an external radio. Bluetooth audio with more
-than two channels and the 8-channel audio path are in esphome-audio.
+for Bluetooth audio; `usb_bluetooth` is allowed on the S31 as well (an external radio instead of the onboard one).
+The 8-channel path of `audio` / `speaker` / `mixer` is in esphome-audio.
 
 ## Use
 
