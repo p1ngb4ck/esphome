@@ -24,5 +24,4 @@ class USBAudioSpeaker : public USBAudioSink, public Component {
 }  // namespace usb_audio
 }  // namespace esphome
 
-#endif  // USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3 ||
-        // USE_ESP32_VARIANT_ESP32S31
+#endif  // USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3

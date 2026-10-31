@@ -170,5 +170,4 @@ class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
 #include "raw_driver.h"
 #endif
 
-#endif  // USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3 ||
-        // USE_ESP32_VARIANT_ESP32S31
+#endif  // USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3
