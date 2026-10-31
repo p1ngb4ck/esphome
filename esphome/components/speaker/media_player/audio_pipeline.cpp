@@ -199,52 +199,43 @@ AudioPipelineState AudioPipeline::process_state() {
       this->hard_stop_ = true;
     }
 
-    if (!this->is_playing_) {
-      // The tasks have been stopped for two ``process_state`` calls in a row, so delete the tasks
-      if (this->read_task_.is_created() || this->decode_task_.is_created()) {
-        // Both are attempted every time; a task that is still running on the other core is freed by a
-        // subsequent call, and freeing an already freed task succeeds without doing anything
-        bool read_task_freed = this->read_task_.deallocate();
-        bool decode_task_freed = this->decode_task_.deallocate();
-        if (!read_task_freed || !decode_task_freed) {
-          // A task is still running on the other core, so keep the pipeline in its current state and try
-          // again on the next call
-          return AudioPipelineState::PLAYING;
-        }
-        if (this->hard_stop_) {
-          // Stop command was sent, so immediately end the playback
-          this->speaker_->stop();
-          this->hard_stop_ = false;
-        } else {
-          // Decoded all the audio, so let the speaker finish playing before stopping
-          this->speaker_->finish();
-        }
+    // The end of the file (or a stop): the playback is over. The tasks stay and wait for the next file.
+    if (this->is_playing_) {
+      ESP_LOGD(TAG, "Stopped (%s)", this->hard_stop_ ? "stop" : "end of the file");
+      this->is_playing_ = false;
+      if (this->hard_stop_) {
+        this->speaker_->stop();
+        this->hard_stop_ = false;
+      } else {
+        this->speaker_->finish();
       }
     }
-    this->is_playing_ = false;
-    if (!this->speaker_->is_running()) {
-      return AudioPipelineState::STOPPED;
-    } else {
-      this->is_finishing_ = true;
-    }
+    return AudioPipelineState::STOPPED;
   }
 
   if (this->pause_state_) {
     return AudioPipelineState::PAUSED;
   }
 
-  if (this->is_finishing_) {
-    if (!this->speaker_->is_running()) {
-      this->is_finishing_ = false;
-    } else {
-      return AudioPipelineState::PLAYING;
-    }
-  }
-
   if (!this->read_task_.is_created() && !this->decode_task_.is_created()) {
     // No tasks are running, so the pipeline is stopped.
     xEventGroupClearBits(this->event_group_, EventGroupBits::PIPELINE_COMMAND_STOP);
     return AudioPipelineState::STOPPED;
+  }
+
+  // Diagnosis: no progress for 5 s while playing (once per stall).
+  const uint32_t now = millis();
+  if (!this->is_playing_ || this->playback_ms_ != this->progress_ms_) {
+    this->progress_ms_ = this->playback_ms_;
+    this->progress_at_ = now;
+    this->stall_logged_ = false;
+  } else if (!this->stall_logged_ && now - this->progress_at_ >= 5000) {
+    this->stall_logged_ = true;
+    std::shared_ptr<ring_buffer::RingBuffer> ring = this->raw_file_ring_buffer_.lock();
+    ESP_LOGD(TAG, "No progress for 5 s at %" PRIu32 " ms: reader %s, decoder %s, %u bytes in the file ring",
+             this->playback_ms_, (event_bits & EventGroupBits::READER_MESSAGE_FINISHED) ? "done" : "reading",
+             (event_bits & EventGroupBits::DECODER_MESSAGE_FINISHED) ? "done" : "decoding",
+             static_cast<unsigned>(ring != nullptr ? ring->available() : 0));
   }
 
   this->is_playing_ = true;
@@ -357,14 +348,17 @@ void AudioPipeline::read_task(void *params) {
         event_bits = xEventGroupGetBits(this_pipeline->event_group_);
 
         if (event_bits & EventGroupBits::PIPELINE_COMMAND_STOP) {
+          ESP_LOGD(TAG, "Reader: stopped");
           break;
         }
 
         audio::AudioReaderState reader_state = reader->read();
 
         if (reader_state == audio::AudioReaderState::FINISHED) {
+          ESP_LOGD(TAG, "Reader: the whole file read");
           break;
         } else if (reader_state == audio::AudioReaderState::FAILED) {
+          ESP_LOGD(TAG, "Reader: failed");
           xEventGroupSetBits(this_pipeline->event_group_,
                              EventGroupBits::READER_MESSAGE_ERROR | EventGroupBits::PIPELINE_COMMAND_STOP);
           break;
@@ -451,6 +445,7 @@ void AudioPipeline::decode_task(void *params) {
         }
 
         if (decoder_state == audio::AudioDecoderState::FINISHED) {
+          ESP_LOGD(TAG, "Decoder: done at %" PRIu32 " ms", decoder->get_playback_ms());
           break;
         } else if (decoder_state == audio::AudioDecoderState::FAILED) {
           if (!has_stream_info) {
