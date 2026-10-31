@@ -20,6 +20,7 @@
 #include "esphome/components/display/display_color_utils.h"
 #include "esphome/core/component.h"
 
+#include <atomic>
 #include <list>
 #include <lvgl.h>
 #include <map>
@@ -40,6 +41,10 @@
 #if defined(USE_LVGL_BUTTONMATRIX) || defined(USE_LVGL_KEYBOARD)
 #include "esphome/components/key_provider/key_provider.h"
 #endif  // USE_LVGL_BUTTONMATRIX
+#ifdef USE_LVGL_HID
+#include "esphome/components/hid/hid_input.h"
+#include "key_bindings.h"
+#endif  // USE_LVGL_HID
 
 namespace esphome::lvgl {
 
@@ -167,6 +172,10 @@ template<typename T> void delete_lv_compound_on_delete(lv_event_t *e) {
 }
 
 class LvglComponent;
+#ifdef USE_LVGL_HID
+class LVHIDKeypadListener;
+class LVHIDPointerListener;
+#endif
 
 class LvPageType : public Parented<LvglComponent> {
  public:
@@ -259,6 +268,35 @@ class LvglComponent final : public PollingComponent {
 
   // Returns true if the display has been explicitly paused via set_paused().
   bool is_paused() const { return this->paused_; }
+#ifdef USE_LVGL_HID
+  // Keypads whose keys still run their actions while the display is paused.
+  void add_hid_keypad(LVHIDKeypadListener *keypad) { this->hid_keypads_.push_back(keypad); }
+  /// Takes keys, typed characters and pointer motion while the display is paused, for what shows on
+  /// it instead. Keys and characters come from the main loop, pointer motion from wherever its source
+  /// reports it. Each returns whether it was taken: navigation keys taken run no action here.
+  class PausedInput {
+   public:
+    /// action: the key's KeyBindings action, -1 for none. codepoint: what the keyboard's layout puts on
+    /// the key at its level now (hid::HIDInput::layout_char(): bit 31 a dead key), 0 for none; level3:
+    /// Right Alt is the layout's AltGr.
+    virtual bool paused_key(uint16_t page, uint16_t usage, uint8_t mods, bool pressed, int action,
+                            uint32_t codepoint, bool level3, uint32_t source) = 0;
+    virtual bool paused_text(uint32_t codepoint) = 0;
+    virtual bool paused_pointer(int16_t dx, int16_t dy, int16_t wheel, uint8_t buttons) = 0;
+  };
+  void set_paused_input(PausedInput *input) { this->paused_input_ = input; }
+  PausedInput *get_paused_input() const { return this->paused_input_; }
+  class KeyTap {
+   public:
+    virtual bool key_tap(uint32_t source, const char *label, uint16_t page, uint16_t usage, bool pressed) = 0;
+  };
+  void set_key_tap(KeyTap *tap) { this->key_tap_.store(tap, std::memory_order_release); }
+  KeyTap *get_key_tap() const { return this->key_tap_.load(std::memory_order_acquire); }
+  /// The pointer the keypads' direction keys and Enter move and click in its key mode (the first
+  /// hid_pointers entry).
+  void set_key_pointer(LVHIDPointerListener *pointer) { this->key_pointer_ = pointer; }
+  LVHIDPointerListener *get_key_pointer() const { return this->key_pointer_; }
+#endif
   // If the display is paused and we have resume_on_input_ set to true, resume the display.
   void maybe_wakeup() {
     if (this->paused_ && this->resume_on_input_) {
@@ -383,6 +421,12 @@ class LvglComponent final : public PollingComponent {
   uint16_t width_{};
   uint16_t height_{};
   bool paused_{};
+#ifdef USE_LVGL_HID
+  std::vector<LVHIDKeypadListener *> hid_keypads_{};
+  PausedInput *paused_input_{nullptr};
+  std::atomic<KeyTap *> key_tap_{nullptr};
+  LVHIDPointerListener *key_pointer_{nullptr};
+#endif
   std::vector<LvPageType *> pages_{};
   size_t current_page_{0};
   bool show_snow_{};
@@ -514,6 +558,205 @@ class LVEncoderListener final : public Parented<LvglComponent> {
   int key_{};
 };
 #endif  //  USE_LVGL_KEY_LISTENER
+
+#ifdef USE_LVGL_HID
+// A HID keyboard or remote as an LVGL keypad. Its keys do what the key bindings say: the arrows
+// move the focus to the nearest widget that way (or work the focused widget that uses them), Enter
+// presses, Back is Escape, and an action of the configuration runs its automation. Typed text goes
+// to a focused text area. Key changes are queued, so a press and release between two reads are kept.
+class LVHIDKeypadListener final : public Parented<LvglComponent> {
+ public:
+  LVHIDKeypadListener(hid::HIDInput *input, KeyBindings *bindings, uint16_t long_press_time,
+                      uint16_t long_press_repeat_time);
+  lv_indev_t *get_drv() { return this->drv_; }
+  /// While the display is paused (main loop): keys and characters go to the paused input, if any; the
+  /// keys run their actions' own automations (navigation only when not taken), and keys let go are let go.
+  void run_paused();
+
+ protected:
+  struct Event {
+    uint32_t code;         // page << 16 | usage, or a character
+    uint32_t layout_char;  // a key's: hid::HIDInput::layout_char()
+    uint8_t mods;
+    EventKind kind;
+    bool level3;
+    uint32_t source;
+  };
+  struct Held {
+    uint32_t code;
+    uint32_t lv_key;
+  };
+  static constexpr uint8_t QUEUE_SIZE = 32;
+  static constexpr uint8_t HELD_SIZE = 4;
+
+  bool push_(uint32_t code, uint8_t mods, EventKind kind, uint32_t layout_char = 0, bool level3 = false,
+             uint32_t source = 0);
+  void read_(lv_indev_data_t *data);
+  /// The LVGL key a key press becomes, 0 when it is done here (or nothing).
+  uint32_t press_(uint16_t page, uint16_t usage, uint8_t mods);
+  /// The keys held, for combos (KeyBindings::resolve_combo()).
+  void track_(uint32_t code, bool pressed);
+  uint32_t builtin_(int action, lv_obj_t *focused);
+  lv_obj_t *focused_() const;
+  /// A full-screen widget shown on the top layer (a popup's backdrop): only its widgets are reached.
+  lv_obj_t *modal_() const;
+  bool reachable_(lv_obj_t *obj, lv_obj_t *modal) const;
+  /// To the nearest reachable widget that way (LV_KEY_UP..LEFT), or the first one when from is null.
+  void move_focus_(uint32_t direction, lv_obj_t *from, lv_obj_t *modal);
+  /// To the next or previous reachable widget in the group's order.
+  void step_focus_(bool forward, lv_obj_t *from, lv_obj_t *modal);
+  /// Scrolls the list around the focused widget by a page and focuses what is then in its place.
+  void scroll_page_(bool down, lv_obj_t *from, lv_obj_t *modal);
+
+  KeyBindings *bindings_;
+  Event queue_[QUEUE_SIZE]{};
+  std::atomic<uint8_t> head_{0};  // read by read_()
+  std::atomic<uint8_t> tail_{0};  // written by push_()
+  Held held_[HELD_SIZE]{};
+  static constexpr uint8_t DOWN_SIZE = 8;
+  uint32_t down_[DOWN_SIZE]{};
+  uint8_t down_count_{0};
+  uint32_t key_{0};
+  bool pressed_{false};
+  bool release_next_{false};
+  lv_indev_t *drv_{};
+};
+
+// A HID mouse as an LVGL pointer with a cursor: motion moves it, the left button presses,
+// the wheel scrolls whatever is under it.
+class LVHIDPointerListener final : public Parented<LvglComponent> {
+ public:
+  LVHIDPointerListener(hid::HIDInput *input, uint16_t long_press_time, uint16_t long_press_repeat_time,
+                       LvglComponent *parent);
+#ifdef USE_LVGL_IMAGE
+  void set_cursor_image(const void *src);
+#endif
+  void set_default_cursor();
+  // The cursor hides after this long without motion (0: never) and shows again with the next.
+  void set_hide_after(uint32_t ms);
+  /// Motion times this (1: as the device reports it).
+  void set_speed(float speed) { this->speed_ = speed; }
+  /// Fast moves go further: a report's motion is multiplied more the larger it is (up to 3 times).
+  void set_acceleration(bool on) { this->acceleration_ = on; }
+  /// A wheel step scrolls this many lines (WHEEL_LINE each).
+  void set_wheel_lines(uint8_t lines) { this->wheel_lines_ = lines; }
+  void set_reverse_wheel(bool reverse) { this->reverse_wheel_ = reverse; }
+  /// The built-in cursor's look (not a configured cursor image): style 0 dot, 1 ring, 2 arrow;
+  /// size 0 small, 1 medium, 2 large. Drawn by LVGL itself: no image, no buffer.
+  void set_cursor_look(uint8_t style, uint8_t size);
+  /// Left-handed: the right button presses, the left one is the second button.
+  void set_left_handed(bool on) { this->left_handed_ = on; }
+  /// How long a press is held before it is a long press.
+  void set_long_press_time(uint16_t ms) { lv_indev_set_long_press_time(this->drv_, ms); }
+  /// The other buttons, pressed (true) and let go: 2 the second of left / right, 3 the middle one,
+  /// 4 and 5 the side buttons. Called where the HID input reports (main loop).
+  template<typename F> void add_on_button_callback(F &&cb) { this->button_cb_.add(std::forward<F>(cb)); }
+  /// A long press on what is under the pointer (the clickable object or its clickable parent).
+  void long_press_here();
+  /// Key mode (remote controls): the keypads' direction keys move the pointer, Enter clicks.
+  void set_key_mode(bool on);
+  bool is_key_mode() const { return this->key_mode_; }
+  /// Key mode: a step is this many pixels, every read while held.
+  void set_key_step(uint8_t pixels) { this->key_step_ = pixels; }
+  /// Key mode: held this long, the steps get faster, up to this many times after 2 s held.
+  void set_key_hold(uint32_t after_ms, uint8_t most) {
+    this->key_after_ms_ = after_ms;
+    this->key_most_ = most;
+  }
+  /// A gamepad's touchpad as this pointer, while on; not while the capture widget shows (a page
+  /// testing the gamepad). One finger moves it (a touchpad width: the display's width, times the
+  /// speed, with the acceleration), a tap or the touchpad's button clicks, two fingers scroll (by the
+  /// reverse wheel setting). Its fingers come as controls of this input and of those added here.
+  void set_pad_touch(bool on) { this->pad_touch_ = on; }
+  bool is_pad_touch() const { return this->pad_touch_; }
+  void add_pad_touch_input(hid::HIDInput *input);
+  /// Another input moving this pointer (a USB mouse next to the Bluetooth ones): its motion,
+  /// buttons and wheel, and its touchpad as add_pad_touch_input().
+  void add_input(hid::HIDInput *input);
+  void set_pad_touch_capture(lv_obj_t *widget) { this->pad_capture_ = widget; }
+  /// From a keypad (LVGL thread): its key code pressed as a direction (LV_KEY_UP..LEFT) or
+  /// LV_KEY_ENTER, or a key let go (any code; those not held are passed over).
+  void key_press(uint32_t code, uint32_t key);
+  void key_release(uint32_t code);
+  lv_indev_t *get_drv() { return this->drv_; }
+
+  static constexpr int32_t WHEEL_LINE = 40;
+
+ protected:
+  void move_(int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons);
+  void set_cursor_(lv_obj_t *cursor);
+
+  void key_read_();
+  /// A control of a pad touch input (main loop): its fingers' motion gathered for the next read.
+  void pad_control_(uint16_t page, uint16_t usage, int32_t value);
+  /// A key of a pad touch input (main loop): the touchpad's button.
+  void pad_key_(uint16_t page, uint16_t usage, bool down);
+  /// LVGL thread, each read: the gathered motion moves the pointer or scrolls; true while it clicks.
+  bool pad_read_();
+  void pad_reset_();
+
+  // A tap: down this short, moved this little (across the touchpad, 0..65535), one finger.
+  static constexpr uint32_t PAD_TAP_MS = 200;
+  static constexpr int32_t PAD_TAP_MOVE = 1300;
+  struct PadFinger {
+    int32_t x, y;
+    bool down, has_x, has_y;
+  };
+  PadFinger pad_fingers_[2]{};
+  int32_t pad_dx_{0};  // gathered since the last read, 0..65535 across the touchpad
+  int32_t pad_dy_{0};
+  int32_t pad_sx_{0};  // two fingers: to scroll
+  int32_t pad_sy_{0};
+  int32_t pad_moved_{0};  // this touch, for the tap
+  uint32_t pad_since_{0};
+  uint8_t pad_most_{0};  // most fingers down at once this touch
+  float pad_rest_x_{0.0f};
+  float pad_rest_y_{0.0f};
+  lv_obj_t *pad_capture_{nullptr};
+  bool pad_touch_{false};
+  bool pad_button_{false};
+  bool pad_no_tap_{false};  // the button was pressed this touch
+  bool pad_tap_{false};
+  bool pad_tap_shown_{false};
+
+  static constexpr uint8_t KEYS_HELD = 4;
+  struct KeyHeld {
+    uint32_t code;
+    uint32_t key;
+  };
+  KeyHeld keys_[KEYS_HELD]{};
+  uint32_t key_since_{0};
+  uint32_t key_after_ms_{400};
+  uint8_t key_step_{6};
+  uint8_t key_most_{8};
+  bool key_mode_{false};
+  bool key_pressed_{false};
+  float speed_{1.0f};
+  float rest_x_{0.0f};  // motion below a pixel, carried to the next report
+  float rest_y_{0.0f};
+  bool acceleration_{false};
+  bool reverse_wheel_{false};
+  uint8_t wheel_lines_{1};
+  int32_t x_{0};
+  int32_t y_{0};
+  bool pressed_{false};
+  // A press LVGL has not read yet: a quick click's press and release can come between two reads
+  // (USB HID reports arrive together in one loop pass), so the press is held for one read.
+  bool press_unread_{false};
+  bool left_handed_{false};
+  bool own_cursor_{false};  // the built-in cursor (set_cursor_look() may change it)
+  bool look_pending_{false};  // changed while LVGL was paused: made at the next motion
+  uint8_t look_style_{0};
+  uint8_t look_size_{1};
+  void apply_look_();
+  uint8_t last_buttons_{0};
+  CallbackManager<void(uint8_t, bool)> button_cb_{};
+  lv_indev_t *drv_{};
+  lv_obj_t *cursor_{};
+  uint32_t hide_after_{0};
+  uint32_t last_motion_{0};
+};
+#endif  // USE_LVGL_HID
 
 #ifdef USE_LVGL_LINE
 class LvLineType : public LvCompound {
