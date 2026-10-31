@@ -64,7 +64,7 @@ using namespace esp_i2s;
 #include "A2DPVolumeControl.h"
 #include "esp_a2dp_api.h"
 #include "esp_avrc_api.h"
-#ifdef ESP_A2D_INVALID_CONN_HDL
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 2, 0)
 #define A2DP_CONN_BY_HANDLE
 #define A2DP_AVRC_TL_MAX ESP_USER_AVRC_TRANS_LABEL_MAX
 #else
