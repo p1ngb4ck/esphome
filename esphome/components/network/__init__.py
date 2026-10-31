@@ -4,6 +4,7 @@ import ipaddress
 import logging
 from typing import Any
 
+from esphome import automation
 import esphome.codegen as cg
 from esphome.components.esp32 import add_idf_sdkconfig_option
 from esphome.components.psram import is_guaranteed as psram_is_guaranteed
@@ -15,6 +16,7 @@ from esphome.const import (
     CONF_ID,
     CONF_MIN_IPV6_ADDR_COUNT,
     CONF_PRIORITY,
+    CONF_TRIGGER_ID,
     CONF_WIFI,
 )
 from esphome.core import CORE, CoroPriority, coroutine_with_priority
@@ -73,13 +75,13 @@ KEY_NETWORK_PRIORITY = "network_priority"
 # accepted in the priority list. openthread and modem will be added here when
 # they wire up their setup-priority consumer in their own to_code — see
 # NETWORK_PLAN.md for the full multi-interface roadmap.
-VALID_NETWORK_TYPES = ["ethernet", "wifi"]
+VALID_NETWORK_TYPES = ["ethernet", "wifi", "usb_ethernet"]
 
 # Interfaces NetworkComponent::loop() knows how to arbitrate the default route
 # for. Deliberately NOT derived from VALID_NETWORK_TYPES: extending that list
 # without extending the C++ arbitration (and then this set) is caught in
 # _final_validate() as a config error instead of a silently mis-routed interface.
-ARBITRATED_NETWORK_TYPES = frozenset({"ethernet", "wifi"})
+ARBITRATED_NETWORK_TYPES = frozenset({"ethernet", "wifi", "usb_ethernet"})
 
 # Setup priority base values — first in list gets the highest priority.
 #
@@ -145,6 +147,16 @@ async def register_active_interface_listener(listener: cg.MockObj) -> bool:
 
 
 IPAddress = network_ns.class_("IPAddress")
+NetworkInterface = network_ns.enum("NetworkInterface", is_class=True)
+NETWORK_INTERFACES = {
+    "ethernet": NetworkInterface.NETWORK_INTERFACE_ETHERNET,
+    "wifi": NetworkInterface.NETWORK_INTERFACE_WIFI,
+    "usb_ethernet": NetworkInterface.NETWORK_INTERFACE_USB_ETHERNET,
+}
+ActiveInterfaceTrigger = network_ns.class_(
+    "ActiveInterfaceTrigger", automation.Trigger.template()
+)
+CONF_ON_ACTIVE_INTERFACE = "on_active_interface"
 
 
 def _register_provisioning_source(config: ConfigType) -> ConfigType:
@@ -419,6 +431,13 @@ CONFIG_SCHEMA = cv.All(
                 cv.only_on_esp32,
             ),
             cv.Optional(CONF_PRIORITY): _validate_priority_list,
+            cv.Optional(CONF_ON_ACTIVE_INTERFACE): automation.validate_automation(
+                {
+                    cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                        ActiveInterfaceTrigger
+                    ),
+                }
+            ),
         }
     ),
     _register_provisioning_source,
@@ -494,6 +513,15 @@ def _final_validate(config: ConfigType) -> None:
         )
 
 
+    if CONF_ON_ACTIVE_INTERFACE in config and not (
+        len(priority_list) > 1 and CORE.is_esp32
+    ):
+        raise cv.Invalid(
+            "on_active_interface needs ESP32 and more than one interface in 'priority'",
+            [CONF_ON_ACTIVE_INTERFACE],
+        )
+
+
 FINAL_VALIDATE_SCHEMA = _final_validate
 
 
@@ -524,6 +552,7 @@ async def to_code(config: ConfigType) -> None:
         # _final_validate() so a future unsupported type fails as a config error.
         if has_active_interface():
             cg.add_define("USE_NETWORK_DEFAULT_ROUTE")
+            cg.add_define("NETWORK_INTERFACE_COUNT", len(priority_list))
             # Have lwIP switch to the DNS servers of the netif that owns the
             # default route whenever the arbitration changes it.
             add_idf_sdkconfig_option("CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF", True)
@@ -688,3 +717,12 @@ async def to_code(config: ConfigType) -> None:
 async def network_component_to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
+    if has_active_interface():
+        # The priority order the arbitration starts from; a saved runtime order replaces it in setup()
+        for entry in config[CONF_PRIORITY]:
+            cg.add(var.add_interface(NETWORK_INTERFACES[entry["interface"]]))
+        for conf in config.get(CONF_ON_ACTIVE_INTERFACE, []):
+            trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
+            _request_active_interface_listener_slot()
+            cg.add(var.add_active_interface_listener(trigger))
+            await automation.build_automation(trigger, [], conf)
