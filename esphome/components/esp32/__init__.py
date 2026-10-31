@@ -2104,6 +2104,7 @@ CONF_DISABLE_MBEDTLS_TLS_SERVER = "disable_mbedtls_tls_server"
 CONF_DISABLE_MBEDTLS_TLS_EXTRAS = "disable_mbedtls_tls_extras"
 CONF_DISABLE_REGI2C_IN_IRAM = "disable_regi2c_in_iram"
 CONF_DISABLE_FATFS = "disable_fatfs"
+CONF_ENABLE_EXFAT = "enable_exfat"
 CONF_ADC_ONESHOT_IN_IRAM = "adc_oneshot_in_iram"
 
 # VFS requirement tracking
@@ -2115,6 +2116,15 @@ KEY_VFS_TERMIOS_REQUIRED = "vfs_termios_required"
 # These are stored in CORE.data[KEY_ESP32] dict
 KEY_USB_SERIAL_JTAG_SECONDARY_REQUIRED = "usb_serial_jtag_secondary_required"
 KEY_FATFS_REQUIRED = "fatfs_required"
+KEY_FATFS_VOLUMES = "fatfs_volumes"
+# FAT volumes beyond the configured mounts, for mounts that come and go at runtime (USB
+# sticks taken by a wildcard entry, say).
+FATFS_SPARE_VOLUMES = 3
+FATFS_MAX_VOLUMES = 10  # Kconfig range of CONFIG_FATFS_VOLUME_COUNT
+# CONFIG_VFS_MAX_COUNT: its Kconfig default (what registers before any FAT mount: console,
+# sockets, eventfd, ...) plus one entry per FAT volume; Kconfig range up to 20.
+VFS_BASE_COUNT = 8
+VFS_COUNT_LIMIT = 20
 KEY_ADC_ONESHOT_IRAM_REQUIRED = "adc_oneshot_iram_required"
 KEY_LIBC_PICOLIBC_NEWLIB_COMPAT_REQUIRED = "libc_picolibc_newlib_compat_required"
 
@@ -2270,13 +2280,17 @@ def require_idf_version(
     return validator
 
 
-def require_fatfs() -> None:
+def require_fatfs(volumes: int = 0) -> None:
     """Mark that FATFS support is required by a component.
 
     Call this from components that use FATFS (e.g., SD card, storage components).
     This prevents FATFS from being disabled when disable_fatfs is set.
+    volumes: the FAT volumes the caller mounts; CONFIG_FATFS_VOLUME_COUNT is sized from their sum.
     """
     CORE.data[KEY_ESP32][KEY_FATFS_REQUIRED] = True
+    CORE.data[KEY_ESP32][KEY_FATFS_VOLUMES] = (
+        CORE.data[KEY_ESP32].get(KEY_FATFS_VOLUMES, 0) + volumes
+    )
 
 
 def require_adc_oneshot_iram() -> None:
@@ -2373,6 +2387,7 @@ FRAMEWORK_SCHEMA = cv.Schema(
                 cv.Optional(CONF_DISABLE_VFS_SUPPORT_TERMIOS, default=True): cv.boolean,
                 cv.Optional(CONF_DISABLE_VFS_SUPPORT_SELECT, default=True): cv.boolean,
                 cv.Optional(CONF_DISABLE_VFS_SUPPORT_DIR, default=True): cv.boolean,
+                cv.Optional(CONF_ENABLE_EXFAT, default=False): cv.boolean,
                 cv.Optional(CONF_FREERTOS_IN_IRAM, default=False): cv.boolean,
                 cv.Optional(CONF_RINGBUF_IN_IRAM, default=False): cv.boolean,
                 cv.Optional(CONF_HEAP_IN_IRAM, default=False): cv.boolean,
@@ -2961,46 +2976,115 @@ async def _reconcile_vfs_fatfs_sdkconfig(
     disable_vfs_select: bool,
     disable_vfs_dir: bool,
     disable_fatfs: bool,
+    enable_exfat: bool,
 ) -> None:
-    """Reconcile VFS/FATFS sdkconfig flags after all require_*() calls; user sdkconfig_options win."""
+    """Reconcile VFS/FATFS sdkconfig flags.
+
+    Runs at FINAL priority so every require_vfs_termios()/require_vfs_select()/
+    require_vfs_dir()/require_fatfs() call (made from the various components' to_code at
+    their own priorities) is seen first. A user-supplied sdkconfig_options value always
+    takes precedence.
+    """
     opts = CORE.data[KEY_ESP32][KEY_SDKCONFIG_OPTIONS]
 
-    # USB Serial JTAG VFS needs termios (require_vfs_termios(), e.g. logger). ~1.8KB flash when off.
+    # VFS support for termios (terminal I/O functions)
+    # USB Serial JTAG VFS functions require termios support.
+    # Components that need it (e.g., logger when USB_SERIAL_JTAG is supported but not selected
+    # as the logger output) call require_vfs_termios().
+    # Saves approximately 1.8KB of flash when disabled (default).
     if CORE.data.get(KEY_VFS_TERMIOS_REQUIRED, False):
         set_idf_sdkconfig_default("CONFIG_VFS_SUPPORT_TERMIOS", True)
     else:
         set_idf_sdkconfig_default("CONFIG_VFS_SUPPORT_TERMIOS", not disable_vfs_termios)
 
-    # VFS select is only needed for UART/eventfd fds (require_vfs_select(), e.g. openthread);
-    # sockets use lwip_select() either way. ~2.7KB flash when off.
+    # VFS support for select() with file descriptors
+    # ESPHome only uses select() with sockets via lwip_select(), which still works.
+    # VFS select is only needed for UART/eventfd file descriptors.
+    # Components that need it (e.g., openthread) call require_vfs_select().
+    # Saves approximately 2.7KB of flash when disabled (default).
     if CORE.data.get(KEY_VFS_SELECT_REQUIRED, False):
         set_idf_sdkconfig_default("CONFIG_VFS_SUPPORT_SELECT", True)
     else:
         set_idf_sdkconfig_default("CONFIG_VFS_SUPPORT_SELECT", not disable_vfs_select)
 
-    # Directory functions: opendir/readdir/mkdir etc. (require_vfs_dir()). ~0.5KB flash when off.
+    # VFS support for directory functions (opendir, readdir, mkdir, etc.)
+    # Components that need it (e.g., storage drivers) call require_vfs_dir().
+    # Saves approximately 0.5KB+ of flash when disabled (default).
     if CORE.data.get(KEY_VFS_DIR_REQUIRED, False):
         set_idf_sdkconfig_default("CONFIG_VFS_SUPPORT_DIR", True)
     else:
         set_idf_sdkconfig_default("CONFIG_VFS_SUPPORT_DIR", not disable_vfs_dir)
 
-    # FATFS (require_fatfs()): LFN + one volume per esp_vfs_fat mount. Defaults only;
-    # sdkconfig_options override. FATFS_LONG_FILENAMES is a Kconfig choice -- if the user set
-    # any member, leave the group alone. LFN_HEAP allocates per LFN op; LFN_STACK uses stack.
-    lfn_keys = (
-        "CONFIG_FATFS_LFN_NONE",
-        "CONFIG_FATFS_LFN_HEAP",
-        "CONFIG_FATFS_LFN_STACK",
-    )
-    user_picked_lfn = any(k in opts for k in lfn_keys)
+    # FATFS support
+    # Components that need FATFS (SD card, USB storage, ...) call require_fatfs().
     if CORE.data[KEY_ESP32].get(KEY_FATFS_REQUIRED, False):
-        if not user_picked_lfn:
+        # Storage drivers need long filenames (heap-allocated, full 255-char length) and
+        # enough FATFS volumes for several drivers at once (SD + USB + wear levelling —
+        # every esp_vfs_fat mount consumes one). All of these are only defaults: override
+        # any of them via esp32 -> framework -> advanced -> sdkconfig_options.
+        lfn_choice_keys = (
+            "CONFIG_FATFS_LFN_NONE",
+            "CONFIG_FATFS_LFN_HEAP",
+            "CONFIG_FATFS_LFN_STACK",
+        )
+        if not any(k in opts for k in lfn_choice_keys):
             set_idf_sdkconfig_default("CONFIG_FATFS_LFN_NONE", False)
             set_idf_sdkconfig_default("CONFIG_FATFS_LFN_HEAP", True)
+        if not opts.get("CONFIG_FATFS_LFN_NONE", False):
             set_idf_sdkconfig_default("CONFIG_FATFS_MAX_LFN", 255)
-        set_idf_sdkconfig_default("CONFIG_FATFS_VOLUME_COUNT", 4)
+        volumes = (
+            CORE.data[KEY_ESP32].get(KEY_FATFS_VOLUMES, 0) + FATFS_SPARE_VOLUMES
+        )
+        if volumes > FATFS_MAX_VOLUMES:
+            _LOGGER.warning(
+                "%d FAT volumes configured, ESP-IDF supports at most %d",
+                volumes - FATFS_SPARE_VOLUMES,
+                FATFS_MAX_VOLUMES,
+            )
+        # At least one volume per configured mount: a smaller sdkconfig_options value is raised.
+        volumes = min(volumes, FATFS_MAX_VOLUMES)
+        user_volumes = opts.get("CONFIG_FATFS_VOLUME_COUNT")
+        if isinstance(user_volumes, RawSdkconfigValue):
+            user_volumes = user_volumes.value
+        if user_volumes is None or int(str(user_volumes).strip('"')) < volumes:
+            add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", volumes)
+        else:
+            volumes = int(str(user_volumes).strip('"'))
+        # Every FAT mount is a VFS entry too (esp_vfs_fat_register -> esp_vfs_register_fs,
+        # ESP_ERR_NO_MEM once the table is full): a smaller sdkconfig_options value is raised.
+        vfs_count = min(VFS_BASE_COUNT + volumes, VFS_COUNT_LIMIT)
+        user_vfs = opts.get("CONFIG_VFS_MAX_COUNT")
+        if isinstance(user_vfs, RawSdkconfigValue):
+            user_vfs = user_vfs.value
+        if user_vfs is None or int(str(user_vfs).strip('"')) < vfs_count:
+            add_idf_sdkconfig_option("CONFIG_VFS_MAX_COUNT", vfs_count)
+        # Long filenames are a hard requirement of exFAT and are already set right above;
+        # the FatFs #defines themselves come via a patched component copy, declared in the
+        # manifest so it replaces the built-in fatfs and lands in src's REQUIRES.
+        exfat_override = _sync_exfat_fatfs_override(
+            enable_exfat,
+            str(CORE.data[KEY_ESP32][KEY_IDF_VERSION]),
+            get_esp32_variant(),
+        )
+        if exfat_override is not None:
+            add_idf_component(name="fatfs", override_path=exfat_override)
+        else:
+            add_src_cmake(
+                "idf_component_get_property(esphome_fatfs_lib fatfs COMPONENT_LIB)\n"
+                "target_link_libraries(${COMPONENT_LIB} PUBLIC ${esphome_fatfs_lib})"
+            )
+    elif enable_exfat:
+        raise cv.Invalid(
+            f"'{CONF_ENABLE_EXFAT}' has no effect here: no component in this configuration "
+            f"mounts a FAT filesystem, so the FatFs library is not part of the build"
+        )
     elif disable_fatfs:
-        if not user_picked_lfn:
+        lfn_choice_keys = (
+            "CONFIG_FATFS_LFN_NONE",
+            "CONFIG_FATFS_LFN_HEAP",
+            "CONFIG_FATFS_LFN_STACK",
+        )
+        if not any(k in opts for k in lfn_choice_keys):
             set_idf_sdkconfig_default("CONFIG_FATFS_LFN_NONE", True)
         # Kconfig range is [1,10]; 0 gets clamped to the default.
         set_idf_sdkconfig_default("CONFIG_FATFS_VOLUME_COUNT", 1)
@@ -3622,14 +3706,16 @@ async def to_code(config):
     mbedtls.disable_pkcs7 = advanced[CONF_DISABLE_MBEDTLS_PKCS7]
     CORE.add_job(_reconcile_mbedtls_sdkconfig)
 
-    # FINAL: require_*() calls can come from to_code at or below this priority, so an
-    # inline read would be iteration-order-dependent; reconcile once after every job ran.
+    # FINAL priority: runs after every require_vfs_*() / require_fatfs() call — components
+    # make those calls from their own to_code, which runs after this platform to_code, so
+    # reading the flags inline here would never see them (VFS/FATFS would stay disabled).
     CORE.add_job(
         _reconcile_vfs_fatfs_sdkconfig,
         advanced[CONF_DISABLE_VFS_SUPPORT_TERMIOS],
         advanced[CONF_DISABLE_VFS_SUPPORT_SELECT],
         advanced[CONF_DISABLE_VFS_SUPPORT_DIR],
         advanced[CONF_DISABLE_FATFS],
+        advanced[CONF_ENABLE_EXFAT],
     )
 
     # Disable regi2c control functions in IRAM
@@ -3673,6 +3759,113 @@ async def to_code(config):
 
 
 KEY_CUSTOM_PARTITIONS = "custom_partitions"
+
+
+_EXFAT_PATCHES = (
+    ("FF_FS_EXFAT", "1"),
+    # exFAT on a card driven over SPI trips the TRIM path (ESP_ERR_INVALID_RESPONSE);
+    # TRIM is an optimisation for the medium, not a feature anything depends on.
+    ("FF_USE_TRIM", "0"),
+)
+_EXFAT_MARKER = ".esphome_exfat_override"
+
+
+def _sync_exfat_fatfs_override(enabled: bool, idf_ver: str, variant: str) -> str | None:
+    """Patch a copy of FatFs so exFAT is compiled in; return its path when enabled.
+
+    exFAT is a plain #define in FatFs (no Kconfig symbol), so the only way to turn it on is a
+    patched copy of the component. The copy sits outside every component search path
+    (<build>/components-src/fatfs, like the usb_host override) and the caller declares it via
+    add_idf_component(override_path=...). The component manager then registers it as a
+    project-managed component -- added after the IDF built-ins, so it replaces the built-in
+    fatfs -- and injects it into src's REQUIRES from the manifest, which is what puts ff.h
+    on the include path of the storage drivers. The directory name must stay "fatfs": IDF
+    names a component after its directory. Synced every codegen and stamped with the IDF
+    version so an IDF switch re-copies; a copy nobody points at is inert."""
+    import shutil
+
+    from esphome.espidf.framework import _get_framework_path, check_esp_idf_install
+
+    # Earlier revisions kept the copy in <build>/components, which IDF scans on its own and
+    # which outranks the manifest; a copy left there would shadow this one or keep exFAT on.
+    legacy = Path(CORE.build_path) / "components" / "fatfs"
+    if (legacy / _EXFAT_MARKER).is_file():
+        shutil.rmtree(legacy)
+
+    dest = Path(CORE.build_path) / "components-src" / "fatfs"
+    marker = dest / _EXFAT_MARKER
+    stamp = f"v4:{idf_ver}:" + ",".join(f"{k}={v}" for k, v in _EXFAT_PATCHES)
+    if not enabled:
+        # Only remove what is provably ours.
+        if marker.is_file():
+            shutil.rmtree(dest)
+        return None
+    if marker.is_file() and marker.read_text() == stamp:
+        return str(dest)  # current copy is up to date
+    src = _get_framework_path(idf_ver) / "components" / "fatfs"
+    if not src.is_dir():
+        # First-ever build: the toolchain would install the IDF minutes from now anyway —
+        # front-load it so the copy source exists.
+        check_esp_idf_install(idf_ver, targets=[variant])
+    if not src.is_dir():
+        raise cv.Invalid(
+            "enable_exfat: cannot locate the ESP-IDF fatfs component to patch "
+            f"(looked in {src})"
+        )
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(src, dest)
+    ffconf = dest / "src" / "ffconf.h"
+    text = ffconf.read_text()
+    for key, value in _EXFAT_PATCHES:
+        text, n = re.subn(
+            rf"#define[ \t]+{key}[ \t]+\S+", f"#define {key} {value}", text
+        )
+        if n != 1:
+            raise cv.Invalid(
+                f"enable_exfat: patching {key} in the IDF's ffconf.h failed — "
+                f"unexpected FatFs layout in IDF {idf_ver}"
+            )
+    # Kconfig bool symbols that are disabled produce no #define, yet ff.c uses several of
+    # them in plain C expressions (e.g. `if (FF_USE_LABEL && vol)`) — inside the original
+    # IDF component that resolves, in a project-component copy it surfaced as 'undeclared
+    # identifier'. Default every CONFIG_ symbol the header references to 0 when undefined:
+    # a no-op for anything sdkconfig.h defines, and exactly the value a disabled bool means
+    # otherwise. Scanned generically so new symbols in future IDF versions are covered.
+    # Only symbols used in *value* contexts and probed nowhere: defining a symbol that any
+    # compiled source probes with #ifdef/defined() makes the probe true and silently
+    # enables the guarded code — vfs_fat.c does exactly that with USE_FASTSEEK (its
+    # fastseek block then references FIL::cltbl, which the ffconf side correctly compiled
+    # out). So the probe scan covers the whole copied component, not just ffconf.h;
+    # test_apps/host_test/fatfs_utils are excluded because they are never built and their
+    # probes must not suppress legitimate guards.
+    probed = set()
+    skip_dirs = {"test_apps", "host_test", "fatfs_utils"}
+    for f in dest.rglob("*"):
+        if f.suffix not in (".c", ".h") or skip_dirs & {
+            part.name for part in f.parents
+        }:
+            continue
+        for line in f.read_text(errors="replace").splitlines():
+            if re.search(r"#\s*if(n?def)?\b", line) or "defined" in line:
+                probed.update(re.findall(r"\bCONFIG_[A-Z0-9_]+\b", line))
+    symbols = sorted(set(re.findall(r"\bCONFIG_[A-Z0-9_]+\b", text)) - probed)
+    guards = "".join(f"#ifndef {sym}\n#define {sym} 0\n#endif\n" for sym in symbols)
+    include_line = '#include "sdkconfig.h"\n'
+    if include_line not in text:
+        raise cv.Invalid(
+            "enable_exfat: unexpected ffconf.h layout — no sdkconfig.h include to anchor on"
+        )
+    text = text.replace(
+        include_line,
+        include_line
+        + "\n/* ESPHome exFAT override: undefined-symbol guards, see codegen */\n"
+        + guards,
+        1,
+    )
+    ffconf.write_text(text)
+    marker.write_text(stamp)
+    return str(dest)
 
 
 @dataclass
