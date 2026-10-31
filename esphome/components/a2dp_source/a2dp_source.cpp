@@ -712,7 +712,7 @@ void A2DPSource::loop() {
         !was_stored && (known == nullptr || known->slot != this->slot_)) {
       ESP_LOGW(TAG, "%s is not paired, disconnecting", this->source_.to_str(this->connected_addr_));
       this->rejected_ = true;
-      esp_a2d_source_disconnect(this->connected_addr_);
+      this->source_.source_disconnect(this->connected_addr_);
     } else {
       this->source_.keep_peer(this->connected_addr_);
       if (is_picked)

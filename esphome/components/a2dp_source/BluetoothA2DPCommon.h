@@ -64,6 +64,12 @@ using namespace esp_i2s;
 #include "A2DPVolumeControl.h"
 #include "esp_a2dp_api.h"
 #include "esp_avrc_api.h"
+#ifdef ESP_A2D_INVALID_CONN_HDL
+#define A2DP_CONN_BY_HANDLE
+#define A2DP_AVRC_TL_MAX ESP_USER_AVRC_TRANS_LABEL_MAX
+#else
+#define A2DP_AVRC_TL_MAX 15
+#endif
 #ifndef A2DP_EXTERNAL_HOST  // ESPHome: no controller API without a controller
 #include "esp_bt.h"
 #endif
@@ -252,7 +258,7 @@ class BluetoothA2DPCommon {
     is_volume_used = true;
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 0, 0)
     if (isSource() && is_connected()){
-      esp_avrc_ct_send_set_absolute_volume_cmd(0, volume_value);
+      avrc_set_absolute_volume(0, volume_value);
     }
 #endif
   }
@@ -415,6 +421,42 @@ class BluetoothA2DPCommon {
   esp_a2d_audio_state_t audio_state = ESP_A2D_AUDIO_STATE_SUSPEND;
   esp_a2d_connection_state_t connection_state =
       ESP_A2D_CONNECTION_STATE_DISCONNECTED;
+#ifdef A2DP_CONN_BY_HANDLE
+  esp_a2d_conn_hdl_t conn_hdl = ESP_A2D_INVALID_CONN_HDL;
+#endif
+
+  esp_err_t a2d_media_ctrl(esp_a2d_media_ctrl_t ctrl) {
+#ifdef A2DP_CONN_BY_HANDLE
+    return esp_a2d_media_ctrl_by_handle(conn_hdl, ctrl);
+#else
+    return esp_a2d_media_ctrl(ctrl);
+#endif
+  }
+
+  esp_err_t avrc_set_absolute_volume(uint8_t tl, uint8_t volume) {
+#ifdef A2DP_CONN_BY_HANDLE
+    return esp_avrc_ct_send_set_absolute_volume_cmd_by_handle(conn_hdl, tl, volume);
+#else
+    return esp_avrc_ct_send_set_absolute_volume_cmd(tl, volume);
+#endif
+  }
+
+  esp_err_t avrc_register_notification(uint8_t tl, uint8_t event_id, uint32_t event_parameter) {
+#ifdef A2DP_CONN_BY_HANDLE
+    return esp_avrc_ct_send_register_notification_cmd_by_handle(conn_hdl, tl, event_id, event_parameter);
+#else
+    return esp_avrc_ct_send_register_notification_cmd(tl, event_id, event_parameter);
+#endif
+  }
+
+  esp_err_t avrc_get_rn_capabilities(uint8_t tl) {
+#ifdef A2DP_CONN_BY_HANDLE
+    return esp_avrc_ct_send_get_rn_capabilities_cmd_by_handle(conn_hdl, tl);
+#else
+    return esp_avrc_ct_send_get_rn_capabilities_cmd(tl);
+#endif
+  }
+
   UBaseType_t task_priority = configMAX_PRIORITIES - 10;
   // volume
   uint8_t volume_value = 0;

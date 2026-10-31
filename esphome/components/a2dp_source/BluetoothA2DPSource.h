@@ -310,6 +310,14 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   /// Check if the target speaker is still active by checking the time of the last heart beat
   bool is_active(unsigned long timeout = 10000);
 
+  esp_err_t source_disconnect([[maybe_unused]] esp_bd_addr_t peer) {
+#ifdef A2DP_CONN_BY_HANDLE
+    return esp_a2d_source_disconnect_by_handle(conn_hdl);
+#else
+    return esp_a2d_source_disconnect(peer);
+#endif
+  }
+
  protected:
   /// callback for data
   int32_t (*get_data_cb)(uint8_t* data, int32_t len) = nullptr;
@@ -424,7 +432,7 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
     ESP_LOGI(BT_AV_TAG, "==> a2dp esp_a2d_source_disconnect from: %s",
              to_str(peer));
     //esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_SUSPEND);
-    return esp_a2d_source_disconnect(peer);
+    return source_disconnect(peer);
   }
 
   /// converts a APP_AV_STATE_ENUM to a string
