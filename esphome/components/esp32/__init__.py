@@ -602,6 +602,15 @@ def _get_sdkconfig_cpu_frequencies(
     return selected, disabled
 
 
+def _warn_once(message: str, *args: Any) -> None:
+    warned = CORE.data.setdefault("esp32_config_warnings", set())
+    key = (message, *(str(arg) for arg in args))
+    if key in warned:
+        return
+    warned.add(key)
+    _LOGGER.warning(message, *args)
+
+
 def set_core_data(config):
     cpu_frequency = config.get(CONF_CPU_FREQUENCY)
     variant = config[CONF_VARIANT]
@@ -622,7 +631,7 @@ def set_core_data(config):
                 f"sdkconfig_options selects {sdkconfig_cpu_frequency}, which {variant} does not support",
                 path=sdkconfig_path,
             )
-        _LOGGER.warning(
+        _warn_once(
             "sdkconfig_options contains a CPU frequency setting; using %s. "
             "Set 'esp32.cpu_frequency' to configure it directly.",
             sdkconfig_cpu_frequency,
@@ -657,7 +666,7 @@ def set_core_data(config):
     config[CONF_CPU_FREQUENCY] = cpu_frequency
 
     if variant == VARIANT_ESP32P4 and cpu_frequency == "400MHZ":
-        _LOGGER.warning(
+        _warn_once(
             "400MHz on ESP32-P4 is experimental and may not boot. "
             "Consider using 360MHz instead. See https://github.com/esphome/esphome/issues/13425"
         )
@@ -1309,7 +1318,7 @@ def _resolve_framework_version(value: ConfigType) -> cv.Version:
         recommended = ESP_IDF_FRAMEWORK_VERSION_LOOKUP["recommended"]
 
     if version != recommended:
-        _LOGGER.warning(
+        _warn_once(
             "The selected framework version is not the recommended one. "
             "If there are connectivity or build issues please remove the manual version."
         )
@@ -1369,7 +1378,7 @@ def _check_pio_versions(config: ConfigType) -> ConfigType:
     if value[CONF_PLATFORM_VERSION] != _parse_pio_platform_version(
         str(PLATFORM_VERSION_LOOKUP["recommended"])
     ):
-        _LOGGER.warning(
+        _warn_once(
             "The selected platform version is not the recommended one. "
             "If there are connectivity or build issues please remove the manual version."
         )
@@ -1390,7 +1399,7 @@ def _check_esp_idf_versions(config: ConfigType) -> ConfigType:
     version = _resolve_framework_version(value)
 
     if CONF_SOURCE in value:
-        _LOGGER.warning(
+        _warn_once(
             "A custom framework source is set. "
             "If there are connectivity or build issues please remove the manual source."
         )
@@ -1431,7 +1440,7 @@ def _normalize_p4_engineering_sample(value: ConfigType) -> bool:
     """Fill in CONF_ENGINEERING_SAMPLE when unset, warning that production
     silicon (rev3) is assumed. Returns the normalized flag."""
     if (engineering_sample := value.get(CONF_ENGINEERING_SAMPLE)) is None:
-        _LOGGER.warning(
+        _warn_once(
             "Defaulting to ESP32-P4 production silicon (rev3).\n"
             "If you have an early engineering sample (pre-rev3), add this to your config:\n"
             "\n"
@@ -1497,7 +1506,7 @@ def _detect_variant(value):
             path=[CONF_BOARD],
         )
     else:
-        _LOGGER.warning(
+        _warn_once(
             "This board is unknown; the specified variant '%s' will be used but this may not work as expected.",
             variant,
         )
