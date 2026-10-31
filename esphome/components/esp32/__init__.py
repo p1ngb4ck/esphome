@@ -2127,6 +2127,10 @@ def require_certificate_bundle() -> None:
     # esp_crt_bundle.c lives in the mbedtls component and calls
     # mbedtls_ssl_conf_*, so a bundle needs the TLS role but not esp-tls.
     require_mbedtls_tls()
+    # A TLS client verifying a server via the bundle needs SHA-384/SHA-512: servers commonly
+    # negotiate SHA-384 cipher suites and present certs signed with SHA-384, so requesting the
+    # bundle implies requiring SHA-384/SHA-512.
+    _mbedtls_sdkconfig().sha512_required = True
     CORE.data[KEY_ESP32][KEY_CERT_BUNDLE] = True
 
 
