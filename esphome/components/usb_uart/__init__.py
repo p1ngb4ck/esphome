@@ -82,6 +82,7 @@ DEFAULT_BAUD_RATE = 9600
 # CH934x TX packets carry a 3-byte header ([port, len_lo, len_hi]) inside every chunk, so the
 # usable payload per chunk is that much smaller. Kept in sync with CH934XChannel::TX_HEADER_SIZE.
 CH934X_TX_HEADER_SIZE = 3
+CONF_DEBUG_ADD_UART_SETTINGS = "debug_add_uart_settings"
 CONF_CLAIM_NOTIFICATION_EP = "claim_notification_ep"
 CONF_CLAIM_COMM_INTERFACE = "claim_comm_interface"
 
@@ -192,6 +193,14 @@ FILTER_SOURCE_FILES = filter_source_files_from_defines(
 )
 
 
+def _validate_debug_add_uart_settings(config):
+    if config.get(CONF_DEBUG_ADD_UART_SETTINGS) and not config.get(CONF_DEBUG):
+        raise cv.Invalid(
+            f"'{CONF_DEBUG_ADD_UART_SETTINGS}' requires '{CONF_DEBUG}' to be true"
+        )
+    return config
+
+
 def _channel_limit(type_: Type) -> Callable[[list], list]:
     """Check the channel count against the type's limit, which depends on the target."""
 
@@ -245,10 +254,14 @@ def channel_schema(type_: "Type") -> cv.Schema:
                                 cv.Optional(CONF_DEBUG, default=False): cv.boolean,
                                 cv.Optional(CONF_DEBUG_PREFIX, default=""): cv.string,
                                 cv.Optional(
+                                    CONF_DEBUG_ADD_UART_SETTINGS, default=False
+                                ): cv.boolean,
+                                cv.Optional(
                                     CONF_FLUSH_TIMEOUT, default="100ms"
                                 ): cv.positive_time_period_milliseconds,
                             }
                         ),
+                        _validate_debug_add_uart_settings,
                     )
                 ),
                 _channel_limit(type_),
@@ -394,3 +407,6 @@ async def to_code(config: ConfigType) -> None:
             cg.add(var.add_entry_channel(chvar))
             if channel[CONF_DEBUG]:
                 cg.add_define("USE_UART_DEBUGGER")
+                if channel[CONF_DEBUG_ADD_UART_SETTINGS]:
+                    cg.add(chvar.set_debug_add_settings(True))
+                    cg.add_define("UART_DEBUGGER_ADD_SETTINGS")

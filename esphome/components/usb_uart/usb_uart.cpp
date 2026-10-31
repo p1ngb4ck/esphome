@@ -153,7 +153,16 @@ void USBUartChannelBase::write_array(const uint8_t *data, size_t len) {
     for (size_t off = 0; off < len; off += batch) {
       size_t n = std::min(len - off, batch);
       format_hex_pretty_to(buf, data + off, n, ',');
-      ESP_LOGD(TAG, "%s>>> %s", this->debug_prefix_.c_str(), buf);
+#ifdef UART_DEBUGGER_ADD_SETTINGS
+      if (this->debug_add_settings_) {
+        char settings[32];
+        snprintf(settings, sizeof(settings), "|%" PRIu32 ":%u:%s:%s|", this->baud_rate_, this->data_bits_,
+                 PARITY_NAMES[static_cast<uint8_t>(this->line_parity_())],
+                 STOP_BITS_NAMES[static_cast<uint8_t>(this->line_stop_bits_())]);
+        ESP_LOGD(TAG, "%s%s>>> %s", settings, this->debug_prefix_.c_str(), buf);
+      } else
+#endif
+        ESP_LOGD(TAG, "%s>>> %s", this->debug_prefix_.c_str(), buf);
     }
   }
 #endif
@@ -236,7 +245,16 @@ bool USBUartComponent::loop() {
       // debug line truncated. Only the log line is affected, never the data itself.
       char buf[format_hex_pretty_size(usb_host::USB_MAX_PACKET_SIZE)];
       format_hex_pretty_to(buf, chunk->data, std::min<uint16_t>(chunk->length, usb_host::USB_MAX_PACKET_SIZE), ',');
-      ESP_LOGD(TAG, "%s<<< %s", channel->debug_prefix_.c_str(), buf);
+#ifdef UART_DEBUGGER_ADD_SETTINGS
+      if (channel->debug_add_settings_) {
+        char settings[32];
+        snprintf(settings, sizeof(settings), "|%" PRIu32 ":%u:%s:%s|", channel->baud_rate_, channel->data_bits_,
+                 PARITY_NAMES[static_cast<uint8_t>(channel->line_parity_())],
+                 STOP_BITS_NAMES[static_cast<uint8_t>(channel->line_stop_bits_())]);
+        ESP_LOGD(TAG, "%s%s<<< %s", settings, channel->debug_prefix_.c_str(), buf);
+      } else
+#endif
+        ESP_LOGD(TAG, "%s<<< %s", channel->debug_prefix_.c_str(), buf);
     }
 #endif
 
