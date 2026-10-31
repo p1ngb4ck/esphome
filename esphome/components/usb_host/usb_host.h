@@ -681,6 +681,11 @@ class USBHost final : public Component {
   void loop() override;
   void setup() override;
 
+  // Which ESP32-P4 controllers run as host (controllers option): usb_host_config_t's
+  // peripheral_map, BIT0 high-speed, BIT1 full-speed. Only the patched espressif/usb component
+  // sets up a PHY per controller (IDF's 5.x built-in sets up one), hence the guards at the use
+  // site and in codegen.
+  void set_peripheral_map(uint8_t map) { this->peripheral_map_ = map; }
 #ifdef USE_USB_HOST_CHANNEL_BUDGET
   /// Host channels of a controller (0 high-speed, 1 full-speed): allocated now, committed to the configured devices,
   /// the hardware's total. False while the controller has no port (not in use).
@@ -688,6 +693,9 @@ class USBHost final : public Component {
     return usb_host_channel_usage(controller, &used, &committed, &total) == ESP_OK;
   }
 #endif
+  // Which of the ESP32-P4's two internal FSLS PHYs the full-speed OTG controller uses:
+  // 0 is GPIO24/25, 1 is GPIO26/27 (the reset default). Set from the fs_pins option.
+  void set_fs_phy_index(uint8_t index) { this->fs_phy_index_ = index; }
 #ifdef USE_USB_HOST_PER_PORT_FIFO_BIAS
   // How one host controller divides its hardware FIFO between received data, non-periodic
   // OUT and periodic OUT. The division caps the largest packet each direction can carry, so
@@ -699,6 +707,8 @@ class USBHost final : public Component {
     if (peripheral_index < SOC_USB_OTG_PERIPH_NUM)
       this->port_fifo_bias_[peripheral_index] = bias;
   }
+  // The high-speed controller as a full/low-speed host (full_speed_only option).
+  void set_full_speed_only(bool full_speed_only) { this->full_speed_only_ = full_speed_only; }
 #endif
 
   // -- Submission engine (called by USBClient thin forwarders) ----------------
@@ -794,8 +804,11 @@ class USBHost final : public Component {
   std::vector<RoutedDevice> devices_{};
   LazyCallbackManager<void()> devices_callback_;
   bool reroute_{false};
+  uint8_t peripheral_map_{0};  // 0: ESP-IDF's default, the high-speed controller
+  uint8_t fs_phy_index_{1};
 #ifdef USE_USB_HOST_PER_PORT_FIFO_BIAS
   uint8_t port_fifo_bias_[SOC_USB_OTG_PERIPH_NUM]{};
+  bool full_speed_only_{false};
 #endif
 };
 

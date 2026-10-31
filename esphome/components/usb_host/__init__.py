@@ -41,6 +41,26 @@ CONF_PRODUCT = "product"
 CONF_ENABLE_HUBS = "enable_hubs"
 CONF_MAX_TRANSFER_REQUESTS = "max_transfer_requests"
 CONF_MAX_PACKET_SIZE = "max_packet_size"
+CONF_DUAL_HOST = "dual_host"
+CONF_CONTROLLERS = "controllers"
+CONTROLLERS_HIGH_SPEED = "high_speed"
+CONTROLLERS_FULL_SPEED = "full_speed"
+CONTROLLERS_BOTH = "both"
+# usb_host_config_t.peripheral_map on the ESP32-P4: bit 0 is the high-speed controller (UTMI
+# PHY), bit 1 the full-speed one (soc/esp32p4/usb_dwc_periph.c).
+_PERIPHERAL_MAPS = {
+    CONTROLLERS_HIGH_SPEED: 0b01,
+    CONTROLLERS_FULL_SPEED: 0b10,
+    CONTROLLERS_BOTH: 0b11,
+}
+CONF_FS_PINS = "fs_pins"
+CONF_FULL_SPEED_ONLY = "full_speed_only"
+
+# GPIO pair the ESP32-P4 full-speed OTG controller is wired to on the board. The chip has
+# two internal FSLS PHYs: PHY 0 on GPIO24 (D-) / GPIO25 (D+), PHY 1 on GPIO26 / GPIO27.
+# Out of reset OTG_FS gets PHY 1 and USB-Serial-JTAG gets PHY 0; selecting "24_25" swaps
+# them, which also moves USB-Serial-JTAG to GPIO26/27.
+FS_PIN_CHOICES = {"26_27": 1, "24_25": 0}
 
 # Transfer-class requirement tracking. Consumer components call the require_*()
 # functions below; the FINAL-priority job turns the union into defines.
@@ -250,6 +270,44 @@ def _store_host_options(config: dict) -> dict:
     domain_data = CORE.data.setdefault(DOMAIN, {})
     domain_data[CONF_MAX_PACKET_SIZE] = config[CONF_MAX_PACKET_SIZE]
     domain_data[CONF_MAX_TRANSFER_REQUESTS] = config[CONF_MAX_TRANSFER_REQUESTS]
+    domain_data[CONF_CONTROLLERS] = config.get(CONF_CONTROLLERS)
+    return config
+
+
+def _resolve_controllers(config: dict) -> dict:
+    """controllers: which ESP32-P4 controllers run as host; dual_host: true means both."""
+    controllers = config.get(CONF_CONTROLLERS)
+    if config[CONF_DUAL_HOST]:
+        if controllers not in (None, CONTROLLERS_BOTH):
+            raise cv.Invalid(
+                f"dual_host runs both controllers; it contradicts {CONF_CONTROLLERS}: {controllers}"
+            )
+        controllers = CONTROLLERS_BOTH
+    if controllers is None:
+        return config
+    if get_esp32_variant() != VARIANT_ESP32P4:
+        raise cv.Invalid(
+            f"{CONF_CONTROLLERS} and {CONF_DUAL_HOST} are only supported on ESP32-P4"
+        )
+    if controllers != CONTROLLERS_HIGH_SPEED and not per_port_fifo_bias_available():
+        raise cv.Invalid(f"{CONF_CONTROLLERS}: {controllers} requires IDF >= 5.4.0")
+    config[CONF_CONTROLLERS] = controllers
+    return config
+
+
+def _validate_full_speed_only(config: dict) -> dict:
+    """full_speed_only: the high-speed controller as a full/low-speed host."""
+    if not config.get(CONF_FULL_SPEED_ONLY):
+        return config
+    if get_esp32_variant() not in (VARIANT_ESP32P4, VARIANT_ESP32S31):
+        raise cv.Invalid(f"{CONF_FULL_SPEED_ONLY} is only supported on ESP32-P4 and ESP32-S31")
+    if not per_port_fifo_bias_available():
+        raise cv.Invalid(f"{CONF_FULL_SPEED_ONLY} requires IDF >= 5.4.0")
+    if config.get(CONF_CONTROLLERS) == CONTROLLERS_FULL_SPEED:
+        raise cv.Invalid(
+            f"{CONF_FULL_SPEED_ONLY} applies to the high-speed controller, which "
+            f"{CONF_CONTROLLERS}: {CONTROLLERS_FULL_SPEED} does not run"
+        )
     return config
 
 
@@ -355,6 +413,9 @@ def fs_peripheral_index() -> int | None:
     variants whose full-speed controller is the only controller it is index 0.
     """
     variant = get_esp32_variant()
+    if variant == VARIANT_ESP32P4:
+        controllers = CORE.data.get(DOMAIN, {}).get(CONF_CONTROLLERS)
+        return 1 if controllers in (CONTROLLERS_FULL_SPEED, CONTROLLERS_BOTH) else None
     if variant in (VARIANT_ESP32S2, VARIANT_ESP32S3):
         return 0
     return None
@@ -398,6 +459,16 @@ def get_max_transfer_requests() -> int:
     return CORE.data.get(DOMAIN, {}).get(CONF_MAX_TRANSFER_REQUESTS, 16)
 
 
+def dual_host_enabled() -> bool:
+    """Whether both USB controllers are brought up.
+
+    Matters to consumers because the two controllers are not equivalent: with dual host a
+    device can land on the full-speed one, whose FIFO and packet limits are those of a
+    full-speed controller no matter how capable the variant is overall.
+    """
+    return CORE.data.get(DOMAIN, {}).get(CONF_CONTROLLERS) == CONTROLLERS_BOTH
+
+
 def _default_max_packet_size() -> int:
     """Largest bulk/interrupt packet the controller in this variant moves at once.
 
@@ -420,6 +491,12 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_MAX_PACKET_SIZE, default=_default_max_packet_size
             ): cv.one_of(64, 128, 256, 512, 1024, int=True),
+            cv.Optional(CONF_DUAL_HOST, default=False): cv.boolean,
+            cv.Optional(CONF_CONTROLLERS): cv.one_of(*_PERIPHERAL_MAPS, lower=True),
+            cv.Optional(CONF_FS_PINS, default="26_27"): cv.enum(FS_PIN_CHOICES),
+            # The high-speed controller as a full/low-speed host: it ignores the
+            # high-speed chirp, so every device and hub on it runs at full or low speed.
+            cv.Optional(CONF_FULL_SPEED_ONLY): cv.boolean,
         }
     ),
     only_on_variant(
@@ -431,6 +508,8 @@ CONFIG_SCHEMA = cv.All(
             VARIANT_ESP32S31,
         ]
     ),
+    _resolve_controllers,
+    _validate_full_speed_only,
     _store_host_options,
 )
 
@@ -548,6 +627,15 @@ async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     CORE.add_job(_usb_match_guards)
+
+    if (controllers := config.get(CONF_CONTROLLERS)) not in (
+        None,
+        CONTROLLERS_HIGH_SPEED,
+    ):
+        cg.add(var.set_peripheral_map(_PERIPHERAL_MAPS[controllers]))
+    cg.add(var.set_fs_phy_index(config[CONF_FS_PINS]))
+    if config.get(CONF_FULL_SPEED_ONLY):
+        cg.add(var.set_full_speed_only(True))
 
     # FINAL: require_*() calls arrive from consumer to_code() at higher priorities, so
     # turn the collected set into defines once after every job ran. Emitting per call

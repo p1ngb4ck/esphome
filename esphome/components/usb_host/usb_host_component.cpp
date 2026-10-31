@@ -25,7 +25,32 @@ static USBHost *&usb_host_ref() {
 USBHost *get_usb_host() { return usb_host_ref(); }
 
 void USBHost::setup() {
+#if defined(USE_ESP32_VARIANT_ESP32P4)
+  // The full-speed OTG controller shares two internal FSLS PHYs with USB-Serial-JTAG. Out of
+  // reset the controller gets PHY 1 (GPIO26/27) and USB-Serial-JTAG gets PHY 0 (GPIO24/25).
+  // A board that wires its full-speed connector to GPIO24/25 needs the other mapping, which
+  // is a software register in LP_SYS -- no eFuse required. usb_phy.c does not touch this
+  // selector, so it has to happen here, before usb_host_install() brings the PHY up.
+  if (this->fs_phy_index_ == 0) {
+    usb_wrap_ll_phy_select(nullptr, 0);
+    // usb_phy.c raises the pad drive strength on GPIO26/27 unconditionally, because that is
+    // what soc's internal_phy_io names. After the swap the controller drives the other pair,
+    // so raise it there too rather than relying on the fixed constant.
+    gpio_set_drive_capability(GPIO_NUM_24, GPIO_DRIVE_CAP_3);
+    gpio_set_drive_capability(GPIO_NUM_25, GPIO_DRIVE_CAP_3);
+    ESP_LOGI(TAG, "USB FS PHY 0 selected (D- GPIO24, D+ GPIO25)");
+  }
+#endif
   usb_host_config_t config{};
+#if defined(USE_ESP32_VARIANT_ESP32P4) && defined(USE_USB_HOST_PER_PORT_FIFO_BIAS)
+  if (this->peripheral_map_ != 0) {
+    // Bit 0 is the high-speed controller, bit 1 the full-speed one.
+    config.peripheral_map = this->peripheral_map_;
+    ESP_LOGI(TAG, "USB host on %s", this->peripheral_map_ == 0b11  ? "both controllers"
+                                    : this->peripheral_map_ == 0b10 ? "the full-speed controller"
+                                                                     : "the high-speed controller");
+  }
+#endif
 #ifdef USE_USB_HOST_PER_PORT_FIFO_BIAS
   // Each controller resolves its own split from its own FIFO depth, so setting one here
   // leaves the other on ESP-IDF's Kconfig default rather than moving it too.
@@ -35,6 +60,9 @@ void USBHost::setup() {
       ESP_LOGI(TAG, "USB controller %u FIFO bias %u", i, this->port_fifo_bias_[i]);
     }
   }
+  config.fsls_only = this->full_speed_only_;
+  if (this->full_speed_only_)
+    ESP_LOGI(TAG, "High-speed controller limited to full/low speed");
 #endif
 #ifdef USE_USB_HOST_CHANNEL_BUDGET
   // Every device's host channels are counted before it is configured (channel_budget_cb)
