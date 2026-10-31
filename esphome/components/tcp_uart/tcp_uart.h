@@ -26,6 +26,13 @@ namespace esphome::tcp_uart {
 
 /// TCP client or server presented as a UART. Bytes are copied unchanged.
 class TcpUart : public uart::UARTComponent, public Component {
+#ifdef USE_BINARY_SENSOR
+  SUB_BINARY_SENSOR(connected)
+#endif
+#ifdef USE_SENSOR
+  SUB_SENSOR(disconnects)
+#endif
+
  public:
   TcpUart() { this->rx_buffer_size_ = RX_BUFFER_SIZE; }
 
@@ -48,12 +55,6 @@ class TcpUart : public uart::UARTComponent, public Component {
       this->enable_loop();
     }
   }
-#endif
-#ifdef USE_BINARY_SENSOR
-  void set_connected_sensor(binary_sensor::BinarySensor *sensor) { this->connected_sensor_ = sensor; }
-#endif
-#ifdef USE_SENSOR
-  void set_disconnects_sensor(sensor::Sensor *sensor) { this->disconnects_sensor_ = sensor; }
 #endif
 #ifdef USE_SOCKET_TCP_LISTENER
   void set_server(bool server) { this->server_ = server; }
@@ -204,11 +205,7 @@ class TcpUart : public uart::UARTComponent, public Component {
   // Slot 0's session; it owns the key.
   noise::NoiseStream *noise_{nullptr};
 #endif
-#ifdef USE_BINARY_SENSOR
-  binary_sensor::BinarySensor *connected_sensor_{nullptr};
-#endif
 #ifdef USE_SENSOR
-  sensor::Sensor *disconnects_sensor_{nullptr};
   uint32_t disconnects_{0};
 #endif
   uint32_t last_drop_log_ms_{0};

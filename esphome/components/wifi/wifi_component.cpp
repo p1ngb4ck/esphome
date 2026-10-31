@@ -24,8 +24,6 @@
 #include <algorithm>
 #include <new>
 #include <utility>
-#include "lwip/dns.h"
-#include "lwip/err.h"
 
 #include "esphome/core/application.h"
 #include "esphome/core/hal.h"

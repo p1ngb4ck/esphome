@@ -91,20 +91,7 @@ void ArduinoI2CBus::dump_config() {
   } else {
     ESP_LOGCONFIG(TAG, "  Recovery: disabled");
   }
-  if (this->scan_) {
-    ESP_LOGI(TAG, "Results from bus scan:");
-    if (this->scan_results_.empty()) {
-      ESP_LOGI(TAG, "Found no devices");
-    } else {
-      for (const auto &s : this->scan_results_) {
-        if (s.second) {
-          ESP_LOGI(TAG, "Found device at address 0x%02X", s.first);
-        } else {
-          ESP_LOGE(TAG, "Unknown error at address 0x%02X", s.first);
-        }
-      }
-    }
-  }
+  this->dump_scan_results_();
 }
 
 ErrorCode ArduinoI2CBus::write_readv(uint8_t address, const uint8_t *write_buffer, size_t write_count,

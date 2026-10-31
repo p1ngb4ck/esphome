@@ -35,6 +35,13 @@ class UartTcpForwards;
 
 /// Copies raw bytes between one hardware UART and one TCP socket.
 class UartTcp final : public Component, public uart::UARTDevice {
+#ifdef USE_BINARY_SENSOR
+  SUB_BINARY_SENSOR(connected)
+#endif
+#ifdef USE_SENSOR
+  SUB_SENSOR(disconnects)
+#endif
+
  public:
   static constexpr size_t HOST_MAX = 253;
   static constexpr size_t MAX_ALLOWED_IPS = 16;
@@ -69,12 +76,6 @@ class UartTcp final : public Component, public uart::UARTDevice {
       this->run_(true);
     }
   }
-#endif
-#ifdef USE_BINARY_SENSOR
-  void set_connected_sensor(binary_sensor::BinarySensor *sensor) { this->connected_sensor_ = sensor; }
-#endif
-#ifdef USE_SENSOR
-  void set_disconnects_sensor(sensor::Sensor *sensor) { this->disconnects_sensor_ = sensor; }
 #endif
 
   // Runtime settings: each applies at once and is saved; from the next boot on it replaces the yaml value.
@@ -184,9 +185,6 @@ class UartTcp final : public Component, public uart::UARTDevice {
 #ifdef USE_NOISE_STREAM
   noise::NoiseStream *noise_{nullptr};
 #endif
-#ifdef USE_BINARY_SENSOR
-  binary_sensor::BinarySensor *connected_sensor_{nullptr};
-#endif
 #ifdef USE_UART_VIRTUAL
   uart::VirtualUARTComponent *virtual_uart_{nullptr};
 #endif
@@ -202,9 +200,6 @@ class UartTcp final : public Component, public uart::UARTDevice {
 #endif
   // Loop start time of the last socket-to-UART write; sizes the next paced write.
   uint32_t last_write_ms_{0};
-#ifdef USE_SENSOR
-  sensor::Sensor *disconnects_sensor_{nullptr};
-#endif
   void (*connection_cb_)(void *, bool){nullptr};
   void *connection_arg_{nullptr};
   uint32_t disconnects_{0};

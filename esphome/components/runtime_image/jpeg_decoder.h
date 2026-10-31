@@ -44,7 +44,6 @@ class JpegDecoder : public ImageDecoder {
    */
 #if !defined(USE_HWJPG) && !defined(USE_NEWJPEG)
   JpegDecoder(RuntimeImage *image);
-  ~JpegDecoder() override;
 
   int prepare(size_t expected_size) override;
 #else
@@ -92,8 +91,8 @@ class JpegDecoder : public ImageDecoder {
   static int32_t source_seek(JPEGFILE *file, int32_t position);
   static void source_close(void *handle) {}
 
-  /// About 18 KB of decoder state, allocated like pngle in PngDecoder: PSRAM first, nullptr if out of memory
-  JPEGDEC *jpeg_{nullptr};
+  /// About 18 KB of decoder state: PSRAM first, nullptr if out of memory
+  RAMUniquePtr<JPEGDEC> jpeg_;
   int scale_{1};                   // JPEGDEC decodes at 1/scale_ of the image size
   DecodeSource *source_{nullptr};  // Set while a begin_source() decode is in progress
 #endif
