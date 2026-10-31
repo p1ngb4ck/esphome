@@ -8,9 +8,10 @@ import esphome.codegen as cg
 from esphome.components.const import CONF_ROLE
 from esphome.config_helpers import filter_source_files_from_defines
 import esphome.config_validation as cv
-from esphome.const import CONF_TIMEOUT
-from esphome.core import CORE, ID
-from esphome.core.config import CONF_LOOP_INTERVAL, get_loop_interval
+from esphome.const import CONF_ESPHOME, CONF_TIMEOUT
+from esphome.core import CORE, ID, TimePeriodMilliseconds
+from esphome.core.config import CONF_LOOP_INTERVAL
+import esphome.final_validate as fv
 from esphome.types import ConfigType
 
 _LOGGER = logging.getLogger(__name__)
@@ -40,6 +41,17 @@ MIN_TCP_SOCKETS = 8
 MIN_UDP_SOCKETS = 6
 # Minimum listening sockets — at least api + ota baseline.
 MIN_TCP_LISTEN_SOCKETS = 2
+
+# Application::loop_interval_ when esphome: sets no loop_interval. Kept here: the fork's components run on an
+# installed ESPHome core, which external_components cannot replace.
+_DEFAULT_LOOP_INTERVAL = TimePeriodMilliseconds(milliseconds=16)
+
+
+def get_loop_interval() -> TimePeriodMilliseconds:
+    """Return the main loop interval of the configuration; for final validation."""
+    return fv.full_config.get()[CONF_ESPHOME].get(
+        CONF_LOOP_INTERVAL, _DEFAULT_LOOP_INTERVAL
+    )
 
 
 class SocketType(StrEnum):
