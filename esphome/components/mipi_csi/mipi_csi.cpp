@@ -33,6 +33,7 @@ ESPHOME_LOG_TAG(TAG, "mipi_csi");
 static constexpr uint32_t CAPTURE_TASK_STACK_SIZE = 4096;
 static constexpr UBaseType_t CAPTURE_TASK_PRIORITY = 1;
 static constexpr BaseType_t CAPTURE_TASK_CORE = 1;
+static constexpr uint32_t JPEG_ENGINE_TIMEOUT_MS = 200;
 
 /// How a configured pixel format maps onto the video device and the JPEG encoder.
 struct FormatMapping {
@@ -70,11 +71,16 @@ static void format_fourcc(uint32_t fourcc, FourccName out) {
 
 /* ---------------- MipiCsiCamera: setup ---------------- */
 
+static uint8_t *psram_alloc(size_t size) {
+  return static_cast<uint8_t *>(heap_caps_aligned_alloc(128, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+}
+
+static void psram_free(uint8_t *ptr) { heap_caps_free(ptr); }
+
 void MipiCsiCamera::setup() {
   if (this->alloc_ == nullptr || this->free_ == nullptr) {
-    ESP_LOGE(TAG, "No buffer allocator set (set_buffer_allocator)");
-    this->mark_failed();
-    return;
+    this->alloc_ = psram_alloc;
+    this->free_ = psram_free;
   }
   if (!this->start_external_clock_()) {
     this->mark_failed();
@@ -366,14 +372,22 @@ bool MipiCsiCamera::open_jpeg_() {
   if (this->encoder_.is_open())
     return true;
   jpeg_encoder_handle_t engine = this->jpeg_engine_ != nullptr ? this->jpeg_engine_() : nullptr;
+  if (this->jpeg_engine_ == nullptr) {
+    jpeg_encode_engine_cfg_t cfg{};
+    cfg.timeout_ms = JPEG_ENGINE_TIMEOUT_MS;
+    if (jpeg_new_encoder_engine(&cfg, &this->own_jpeg_engine_) != ESP_OK)
+      this->own_jpeg_engine_ = nullptr;
+    engine = this->own_jpeg_engine_;
+  }
   if (engine == nullptr) {
-    ESP_LOGE(TAG, "No JPEG encoder engine (set_jpeg_encoder)");
+    ESP_LOGE(TAG, "No JPEG encoder engine");
     return false;
   }
   const size_t jpeg_size = align_piece(JpegEncoder::output_size_for(this->expected_frame_size_));
   this->jpeg_output_ = this->alloc_(jpeg_size);
   if (this->jpeg_output_ == nullptr) {
     ESP_LOGE(TAG, "No room for the JPEG output (%zu bytes)", jpeg_size);
+    this->release_own_jpeg_engine_();
     return false;
   }
   const FormatMapping mapping = get_format_mapping(this->pixel_format_);
@@ -388,6 +402,14 @@ void MipiCsiCamera::close_jpeg_() {
     this->free_(this->jpeg_output_);
     this->jpeg_output_ = nullptr;
   }
+  this->release_own_jpeg_engine_();
+}
+
+void MipiCsiCamera::release_own_jpeg_engine_() {
+  if (this->own_jpeg_engine_ == nullptr)
+    return;
+  jpeg_del_encoder_engine(this->own_jpeg_engine_);
+  this->own_jpeg_engine_ = nullptr;
 }
 
 bool MipiCsiCamera::queue_buffer_(uint32_t index) {

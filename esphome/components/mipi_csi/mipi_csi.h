@@ -228,6 +228,7 @@ class MipiCsiCamera final : public camera::Camera {
   /// Main loop: the JPEG output (a pool piece) and the engine while API images are asked for; given back after.
   bool open_jpeg_();
   void close_jpeg_();
+  void release_own_jpeg_engine_();
   /// Logs every MIPI-CSI format the sensor offers, used when the configured resolution is rejected.
   void log_sensor_formats_();
   /// Ranks two sensor formats of the same resolution against each other.
@@ -284,6 +285,7 @@ class MipiCsiCamera final : public camera::Camera {
   BufferAlloc alloc_{nullptr};
   BufferFree free_{nullptr};
   jpeg_encoder_handle_t (*jpeg_engine_)(){nullptr};
+  jpeg_encoder_handle_t own_jpeg_engine_{nullptr};
   State state_{State::IDLE};
   bool video_ready_{false};
   FixedVector<FrameBuffer> buffers_;

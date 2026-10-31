@@ -203,6 +203,7 @@ SETTERS = {
 async def to_code(config: ConfigType) -> None:
     cg.add_define("USE_CAMERA")
     cg.add_define("USE_MIPI_CSI")
+    esp32.require_hw_jpeg()
     var = cg.new_Pvariable(config[CONF_ID])
     await setup_entity(var, config, "camera")
     await cg.register_component(var, config)
