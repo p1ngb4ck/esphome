@@ -1,7 +1,7 @@
 // Screenshots and screencasts of what LVGL shows (screen_capture:). LVGL's drawing goes into a
 // picture of the screen's own (FrameCapture), the HW JPEG encoder makes the JPEGs on the capture
 // task, the files are written through the storage worker on the main loop (each step after the last
-// one's completion), svp_relay gets the screencast over a connection of its own (cast sender task).
+// one's completion), the media relay gets the screencast over a connection of its own (cast sender task).
 // No encoding of anything else: the sound is the microphone's PCM as it comes.
 
 #include "screen_capture.h"
@@ -36,8 +36,8 @@ static const char *const R_STREAM = "A stream took the panel";
 static const char *const R_DESKTOP = "A remote desktop started";
 static const char *const R_MEMORY = "Not enough memory for the screencast";
 static const char *const R_WRITE = "Writing the screencast's file failed";
-static const char *const R_RELAY = "SVP Relay was not reached";
-static const char *const R_RELAY_LOST = "The connection to SVP Relay was lost";
+static const char *const R_RELAY = "The media relay was not reached";
+static const char *const R_RELAY_LOST = "The connection to the media relay was lost";
 static const char *const R_FULL = "The screencast reached its longest length";
 static const char *const R_CAPTURE = "The screen capture stopped";
 static const char *const R_BUSY = "A screenshot is still being written";
@@ -101,7 +101,7 @@ bool ScreenCapture::capture_ready_() {
       this->cap_ppa_ = nullptr;  // copied by the CPU then
   }
   if (this->cap_task_ == nullptr &&
-      !create_psram_task(&ScreenCapture::capture_task_entry_, "svp_capture", CAP_TASK_STACK, this, 3,
+      !create_psram_task(&ScreenCapture::capture_task_entry_, "screen_capture", CAP_TASK_STACK, this, 3,
                          &this->cap_task_, 0)) {
     this->cap_task_ = nullptr;
     ESP_LOGE(TAG, "No capture task");
@@ -112,7 +112,7 @@ bool ScreenCapture::capture_ready_() {
     args.callback = &ScreenCapture::capture_tick_cb_;
     args.arg = this;
     args.dispatch_method = ESP_TIMER_TASK;
-    args.name = "svp_cast";
+    args.name = "screen_cast";
     if (esp_timer_create(&args, &this->cap_timer_) != ESP_OK) {
       this->cap_timer_ = nullptr;
       return false;
@@ -1004,7 +1004,7 @@ void ScreenCapture::loop() {
       this->capture_end_(why);
   }
 
-  // svp_relay's answer, then the connection.
+  // The media relay's answer, then the connection.
   const uint8_t relay = this->cap_relay_.load(std::memory_order_acquire);
   if (relay == CAP_RELAY_ASKED && millis() - this->cap_relay_asked_ > CAP_RELAY_WAIT_MS)
     this->cap_relay_.store(CAP_RELAY_FAILED, std::memory_order_release);
@@ -1024,7 +1024,7 @@ void ScreenCapture::loop() {
       if (relay == CAP_RELAY_FAILED)
         ESP_LOGW(TAG, "Screencast: %s, into the file only", R_RELAY);
       if (this->cast_file_ == CF_FAILED)
-        ESP_LOGW(TAG, "Screencast: %s, to SVP Relay only", R_WRITE);
+        ESP_LOGW(TAG, "Screencast: %s, to the media relay only", R_WRITE);
       // Running: LVGL's drawing, the sound and the tick.
       this->cast_state_ = CAST_RUNNING;
       this->cap_casting_.store(true, std::memory_order_release);
@@ -1045,7 +1045,7 @@ void ScreenCapture::loop() {
   }
 
   if (this->cast_state_ == CAST_RUNNING) {
-    // svp_relay gone: the file goes on alone, else the screencast ends. The same the other way.
+    // The media relay gone: the file goes on alone, else the screencast ends. The same the other way.
     const uint8_t sinks = this->cap_sinks_.load(std::memory_order_acquire);
     if ((sinks & CAP_SINK_RELAY) && relay == CAP_RELAY_FAILED) {
       this->cap_sinks_.fetch_and(static_cast<uint8_t>(~CAP_SINK_RELAY), std::memory_order_acq_rel);
@@ -1059,7 +1059,7 @@ void ScreenCapture::loop() {
       if ((sinks & ~CAP_SINK_FILE) == 0) {
         this->capture_end_(R_WRITE);
       } else {
-        ESP_LOGW(TAG, "Screencast: %s, to SVP Relay only", R_WRITE);
+        ESP_LOGW(TAG, "Screencast: %s, to the media relay only", R_WRITE);
       }
     }
   }
@@ -1091,12 +1091,12 @@ void ScreenCapture::loop() {
         !this->cam_cap_busy_.load(std::memory_order_acquire)) {
       this->capture_free_frames_();
     }
-    // The file's end: its indexes and header; svp_relay's connection closed.
+    // The file's end: its indexes and header; the media relay's connection closed.
     if (this->cast_file_ == CF_READY && !this->cast_file_final_) {
       this->cast_file_final_ = true;
       this->cast_file_run_();
     }
-    // svp_relay: once its answer and the connection are settled, the connection closed and the
+    // The media relay: once its answer and the connection are settled, the connection closed and the
     // relay told.
     const uint8_t relay_now = this->cap_relay_.load(std::memory_order_acquire);
     if (relay_now == CAP_RELAY_READY || relay_now == CAP_RELAY_FAILED) {
@@ -1340,10 +1340,10 @@ void ScreenCapture::cast_file_run_() {
 }
 
 //==================================================================================================
-// svp_relay
+// media relay
 //==================================================================================================
 
-// Channel task: svp_relay takes the screencast on a port of its own (start), or lets it go.
+// Channel task: the media relay takes the screencast on a port of its own (start), or lets it go.
 void ScreenCapture::cast_relay_task_(bool start) {
   const std::string payload = json::build_json([&](JsonObject root) {
     root["port"] = this->host_->capture_stream_port();
@@ -1383,7 +1383,7 @@ void ScreenCapture::cast_relay_task_(bool start) {
   }
   this->cap_relay_port_.store(port, std::memory_order_relaxed);
   if (this->cap_tx_task_ == nullptr &&
-      !create_psram_task(&ScreenCapture::cast_tx_entry_, "svp_cast_tx", CAP_TASK_STACK, this, 3,
+      !create_psram_task(&ScreenCapture::cast_tx_entry_, "screen_cast_tx", CAP_TASK_STACK, this, 3,
                          &this->cap_tx_task_, 0)) {
     this->cap_tx_task_ = nullptr;
     this->cap_relay_.store(CAP_RELAY_FAILED, std::memory_order_release);
@@ -1416,7 +1416,7 @@ void ScreenCapture::cast_tx_close_() {
   this->cap_sock_ = -1;
 }
 
-// The cast sender task: connects to svp_relay, sends the header and then each batch.
+// The cast sender task: connects to the media relay, sends the header and then each batch.
 void ScreenCapture::cast_tx_loop_() {
   while (true) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -1425,7 +1425,7 @@ void ScreenCapture::cast_tx_loop_() {
       this->cast_tx_close_();
     if (this->cap_tx_connect_.exchange(false, std::memory_order_acq_rel)) {
       bool ok = false;
-      // svp_relay's host: the channel list's URL's.
+      // The media relay's host: the relay link's URL's.
       std::string host = this->host_->capture_relay_url();
       const size_t scheme = host.find("://");
       if (scheme != std::string::npos)
@@ -1460,7 +1460,7 @@ void ScreenCapture::cast_tx_loop_() {
           ::fcntl(this->cap_sock_, F_SETFL, flags);
           if (connected) {
             char line[64];
-            const int n = std::snprintf(line, sizeof(line), "SVPCAST %s\n", this->cap_relay_token_);
+            const int n = std::snprintf(line, sizeof(line), "MEDIACAST %s\n", this->cap_relay_token_);
             ok = this->cast_tx_send_(reinterpret_cast<const uint8_t *>(line), static_cast<size_t>(n)) &&
                  this->cast_tx_send_(this->cap_index_, this->cap_avi_.header_size());
           }
