@@ -1,0 +1,169 @@
+"""
+S3 client storage component for ESPHome.
+
+WARNING: This component is EXPERIMENTAL. The API (both Python configuration
+and C++ interfaces) may change at any time without following the normal
+breaking changes policy. Use at your own risk.
+
+Once the API is considered stable, this warning will be removed.
+"""
+
+import esphome.codegen as cg
+from esphome.components import cert_store
+from esphome.components.storage import (
+    MountableStorage,
+    register_mount_path,
+    request_path_length,
+    request_storage_device,
+    request_storage_worker,
+    validate_mount_path,
+)
+import esphome.config_validation as cv
+from esphome.const import CONF_ID, CONF_PORT
+
+CODEOWNERS = ["@p1ngb4ck"]
+DEPENDENCIES = ["network"]
+
+
+CONF_ENDPOINT = "endpoint"
+CONF_BUCKET = "bucket"
+CONF_REGION = "region"
+CONF_ACCESS_KEY = "access_key"
+CONF_SECRET_KEY = "secret_key"
+CONF_MOUNT_PATH = "mount_path"
+CONF_PATH_STYLE = "path_style"
+CONF_BASE_PATH = "base_path"
+CONF_AUTO_CONNECT = "auto_connect"
+CONF_TLS = "tls"
+
+s3_client_ns = cg.esphome_ns.namespace("s3_client")
+# MountableStorage parent makes s3 ids valid targets for the generic storage.mount /
+# storage.unmount actions (cv.use_id(MountableStorage) checks declared Python parents).
+S3Client = s3_client_ns.class_("S3Client", cg.Component, MountableStorage)
+
+DEFAULT_PORT_TLS = 443
+DEFAULT_PORT_PLAIN = 80
+
+
+def _default_port(config):
+    if CONF_PORT not in config:
+        config = dict(config)
+        config[CONF_PORT] = (
+            DEFAULT_PORT_TLS if config.get(CONF_TLS, True) else DEFAULT_PORT_PLAIN
+        )
+    return config
+
+
+def _validate_endpoint(endpoint):
+    # endpoint must be a bare host (optionally with a port handled separately); a scheme or a path
+    # here is the classic mistake that made getaddrinfo see "host/prefix/". Point the user at
+    # base_path for the prefix.
+    e = cv.string(endpoint)
+    if "://" in e:
+        raise cv.Invalid("endpoint must be a bare host without a scheme (no http:// or https://)")
+    if "/" in e:
+        raise cv.Invalid(
+            "endpoint must be a bare host without a path -- put a reverse-proxy prefix in "
+            "'base_path' instead (e.g. base_path: /shop-files)"
+        )
+    return e
+
+
+def _normalise_base_path(value):
+    # Default and canonical form: leading '/', no trailing '/'. "/" (or "") means no prefix and is
+    # stored as "" so the C++ side joins parts with single slashes (never "//").
+    s = cv.string(value).strip()
+    if s in ("", "/"):
+        return ""
+    if not s.startswith("/"):
+        s = "/" + s
+    while s.endswith("/"):
+        s = s[:-1]
+    return s
+
+
+def _validate_tls(config):
+    # A CA entry is optional: with tls and no ca, cert_store falls back to the built-in Mozilla
+    # bundle, which covers public CAs like Let's Encrypt. A named ca selects a specific cert_store
+    # entry (embedded or storage). A ca without tls is a configuration error.
+    if not config.get(CONF_TLS, True) and cert_store.tls_keys_present(config):
+        raise cv.Invalid(f"ca / client_certificate / client_certificate_key have no effect with '{CONF_TLS}: false'")
+    return config
+
+
+S3_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.declare_id(S3Client),
+        cv.Required(CONF_ENDPOINT): _validate_endpoint,
+        cv.Optional(CONF_PORT): cv.port,
+        cv.Required(CONF_BUCKET): cv.string,
+        cv.Optional(CONF_REGION, default="us-east-1"): cv.string,
+        cv.Required(CONF_ACCESS_KEY): cv.string,
+        cv.Required(CONF_SECRET_KEY): cv.string,
+        cv.Required(CONF_MOUNT_PATH): validate_mount_path,
+        # MinIO and most self-hosted S3 servers require path-style addressing; AWS accepts it.
+        cv.Optional(CONF_PATH_STYLE, default=True): cv.boolean,
+        # Path prefix the endpoint sits behind on a reverse proxy (e.g. /shop-files).
+        # Default "/" means the bucket is at the server root.
+        cv.Optional(CONF_BASE_PATH, default="/"): _normalise_base_path,
+        cv.Optional(CONF_AUTO_CONNECT, default=True): cv.boolean,
+        cv.Optional(CONF_TLS, default=True): cv.boolean,
+    }
+).extend(cert_store.TLS_SCHEMA).extend(cv.COMPONENT_SCHEMA)
+
+
+CONFIG_SCHEMA = cv.All(
+    cv.ensure_list(S3_SCHEMA, _default_port, cert_store.validate_tls, _validate_tls),
+    # only_with_esp_idf does not exist as a prebuilt alias (only only_with_arduino does);
+    # the generic form takes the Framework enum.
+    cv.only_with_framework(cv.Framework.ESP_IDF),
+)
+
+
+def _auto_load(config):
+    # cert_store carries the CA material; only pulled in when some share uses TLS, so a
+    # plain-http LAN MinIO setup does not pay for it.
+    loads = ["storage"]
+    if any(share.get(CONF_TLS, True) for share in config):
+        loads.append("cert_store")
+    return loads
+
+
+AUTO_LOAD = _auto_load
+
+
+async def to_code(config):
+    for share in config:
+        var = cg.new_Pvariable(share[CONF_ID])
+        await cg.register_component(var, share)
+
+        cg.add(var.set_endpoint(share[CONF_ENDPOINT]))
+        cg.add(var.set_port(share[CONF_PORT]))
+        cg.add(var.set_bucket(share[CONF_BUCKET]))
+        cg.add(var.set_region(share[CONF_REGION]))
+        cg.add(var.set_access_key(share[CONF_ACCESS_KEY]))
+        cg.add(var.set_secret_key(share[CONF_SECRET_KEY]))
+        cg.add(var.set_path_style(share[CONF_PATH_STYLE]))
+        cg.add(var.set_base_path(share[CONF_BASE_PATH]))
+        cg.add(var.set_auto_connect(share[CONF_AUTO_CONNECT]))
+        # The gateway gates the setter: set_tls()/set_ca_entry() exist only under
+        # USE_CERT_STORE, which is present exactly when some share enables TLS -- so the
+        # calls are emitted only for TLS shares; plain-http shares rely on the C++ default.
+        if share[CONF_TLS]:
+            cg.add_define("USE_S3_CLIENT_TLS")
+            cg.add(var.set_tls(True))
+            cg.add(var.set_tls_refs(cert_store.tls_refs(share)))
+
+        cg.add(var.set_mount_path(share[CONF_MOUNT_PATH]))
+        # Full VFS paths carry the mount point; the storage component sizes its buffers from
+        # the paths registered here.
+        register_mount_path(share[CONF_MOUNT_PATH])
+
+        request_storage_device()
+        # Deliberately the system default (256): S3 allows 1024-byte keys, but the path bound
+        # is a global maximum every pool, walk and consumer buffer pays for. Keys are bounded
+        # by 256 minus the mount path; raising this waits until the consumers are ready for it.
+        request_path_length(256)
+        # All I/O is our own socket + mbedTLS under the worker's serialization -- safe on the
+        # background task.
+        request_storage_worker(task_safe=True)
