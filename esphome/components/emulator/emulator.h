@@ -21,6 +21,12 @@
 #ifdef USE_EMULATOR_SPEAKER
 #include "esphome/components/speaker/speaker.h"
 #endif
+#ifdef USE_EMULATOR_KEY_BINDINGS
+#include "esphome/components/lvgl/key_bindings.h"
+#endif
+#ifdef USE_EMULATOR_TOUCH
+#include "esphome/components/touchscreen/touchscreen.h"
+#endif
 
 namespace esphome::emulator {
 
@@ -72,6 +78,20 @@ class EmuCore {
 static constexpr size_t EMU_CORE_STORE = 768;
 EmuCore *emu_make_core(EmuSystem system, void *store);
 
+class Emulator;
+
+#ifdef USE_EMULATOR_TOUCH
+class EmulatorTouchListener : public touchscreen::TouchListener {
+ public:
+  explicit EmulatorTouchListener(Emulator *parent) : parent_(parent) {}
+  void update(const touchscreen::TouchPoints_t &points) override;
+  void release() override;
+
+ protected:
+  Emulator *parent_;
+};
+#endif
+
 class Emulator : public Component
 #ifdef USE_LVGL_HID
     , public lvgl::LvglComponent::KeyTap
@@ -106,6 +126,17 @@ class Emulator : public Component
   void set_bios_dir(const char *dir) { this->bios_dir_ = dir; }
   void add_hid(hid::HIDInput *input);
   void add_on_state_callback(std::function<void()> &&callback) { this->state_callbacks_.add(std::move(callback)); }
+#ifdef USE_EMULATOR_KEY_BINDINGS
+  void set_key_bindings(lvgl::KeyBindings *bindings) { this->bindings_ = bindings; }
+  void set_close_keys(uint8_t keys) { this->close_keys_ = keys; }
+  void set_close_hold(float seconds) { this->close_hold_ms_ = static_cast<uint32_t>(seconds * 1000); }
+#endif
+#ifdef USE_EMULATOR_TOUCH
+  void set_touchscreen(touchscreen::Touchscreen *touchscreen) { this->touchscreen_ = touchscreen; }
+  void touch(uint8_t fingers);
+#endif
+  void set_touch_hold(float seconds) { this->touch_hold_ms_ = static_cast<uint32_t>(seconds * 1000); }
+  bool closed_home() const { return this->closed_home_; }
   Trigger<> *get_players_changed_trigger() { return &this->players_changed_trigger_; }
   Trigger<> *get_players_closed_trigger() { return &this->players_closed_trigger_; }
 
@@ -289,6 +320,8 @@ class Emulator : public Component
   bool host_frame_(uint16_t *pad1, uint16_t *pad2);
   void draw_frame_(const EmuVideo &video);
   bool game_key_(uint16_t page, uint16_t usage, bool pressed, uint32_t source);
+  bool close_key_(uint16_t page, uint16_t usage, bool pressed, uint32_t source);
+  void close_check_();
   bool draw_ppa_(const EmuVideo &video, const lvgl::LvglComponent::VideoCanvasTarget &target, bool straight);
   void draw_cpu_(const EmuVideo &video, const lvgl::LvglComponent::VideoCanvasTarget &target);
   void pass_check_();
@@ -305,6 +338,23 @@ class Emulator : public Component
   speaker::Speaker *speaker_{nullptr};
 #endif
   CallbackManager<void()> state_callbacks_;
+  bool closed_home_{false};
+#ifdef USE_EMULATOR_KEY_BINDINGS
+  lvgl::KeyBindings *bindings_{nullptr};
+  uint8_t close_keys_{1};
+  uint32_t close_hold_ms_{1000};
+  bool key_held_{false};
+  uint16_t key_page_{0};
+  uint16_t key_usage_{0};
+  uint32_t key_at_{0};
+#endif
+#ifdef USE_EMULATOR_TOUCH
+  touchscreen::Touchscreen *touchscreen_{nullptr};
+  EmulatorTouchListener touch_listener_{this};
+#endif
+  uint32_t touch_hold_ms_{1000};
+  bool fingers_{false};
+  uint32_t fingers_at_{0};
   uint32_t audio_rate_{48000};
   uint8_t audio_channels_{2};
   std::atomic<bool> pause_wanted_{false};
