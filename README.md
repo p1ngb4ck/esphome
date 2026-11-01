@@ -1,16 +1,9 @@
-# ESPHome [![Discord Chat](https://img.shields.io/discord/429907082951524364.svg)](https://discord.gg/KhAMKrd) [![GitHub release](https://img.shields.io/github/release/esphome/esphome.svg)](https://GitHub.com/esphome/esphome/releases/) [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/esphome/esphome)
+# esphome-phone
 
-<a href="https://esphome.io/">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://media.esphome.io/logo/logo-text-on-dark.svg">
-    <img src="https://media.esphome.io/logo/logo-text-on-light.svg" alt="ESPHome Logo">
-  </picture>
-</a>
+ESPHome `dev` plus the SIP phone app of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome) `testing_dev`. One branch per change; `main` contains every branch. Base: ESPHome `dev` at `1f70f86b47`. The code is taken over unchanged from `testing_dev`; `main` equals `testing_dev` for sip_phone. An app of its own (one repo per app); branches of other topic repos it builds on are merged into the branch that needs them.
 
----
+## Branches
 
-[Documentation](https://esphome.io) -- [Issues](https://github.com/esphome/esphome/issues) -- [Feature requests](https://github.com/orgs/esphome/discussions)
-
----
-
-[![ESPHome - A project from the Open Home Foundation](https://www.openhomefoundation.org/badges/esphome.png)](https://www.openhomefoundation.org/)
+| Branch | Change | Needs | Chips |
+|---|---|---|---|
+| `pr/sip-phone` | sip_phone: SIP phone (account registration, Opus / G.722 / PCMA / PCMU, contacts, DTMF), sound from a resampler microphone to a speaker | `pr/resampler-routing` ([esphome-audio](https://github.com/p1ngb4ck/esphome-audio)), `pr/network-priority` ([esphome-network](https://github.com/p1ngb4ck/esphome-network)) | ESP32 |
