@@ -1,16 +1,5 @@
-# ESPHome [![Discord Chat](https://img.shields.io/discord/429907082951524364.svg)](https://discord.gg/KhAMKrd) [![GitHub release](https://img.shields.io/github/release/esphome/esphome.svg)](https://GitHub.com/esphome/esphome/releases/) [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/esphome/esphome)
+# esphome-pool
 
-<a href="https://esphome.io/">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://media.esphome.io/logo/logo-text-on-dark.svg">
-    <img src="https://media.esphome.io/logo/logo-text-on-light.svg" alt="ESPHome Logo">
-  </picture>
-</a>
+ESPHome `dev` plus smaller fixes and additions of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome) `testing_dev` that belong to no other topic. One branch per change; `main` contains every branch. Base: ESPHome `dev` at `1f70f86b47`.
 
----
-
-[Documentation](https://esphome.io) -- [Issues](https://github.com/esphome/esphome/issues) -- [Feature requests](https://github.com/orgs/esphome/discussions)
-
----
-
-[![ESPHome - A project from the Open Home Foundation](https://www.openhomefoundation.org/badges/esphome.png)](https://www.openhomefoundation.org/)
+Branches: `pr/adc`, `pr/acs712` (on `pr/adc`), `pr/zmpt101b` (on `pr/adc`), `pr/ads1115`, `pr/select`.
