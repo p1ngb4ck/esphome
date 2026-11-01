@@ -436,6 +436,7 @@ class NetworkStorage : public PathStorage {
   // stateless protocol has no open() to carry it. copy() calls it with 0 before the first chunk of
   // a file whose destination is a NetworkStorage.
   virtual StorageError truncate(const char *path, uint64_t size) = 0;
+  virtual StorageError write_done(const char *path, uint64_t size) { return StorageError::STORAGE_ERROR_OK; }
 };
 
 struct OpticalFileHandle : public FileHandle {
