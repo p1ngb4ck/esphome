@@ -36,6 +36,12 @@ class VideoCanvas {
   void drop_frames();
   bool open_page(uint32_t width, uint32_t height, Component *owner);
   bool page_rect(const uint8_t *jpeg, size_t len, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
+  static uint8_t page_bpp();
+  bool page_fill(uint32_t x, uint32_t y, uint32_t width, uint32_t height, const uint8_t *pixel);
+  bool page_pixels(const uint8_t *pixels, size_t stride, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
+  bool page_copy(uint32_t from_x, uint32_t from_y, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
+  bool page_read(uint8_t *pixels, size_t stride, uint32_t x, uint32_t y, uint32_t width, uint32_t height) const;
+  void page_show();
   bool page_size(uint32_t *width, uint32_t *height, bool combined) const;
   bool canvas_point(int32_t *x, int32_t *y) const;
 #endif

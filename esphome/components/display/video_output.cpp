@@ -157,6 +157,84 @@ bool VideoCanvas::page_rect(const uint8_t *jpeg, size_t len, uint32_t x, uint32_
   return true;
 }
 
+uint8_t VideoCanvas::page_bpp() { return BUFFER_BPP; }
+
+static void page_sync(uint8_t *page, size_t stride, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
+  uint8_t *first = page + static_cast<size_t>(y) * stride + static_cast<size_t>(x) * BUFFER_BPP;
+  uint8_t *last = page + (static_cast<size_t>(y) + height - 1) * stride + (static_cast<size_t>(x) + width) * BUFFER_BPP;
+  esp_cache_msync(first, last - first, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+}
+
+bool VideoCanvas::page_fill(uint32_t x, uint32_t y, uint32_t width, uint32_t height, const uint8_t *pixel) {
+  if (this->mode_.load() != MODE_PAGE || pixel == nullptr || width == 0 || height == 0 || x + width > this->width_ ||
+      y + height > this->height_)
+    return false;
+  uint8_t *page = this->buffers_[0];
+  uint8_t *row = page + static_cast<size_t>(y) * this->stride_ + static_cast<size_t>(x) * BUFFER_BPP;
+  for (uint32_t i = 0; i != width; i++)
+    std::memcpy(row + static_cast<size_t>(i) * BUFFER_BPP, pixel, BUFFER_BPP);
+  for (uint32_t r = 1; r != height; r++)
+    std::memcpy(row + static_cast<size_t>(r) * this->stride_, row, static_cast<size_t>(width) * BUFFER_BPP);
+  page_sync(page, this->stride_, x, y, width, height);
+  return true;
+}
+
+bool VideoCanvas::page_pixels(const uint8_t *pixels, size_t stride, uint32_t x, uint32_t y, uint32_t width,
+                              uint32_t height) {
+  if (this->mode_.load() != MODE_PAGE || pixels == nullptr || width == 0 || height == 0 ||
+      x + width > this->width_ || y + height > this->height_)
+    return false;
+  uint8_t *page = this->buffers_[0];
+  for (uint32_t r = 0; r != height; r++)
+    std::memcpy(page + (static_cast<size_t>(y) + r) * this->stride_ + static_cast<size_t>(x) * BUFFER_BPP,
+                pixels + static_cast<size_t>(r) * stride, static_cast<size_t>(width) * BUFFER_BPP);
+  page_sync(page, this->stride_, x, y, width, height);
+  return true;
+}
+
+bool VideoCanvas::page_copy(uint32_t from_x, uint32_t from_y, uint32_t x, uint32_t y, uint32_t width,
+                            uint32_t height) {
+  if (this->mode_.load() != MODE_PAGE || width == 0 || height == 0 || x + width > this->width_ ||
+      y + height > this->height_ || from_x + width > this->width_ || from_y + height > this->height_)
+    return false;
+  uint8_t *page = this->buffers_[0];
+  const size_t bytes = static_cast<size_t>(width) * BUFFER_BPP;
+  if (y <= from_y) {
+    for (uint32_t r = 0; r != height; r++)
+      std::memmove(page + (static_cast<size_t>(y) + r) * this->stride_ + static_cast<size_t>(x) * BUFFER_BPP,
+                   page + (static_cast<size_t>(from_y) + r) * this->stride_ + static_cast<size_t>(from_x) * BUFFER_BPP,
+                   bytes);
+  } else {
+    for (uint32_t r = height; r != 0; r--)
+      std::memmove(page + (static_cast<size_t>(y) + r - 1) * this->stride_ + static_cast<size_t>(x) * BUFFER_BPP,
+                   page + (static_cast<size_t>(from_y) + r - 1) * this->stride_ +
+                       static_cast<size_t>(from_x) * BUFFER_BPP,
+                   bytes);
+  }
+  page_sync(page, this->stride_, x, y, width, height);
+  return true;
+}
+
+bool VideoCanvas::page_read(uint8_t *pixels, size_t stride, uint32_t x, uint32_t y, uint32_t width,
+                            uint32_t height) const {
+  if (this->mode_.load() != MODE_PAGE || pixels == nullptr || width == 0 || height == 0 ||
+      x + width > this->width_ || y + height > this->height_)
+    return false;
+  const uint8_t *page = this->buffers_[0];
+  for (uint32_t r = 0; r != height; r++)
+    std::memcpy(pixels + static_cast<size_t>(r) * stride,
+                page + (static_cast<size_t>(y) + r) * this->stride_ + static_cast<size_t>(x) * BUFFER_BPP,
+                static_cast<size_t>(width) * BUFFER_BPP);
+  return true;
+}
+
+void VideoCanvas::page_show() {
+  if (this->mode_.load() != MODE_PAGE)
+    return;
+  this->page_dirty_.store(true);
+  this->wake_();
+}
+
 bool VideoCanvas::canvas_point(int32_t *x, int32_t *y) const {
   if (this->canvas_ == nullptr || this->lvgl_ == nullptr || !this->open_)
     return false;
