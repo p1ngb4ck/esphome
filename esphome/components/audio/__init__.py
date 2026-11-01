@@ -13,6 +13,7 @@ import esphome.config_validation as cv
 from esphome.const import (
     CONF_BITS_PER_SAMPLE,
     CONF_NUM_CHANNELS,
+    CONF_PLATFORM,
     CONF_SAMPLE_RATE,
     CONF_SIZE,
 )
@@ -220,6 +221,19 @@ def set_stream_limits(
             config[CONF_MAX_SAMPLE_RATE] = max_sample_rate
 
     return set_limits_in_config
+
+
+_FORMAT_RESOLVERS: dict[str, Callable[[ConfigType], None]] = {}
+
+
+def register_format_resolver(platform: str, resolver: Callable[[ConfigType], None]) -> None:
+    _FORMAT_RESOLVERS[platform] = resolver
+
+
+def resolve_device_format(device_id) -> None:
+    device_config = fv.get_declaring_config(device_id)
+    if (resolver := _FORMAT_RESOLVERS.get(device_config.get(CONF_PLATFORM))) is not None:
+        resolver(device_config)
 
 
 def final_validate_audio_schema(
