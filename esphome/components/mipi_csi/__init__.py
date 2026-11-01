@@ -192,21 +192,25 @@ def _final_validate(config: ConfigType) -> ConfigType:
         for name in SENSOR_FORMATS.get(config[CONF_SENSOR], [])
         if (mode := format_mode(name)) is not None and fits(mode[0], mode[1])
     ]
+    resolution = config.get(CONF_RESOLUTION)
+    if shown and resolution is not None and resolution != (0, 0):
+        shown += [
+            name
+            for name in SENSOR_FORMATS.get(config[CONF_SENSOR], [])
+            if name not in shown and (mode := format_mode(name)) is not None and mode[:2] == tuple(resolution)
+        ]
     if shown:
         own[CONF_SHOWN_FORMATS] = shown
-    resolution = config.get(CONF_RESOLUTION)
     if resolution is not None and resolution != (0, 0):
-        if not fits(*resolution):
-            raise cv.Invalid(
-                f"{CONF_RESOLUTION} {resolution[0]}x{resolution[1]} is larger than the screen ({screen_w}x{screen_h})"
-            )
         return config
-    fitting = [(w, h) for w, h, _ in sensor_modes(own)]
-    if not fitting:
-        raise cv.Invalid(
-            f"No mode of {config[CONF_SENSOR]} known here fits the screen: set {CONF_RESOLUTION}"
-        )
-    own[CONF_RESOLUTION] = max(fitting, key=lambda mode: mode[0] * mode[1])
+    fitting = [mode[:2] for name in shown if (mode := format_mode(name)) is not None]
+    if fitting:
+        own[CONF_RESOLUTION] = max(fitting, key=lambda mode: mode[0] * mode[1])
+        return config
+    modes = [mode for name in SENSOR_FORMATS.get(config[CONF_SENSOR], []) if (mode := format_mode(name)) is not None]
+    if not modes:
+        raise cv.Invalid(f"No mode of {config[CONF_SENSOR]} is known here: set {CONF_RESOLUTION}")
+    own[CONF_RESOLUTION] = tuple(min(modes, key=lambda mode: mode[0] * mode[1])[:2])
     return config
 
 
