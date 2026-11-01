@@ -146,7 +146,7 @@ def touchscreen_schema(
             cv.Optional(CONF_ON_TOUCH): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_UPDATE): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_RELEASE): automation.validate_automation(single=True),
-            cv.Optional(CONF_EDT_READ_VARIANT, default=False): cv.boolean,
+            cv.Optional(CONF_EDT_READ_VARIANT): cv.boolean,
         }
     ).extend(cv.polling_component_schema("50ms"))
 
