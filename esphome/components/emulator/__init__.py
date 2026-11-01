@@ -3,6 +3,7 @@ from pathlib import Path
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import socket, speaker
+from esphome.components.const import CONF_HOST
 from esphome.components.esp32 import (
     VARIANT_ESP32P4,
     add_idf_component,
@@ -21,7 +22,6 @@ from esphome.components.storage import request_storage_worker
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_CHANNEL,
-    CONF_HOST,
     CONF_ID,
     CONF_INDEX,
     CONF_NUM_CHANNELS,
