@@ -171,7 +171,9 @@ bool VideoCanvas::canvas_point(int32_t *x, int32_t *y) const {
 void VideoCanvas::drop_frames() {
   if (this->attached_ == nullptr || !this->lvgl_runs_())
     return;
+#if LV_USE_CANVAS
   lv_image_set_src(this->attached_, nullptr);
+#endif
   this->attached_ = nullptr;
   std::memset(&this->draw_buf_, 0, sizeof(this->draw_buf_));
 }
@@ -185,7 +187,9 @@ void VideoCanvas::attach_(uint8_t *pixels) {
     this->attached_ = nullptr;
     if (lv_draw_buf_init(&this->draw_buf_, this->width_, this->height_, BUFFER_FORMAT, this->stride_, pixels,
                          static_cast<uint32_t>(this->buffer_size_)) == LV_RESULT_OK) {
+#if LV_USE_CANVAS
       lv_canvas_set_draw_buf(this->canvas_, &this->draw_buf_);
+#endif
       this->attached_ = this->canvas_;
     }
   }
