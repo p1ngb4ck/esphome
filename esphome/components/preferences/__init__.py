@@ -16,6 +16,7 @@ from esphome.const import (
 from esphome.core import CORE, ID, coroutine_with_priority
 from esphome.coroutine import CoroPriority
 import esphome.final_validate as fv
+from esphome.helpers import cpp_string_escape
 from esphome.types import ConfigType
 
 CODEOWNERS = ["@esphome/core"]
@@ -34,6 +35,7 @@ CONF_STORAGE_BACKEND = "storage_backend"
 CONF_EXTERNAL_NVS = "external_nvs"
 CONF_KEEP_EARLY = "keep_early"
 CONF_USE_INTERNAL_NVS = "use_internal_nvs"
+CONF_NVS_BACKUP_DIR = "nvs_backup_dir"
 
 
 @dataclass
@@ -106,6 +108,7 @@ CONFIG_SCHEMA = cv.Schema(
         # internal namespace is then not opened and preferences read before the external store is
         # bound return defaults. nvs_flash_init() still runs (IDF wifi/BT may need it).
         cv.Optional(CONF_USE_INTERNAL_NVS): cv.All(cv.boolean, cv.only_on_esp32),
+        cv.Optional(CONF_NVS_BACKUP_DIR): cv.All(cv.string_strict, cv.Length(min=2, max=96), cv.only_on_esp32),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -138,6 +141,8 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_update_interval(write_interval))
     if config.get(CONF_RTC_STORAGE):
         preferences.request_rtc_storage()
+    if (backup_dir := config.get(CONF_NVS_BACKUP_DIR)) is not None:
+        cg.add_define("ESP32_NVS_BACKUP_DIR", cg.RawExpression(cpp_string_escape(backup_dir.rstrip("/"))))
     if config.get(CONF_STORAGE_BACKEND):
         cg.add_define("USE_ESP32_PREFERENCES_STORAGE")
         # FILTER_SOURCE_FILES in binary_storage is exclude-based: keep nvs_store.cpp
