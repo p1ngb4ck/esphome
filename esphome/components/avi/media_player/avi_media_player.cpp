@@ -87,14 +87,17 @@ void AviMediaPlayer::control(const media_player::MediaPlayerCall &call) {
   const bool enqueue =
       call.get_command().has_value() && call.get_command().value() == media_player::MEDIA_PLAYER_COMMAND_ENQUEUE;
   if (call.get_media_url().has_value()) {
+    std::string url = call.get_media_url().value();
+    if (url.rfind("file://", 0) == 0)
+      url.erase(0, 7);
     if (enqueue) {
-      this->list_.push_back(call.get_media_url().value());
+      this->list_.push_back(url);
       if (this->run_.load() == RUN_IDLE && this->pending_ < 0)
         this->play_index_(this->list_.size() - 1);
       return;
     }
     this->list_.clear();
-    this->list_.push_back(call.get_media_url().value());
+    this->list_.push_back(url);
     this->play_index_(0);
     return;
   }
@@ -164,11 +167,15 @@ bool AviMediaPlayer::start_(const std::string &path) {
     return false;
   }
   this->path_ = path;
+  this->error_.store(ERROR_NONE);
+  if (this->latency_fn_)
+    this->set_audio_latency(this->latency_fn_());
   this->ring_ = psram_piece(this->ring_size_);
   this->frame_ = psram_piece(this->frame_size_);
   if (this->ring_ == nullptr || this->frame_ == nullptr) {
     ESP_LOGE(TAG, "No memory for %s (largest PSRAM block %zu)", path.c_str(),
              heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    this->error_.store(ERROR_MEMORY);
     this->release_();
     return false;
   }
@@ -322,16 +329,19 @@ bool AviMediaPlayer::open_() {
       this->room_cb_(this->room_arg_);
   } else if (!this->reader_->open(this->path_.c_str())) {
     ESP_LOGE(TAG, "%s not opened", this->path_.c_str());
+    this->error_.store(ERROR_NOT_FOUND);
     return false;
   }
   this->parser_ = std::make_unique<AVIParser>();
   if (!this->parser_->open(this->reader_.get())) {
     ESP_LOGE(TAG, "%s is no AVI", this->path_.c_str());
+    this->error_.store(ERROR_FORMAT);
     return false;
   }
   const AVIStreamInfo *video = this->parser_->get_video_info();
   if (video == nullptr || video->fps_num == 0) {
     ESP_LOGE(TAG, "%s has no video stream", this->path_.c_str());
+    this->error_.store(ERROR_FORMAT);
     return false;
   }
   this->frame_us_ = static_cast<uint32_t>(1000000ull * video->fps_den / video->fps_num);
@@ -340,6 +350,7 @@ bool AviMediaPlayer::open_() {
   if (this->canvas_ == nullptr) {
     ESP_LOGE(TAG, "%s is %" PRIu32 "x%" PRIu32 " at %" PRIu32 " fps: no canvas or screen output takes it",
              this->path_.c_str(), video->width, video->height, fps);
+    this->error_.store(ERROR_FORMAT);
     return false;
   }
   this->pcm_ = false;
@@ -411,8 +422,10 @@ void AviMediaPlayer::play_() {
     this->wait_until_(due);
     due += this->frame_us_;
     const bool shown = this->frame_(this->frame_, static_cast<size_t>(n));
-    if (!shown && !this->frame_failed_)
+    if (!shown && !this->frame_failed_) {
       ESP_LOGW(TAG, "Frames of %s not decoded", this->path_.c_str());
+      this->error_.store(ERROR_DECODE);
+    }
     this->frame_failed_ = !shown;
   }
 }

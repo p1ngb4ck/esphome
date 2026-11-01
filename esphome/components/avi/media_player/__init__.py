@@ -35,8 +35,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_AUDIO_CODECS, default=["pcm"]): cv.ensure_list(
                 cv.one_of("pcm", "mp3", "flac", lower=True)
             ),
-            cv.Optional(CONF_AUDIO_LATENCY, default="0ms"): cv.All(
-                cv.positive_time_period_milliseconds, cv.Range(max=cv.TimePeriod(milliseconds=2000))
+            cv.Optional(CONF_AUDIO_LATENCY, default="0ms"): cv.Any(
+                cv.returning_lambda,
+                cv.All(cv.positive_time_period_milliseconds, cv.Range(max=cv.TimePeriod(milliseconds=2000))),
             ),
         }
     )
@@ -62,4 +63,8 @@ async def to_code(config: ConfigType) -> None:
             audio.request_flac_support()
     cg.add(var.set_buffer_size(config[CONF_BUFFER_SIZE]))
     cg.add(var.set_frame_size(config[CONF_FRAME_SIZE]))
-    cg.add(var.set_audio_latency(config[CONF_AUDIO_LATENCY].total_milliseconds))
+    latency = config[CONF_AUDIO_LATENCY]
+    if isinstance(latency, cv.Lambda):
+        cg.add(var.set_audio_latency_lambda(await cg.process_lambda(latency, [], return_type=cg.uint32)))
+    else:
+        cg.add(var.set_audio_latency(latency.total_milliseconds))
