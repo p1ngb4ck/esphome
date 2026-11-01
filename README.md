@@ -39,6 +39,8 @@ capture, players): [the esp-video plan](https://github.com/p1ngb4ck/p4-panel-wor
 | `pr/camera-encoder-option` | camera, mipi_csi: the encoder a camera option (`encoder: jpeg \| h264`), camera_encoder back to upstream | `pr/esp32-require-h264-encoder`, `pr/mipi-csi-hw-jpeg` | P4 |
 | `pr/avi` | avi: AVI demuxer, muxer, read-ahead file reader on the storage worker | `pr/storage` | all |
 | `pr/display-video-output` | display, lvgl: the HW JPEG decoder's output straight into the scanout buffer, `display::VideoOutput` (lvgl `video_output:` 1-2 canvases following the frame size, page mode, capability report), the camera scanout layer, the frame capture, canvas `external_buffer` | `pr/mipi-dsi-scanout`, `pr/lvgl-color-depth-32` (esphome-mipi-display), `pr/lvgl-remote-input` (esphome-hid), `pr/esp32-require-hw-jpeg` | P4 (scanout) |
+| `pr/display-video-output-page-draw` | display: video output page draw calls (`page_rect` a JPEG into a rectangle, `page_fill`, `page_pixels`, `page_copy`, `page_read`, `page_show`, `page_bpp`, `canvas_point`) | `pr/display-video-output` | P4 |
+| `pr/display-video-output-rows` | display: `open_rows` (the panel's rows alone, no JPEG decoder), `rows_begin` / `rows_end` for a writer of its own (the emulator's PPA pass), `rotation()`, `display()` | `pr/display-video-output-page-draw` | P4 (scanout) |
 | `pr/avi-media-player` | avi: media_player platform `avi` (MJPEG through the video output, PCM / MP3 / FLAC sound, playlist, network streams) | `pr/avi`, `pr/display-video-output` | P4 |
 | `pr/screen-capture` | screen_capture: screenshots and screencasts of what LVGL shows | `pr/avi`, `pr/display-video-output` | P4 |
 | `pr/apps` | apps: app structure with interlock (`apps.start` / `stop` / `is_running`) | - | all |
