@@ -61,6 +61,15 @@ repositories above merged.
 All topics together: `github://p1ngb4ck/esphome@dev`. `external_components` replaces components only; the ESPHome
 core of the build host stays as installed.
 
+## License
+
+- ESPHome's own files, also where this repository changes them: the [ESPHome License](LICENSE) (MIT for the Python
+  code and everything else, GPLv3 for the C++ runtime files).
+- New files written for this repository (new components, their code, tests and documentation): MIT,
+  [LICENSE-MIT](LICENSE-MIT).
+- Third-party code keeps its own licence:
+  - `gsl3680/`: the GSL3680 firmware and driver parts carry Silead's GPL notice.
+
 ## Thanks
 
 The GSL3680 driver comes from Konstantin's ([kvj](https://github.com/kvj/esphome)) `jd9365_gsl3680`, which
