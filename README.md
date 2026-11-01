@@ -36,18 +36,17 @@ crash dumps, the helpers for component authors.
 ## Branches
 
 One branch per change; `main` contains every branch. Base: ESPHome `dev` at `1f70f86b47`.
+The NVS branches (`pr/esp32-nvs-ready`, `pr/esp32-nvs-defaults`, `pr/esp32-nvs-actions`) are in
+[esphome-storage-drivers](https://github.com/p1ngb4ck/esphome-storage-drivers) with the NVS guard (`pr/nvs`).
 
 | Branch | Change | Chips | Needs |
 |---|---|---|---|
 | `pr/esp32-warn-once` | config-time warnings once per run | all | - |
 | `pr/esp32-idf-component-override-path` | `add_idf_component(override_path=...)`: a built-in IDF component replaced by a project copy | all | - |
 | `pr/esp32-loop-task-core` | `LOOP_TASK_CORE` in `esp32/hal.h`, the loop task pinned to it | all | - |
-| `pr/esp32-nvs-ready` | `nvs_ready`: the default NVS partition formatted when it reports no free pages or a new version | all | - |
-| `pr/esp32-nvs-defaults` | `add_nvs_default()`: defaults written into an NVS partition image at build time | all | - |
 | `pr/esp32-chip-revision` | ESP32-P4 `minimum_chip_revision`, settings from the detected chip revision, API action `chip_revision` | ESP32, P4 | `pr/esp32-warn-once` |
 | `pr/esp32-flash-detect` | flash chip and speed from the detected flash, API actions `flash_info` / `flash_verify` | all; speed: P4 | `pr/esp32-chip-revision` |
 | `pr/esp32-coredump` | crash dumps to a `coredump` partition, API actions `coredump_info` / `coredump_read` / `coredump_erase` | all | `pr/esp32-chip-revision` |
-| `pr/esp32-nvs-actions` | NVS browsing and erasing, API actions `nvs_list` / `nvs_erase` | all | `pr/esp32-chip-revision` |
 | `pr/esp32-system-info` | `system_info.h`: chip, flash, PSRAM and partition facts, usage per region | all | - |
 | `pr/esp32-p4-restart-fix` | `esp_restart_noos` wrapped: the other core stalled and the cache sync engine idle before the restart (espressif/esp-idf#19171) | P4 | - |
 | `pr/esp32-p4-small-alloc-retention` | small malloc / new allocations to the retention RAM | P4 | - |
