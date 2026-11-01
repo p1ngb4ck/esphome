@@ -5,6 +5,7 @@ import re
 from esphome import automation, pins
 import esphome.codegen as cg
 from esphome.components import esp32, i2c
+from esphome.components.const import CONF_COLOR_DEPTH
 from esphome.components.camera import (
     CONF_ENCODER,
     ENCODER_H264,
@@ -13,6 +14,13 @@ from esphome.components.camera import (
 )
 from esphome.components.esp32 import add_idf_component, add_idf_sdkconfig_option
 from esphome.components.esp32.const import VARIANT_ESP32P4
+from esphome.components.lvgl.defines import CONF_LVGL_ID
+from esphome.components.lvgl.video_output import (
+    VIDEO_OUTPUT_SCHEMA,
+    final_validate_video_output,
+    screen_size,
+    video_output_to_code,
+)
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_FREQUENCY,
@@ -28,6 +36,7 @@ from esphome.const import (
 )
 from esphome.core import CORE
 from esphome.core.entity_helpers import setup_entity
+import esphome.final_validate as fv
 from esphome.types import ConfigType
 
 from .const import (
@@ -133,6 +142,74 @@ def _validate_h264_format(config: ConfigType) -> ConfigType:
     return config
 
 
+SENSOR_MODE = re.compile(r"_(\d+)X(\d+)(?:_[A-Z]+)*_(\d+)FPS$")
+
+
+CONF_SHOWN_FORMATS = "shown_formats"
+
+
+def format_mode(name: str) -> tuple[int, int, int] | None:
+    if (match := SENSOR_MODE.search(name)) is None:
+        return None
+    return int(match[1]), int(match[2]), int(match[3])
+
+
+def sensor_formats(config: ConfigType) -> list[str]:
+    return config.get(CONF_SHOWN_FORMATS, SENSOR_FORMATS.get(config[CONF_SENSOR], []))
+
+
+def sensor_modes(config: ConfigType) -> list[tuple[int, int, int]]:
+    return [mode for name in sensor_formats(config) if (mode := format_mode(name)) is not None]
+
+
+def _validate_canvas(config: ConfigType) -> ConfigType:
+    if CONF_LVGL_ID not in config:
+        return config
+    if config[CONF_PIXEL_FORMAT] not in ("RGB565", "RGB888"):
+        raise cv.Invalid(f"Showing frames in LVGL needs {CONF_PIXEL_FORMAT} RGB565 or RGB888")
+    if config[CONF_FRAME_BUFFER_COUNT] < 3:
+        raise cv.Invalid(f"Showing frames in LVGL needs {CONF_FRAME_BUFFER_COUNT} 3 or 4")
+    return config
+
+
+def _final_validate(config: ConfigType) -> ConfigType:
+    config = final_validate_video_output(config)
+    if CONF_LVGL_ID not in config:
+        return config
+    fconf = fv.full_config.get()
+    lvgl = fconf.get_config_for_path(fconf.get_path_for_id(config[CONF_LVGL_ID])[:-1])
+    wanted = "RGB565" if lvgl.get(CONF_COLOR_DEPTH, 16) == 16 else "RGB888"
+    if config[CONF_PIXEL_FORMAT] != wanted:
+        raise cv.Invalid(f"Showing frames in this LVGL needs {CONF_PIXEL_FORMAT} {wanted}")
+    own = fconf.get_config_for_path(fconf.get_path_for_id(config[CONF_ID])[:-1])
+    screen_w, screen_h = screen_size(config[CONF_LVGL_ID])
+
+    def fits(width: int, height: int) -> bool:
+        return screen_w == 0 or screen_h == 0 or (width <= screen_w and height <= screen_h)
+
+    shown = [
+        name
+        for name in SENSOR_FORMATS.get(config[CONF_SENSOR], [])
+        if (mode := format_mode(name)) is not None and fits(mode[0], mode[1])
+    ]
+    if shown:
+        own[CONF_SHOWN_FORMATS] = shown
+    resolution = config.get(CONF_RESOLUTION)
+    if resolution is not None and resolution != (0, 0):
+        if not fits(*resolution):
+            raise cv.Invalid(
+                f"{CONF_RESOLUTION} {resolution[0]}x{resolution[1]} is larger than the screen ({screen_w}x{screen_h})"
+            )
+        return config
+    fitting = [(w, h) for w, h, _ in sensor_modes(own)]
+    if not fitting:
+        raise cv.Invalid(
+            f"No mode of {config[CONF_SENSOR]} known here fits the screen: set {CONF_RESOLUTION}"
+        )
+    own[CONF_RESOLUTION] = max(fitting, key=lambda mode: mode[0] * mode[1])
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.ENTITY_BASE_SCHEMA.extend(
         {
@@ -191,11 +268,16 @@ CONFIG_SCHEMA = cv.All(
                 {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(MipiCsiPreviewReleasedTrigger)}
             ),
         }
-    ).extend(cv.COMPONENT_SCHEMA),
+    )
+    .extend(VIDEO_OUTPUT_SCHEMA)
+    .extend(cv.COMPONENT_SCHEMA),
     cv.only_with_framework(Framework.ESP_IDF),
     esp32.only_on_variant(supported=[VARIANT_ESP32P4]),
     _validate_h264_format,
+    _validate_canvas,
 )
+
+FINAL_VALIDATE_SCHEMA = _final_validate
 
 SETTERS = {
     CONF_PIXEL_FORMAT: "set_pixel_format",
@@ -222,6 +304,11 @@ async def to_code(config: ConfigType) -> None:
 
     if (resolution := config.get(CONF_RESOLUTION)) is not None:
         cg.add(var.set_resolution(*resolution))
+    for width, height, fps in sensor_modes(config):
+        cg.add(var.add_resolution(width, height, fps))
+    if CONF_LVGL_ID in config:
+        cg.add_define("USE_CSI_VIDEO_OUTPUT")
+        await video_output_to_code(var, config)
     cg.add(var.set_sensor_name(config[CONF_SENSOR]))
     cg.add(var.set_init_ldo(config.get(CONF_INIT_LDO)))
     cg.add(var.set_framerate(int(config[CONF_FRAMERATE])))
@@ -462,9 +549,9 @@ def _add_idf_config(config: ConfigType) -> None:
     )
 
     sensor = config[CONF_SENSOR]
-    if (formats := SENSOR_FORMATS.get(sensor)) is not None:
+    if SENSOR_FORMATS.get(sensor) is not None:
         add_idf_sdkconfig_option(f"CONFIG_CAMERA_{sensor}", True)
-        for format_option in formats:
+        for format_option in sensor_formats(config):
             add_idf_sdkconfig_option(f"CONFIG_{format_option}", True)
 
     for option, value in {

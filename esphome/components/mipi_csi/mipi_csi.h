@@ -20,6 +20,9 @@
 #include "esphome/core/helpers.h"
 
 #include "jpeg_encoder.h"
+#ifdef USE_CSI_VIDEO_OUTPUT
+#include "esphome/components/display/video_output.h"
+#endif
 
 namespace esphome::mipi_csi {
 
@@ -116,6 +119,24 @@ using BufferFree = void (*)(uint8_t *ptr);
 /// capture task and every buffer are set up then and given back after (the buffers from the allocator).
 class MipiCsiCamera final : public camera::Camera {
  public:
+  static constexpr uint8_t MAX_RESOLUTIONS = 8;
+  struct Resolution {
+    uint16_t width;
+    uint16_t height;
+    uint8_t fps;
+  };
+  void add_resolution(uint16_t width, uint16_t height, uint8_t fps);
+  uint8_t resolution_count() const { return this->resolution_count_; }
+  const Resolution &resolution(uint8_t index) const { return this->resolutions_[index]; }
+  bool switch_resolution(uint16_t width, uint16_t height);
+#ifdef USE_CSI_VIDEO_OUTPUT
+  void set_video_output(display::VideoOutput *output) { this->output_ = output; }
+  bool can_show(uint16_t width, uint16_t height, uint8_t fps) const {
+    return this->output_->fits(width, height, fps, false, this);
+  }
+  void show_on_canvas(bool on);
+  bool is_shown_on_canvas() const { return this->output_on_; }
+#endif
   void set_buffer_allocator(BufferAlloc alloc, BufferFree free) {
     this->alloc_ = alloc;
     this->free_ = free;
@@ -231,6 +252,7 @@ class MipiCsiCamera final : public camera::Camera {
   void release_own_jpeg_engine_();
   /// Logs every MIPI-CSI format the sensor offers, used when the configured resolution is rejected.
   void log_sensor_formats_();
+  void collect_resolutions_();
   /// Ranks two sensor formats of the same resolution against each other.
   bool is_better_sensor_format_(const esp_cam_sensor_format_t &candidate, const esp_cam_sensor_format_t &current) const;
   /// Reduces the configured frame rate to one the driver can actually produce.
@@ -324,6 +346,14 @@ class MipiCsiCamera final : public camera::Camera {
   std::atomic<bool> direct_ready_{false};
   bool direct_given_{false};
   CallbackManager<void(const uint8_t *, uint16_t, uint16_t)> direct_callback_;
+  Resolution resolutions_[MAX_RESOLUTIONS]{};
+  uint8_t resolution_count_{0};
+#ifdef USE_CSI_VIDEO_OUTPUT
+  bool holds_() const { return this->canvas_ != nullptr && this->canvas_->held_by(this); }
+  display::VideoOutput *output_{nullptr};
+  display::VideoCanvas *canvas_{nullptr};
+  bool output_on_{false};
+#endif
 
   std::shared_ptr<MipiCsiImage> current_image_;
   std::vector<camera::CameraListener *> listeners_;
