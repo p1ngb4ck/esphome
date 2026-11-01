@@ -380,7 +380,7 @@ RemoteDesktop::Protocol RemoteDesktop::probe_() {
   return kind;
 }
 
-void RemoteDesktop::session_() {
+void RemoteDesktop::run_session_() {
   if (this->protocol_ == PROTOCOL_AUTO) {
     this->protocol_ = this->probe_();
     if (this->protocol_ == PROTOCOL_AUTO) {

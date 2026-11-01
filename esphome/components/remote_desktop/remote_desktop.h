@@ -138,7 +138,7 @@ class RemoteDesktop : public Component {
   void file_free_();
 #endif
   static void task_entry_(void *param);
-  void session_();
+  void run_session_();
   void spice_session_();
   bool allocate_();
   void free_();
