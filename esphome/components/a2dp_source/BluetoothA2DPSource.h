@@ -107,10 +107,10 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   /// Constructor
   BluetoothA2DPSource();
 
-  /// ESPHome: one event of the shared Classic GAP callback (bt_classic). True when it
+  /// ESPHome: one event of the shared Classic GAP callback (bt_host). True when it
   /// answered a pairing request for this source's peer.
   bool handle_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
-  /// ESPHome: a pairing request no other component claimed (bt_classic fallback).
+  /// ESPHome: a pairing request no other component claimed (bt_host fallback).
   bool handle_unclaimed_pairing(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
   void set_on_delay_report(void (*callback)(uint16_t delay, void *obj), void *obj) {
     delay_report_callback = callback;

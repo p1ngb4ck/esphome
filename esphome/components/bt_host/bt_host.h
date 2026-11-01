@@ -17,7 +17,7 @@
 #include "esphome/components/esp32_ble_tracker/esp32_ble_tracker.h"
 #endif
 #ifdef USE_BT_CLASSIC
-#include "esphome/components/bt_classic/bt_classic.h"
+#include "esphome/components/bt_host/gap_classic.h"
 #endif
 #ifdef USE_BT_PAIRING_HID
 #include "esphome/components/hid/hid_input.h"
@@ -28,7 +28,7 @@
 #include <string>
 #include <vector>
 
-namespace esphome::bt_pairing {
+namespace esphome::bt_host {
 
 enum class Transport : uint8_t { CLASSIC = 0, LE = 1 };
 
@@ -90,14 +90,14 @@ class PairingTarget {
   virtual void disconnect_address(const uint8_t *address) { this->disconnect_device(); }
 };
 
-class BTPairingSelect;
+class BTHostSelect;
 
 // The devices paired through bt_hid and ble_client_hid slots, kept across reboots in
 // preferences or in a file on a storage. Bond keys stay in Bluedroid's own NVS store;
 // forgetting a device also deletes its bond there.
 // With max_hid_devices, it is also the HID input of every HID device paired through it: keys,
 // typed text (in its layout), pointer and controls, each from the device event_device() names.
-class BTPairing : public Component
+class BTHost : public Component
 #ifdef USE_BT_PAIRING_LE
     ,
                   public esp32_ble_tracker::ESPBTDeviceListener
@@ -193,7 +193,7 @@ class BTPairing : public Component
   }
   /// A configured slot owns this slot id; a record of any other id is left from an old config.
   bool slot_in_use(uint32_t slot) const;
-  void set_device_select(BTPairingSelect *select) { this->device_select_ = select; }
+  void set_device_select(BTHostSelect *select) { this->device_select_ = select; }
   static constexpr size_t MAX_SCANNED = 16;
   /// Lists the Bluetooth Classic and LE devices that can be paired, for duration_ms.
   void scan(uint32_t duration_ms);
@@ -273,7 +273,7 @@ class BTPairing : public Component
   void devices_changed_() { this->devices_cb_.call(); }
 #endif
   std::vector<ScannedDevice> scanned_;
-  BTPairingSelect *device_select_{nullptr};
+  BTHostSelect *device_select_{nullptr};
   Mutex found_lock_;
   std::deque<ScannedDevice> found_;  // Classic results from the BTC task
   ScannedDevice pending_{};
@@ -304,38 +304,38 @@ class BTPairing : public Component
   bool dirty_{false};
 };
 
-template<typename... Ts> class ForgetAllAction : public Action<Ts...>, public Parented<BTPairing> {
+template<typename... Ts> class ForgetAllAction : public Action<Ts...>, public Parented<BTHost> {
  public:
   void play(const Ts &...x) override { this->parent_->forget_all(); }
 };
 
-template<typename... Ts> class ForgetAction : public Action<Ts...>, public Parented<BTPairing> {
+template<typename... Ts> class ForgetAction : public Action<Ts...>, public Parented<BTHost> {
  public:
   TEMPLATABLE_VALUE(std::string, address)
   void play(const Ts &...x) override;
 };
 
-template<typename... Ts> class ScanAction : public Action<Ts...>, public Parented<BTPairing> {
+template<typename... Ts> class ScanAction : public Action<Ts...>, public Parented<BTHost> {
  public:
   TEMPLATABLE_VALUE(uint32_t, duration)
   void play(const Ts &...x) override { this->parent_->scan(this->duration_.value(x...)); }
 };
 
-template<typename... Ts> class CancelScanAction : public Action<Ts...>, public Parented<BTPairing> {
+template<typename... Ts> class CancelScanAction : public Action<Ts...>, public Parented<BTHost> {
  public:
   void play(const Ts &...x) override { this->parent_->cancel_scan(); }
 };
 
 class StatusTrigger : public Trigger<std::string> {
  public:
-  explicit StatusTrigger(BTPairing *parent) {
+  explicit StatusTrigger(BTHost *parent) {
     parent->add_on_status_callback([this](const std::string &message) { this->trigger(message); });
   }
 };
 
 class ConnectionTrigger : public Trigger<std::string> {
  public:
-  ConnectionTrigger(BTPairing *parent, bool connected) {
+  ConnectionTrigger(BTHost *parent, bool connected) {
     parent->add_on_connection_callback([this, connected](const std::string &device, bool state) {
       if (state == connected)
         this->trigger(device);
@@ -343,25 +343,25 @@ class ConnectionTrigger : public Trigger<std::string> {
   }
 };
 
-template<typename... Ts> class PairAction : public Action<Ts...>, public Parented<BTPairing> {
+template<typename... Ts> class PairAction : public Action<Ts...>, public Parented<BTHost> {
  public:
   TEMPLATABLE_VALUE(std::string, address)
   void play(const Ts &...x) override { this->parent_->pair_address(this->address_.value(x...)); }
 };
 
-template<typename... Ts> class ConnectAction : public Action<Ts...>, public Parented<BTPairing> {
+template<typename... Ts> class ConnectAction : public Action<Ts...>, public Parented<BTHost> {
  public:
   TEMPLATABLE_VALUE(std::string, address)
   void play(const Ts &...x) override { this->parent_->connect(this->address_.value(x...)); }
 };
 
-template<typename... Ts> class DisconnectAction : public Action<Ts...>, public Parented<BTPairing> {
+template<typename... Ts> class DisconnectAction : public Action<Ts...>, public Parented<BTHost> {
  public:
   TEMPLATABLE_VALUE(std::string, address)
   void play(const Ts &...x) override { this->parent_->disconnect(this->address_.value(x...)); }
 };
 
-template<typename... Ts> class UnpairAction : public Action<Ts...>, public Parented<BTPairing> {
+template<typename... Ts> class UnpairAction : public Action<Ts...>, public Parented<BTHost> {
  public:
   TEMPLATABLE_VALUE(std::string, address)
   void play(const Ts &...x) override { this->parent_->unpair(this->address_.value(x...)); }
@@ -371,7 +371,7 @@ template<typename... Ts> class UnpairAction : public Action<Ts...>, public Paren
 /// on_key: (device, key, pressed); with a key set, only that one.
 class DeviceKeyTrigger : public Trigger<std::string, std::string, bool> {
  public:
-  explicit DeviceKeyTrigger(BTPairing *parent) {
+  explicit DeviceKeyTrigger(BTHost *parent) {
     parent->add_on_key_event_callback([this, parent](uint16_t page, uint16_t usage, bool pressed) {
       if (this->any_ || (page == this->page_ && usage == this->usage_))
         this->trigger(parent->event_device(), hid::key_name(page, usage), pressed);
@@ -391,7 +391,7 @@ class DeviceKeyTrigger : public Trigger<std::string, std::string, bool> {
 
 class DeviceTextTrigger : public Trigger<std::string, std::string> {
  public:
-  explicit DeviceTextTrigger(BTPairing *parent) {
+  explicit DeviceTextTrigger(BTHost *parent) {
     parent->add_on_text_callback(
         [this, parent](const std::string &text) { this->trigger(parent->event_device(), text); });
   }
@@ -399,7 +399,7 @@ class DeviceTextTrigger : public Trigger<std::string, std::string> {
 
 class DevicePointerTrigger : public Trigger<std::string, int, int, int, int, int> {
  public:
-  explicit DevicePointerTrigger(BTPairing *parent) {
+  explicit DevicePointerTrigger(BTHost *parent) {
     parent->add_on_pointer_callback(
         [this, parent](int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
           this->trigger(parent->event_device(), dx, dy, wheel, pan, buttons);
@@ -409,7 +409,7 @@ class DevicePointerTrigger : public Trigger<std::string, int, int, int, int, int
 
 class DeviceControlTrigger : public Trigger<std::string, std::string, int> {
  public:
-  explicit DeviceControlTrigger(BTPairing *parent) {
+  explicit DeviceControlTrigger(BTHost *parent) {
     parent->add_on_control_callback([this, parent](uint16_t page, uint16_t usage, int32_t value) {
       this->trigger(parent->event_device(), hid::key_name(page, usage), value);
     });
@@ -417,7 +417,7 @@ class DeviceControlTrigger : public Trigger<std::string, std::string, int> {
 };
 #endif
 
-template<typename... Ts> class LogAction : public Action<Ts...>, public Parented<BTPairing> {
+template<typename... Ts> class LogAction : public Action<Ts...>, public Parented<BTHost> {
  public:
   void play(const Ts &...x) override { this->parent_->log_records(); }
 };
@@ -430,6 +430,6 @@ template<typename... Ts> void ForgetAction<Ts...>::play(const Ts &...x) {
     this->parent_->forget_address(address);
 }
 
-}  // namespace esphome::bt_pairing
+}  // namespace esphome::bt_host
 
 #endif  // USE_ESP32

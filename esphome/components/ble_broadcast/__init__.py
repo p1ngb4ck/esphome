@@ -1,17 +1,17 @@
 """BLE devices that only advertise (buttons, remotes), heard without a connection.
 
-Each entry is a slot: bt_pairing.scan lists a device whose advertised data changes while the
+Each entry is a slot: bt_host.scan lists a device whose advertised data changes while the
 scan runs (press a button on it) as [BLE broadcast]; picking it fills a free slot, kept in
-bt_pairing. on_manufacturer_data / on_service_data fire whenever its advertisement changes.
+bt_host. on_manufacturer_data / on_service_data fire whenever its advertisement changes.
 """
 
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import esp32_ble_tracker
-from esphome.components.bt_pairing import (
+from esphome.components.bt_host import (
     ADDRESS_GLOBAL_SCHEMA,
-    CONF_BT_PAIRING_ID,
-    BTPairing,
+    CONF_BT_HOST_ID,
+    BTHost,
     setup_address_global,
     validate_address_global,
 )
@@ -20,9 +20,9 @@ from esphome.const import CONF_ID, CONF_TRIGGER_ID
 from esphome.helpers import fnv1_hash
 
 CODEOWNERS = ["@p1ngb4ck"]
-DEPENDENCIES = ["esp32", "bt_pairing", "esp32_ble_tracker"]
+DEPENDENCIES = ["esp32", "bt_host", "esp32_ble_tracker"]
 MULTI_CONF = True
-# Auto-loaded by bt_pairing, which creates its own instances.
+# Auto-loaded by bt_host, which creates its own instances.
 MULTI_CONF_NO_DEFAULT = True
 
 CONF_ON_MANUFACTURER_DATA = "on_manufacturer_data"
@@ -48,7 +48,7 @@ CONFIG_SCHEMA = (
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(BLEBroadcast),
-            cv.GenerateID(CONF_BT_PAIRING_ID): cv.use_id(BTPairing),
+            cv.GenerateID(CONF_BT_HOST_ID): cv.use_id(BTHost),
             **ADDRESS_GLOBAL_SCHEMA,
             # x: the data after the company id, id: the company id
             cv.Optional(CONF_ON_MANUFACTURER_DATA): automation.validate_automation(
@@ -76,7 +76,7 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await esp32_ble_tracker.register_ble_device(var, config)
-    cg.add(var.set_pairing(await cg.get_variable(config[CONF_BT_PAIRING_ID])))
+    cg.add(var.set_pairing(await cg.get_variable(config[CONF_BT_HOST_ID])))
     cg.add(var.set_slot(fnv1_hash(f"ble_broadcast:{config[CONF_ID]}")))
     await setup_address_global(var, config)
     data = cg.std_vector.template(cg.uint8)

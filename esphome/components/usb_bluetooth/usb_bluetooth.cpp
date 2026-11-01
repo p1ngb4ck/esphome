@@ -10,7 +10,7 @@
 #include "esp_bluedroid_hci.h"
 #include "esp_bt_main.h"
 #ifdef USE_BT_PERSISTENCE
-#include "esphome/components/bt_persistence/bt_persistence.h"
+#include "esphome/components/bt_host/persistence.h"
 #endif
 #endif
 #ifdef USE_USB_BLUETOOTH_HCI_SPLIT
@@ -353,10 +353,10 @@ void USBBluetooth::start_split_() {
 void USBBluetooth::start_bluedroid_() {
 #ifdef USE_BT_PERSISTENCE
   // Bluedroid reads its pairing data once, when it starts.
-  if (bt_persistence::global_bt_persistence != nullptr && !bt_persistence::global_bt_persistence->is_ready()) {
+  if (bt_host::global_bt_persistence != nullptr && !bt_host::global_bt_persistence->is_ready()) {
     if (!this->waiting_for_store_.exchange(true)) {
       this->defer([this]() {
-        bt_persistence::global_bt_persistence->when_ready([this]() {
+        bt_host::global_bt_persistence->when_ready([this]() {
           this->waiting_for_store_ = false;
           this->start_bluedroid_();
         });

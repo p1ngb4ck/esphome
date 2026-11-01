@@ -34,7 +34,7 @@
 #include "esphome/components/api/custom_api_device.h"
 #endif
 #ifdef USE_BT_PAIRING
-#include "esphome/components/bt_pairing/bt_pairing.h"
+#include "esphome/components/bt_host/bt_host.h"
 #endif
 #include "esphome/core/automation.h"
 
@@ -176,7 +176,7 @@ class BLEClientHID : public Component,
                      public api::CustomAPIDevice,
 #endif
 #ifdef USE_BT_PAIRING
-                     public bt_pairing::PairingTarget,
+                     public bt_host::PairingTarget,
 #endif
                      public hid::HIDInput {
  public:
@@ -192,7 +192,7 @@ class BLEClientHID : public Component,
   bool parse_device(const ble_device_base::ESPBTDevice &device) override;
 #endif
 
-  // A slot: the ble_client has no mac_address, pair() finds the device and bt_pairing keeps it.
+  // A slot: the ble_client has no mac_address, pair() finds the device and bt_host keeps it.
   void set_slot(uint32_t slot) { this->slot_ = slot; }
   void set_dynamic(bool dynamic) { this->dynamic_ = dynamic; }
   /// A std::string global holding the slot's device address ("" when none).
@@ -201,7 +201,7 @@ class BLEClientHID : public Component,
     this->address_set_ = set;
   }
 #ifdef USE_BT_PAIRING
-  void set_pairing(bt_pairing::BTPairing *pairing) { this->pairing_ = pairing; }
+  void set_pairing(bt_host::BTHost *pairing) { this->pairing_ = pairing; }
 #endif
   /// A slot: look for an advertising HID device for duration_ms, pair the first new one and
   /// keep it. With a configured address: connect, which pairs it if it is not paired yet.
@@ -217,12 +217,12 @@ class BLEClientHID : public Component,
   /// Pair with a device the window listed; opens the window again when it has closed.
   void pair_with(size_t index);
 #ifdef USE_BT_PAIRING
-  bool pairs(bt_pairing::Transport transport, bt_pairing::DeviceKind kind) const override {
-    return transport == bt_pairing::Transport::LE && kind == bt_pairing::DeviceKind::HID;
+  bool pairs(bt_host::Transport transport, bt_host::DeviceKind kind) const override {
+    return transport == bt_host::Transport::LE && kind == bt_host::DeviceKind::HID;
   }
   uint32_t pairing_slot() const override { return this->slot_; }
   bool is_free() const override;
-  bool pair_device(const bt_pairing::ScannedDevice &device) override;
+  bool pair_device(const bt_host::ScannedDevice &device) override;
   bool is_device_connected() const override { return this->hid_connected_; }
   void connect_device() override;
   void disconnect_device() override;
@@ -394,7 +394,7 @@ class BLEClientHID : public Component,
   std::string gatt_profile_hash_;
 
 #ifdef USE_BT_PAIRING
-  bt_pairing::BTPairing *pairing_{nullptr};
+  bt_host::BTHost *pairing_{nullptr};
 #endif
   std::string candidate_name_;
   std::vector<FoundBLEDevice> found_;

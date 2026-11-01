@@ -24,7 +24,7 @@ static uint16_t uuid16_of(const ble_device_base::ESPBTUUID &uuid) {
 
 void BLEBroadcast::setup() {
   this->pairing_->add_target(this);
-  this->pairing_->add_on_forget_callback([this](const bt_pairing::PairingRecord &record) {
+  this->pairing_->add_on_forget_callback([this](const bt_host::PairingRecord &record) {
     if (record.slot != this->slot_)
       return;
     this->set_address_(nullptr);
@@ -36,7 +36,7 @@ void BLEBroadcast::setup() {
 // The slot's device, once: from the address global, or the pairing database once it is loaded.
 void BLEBroadcast::loop() {
   uint8_t bda[6];
-  if (this->address_get_ != nullptr && bt_pairing::parse_address(this->address_get_(), bda)) {
+  if (this->address_get_ != nullptr && bt_host::parse_address(this->address_get_(), bda)) {
     this->set_address_(bda);
   } else if (!this->pairing_->is_loaded()) {
     return;
@@ -52,22 +52,22 @@ void BLEBroadcast::loop() {
   this->disable_loop();
 }
 
-void BLEBroadcast::dump_config() { ESP_LOGCONFIG(TAG, "BLE broadcast device (set by a bt_pairing pick)"); }
+void BLEBroadcast::dump_config() { ESP_LOGCONFIG(TAG, "BLE broadcast device (set by a bt_host pick)"); }
 
 void BLEBroadcast::set_address_(const uint8_t *bda) {
   this->address_ = bda == nullptr ? 0 : to_uint64(bda);
   this->last_hash_ = 0;
 }
 
-bool BLEBroadcast::pair_device(const bt_pairing::ScannedDevice &device) {
+bool BLEBroadcast::pair_device(const bt_host::ScannedDevice &device) {
   this->set_address_(device.address);
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(device.address, mac);
   if (this->address_set_ != nullptr)
     this->address_set_(mac);
-  bt_pairing::PairingRecord record{};
+  bt_host::PairingRecord record{};
   memcpy(record.address, device.address, sizeof(record.address));
-  record.transport = static_cast<uint8_t>(bt_pairing::Transport::LE);
+  record.transport = static_cast<uint8_t>(bt_host::Transport::LE);
   record.address_type = device.address_type;
   record.slot = this->slot_;
   strncpy(record.name, device.name.c_str(), sizeof(record.name) - 1);
@@ -89,7 +89,7 @@ void BLEBroadcast::unpair() {
 bool BLEBroadcast::parse_device(const ble_device_base::ESPBTDevice &device) {
   if (this->address_ == 0 || device.address_uint64() != this->address_)
     return false;
-  const uint32_t hash = bt_pairing::advertisement_hash(device);
+  const uint32_t hash = bt_host::advertisement_hash(device);
   if (hash == this->last_hash_)
     return true;
   this->last_hash_ = hash;

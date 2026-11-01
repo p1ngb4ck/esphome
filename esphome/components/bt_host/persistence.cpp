@@ -1,4 +1,4 @@
-#include "bt_persistence.h"
+#include "persistence.h"
 
 #ifdef USE_BT_PERSISTENCE
 
@@ -12,11 +12,11 @@
 #include <cinttypes>
 #include <cstring>
 
-namespace esphome::bt_persistence {
+namespace esphome::bt_host {
 
 using storage::StorageError;
 
-static const char *const TAG = "bt_persistence";
+static const char *const TAG = "bt_host.persistence";
 static constexpr size_t READ_CHUNK = 16384;
 static constexpr size_t MAX_IMAGE = 4 * 1024 * 1024;
 
@@ -403,6 +403,6 @@ bool BtPersistence::grow_(uint8_t *&buf, size_t &cap, size_t need) {
   return true;
 }
 
-}  // namespace esphome::bt_persistence
+}  // namespace esphome::bt_host
 
 #endif  // USE_BT_PERSISTENCE

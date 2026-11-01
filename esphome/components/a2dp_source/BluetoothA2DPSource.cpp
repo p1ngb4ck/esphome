@@ -23,7 +23,7 @@
 // Copyright 2015-2016 Espressif Systems (Shanghai) PTE LTD
 
 #include "BluetoothA2DPSource.h"
-#include "esphome/components/bt_classic/bt_classic.h"
+#include "esphome/components/bt_host/gap_classic.h"
 
 #if IS_VALID_PLATFORM
 
@@ -166,7 +166,7 @@ void BluetoothA2DPSource::start(std::vector<const char *> names) {
     }
   }
 
-  // ESPHome: the IO capability (DisplayYesNo) and the variable PIN type are bt_classic's,
+  // ESPHome: the IO capability (DisplayYesNo) and the variable PIN type are bt_host's,
   // shared by every Classic component; the PIN itself is still answered from pin_code.
 
   /* create application task */
@@ -632,9 +632,9 @@ void BluetoothA2DPSource::av_hdl_stack_evt(uint16_t event, void *p_param) {
       // set up device name
       esp_bt_gap_set_device_name(dev_name);
 
-      // ESPHome: the GAP callback is bt_classic's, shared with other components;
+      // ESPHome: the GAP callback is bt_host's, shared with other components;
       // handle_gap_event() is registered with it. Not up (any more): the next start() does it.
-      if (!esphome::bt_classic::ensure_gap_callback())
+      if (!esphome::bt_host::ensure_gap_callback())
         break;
 
       // initialize AVRCP controller

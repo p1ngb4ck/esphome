@@ -1,7 +1,7 @@
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import esp32, microphone
-from esphome.components.bt_pairing import CONF_BT_PAIRING_ID, BTPairing
+from esphome.components.bt_host import CONF_BT_HOST_ID, BTHost, pairing_configured
 from esphome.components.esp32 import (
     CONF_SDKCONFIG_OPTIONS,
     add_idf_sdkconfig_option,
@@ -24,7 +24,7 @@ from esphome.helpers import fnv1_hash
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32"]
-AUTO_LOAD = ["bt_classic"]
+AUTO_LOAD = ["bt_host"]
 
 CONF_A2DP_SOURCE_ID = "a2dp_source_id"
 CONF_BUFFER_DURATION = "buffer_duration"
@@ -67,12 +67,19 @@ IsStreamingCondition = a2dp_source_ns.class_(
 # Classic Bluetooth exists on the original ESP32 and nowhere else in the family;
 # every later variant is BLE only, and A2DP is a Classic profile. Without this
 # the mistake surfaces as an #error deep inside the library's platform check.
+def _bt_host_id(config):
+    if CONF_BT_HOST_ID not in config and pairing_configured():
+        config[CONF_BT_HOST_ID] = cv.use_id(BTHost)(None)
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
+    _bt_host_id,
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(A2DPSource),
-            # bt_pairing.scan lists audio devices too; the one picked connects here.
-            cv.OnlyWith(CONF_BT_PAIRING_ID, "bt_pairing"): cv.use_id(BTPairing),
+            # bt_host.scan lists audio devices too; the one picked connects here.
+            cv.Optional(CONF_BT_HOST_ID): cv.use_id(BTHost),
             # Stereo, because A2DP is. The library's frame is two int16 samples
             # and nothing in the path resamples or upmixes. Without it, audio comes
             # from the a2dp_source speaker platform.
@@ -206,8 +213,8 @@ async def to_code(config):
     cg.add_define("USE_A2DP_SOURCE")
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
-    if CONF_BT_PAIRING_ID in config:
-        cg.add(var.set_pairing(await cg.get_variable(config[CONF_BT_PAIRING_ID])))
+    if CONF_BT_HOST_ID in config:
+        cg.add(var.set_pairing(await cg.get_variable(config[CONF_BT_HOST_ID])))
         cg.add(var.set_slot(fnv1_hash(f"a2dp_source:{config[CONF_ID]}")))
 
     # passive=False: this component is the reason the microphone runs, so it

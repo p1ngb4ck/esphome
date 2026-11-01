@@ -6,7 +6,7 @@
 
 #if defined(USE_ESP32_VARIANT_ESP32) || defined(USE_A2DP_SOURCE_EXTERNAL_HOST)
 
-#include "esphome/components/bt_classic/bt_classic.h"
+#include "esphome/components/bt_host/gap_classic.h"
 #include "esphome/core/log.h"
 
 #include <esp_heap_caps.h>
@@ -183,12 +183,12 @@ void A2DPSource::setup() {
   this->source_.set_media_active(this->media_wanted_);
   this->source_.set_auto_reconnect(true);
   this->source_.set_discovery_gate(A2DPSource::discovery_gate_);
-  bt_classic::add_gap_handler(A2DPSource::gap_handler_, this);
-  bt_classic::add_gap_fallback(A2DPSource::gap_fallback_, this);
+  bt_host::add_gap_handler(A2DPSource::gap_handler_, this);
+  bt_host::add_gap_fallback(A2DPSource::gap_fallback_, this);
 #ifdef USE_BT_PAIRING
   if (this->pairing_ != nullptr) {
     this->pairing_->add_target(this);
-    this->pairing_->add_on_forget_callback([this](const bt_pairing::PairingRecord &record) {
+    this->pairing_->add_on_forget_callback([this](const bt_host::PairingRecord &record) {
       if (record.slot != this->slot_)
         return;
       if (this->is_address_connected(record.address))
@@ -281,7 +281,7 @@ bool A2DPSource::pair_with_index(size_t index) {
 }
 
 #ifdef USE_BT_PAIRING
-bool A2DPSource::pair_device(const bt_pairing::ScannedDevice &device) {
+bool A2DPSource::pair_device(const bt_host::ScannedDevice &device) {
   if (!this->started_.load()) {
     ESP_LOGW(TAG, "Bluetooth is not running, cannot pair");
     return false;
@@ -289,9 +289,9 @@ bool A2DPSource::pair_device(const bt_pairing::ScannedDevice &device) {
   if (this->connected_.load()) {
     if (memcmp(device.address, *this->source_.get_peer_address(), ESP_BD_ADDR_LEN) == 0) {
       // The device picked is the one connected (paired before the database held it): kept as it is.
-      bt_pairing::PairingRecord record{};
+      bt_host::PairingRecord record{};
       memcpy(record.address, device.address, sizeof(record.address));
-      record.transport = static_cast<uint8_t>(bt_pairing::Transport::CLASSIC);
+      record.transport = static_cast<uint8_t>(bt_host::Transport::CLASSIC);
       record.slot = this->slot_;
       record.device_class = device.device_class;
       strncpy(record.name, device.name.c_str(), sizeof(record.name) - 1);
@@ -654,7 +654,7 @@ void A2DPSource::update_media_() {
 }
 
 void A2DPSource::loop() {
-  const bool classic_up = bt_classic::ensure_gap_callback();
+  const bool classic_up = bt_host::ensure_gap_callback();
 #ifdef USE_A2DP_SOURCE_EXTERNAL_HOST
   if (this->started_.load() && !classic_up) {
     // The dongle went (or Bluedroid): the profiles go down while Bluedroid can still take it, and
@@ -714,7 +714,7 @@ void A2DPSource::loop() {
         memcmp(this->connected_addr_, *this->source_.get_last_peer_address(), ESP_BD_ADDR_LEN) == 0;
     const bool is_picked =
         this->picked_valid_ && memcmp(this->connected_addr_, this->picked_.address, ESP_BD_ADDR_LEN) == 0;
-    const bt_pairing::PairingRecord *known =
+    const bt_host::PairingRecord *known =
         this->pairing_ != nullptr ? this->pairing_->find_address(this->connected_addr_) : nullptr;
     // A device that connects on its own is taken only when paired here (or picked in a pairing window).
     if (this->pairing_ != nullptr && this->pairing_->is_loaded() && !this->pairing_mode_.load() && !is_picked &&
@@ -737,9 +737,9 @@ void A2DPSource::loop() {
       // The device picked in the pairing scan is kept once it has connected.
       if (is_picked) {
         this->picked_valid_ = false;
-        bt_pairing::PairingRecord record{};
+        bt_host::PairingRecord record{};
         memcpy(record.address, this->picked_.address, sizeof(record.address));
-        record.transport = static_cast<uint8_t>(bt_pairing::Transport::CLASSIC);
+        record.transport = static_cast<uint8_t>(bt_host::Transport::CLASSIC);
         record.slot = this->slot_;
         record.device_class = this->picked_.device_class;
         strncpy(record.name, this->picked_.name.c_str(), sizeof(record.name) - 1);
@@ -775,9 +775,9 @@ void A2DPSource::loop() {
     }
   }
   if (this->pairing_ != nullptr && this->keep_pending_ && this->pairing_->is_loaded()) {
-    bt_pairing::PairingRecord record{};
+    bt_host::PairingRecord record{};
     memcpy(record.address, this->name_addr_, sizeof(record.address));
-    record.transport = static_cast<uint8_t>(bt_pairing::Transport::CLASSIC);
+    record.transport = static_cast<uint8_t>(bt_host::Transport::CLASSIC);
     record.slot = this->slot_;
     memcpy(record.name, this->name_buf_, sizeof(record.name));
     record.name[sizeof(record.name) - 1] = '\0';

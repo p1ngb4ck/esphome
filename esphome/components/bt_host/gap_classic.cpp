@@ -1,4 +1,4 @@
-#include "bt_classic.h"
+#include "gap_classic.h"
 
 #ifdef USE_ESP32
 
@@ -11,9 +11,9 @@
 
 #include <vector>
 
-namespace esphome::bt_classic {
+namespace esphome::bt_host {
 
-static const char *const TAG = "bt_classic";
+static const char *const TAG = "bt_host";
 
 namespace {
 
@@ -104,6 +104,6 @@ bool ensure_gap_callback() {
   return true;
 }
 
-}  // namespace esphome::bt_classic
+}  // namespace esphome::bt_host
 
 #endif  // USE_ESP32

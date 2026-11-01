@@ -6,7 +6,7 @@
 
 #include <esp_gap_bt_api.h>
 
-namespace esphome::bt_classic {
+namespace esphome::bt_host {
 
 /// Runs on Bluedroid's BTC task for every Classic GAP event. Returns true when it answered a
 /// pairing request (PIN, SSP confirmation or passkey) for that device; a request nobody
@@ -26,6 +26,6 @@ bool is_active();
 /// registered.
 bool ensure_gap_callback();
 
-}  // namespace esphome::bt_classic
+}  // namespace esphome::bt_host
 
 #endif  // USE_ESP32

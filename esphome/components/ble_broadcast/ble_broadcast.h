@@ -4,7 +4,7 @@
 
 #ifdef USE_ESP32
 
-#include "esphome/components/bt_pairing/bt_pairing.h"
+#include "esphome/components/bt_host/bt_host.h"
 #include "esphome/components/esp32_ble_tracker/esp32_ble_tracker.h"
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -14,17 +14,17 @@
 
 namespace esphome::ble_broadcast {
 
-/// A BLE device that only advertises (a button, a remote): picked in the bt_pairing scan, then
+/// A BLE device that only advertises (a button, a remote): picked in the bt_host scan, then
 /// heard without a connection. Every change of its advertised data fires the triggers with the
 /// data, for a lambda to decode.
-class BLEBroadcast : public Component, public esp32_ble_tracker::ESPBTDeviceListener, public bt_pairing::PairingTarget {
+class BLEBroadcast : public Component, public esp32_ble_tracker::ESPBTDeviceListener, public bt_host::PairingTarget {
  public:
   void setup() override;
   void loop() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::AFTER_BLUETOOTH; }
 
-  void set_pairing(bt_pairing::BTPairing *pairing) { this->pairing_ = pairing; }
+  void set_pairing(bt_host::BTHost *pairing) { this->pairing_ = pairing; }
   void set_slot(uint32_t slot) { this->slot_ = slot; }
   /// A std::string global holding the slot's device address ("" when none).
   void set_address_global(std::string (*get)(), void (*set)(const std::string &)) {
@@ -34,12 +34,12 @@ class BLEBroadcast : public Component, public esp32_ble_tracker::ESPBTDeviceList
 
   bool parse_device(const ble_device_base::ESPBTDevice &device) override;
 
-  bool pairs(bt_pairing::Transport transport, bt_pairing::DeviceKind kind) const override {
-    return transport == bt_pairing::Transport::LE && kind == bt_pairing::DeviceKind::BROADCAST;
+  bool pairs(bt_host::Transport transport, bt_host::DeviceKind kind) const override {
+    return transport == bt_host::Transport::LE && kind == bt_host::DeviceKind::BROADCAST;
   }
   uint32_t pairing_slot() const override { return this->slot_; }
   bool is_free() const override { return this->address_ == 0; }
-  bool pair_device(const bt_pairing::ScannedDevice &device) override;
+  bool pair_device(const bt_host::ScannedDevice &device) override;
   /// Listening counts as connected; there is no link to make or drop.
   bool is_device_connected() const override { return this->address_ != 0; }
   void connect_device() override {}
@@ -58,7 +58,7 @@ class BLEBroadcast : public Component, public esp32_ble_tracker::ESPBTDeviceList
  protected:
   void set_address_(const uint8_t *bda);
 
-  bt_pairing::BTPairing *pairing_{nullptr};
+  bt_host::BTHost *pairing_{nullptr};
   std::string (*address_get_)(){nullptr};
   void (*address_set_)(const std::string &){nullptr};
   CallbackManager<void(const std::vector<uint8_t> &, uint16_t)> manufacturer_cb_;

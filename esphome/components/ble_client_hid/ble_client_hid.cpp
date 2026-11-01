@@ -220,7 +220,7 @@ void BLEClientHID::setup() {
   if (this->pairing_ != nullptr && this->dynamic_)
     this->pairing_->add_target(this);
   if (this->pairing_ != nullptr) {
-    this->pairing_->add_on_forget_callback([this](const bt_pairing::PairingRecord &record) {
+    this->pairing_->add_on_forget_callback([this](const bt_host::PairingRecord &record) {
       if (record.slot != this->slot_)
         return;
       if (this->address_set_ != nullptr)
@@ -342,7 +342,7 @@ bool BLEClientHID::is_free() const {
                                       : this->ble_client::BLEClientNode::parent_->get_address() == 0;
 }
 
-bool BLEClientHID::pair_device(const bt_pairing::ScannedDevice &device) {
+bool BLEClientHID::pair_device(const bt_host::ScannedDevice &device) {
   return this->pair_found_({address_to_uint64(device.address), static_cast<esp_ble_addr_type_t>(device.address_type),
                             static_cast<uint16_t>(device.device_class), device.name});
 }
@@ -475,9 +475,9 @@ void BLEClientHID::end_pairing_(bool success, const char *reason) {
     this->address_set_(this->parent()->address_str());
 #ifdef USE_BT_PAIRING
   if (this->pairing_ != nullptr) {
-    bt_pairing::PairingRecord record{};
+    bt_host::PairingRecord record{};
     memcpy(record.address, this->parent()->get_remote_bda(), sizeof(record.address));
-    record.transport = static_cast<uint8_t>(bt_pairing::Transport::LE);
+    record.transport = static_cast<uint8_t>(bt_host::Transport::LE);
     record.address_type = static_cast<uint8_t>(this->parent()->get_remote_addr_type());
     record.slot = this->slot_;
     record.device_class = this->candidate_appearance_;

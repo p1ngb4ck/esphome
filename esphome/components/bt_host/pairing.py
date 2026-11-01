@@ -34,7 +34,7 @@ DEPENDENCIES = ["esp32"]
 
 _LOGGER = logging.getLogger(__name__)
 
-CONF_BT_PAIRING_ID = "bt_pairing_id"
+CONF_BT_HOST_ID = "bt_host_id"
 CONF_ADDRESS_GLOBAL = "address_global"
 CONF_MAX_RESTORE_DATA_LENGTH = "max_restore_data_length"
 CONF_MAX_DEVICES = "max_devices"
@@ -45,58 +45,58 @@ CONF_MAX_HID_DEVICES = "max_hid_devices"
 CONF_MAX_BROADCAST_DEVICES = "max_broadcast_devices"
 CONF_SLOTS = "slots"
 
-bt_pairing_ns = cg.esphome_ns.namespace("bt_pairing")
+bt_host_ns = cg.esphome_ns.namespace("bt_host")
 # A HIDInput too (with max_hid_devices): hid_id for LVGL and the hid platforms.
-BTPairing = bt_pairing_ns.class_("BTPairing", cg.Component, hid.HIDInput)
-ForgetAllAction = bt_pairing_ns.class_(
-    "ForgetAllAction", automation.Action, cg.Parented.template(BTPairing)
+BTHost = bt_host_ns.class_("BTHost", cg.Component, hid.HIDInput)
+ForgetAllAction = bt_host_ns.class_(
+    "ForgetAllAction", automation.Action, cg.Parented.template(BTHost)
 )
-ForgetAction = bt_pairing_ns.class_(
-    "ForgetAction", automation.Action, cg.Parented.template(BTPairing)
+ForgetAction = bt_host_ns.class_(
+    "ForgetAction", automation.Action, cg.Parented.template(BTHost)
 )
-LogAction = bt_pairing_ns.class_(
-    "LogAction", automation.Action, cg.Parented.template(BTPairing)
+LogAction = bt_host_ns.class_(
+    "LogAction", automation.Action, cg.Parented.template(BTHost)
 )
-ScanAction = bt_pairing_ns.class_(
-    "ScanAction", automation.Action, cg.Parented.template(BTPairing)
+ScanAction = bt_host_ns.class_(
+    "ScanAction", automation.Action, cg.Parented.template(BTHost)
 )
-CancelScanAction = bt_pairing_ns.class_(
-    "CancelScanAction", automation.Action, cg.Parented.template(BTPairing)
+CancelScanAction = bt_host_ns.class_(
+    "CancelScanAction", automation.Action, cg.Parented.template(BTHost)
 )
-StatusTrigger = bt_pairing_ns.class_(
+StatusTrigger = bt_host_ns.class_(
     "StatusTrigger", automation.Trigger.template(cg.std_string)
 )
-ConnectionTrigger = bt_pairing_ns.class_(
+ConnectionTrigger = bt_host_ns.class_(
     "ConnectionTrigger", automation.Trigger.template(cg.std_string)
 )
-DeviceKeyTrigger = bt_pairing_ns.class_(
+DeviceKeyTrigger = bt_host_ns.class_(
     "DeviceKeyTrigger",
     automation.Trigger.template(cg.std_string, cg.std_string, cg.bool_),
 )
-DeviceTextTrigger = bt_pairing_ns.class_(
+DeviceTextTrigger = bt_host_ns.class_(
     "DeviceTextTrigger", automation.Trigger.template(cg.std_string, cg.std_string)
 )
-DevicePointerTrigger = bt_pairing_ns.class_(
+DevicePointerTrigger = bt_host_ns.class_(
     "DevicePointerTrigger",
     automation.Trigger.template(
         cg.std_string, cg.int_, cg.int_, cg.int_, cg.int_, cg.int_
     ),
 )
-DeviceControlTrigger = bt_pairing_ns.class_(
+DeviceControlTrigger = bt_host_ns.class_(
     "DeviceControlTrigger",
     automation.Trigger.template(cg.std_string, cg.std_string, cg.int_),
 )
-PairAction = bt_pairing_ns.class_(
-    "PairAction", automation.Action, cg.Parented.template(BTPairing)
+PairAction = bt_host_ns.class_(
+    "PairAction", automation.Action, cg.Parented.template(BTHost)
 )
-ConnectAction = bt_pairing_ns.class_(
-    "ConnectAction", automation.Action, cg.Parented.template(BTPairing)
+ConnectAction = bt_host_ns.class_(
+    "ConnectAction", automation.Action, cg.Parented.template(BTHost)
 )
-DisconnectAction = bt_pairing_ns.class_(
-    "DisconnectAction", automation.Action, cg.Parented.template(BTPairing)
+DisconnectAction = bt_host_ns.class_(
+    "DisconnectAction", automation.Action, cg.Parented.template(BTHost)
 )
-UnpairAction = bt_pairing_ns.class_(
-    "UnpairAction", automation.Action, cg.Parented.template(BTPairing)
+UnpairAction = bt_host_ns.class_(
+    "UnpairAction", automation.Action, cg.Parented.template(BTHost)
 )
 
 
@@ -107,7 +107,7 @@ def AUTO_LOAD(config=None) -> list[str]:
     if (config or {}).get(CONF_MAX_HID_DEVICES):
         loads.append("hid")
     if slots.get("bt_hid"):
-        loads += ["bt_hid", "bt_classic"]
+        loads += ["bt_hid", "bt_host"]
     if slots.get("ble_client"):
         loads += ["ble_client", "esp32_ble_client", "ble_client_hid", "sha256"]
     if slots.get("ble_broadcast"):
@@ -119,7 +119,7 @@ def _validate_file(value):
     value = cv.string_strict(value)
     if not value.startswith("/") or value.endswith("/") or value.count("/") < 2:
         raise cv.Invalid(
-            "file is a path under a storage's mount_path, e.g. /sdcard/bt_pairing.bin"
+            "file is a path under a storage's mount_path, e.g. /sdcard/bt_host.bin"
         )
     return value
 
@@ -148,18 +148,18 @@ def _generate_slots(config):
     slots = {}
     if hid_count and "usb_bluetooth" in CORE.loaded_integrations:
         slots["bt_hid"] = [
-            bt_hid.CONFIG_SCHEMA({CONF_ID: f"bt_pairing_bt_hid_{i}"})
+            bt_hid.CONFIG_SCHEMA({CONF_ID: f"bt_host_bt_hid_{i}"})
             for i in range(1, hid_count + 1)
         ]
     if "esp32_ble_tracker" in CORE.loaded_integrations:
         clients, nodes = [], []
         for i in range(1, min(hid_count, _ble_connection_budget()) + 1):
-            client_id = f"bt_pairing_ble_client_{i}"
+            client_id = f"bt_host_ble_client_{i}"
             clients.append(ble_client.CONFIG_SCHEMA({CONF_ID: client_id}))
             nodes.append(
                 ble_client_hid.CONFIG_SCHEMA(
                     {
-                        CONF_ID: f"bt_pairing_ble_hid_{i}",
+                        CONF_ID: f"bt_host_ble_hid_{i}",
                         ble_client.CONF_BLE_CLIENT_ID: client_id,
                     }
                 )
@@ -169,7 +169,7 @@ def _generate_slots(config):
             slots["ble_client_hid"] = nodes
         if config[CONF_MAX_BROADCAST_DEVICES]:
             slots["ble_broadcast"] = [
-                ble_broadcast.CONFIG_SCHEMA({CONF_ID: f"bt_pairing_ble_broadcast_{i}"})
+                ble_broadcast.CONFIG_SCHEMA({CONF_ID: f"bt_host_ble_broadcast_{i}"})
                 for i in range(1, config[CONF_MAX_BROADCAST_DEVICES] + 1)
             ]
     config[CONF_SLOTS] = slots
@@ -178,7 +178,7 @@ def _generate_slots(config):
 
 _BASE_SCHEMA = cv.Schema(
     {
-        cv.GenerateID(): cv.declare_id(BTPairing),
+        cv.GenerateID(): cv.declare_id(BTHost),
         cv.Optional(CONF_MAX_DEVICES, default=8): cv.int_range(min=1, max=32),
         # HID devices (keyboards, mice, remotes, game controllers): Bluetooth Classic ones
         # connected at once (paired: up to max_devices; Bluedroid's HID host takes at most 7
@@ -321,18 +321,18 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 PAIRING_ACTION_SCHEMA = automation.maybe_simple_id(
-    {cv.GenerateID(): cv.use_id(BTPairing)}
+    {cv.GenerateID(): cv.use_id(BTHost)}
 )
 
 
 @automation.register_action(
-    "bt_pairing.forget_all",
+    "bt_host.forget_all",
     ForgetAllAction,
     PAIRING_ACTION_SCHEMA,
     synchronous=True,
 )
 @automation.register_action(
-    "bt_pairing.log", LogAction, PAIRING_ACTION_SCHEMA, synchronous=True
+    "bt_host.log", LogAction, PAIRING_ACTION_SCHEMA, synchronous=True
 )
 async def pairing_simple_action_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
@@ -341,7 +341,7 @@ async def pairing_simple_action_to_code(config, action_id, template_arg, args):
 
 
 @automation.register_action(
-    "bt_pairing.cancel_scan", CancelScanAction, PAIRING_ACTION_SCHEMA, synchronous=True
+    "bt_host.cancel_scan", CancelScanAction, PAIRING_ACTION_SCHEMA, synchronous=True
 )
 async def cancel_scan_action_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
@@ -350,11 +350,11 @@ async def cancel_scan_action_to_code(config, action_id, template_arg, args):
 
 
 @automation.register_action(
-    "bt_pairing.scan",
+    "bt_host.scan",
     ScanAction,
     automation.maybe_simple_id(
         {
-            cv.GenerateID(): cv.use_id(BTPairing),
+            cv.GenerateID(): cv.use_id(BTHost),
             cv.Optional(CONF_DURATION, default="20s"): cv.templatable(
                 cv.positive_time_period_milliseconds
             ),
@@ -380,23 +380,23 @@ def _validate_address(value):
 
 ADDRESS_ACTION_SCHEMA = cv.Schema(
     {
-        cv.GenerateID(): cv.use_id(BTPairing),
+        cv.GenerateID(): cv.use_id(BTHost),
         cv.Required(CONF_ADDRESS): cv.templatable(_validate_address),
     }
 )
 
 
 @automation.register_action(
-    "bt_pairing.pair", PairAction, ADDRESS_ACTION_SCHEMA, synchronous=True
+    "bt_host.pair", PairAction, ADDRESS_ACTION_SCHEMA, synchronous=True
 )
 @automation.register_action(
-    "bt_pairing.connect", ConnectAction, ADDRESS_ACTION_SCHEMA, synchronous=True
+    "bt_host.connect", ConnectAction, ADDRESS_ACTION_SCHEMA, synchronous=True
 )
 @automation.register_action(
-    "bt_pairing.disconnect", DisconnectAction, ADDRESS_ACTION_SCHEMA, synchronous=True
+    "bt_host.disconnect", DisconnectAction, ADDRESS_ACTION_SCHEMA, synchronous=True
 )
 @automation.register_action(
-    "bt_pairing.unpair", UnpairAction, ADDRESS_ACTION_SCHEMA, synchronous=True
+    "bt_host.unpair", UnpairAction, ADDRESS_ACTION_SCHEMA, synchronous=True
 )
 async def address_action_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
@@ -408,11 +408,11 @@ async def address_action_to_code(config, action_id, template_arg, args):
 
 
 @automation.register_action(
-    "bt_pairing.forget",
+    "bt_host.forget",
     ForgetAction,
     cv.Schema(
         {
-            cv.GenerateID(): cv.use_id(BTPairing),
+            cv.GenerateID(): cv.use_id(BTHost),
             cv.Required(CONF_ADDRESS): cv.templatable(_validate_address),
         }
     ),
@@ -429,7 +429,7 @@ async def forget_action_to_code(config, action_id, template_arg, args):
 
 # For bt_hid / ble_client_hid slots: a std::string global (restore_value: true) holding the
 # paired device's address, "AA:BB:CC:DD:EE:FF" or "" -- upstream's globals and preferences,
-# readable and settable from lambdas. Works alongside bt_pairing or without it.
+# readable and settable from lambdas. Works alongside bt_host or without it.
 ADDRESS_GLOBAL_SCHEMA = {
     cv.Optional(CONF_ADDRESS_GLOBAL): cv.use_id(GlobalsComponent),
 }

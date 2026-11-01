@@ -1,9 +1,9 @@
-#include "bt_pairing.h"
+#include "bt_host.h"
 
 #ifdef USE_ESP32
 
 #ifdef USE_BT_PAIRING_SELECT
-#include "select/bt_pairing_select.h"
+#include "select/bt_host_select.h"
 #endif
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
@@ -24,9 +24,9 @@
 #include <cstdio>
 #include <cstring>
 
-namespace esphome::bt_pairing {
+namespace esphome::bt_host {
 
-static const char *const TAG = "bt_pairing";
+static const char *const TAG = "bt_host";
 
 static constexpr uint32_t MAGIC = 0x44505442;  // "BTPD"
 static constexpr uint8_t VERSION = 1;
@@ -65,7 +65,7 @@ static const char *kind_str(const ScannedDevice &device) {
   return device.kind == DeviceKind::AUDIO ? "BT audio" : "BT HID";
 }
 
-void BTPairing::setup() {
+void BTHost::setup() {
   this->pref_ = global_preferences->make_preference(sizeof(Header) + PREFERENCE_RECORDS * sizeof(PairingRecord),
                                                     this->preference_key_);
 #ifdef USE_BT_PAIRING_STORAGE
@@ -80,11 +80,11 @@ void BTPairing::setup() {
   }
 #endif
 #ifdef USE_BT_CLASSIC
-  bt_classic::add_gap_handler(BTPairing::gap_handler_, this);
+  bt_host::add_gap_handler(BTHost::gap_handler_, this);
 #endif
 }
 
-void BTPairing::loop() {
+void BTHost::loop() {
   this->scan_loop_();
   const uint32_t now = millis();
   if (static_cast<int32_t>(now - this->next_attempt_ms_) < 0)
@@ -131,7 +131,7 @@ void BTPairing::loop() {
     this->disable_loop();
 }
 
-void BTPairing::dump_config() {
+void BTHost::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "Bluetooth pairing database:\n"
                 "  Max devices: %u",
@@ -145,7 +145,7 @@ void BTPairing::dump_config() {
   ESP_LOGCONFIG(TAG, "  Stored in preferences");
 }
 
-const PairingRecord *BTPairing::find_slot(uint32_t slot) const {
+const PairingRecord *BTHost::find_slot(uint32_t slot) const {
   for (const auto &record : this->records_) {
     if (record.slot == slot)
       return &record;
@@ -153,7 +153,7 @@ const PairingRecord *BTPairing::find_slot(uint32_t slot) const {
   return nullptr;
 }
 
-const PairingRecord *BTPairing::find_address(const uint8_t *address) const {
+const PairingRecord *BTHost::find_address(const uint8_t *address) const {
   for (const auto &record : this->records_) {
     if (memcmp(record.address, address, sizeof(record.address)) == 0)
       return &record;
@@ -161,7 +161,7 @@ const PairingRecord *BTPairing::find_address(const uint8_t *address) const {
   return nullptr;
 }
 
-bool BTPairing::store(const PairingRecord &record) {
+bool BTHost::store(const PairingRecord &record) {
   if (!this->loaded_) {
     ESP_LOGW(TAG, "Database not loaded yet, not stored");
     return false;
@@ -208,7 +208,7 @@ bool BTPairing::store(const PairingRecord &record) {
   return true;
 }
 
-void BTPairing::forget_index_(size_t index) {
+void BTHost::forget_index_(size_t index) {
   const PairingRecord record = this->records_[index];
   this->records_.erase(this->records_.begin() + index);
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
@@ -236,7 +236,7 @@ void BTPairing::forget_index_(size_t index) {
 #endif
 }
 
-void BTPairing::delete_bond(const uint8_t *address, Transport transport) {
+void BTHost::delete_bond(const uint8_t *address, Transport transport) {
 #ifdef CONFIG_BT_BLUEDROID_ENABLED
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(address, mac);
@@ -260,7 +260,7 @@ void BTPairing::delete_bond(const uint8_t *address, Transport transport) {
 #endif
 }
 
-void BTPairing::forget_slot(uint32_t slot) {
+void BTHost::forget_slot(uint32_t slot) {
   if (!this->loaded_)
     return;
   for (size_t i = 0; i < this->records_.size(); i++) {
@@ -271,7 +271,7 @@ void BTPairing::forget_slot(uint32_t slot) {
   }
 }
 
-bool BTPairing::forget_address(const uint8_t *address) {
+bool BTHost::forget_address(const uint8_t *address) {
   if (!this->loaded_) {
     ESP_LOGW(TAG, "Database not loaded yet");
     return false;
@@ -288,7 +288,7 @@ bool BTPairing::forget_address(const uint8_t *address) {
   return false;
 }
 
-void BTPairing::forget_all() {
+void BTHost::forget_all() {
   if (!this->loaded_) {
     ESP_LOGW(TAG, "Database not loaded yet");
     return;
@@ -297,7 +297,7 @@ void BTPairing::forget_all() {
     this->forget_index_(this->records_.size() - 1);
 }
 
-void BTPairing::log_records() const {
+void BTHost::log_records() const {
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   if (this->records_.empty()) {
     ESP_LOGI(TAG, "No paired devices");
@@ -324,15 +324,15 @@ void BTPairing::log_records() const {
 
 // -- Pairing scan -------------------------------------------------------------------------
 
-void BTPairing::status_(const std::string &message) {
+void BTHost::status_(const std::string &message) {
   ESP_LOGV(TAG, "%s", message.c_str());
   this->status_callbacks_.call(message);
 }
 
 #ifdef USE_BT_CLASSIC
 // BTC task.
-bool BTPairing::gap_handler_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void *arg) {
-  auto *self = static_cast<BTPairing *>(arg);
+bool BTHost::gap_handler_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void *arg) {
+  auto *self = static_cast<BTHost *>(arg);
   if (event == ESP_BT_GAP_DISC_STATE_CHANGED_EVT) {
     self->classic_discovering_.store(param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STARTED);
     self->enable_loop_soon_any_context();
@@ -434,7 +434,7 @@ static bool payload_changed(std::vector<std::pair<uint64_t, uint32_t>> &seen,
   return false;
 }
 
-bool BTPairing::parse_device(const ble_device_base::ESPBTDevice &device) {
+bool BTHost::parse_device(const ble_device_base::ESPBTDevice &device) {
   if (!this->scanning_.load())
     return false;
   const auto hid_uuid = ble_device_base::ESPBTUUID::from_uint16(UUID_HID_SERVICE);
@@ -464,7 +464,7 @@ bool BTPairing::parse_device(const ble_device_base::ESPBTDevice &device) {
 }
 #endif
 
-void BTPairing::scan(uint32_t duration_ms) {
+void BTHost::scan(uint32_t duration_ms) {
   if (this->scanning_.load()) {
     this->status_("A scan is already running");
     return;
@@ -482,7 +482,7 @@ void BTPairing::scan(uint32_t duration_ms) {
   bool started = false;
   this->scanning_.store(true);
 #ifdef USE_BT_CLASSIC
-  if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED && bt_classic::ensure_gap_callback()) {
+  if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED && bt_host::ensure_gap_callback()) {
     // Inquiry length is in units of 1.28 s.
     const uint32_t units =
         std::clamp<uint32_t>((duration_ms + 1279) / 1280, ESP_BT_GAP_MIN_INQ_LEN, ESP_BT_GAP_MAX_INQ_LEN);
@@ -515,7 +515,7 @@ void BTPairing::scan(uint32_t duration_ms) {
                     : "Scanning for Bluetooth devices in pairing mode");
 }
 
-void BTPairing::cancel_scan() {
+void BTHost::cancel_scan() {
   const bool active = this->scanning_.exchange(false) || this->pending_target_ != nullptr;
   this->pending_target_ = nullptr;
   for (auto *target : this->targets_)
@@ -528,7 +528,7 @@ void BTPairing::cancel_scan() {
     this->status_("Scan cancelled");
 }
 
-void BTPairing::add_scanned_(const ScannedDevice &device) {
+void BTHost::add_scanned_(const ScannedDevice &device) {
   for (auto &known : this->scanned_) {
     if (memcmp(known.address, device.address, sizeof(device.address)) != 0)
       continue;
@@ -548,7 +548,7 @@ void BTPairing::add_scanned_(const ScannedDevice &device) {
   this->publish_scanned_();
 }
 
-void BTPairing::publish_scanned_() {
+void BTHost::publish_scanned_() {
 #ifdef USE_BT_PAIRING_SELECT
   if (this->device_select_ != nullptr)
     this->device_select_->set_devices(this->scanned_);
@@ -556,7 +556,7 @@ void BTPairing::publish_scanned_() {
   this->scanned_callbacks_.call();
 }
 
-void BTPairing::scan_loop_() {
+void BTHost::scan_loop_() {
   std::deque<ScannedDevice> found;
   {
     LockGuard guard(this->found_lock_);
@@ -579,7 +579,7 @@ void BTPairing::scan_loop_() {
   }
 }
 
-bool BTPairing::slot_in_use(uint32_t slot) const {
+bool BTHost::slot_in_use(uint32_t slot) const {
   for (auto *target : this->targets_) {
     if (target->pairing_slot() == slot)
       return true;
@@ -587,7 +587,7 @@ bool BTPairing::slot_in_use(uint32_t slot) const {
   return false;
 }
 
-bool BTPairing::slot_holds_many_(uint32_t slot) const {
+bool BTHost::slot_holds_many_(uint32_t slot) const {
   for (auto *target : this->targets_) {
     if (target->pairing_slot() == slot)
       return target->holds_many();
@@ -596,7 +596,7 @@ bool BTPairing::slot_holds_many_(uint32_t slot) const {
 }
 
 // A slot several targets share (holds_many): the one holding the device, else a free one.
-PairingTarget *BTPairing::target_of_(const uint8_t *address) const {
+PairingTarget *BTHost::target_of_(const uint8_t *address) const {
   const PairingRecord *record = this->find_address(address);
   if (record == nullptr || record->slot == 0)
     return nullptr;
@@ -618,7 +618,7 @@ PairingTarget *BTPairing::target_of_(const uint8_t *address) const {
 
 // Bluetooth Classic HID devices of a slot no target owns any more (the slots before they were
 // shared) go to the shared Classic HID slot.
-void BTPairing::migrate_records_() {
+void BTHost::migrate_records_() {
   uint32_t pool = 0;
   for (auto *target : this->targets_) {
     if (target->pairs(Transport::CLASSIC, DeviceKind::HID) && target->holds_many())
@@ -643,7 +643,7 @@ void BTPairing::migrate_records_() {
 }
 
 // The slot already holding the device, else a free one within the HID budget.
-PairingTarget *BTPairing::target_for_(const ScannedDevice &device, const char **reason) const {
+PairingTarget *BTHost::target_for_(const ScannedDevice &device, const char **reason) const {
   if (PairingTarget *target = this->target_of_(device.address);
       target != nullptr && target->pairs(device.transport, device.kind))
     return target;
@@ -667,7 +667,7 @@ PairingTarget *BTPairing::target_for_(const ScannedDevice &device, const char **
   return nullptr;
 }
 
-void BTPairing::pair_with(size_t index) {
+void BTHost::pair_with(size_t index) {
   if (index >= this->scanned_.size())
     return;
   const ScannedDevice device = this->scanned_[index];
@@ -695,7 +695,7 @@ void BTPairing::pair_with(size_t index) {
   this->dispatch_(device, target);
 }
 
-void BTPairing::dispatch_(const ScannedDevice &device, PairingTarget *target) {
+void BTHost::dispatch_(const ScannedDevice &device, PairingTarget *target) {
   char text[128];
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(device.address, mac);
@@ -710,13 +710,13 @@ void BTPairing::dispatch_(const ScannedDevice &device, PairingTarget *target) {
   this->status_(text);
 }
 
-std::string BTPairing::device_label(const PairingTarget *target) const {
+std::string BTHost::device_label(const PairingTarget *target) const {
   std::string label;
   this->device_label_into_(target, label);
   return label;
 }
 
-void BTPairing::device_label_into_(const PairingTarget *target, std::string &out) const {
+void BTHost::device_label_into_(const PairingTarget *target, std::string &out) const {
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   if (target == this->dispatched_target_ && !target->is_free()) {
     if (!this->dispatched_.name.empty()) {
@@ -748,17 +748,17 @@ void BTPairing::device_label_into_(const PairingTarget *target, std::string &out
   out.assign(mac);
 }
 
-void BTPairing::on_pin_request(const PairingTarget *target, const std::string &pin) {
+void BTHost::on_pin_request(const PairingTarget *target, const std::string &pin) {
   this->status_("Type " + pin + " + Enter on " + this->device_label(target));
 }
 
-void BTPairing::on_passkey(const PairingTarget *target, uint32_t passkey) {
+void BTHost::on_passkey(const PairingTarget *target, uint32_t passkey) {
   char text[96];
   snprintf(text, sizeof(text), "Type %06" PRIu32 " + Enter on %s", passkey, this->device_label(target).c_str());
   this->status_(text);
 }
 
-void BTPairing::on_connection(const PairingTarget *target, bool connected) {
+void BTHost::on_connection(const PairingTarget *target, bool connected) {
   const std::string label = this->device_label(target);
   this->status_(label + (connected ? " connected" : " disconnected"));
   this->connection_callbacks_.call(label, connected);
@@ -768,14 +768,14 @@ void BTPairing::on_connection(const PairingTarget *target, bool connected) {
 }
 
 #ifdef USE_BT_PAIRING_HID
-uint8_t BTPairing::get_device_kinds() const {
+uint8_t BTHost::get_device_kinds() const {
   uint8_t kinds = 0;
   for (const auto *input : this->hid_slots_)
     kinds |= input->get_device_kinds();
   return kinds;
 }
 
-void BTPairing::add_hid_slot(hid::HIDInput *input, PairingTarget *target) {
+void BTHost::add_hid_slot(hid::HIDInput *input, PairingTarget *target) {
   this->hid_slots_.push_back(input);
   this->hid_targets_.push_back(target);
   input->add_on_key_event_callback([this, target, input](uint16_t page, uint16_t usage, bool pressed) {
@@ -805,7 +805,7 @@ void BTPairing::add_hid_slot(hid::HIDInput *input, PairingTarget *target) {
 }
 #endif
 
-const hid::KeyboardLayout *BTPairing::slot_layout_(const PairingTarget *target) const {
+const hid::KeyboardLayout *BTHost::slot_layout_(const PairingTarget *target) const {
   if (this->device_layouts_.empty() || target->pairing_slot() == 0)
     return nullptr;
   const uint8_t *held = target->connected_address();
@@ -820,7 +820,7 @@ const hid::KeyboardLayout *BTPairing::slot_layout_(const PairingTarget *target) 
   return nullptr;
 }
 
-uint8_t BTPairing::record_kinds(const PairingRecord &record) {
+uint8_t BTHost::record_kinds(const PairingRecord &record) {
   const uint32_t value = record.device_class;
   if (record.transport == static_cast<uint8_t>(Transport::LE)) {
     if ((value >> 6) == 0x06)  // remote control category (0x0180)
@@ -859,7 +859,7 @@ uint8_t BTPairing::record_kinds(const PairingRecord &record) {
   return kinds;
 }
 
-void BTPairing::list_devices(std::vector<hid::InputDevice> &out) const {
+void BTHost::list_devices(std::vector<hid::InputDevice> &out) const {
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   for (const auto &record : this->records_) {
     bool hid = false;
@@ -890,7 +890,7 @@ void BTPairing::list_devices(std::vector<hid::InputDevice> &out) const {
   }
 }
 
-hid::HIDInput *BTPairing::device_input(const std::string &key) {
+hid::HIDInput *BTHost::device_input(const std::string &key) {
   uint8_t address[6];
   if (key.rfind("bt:", 0) != 0 || !parse_address(key.substr(3), address))
     return nullptr;
@@ -905,7 +905,7 @@ hid::HIDInput *BTPairing::device_input(const std::string &key) {
   return nullptr;
 }
 
-void BTPairing::set_device_layout(const std::string &key, const hid::KeyboardLayout *layout) {
+void BTHost::set_device_layout(const std::string &key, const hid::KeyboardLayout *layout) {
   uint8_t address[6];
   if (key.rfind("bt:", 0) != 0 || !parse_address(key.substr(3), address))
     return;
@@ -927,7 +927,7 @@ void BTPairing::set_device_layout(const std::string &key, const hid::KeyboardLay
   }
 }
 
-bool BTPairing::pair_address(const std::string &address) {
+bool BTHost::pair_address(const std::string &address) {
   uint8_t bda[6];
   if (!parse_address(address, bda))
     return false;
@@ -941,7 +941,7 @@ bool BTPairing::pair_address(const std::string &address) {
   return false;
 }
 
-bool BTPairing::connect(const std::string &address) {
+bool BTHost::connect(const std::string &address) {
   uint8_t bda[6];
   PairingTarget *target = parse_address(address, bda) ? this->target_of_(bda) : nullptr;
   if (target == nullptr) {
@@ -952,7 +952,7 @@ bool BTPairing::connect(const std::string &address) {
   return true;
 }
 
-bool BTPairing::disconnect(const std::string &address) {
+bool BTHost::disconnect(const std::string &address) {
   uint8_t bda[6];
   PairingTarget *target = parse_address(address, bda) ? this->target_of_(bda) : nullptr;
   if (target == nullptr) {
@@ -963,18 +963,18 @@ bool BTPairing::disconnect(const std::string &address) {
   return true;
 }
 
-bool BTPairing::unpair(const std::string &address) {
+bool BTHost::unpair(const std::string &address) {
   uint8_t bda[6];
   return parse_address(address, bda) && this->forget_address(bda);
 }
 
-bool BTPairing::is_connected(const std::string &address) const {
+bool BTHost::is_connected(const std::string &address) const {
   uint8_t bda[6];
   const PairingTarget *target = parse_address(address, bda) ? this->target_of_(bda) : nullptr;
   return target != nullptr && target->is_address_connected(bda);
 }
 
-std::vector<uint8_t> BTPairing::encode_(bool fixed_size) const {
+std::vector<uint8_t> BTHost::encode_(bool fixed_size) const {
   const size_t count = fixed_size ? PREFERENCE_RECORDS : this->records_.size();
   std::vector<uint8_t> out(sizeof(Header) + count * sizeof(PairingRecord), 0);
   const size_t used = this->records_.size() * sizeof(PairingRecord);
@@ -986,7 +986,7 @@ std::vector<uint8_t> BTPairing::encode_(bool fixed_size) const {
   return out;
 }
 
-bool BTPairing::decode_(const uint8_t *data, size_t length) {
+bool BTHost::decode_(const uint8_t *data, size_t length) {
   Header header{};
   if (length < sizeof(header))
     return false;
@@ -1008,7 +1008,7 @@ bool BTPairing::decode_(const uint8_t *data, size_t length) {
 }
 
 #ifdef USE_BT_PAIRING_STORAGE
-storage::PathStorage *BTPairing::resolve_file_(const char **rel) {
+storage::PathStorage *BTHost::resolve_file_(const char **rel) {
   if (storage::global_storage_registry == nullptr)
     return nullptr;
   storage::PathStorage *storage = storage::global_storage_registry->resolve_path(this->file_, rel);
@@ -1020,14 +1020,14 @@ storage::PathStorage *BTPairing::resolve_file_(const char **rel) {
 
 using storage::StorageError;
 
-void BTPairing::file_failed_(const char *what, StorageError err) {
+void BTHost::file_failed_(const char *what, StorageError err) {
   ESP_LOGW(TAG, "%s %s failed (%s), trying again", what, this->file_, storage::error_to_string(err));
   this->io_busy_ = false;
   this->next_attempt_ms_ = millis() + RETRY_MS;
   this->enable_loop();
 }
 
-void BTPairing::file_load_() {
+void BTHost::file_load_() {
   this->io_storage_ = this->resolve_file_(&this->io_rel_);
   if (this->io_storage_ == nullptr) {
     this->next_attempt_ms_ = millis() + RETRY_MS;
@@ -1059,7 +1059,7 @@ void BTPairing::file_load_() {
     this->file_failed_("Opening", err);
 }
 
-void BTPairing::file_read_next_() {
+void BTHost::file_read_next_() {
   const size_t size = sizeof(Header) + PREFERENCE_RECORDS * sizeof(PairingRecord);
   const StorageError err = storage::global_storage_worker->read_chunk(
       this->io_handle_, this->io_buf_ + this->io_len_, size - this->io_len_, &this->io_got_,
@@ -1090,7 +1090,7 @@ void BTPairing::file_read_next_() {
   }
 }
 
-void BTPairing::file_loaded_(LoadResult result) {
+void BTHost::file_loaded_(LoadResult result) {
   this->loaded_ = true;
   if (result == LoadResult::OK) {
     this->migrate_records_();
@@ -1105,7 +1105,7 @@ void BTPairing::file_loaded_(LoadResult result) {
   this->enable_loop();
 }
 
-size_t BTPairing::encode_into_(uint8_t *out) const {
+size_t BTHost::encode_into_(uint8_t *out) const {
   const size_t used = this->records_.size() * sizeof(PairingRecord);
   if (used != 0)
     memcpy(out + sizeof(Header), this->records_.data(), used);
@@ -1115,7 +1115,7 @@ size_t BTPairing::encode_into_(uint8_t *out) const {
   return sizeof(Header) + used;
 }
 
-void BTPairing::file_save_() {
+void BTHost::file_save_() {
   this->io_storage_ = this->resolve_file_(&this->io_rel_);
   if (this->io_storage_ == nullptr) {
     this->next_attempt_ms_ = millis() + RETRY_MS;
@@ -1166,14 +1166,14 @@ void BTPairing::file_save_() {
 }
 #endif
 
-BTPairing::LoadResult BTPairing::load_() {
+BTHost::LoadResult BTHost::load_() {
   std::vector<uint8_t> data(sizeof(Header) + PREFERENCE_RECORDS * sizeof(PairingRecord));
   if (!this->pref_.load(data.data(), data.size()) || !this->decode_(data.data(), data.size()))
     return LoadResult::EMPTY;
   return LoadResult::OK;
 }
 
-bool BTPairing::save_() {
+bool BTHost::save_() {
   const auto data = this->encode_(true);
   if (!this->pref_.save(data.data(), data.size()) || !global_preferences->sync()) {
     ESP_LOGW(TAG, "Saving to preferences failed, retrying");
@@ -1183,6 +1183,6 @@ bool BTPairing::save_() {
   return true;
 }
 
-}  // namespace esphome::bt_pairing
+}  // namespace esphome::bt_host
 
 #endif  // USE_ESP32

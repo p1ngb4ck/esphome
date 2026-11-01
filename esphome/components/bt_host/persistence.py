@@ -31,11 +31,11 @@ CONF_ON_ERROR = "on_error"
 BACKEND_STORAGE = "storage"
 BACKEND_NVS = "nvs"
 
-bt_persistence_ns = cg.esphome_ns.namespace("bt_persistence")
-BtPersistence = bt_persistence_ns.class_("BtPersistence", cg.Component)
-ReadyTrigger = bt_persistence_ns.class_("ReadyTrigger", automation.Trigger.template())
-ErrorTrigger = bt_persistence_ns.class_("ErrorTrigger", automation.Trigger.template())
-SetPathAction = bt_persistence_ns.class_("SetPathAction", automation.Action)
+bt_host_ns = cg.esphome_ns.namespace("bt_host")
+BtPersistence = bt_host_ns.class_("BtPersistence", cg.Component)
+ReadyTrigger = bt_host_ns.class_("ReadyTrigger", automation.Trigger.template())
+ErrorTrigger = bt_host_ns.class_("ErrorTrigger", automation.Trigger.template())
+SetPathAction = bt_host_ns.class_("SetPathAction", automation.Action)
 
 
 def _vfs_path(value):
@@ -87,7 +87,7 @@ def _final_validate(config: ConfigType) -> ConfigType:
     full = fv.full_config.get()
     if "esp32_ble" not in full and "usb_bluetooth" not in full:
         raise cv.Invalid(
-            "bt_persistence needs Bluedroid: configure esp32_ble or usb_bluetooth"
+            "bt_host persistence needs Bluedroid: configure esp32_ble or usb_bluetooth"
         )
     if config[CONF_BACKEND] == BACKEND_STORAGE and "storage" not in full:
         raise cv.Invalid("backend 'storage' needs a storage component")
@@ -137,7 +137,7 @@ def _sync_bt_override() -> str:
         check_esp_idf_install(idf_ver, targets=[get_esp32_variant()])
     if not src.is_dir():
         raise cv.Invalid(
-            f"bt_persistence: cannot locate the ESP-IDF bt component (looked in {src})"
+            f"bt_host persistence: cannot locate the ESP-IDF bt component (looked in {src})"
         )
     if dest.exists():
         shutil.rmtree(dest)
@@ -149,7 +149,7 @@ def _sync_bt_override() -> str:
         positions = [text.find(line) for line in _NVS_INCLUDES]
         if any(text.count(line) != 1 for line in _NVS_INCLUDES):
             raise cv.Invalid(
-                f"bt_persistence: unexpected NVS includes in {rel} of IDF {idf_ver}"
+                f"bt_host persistence: unexpected NVS includes in {rel} of IDF {idf_ver}"
             )
         last = max(positions)
         line = _NVS_INCLUDES[positions.index(last)]
@@ -160,7 +160,7 @@ def _sync_bt_override() -> str:
     text = cmake.read_text()
     if text.count(_CMAKE_ANCHOR) != 1:
         raise cv.Invalid(
-            f"bt_persistence: unexpected source list in {_CMAKE_LIST} of IDF {idf_ver}"
+            f"bt_host persistence: unexpected source list in {_CMAKE_LIST} of IDF {idf_ver}"
         )
     text = text.replace(
         _CMAKE_ANCHOR,
@@ -202,7 +202,7 @@ async def to_code(config: ConfigType) -> None:
 
 
 @automation.register_action(
-    "bt_persistence.set_path",
+    "bt_host.persistence_set_path",
     SetPathAction,
     cv.Schema(
         {

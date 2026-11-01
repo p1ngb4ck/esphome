@@ -11,7 +11,7 @@
 #include "esphome/core/helpers.h"
 
 #ifdef USE_BT_PAIRING
-#include "esphome/components/bt_pairing/bt_pairing.h"
+#include "esphome/components/bt_host/bt_host.h"
 #endif
 
 #include <esp_bt_defs.h>
@@ -45,7 +45,7 @@ class BTHIDDevice : public Component,
                     public hid::HIDInput
 #ifdef USE_BT_PAIRING
     ,
-                    public bt_pairing::PairingTarget
+                    public bt_host::PairingTarget
 #endif
 {
  public:
@@ -63,12 +63,12 @@ class BTHIDDevice : public Component,
   /// Pair with a device the pairing scan listed; opens the window again when it has closed.
   void pair_with(size_t index);
 #ifdef USE_BT_PAIRING
-  bool pairs(bt_pairing::Transport transport, bt_pairing::DeviceKind kind) const override {
-    return transport == bt_pairing::Transport::CLASSIC && kind == bt_pairing::DeviceKind::HID;
+  bool pairs(bt_host::Transport transport, bt_host::DeviceKind kind) const override {
+    return transport == bt_host::Transport::CLASSIC && kind == bt_host::DeviceKind::HID;
   }
   uint32_t pairing_slot() const override { return this->slot_; }
   bool is_free() const override { return !this->fixed_address_ && !this->has_address() && !this->is_pairing(); }
-  bool pair_device(const bt_pairing::ScannedDevice &device) override;
+  bool pair_device(const bt_host::ScannedDevice &device) override;
   bool is_device_connected() const override { return this->connected_; }
   void connect_device() override { this->connect(); }
   void disconnect_device() override { this->disconnect(); }
@@ -83,7 +83,7 @@ class BTHIDDevice : public Component,
   void connect_address(const uint8_t *address) override;
   void disconnect_address(const uint8_t *address) override;
 #endif
-  /// One of bt_pairing's shared slots: a connection, taken by whichever of its paired devices
+  /// One of bt_host's shared slots: a connection, taken by whichever of its paired devices
   /// connects or is connected to, and given up when that one goes.
   void set_pooled(bool pooled) { this->pooled_ = pooled; }
   bool is_pooled() const { return this->pooled_; }
@@ -99,7 +99,7 @@ class BTHIDDevice : public Component,
     this->address_set_ = set;
   }
 #ifdef USE_BT_PAIRING
-  void set_pairing(bt_pairing::BTPairing *pairing) { this->pairing_ = pairing; }
+  void set_pairing(bt_host::BTHost *pairing) { this->pairing_ = pairing; }
 #endif
   void set_pin(const std::string &pin) { this->pin_ = pin; }
   void set_auto_connect(bool auto_connect) { this->auto_connect_ = auto_connect; }
@@ -185,7 +185,7 @@ class BTHIDDevice : public Component,
   std::string pin_;
   std::unique_ptr<hid::HIDReportMap> map_;
 #ifdef USE_BT_PAIRING
-  bt_pairing::BTPairing *pairing_{nullptr};
+  bt_host::BTHost *pairing_{nullptr};
 #endif
   std::string candidate_name_;
   std::vector<FoundDevice> found_;
