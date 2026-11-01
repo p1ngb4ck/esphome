@@ -88,6 +88,15 @@ is `pr/usb-uvc-video-output` in [esphome-usb-drivers](https://github.com/p1ngb4c
 All topics together: `github://p1ngb4ck/esphome@dev`. `external_components` replaces components only; the ESPHome
 core of the build host stays as installed.
 
+## License
+
+- ESPHome's own files, also where this repository changes them: the [ESPHome License](LICENSE) (MIT for the Python
+  code and everything else, GPLv3 for the C++ runtime files).
+- New files written for this repository (new components, their code, tests and documentation): MIT,
+  [LICENSE-MIT](LICENSE-MIT).
+- Third-party code keeps its own licence:
+  - `mipi_csi/ov02c10/`: Espressif OV02C10 driver, Apache-2.0.
+
 ## Thanks
 
 `mipi_csi` is built on Horstexplorer's MIPI-CSI camera component
