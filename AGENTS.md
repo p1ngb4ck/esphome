@@ -432,6 +432,9 @@ repositories of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome).
 - `CONFIGURATION.md`: every option of every component the topic adds or changes, with defaults and an example per
   variant. A new or changed option is documented there in the same change.
 - The component's `AGENTS.md`: updated when the design, the threading or the memory use changes.
+- Licences: new files are MIT (`LICENSE-MIT`); changes to ESPHome's own files stay under that file's ESPHome
+  License; third-party code keeps its licence file or notice. Name every third-party source in `ATTRIBUTIONS.md`
+  of `dev` and in the README's thanks.
 
 ### Target constraints (microcontrollers)
 - Internal RAM is scarce (an ESP32-P4 has 512 KB SRAM shared by everything, PSRAM up to 32 MB). Large buffers,
