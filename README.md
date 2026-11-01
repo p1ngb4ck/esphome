@@ -1,10 +1,14 @@
 # esphome-esp-video
 
 ESPHome `dev` plus the video-related changes of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome) `testing_dev`:
-codec requirements, image, camera. One branch per change; `main` contains every branch. Base: ESPHome `dev` at
-`1f70f86b47`. The code is taken over unchanged from `testing_dev` (the lines of esp32, runtime_image, online_image,
-camera, camera_encoder, mipi_csi, rtsp_server, api assigned by `git blame`); `main` equals `testing_dev` for
-runtime_image, online_image, camera, camera_encoder, mipi_csi and rtsp_server.
+codec requirements, image, camera, the display's video output, containers, players, screen capture, apps. One branch
+per change; `main` contains every branch. Base: ESPHome `dev` at `1f70f86b47`. The code is taken over unchanged from
+`testing_dev` (the lines of esp32, runtime_image, online_image, camera, camera_encoder, mipi_csi, rtsp_server, api
+assigned by `git blame`); `main` equals `testing_dev` for runtime_image, online_image, camera, camera_encoder, mipi_csi,
+rtsp_server, display, avi, screen_capture, apps and stream_receiver, and for lvgl except the color picker, the keyboard
+text and the i18n label changes (other topics). The video output builds on the display topic's scanout
+([esphome-mipi-display](https://github.com/p1ngb4ck/esphome-mipi-display) `pr/mipi-dsi-scanout`) and lvgl's remote
+input ([esphome-hid](https://github.com/p1ngb4ck/esphome-hid) `pr/lvgl-remote-input`), so `main` contains those.
 
 The structure this repo grows into (codecs required from esp32, image, camera, display output, containers, screen
 capture, players): [the esp-video plan](https://github.com/p1ngb4ck/p4-panel-workspace) (private workspace,
@@ -31,6 +35,19 @@ capture, players): [the esp-video plan](https://github.com/p1ngb4ck/p4-panel-wor
 | `pr/mipi-csi-ov02c10` | mipi_csi: OV02C10 sensor | `pr/mipi-csi-h264` | P4 |
 | `pr/mipi-csi-define` | mipi_csi: `USE_MIPI_CSI` | `pr/mipi-csi-ov02c10` | P4 |
 | `pr/mipi-csi-hw-jpeg` | mipi_csi: the HW JPEG codec through `esp32.require_hw_jpeg()` | `pr/mipi-csi-define`, `pr/esp32-require-hw-jpeg` | P4 |
+| `pr/esp32-require-h264-encoder` | esp32 `require_h264_encoder()` (esp_h264 on the P4); camera_encoder's h264 type requires it | `pr/esp32-require-hw-jpeg`, `pr/camera-encoder-h264` | P4 |
+| `pr/camera-encoder-option` | camera, mipi_csi: the encoder a camera option (`encoder: jpeg \| h264`), camera_encoder back to upstream | `pr/esp32-require-h264-encoder`, `pr/mipi-csi-hw-jpeg` | P4 |
+| `pr/avi` | avi: AVI demuxer, muxer, read-ahead file reader on the storage worker | `pr/storage` | all |
+| `pr/display-video-output` | display, lvgl: the HW JPEG decoder's output straight into the scanout buffer, `display::VideoOutput` (lvgl `video_output:` 1-2 canvases following the frame size, page mode, capability report), the camera scanout layer, the frame capture, canvas `external_buffer` | `pr/mipi-dsi-scanout`, `pr/lvgl-color-depth-32` (esphome-mipi-display), `pr/lvgl-remote-input` (esphome-hid), `pr/esp32-require-hw-jpeg` | P4 (scanout) |
+| `pr/avi-media-player` | avi: media_player platform `avi` (MJPEG through the video output, PCM / MP3 / FLAC sound, playlist, network streams) | `pr/avi`, `pr/display-video-output` | P4 |
+| `pr/screen-capture` | screen_capture: screenshots and screencasts of what LVGL shows | `pr/avi`, `pr/display-video-output` | P4 |
+| `pr/apps` | apps: app structure with interlock (`apps.start` / `stop` / `is_running`) | - | all |
+| `pr/mipi-csi-video-output` | mipi_csi: runtime resolutions, frames shown through the video output, formats the screen takes chosen at config time | `pr/camera-encoder-option`, `pr/display-video-output` | P4 |
+| `pr/stream-receiver` | stream_receiver: media_player platform for svp_relay's stream (udisp rectangles into a page canvas, sound, touches, AVI through the avi player) | `pr/avi-media-player` | P4 |
+
+usb_uvc's part (the encoder option, MJPEG frames through the video output) is `pr/usb-uvc-video-output` in
+[esphome-usb-drivers](https://github.com/p1ngb4ck/esphome-usb-drivers) (on `pr/usb-uvc`, `pr/camera-encoder-option`,
+`pr/display-video-output`).
 
 Each mipi_csi branch contains the one before it.
 
@@ -46,7 +63,8 @@ Each mipi_csi branch contains the one before it.
 ```yaml
 external_components:
   - source: github://p1ngb4ck/esphome-esp-video@main
-    components: [esp32, runtime_image, online_image, camera, camera_encoder, mipi_csi, rtsp_server]
+    components: [esp32, runtime_image, online_image, camera, camera_encoder, mipi_csi, rtsp_server, display, lvgl,
+                 mipi_dsi, avi, screen_capture, apps, stream_receiver]
 ```
 
 `external_components` replaces components only; the ESPHome core of the build host stays as installed. With the other
