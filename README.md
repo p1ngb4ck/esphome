@@ -1,6 +1,6 @@
 # esphome-remote-desktop
 
-ESPHome `dev` plus the remote desktop app of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome) `testing_dev`. One branch per change; `main` contains every branch. Base: ESPHome `dev` at `1f70f86b47`. The code is taken over unchanged from `testing_dev`; `main` equals `testing_dev` for remote_desktop and display. An app of its own (one repo per app); branches of other topic repos it builds on are merged into the branch that needs them.
+ESPHome `dev` plus the remote desktop app of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome) `testing_dev`. One branch per change; `main` contains every branch. Base: ESPHome `dev` at `1f70f86b47`. The code is taken over unchanged from `testing_dev`; `main` equals `testing_dev` for remote_desktop; its display is `pr/display-video-output-page-draw`'s (the rows change is the emulator's). An app of its own (one repo per app); branches of other topic repos it builds on are merged into the branch that needs them.
 
 ## Branches
 
