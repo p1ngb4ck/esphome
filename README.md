@@ -1,9 +1,56 @@
 # esphome-phone
 
-ESPHome `dev` plus the SIP phone app of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome) `testing_dev`. One branch per change; `main` contains every branch. Base: ESPHome `dev` at `1f70f86b47`. The code is taken over unchanged from `testing_dev`; `main` equals `testing_dev` for sip_phone. An app of its own (one repo per app); branches of other topic repos it builds on are merged into the branch that needs them.
+`sip_phone`: a SIP phone for ESPHome. Registers with a SIP server (a PBX, a home router, a provider), makes and takes
+calls with Opus, G.722, PCMA and PCMU, sends DTMF and SIP messages, has contacts, mute, do-not-disturb and auto
+answer. Sound comes from a resampler microphone (with echo cancellation, esphome-audio) and goes to any ESPHome
+speaker; every state is available to automations, Home Assistant and on-device UIs.
+
+## Getting started
+
+```yaml
+external_components:
+  - source: github://p1ngb4ck/esphome-phone@main
+    components: [sip_phone]
+  - source: github://p1ngb4ck/esphome-audio@main
+    components: [audio, resampler, speaker, mixer]
+
+sip_phone:
+  id: phone
+  microphone: call_mic
+  speaker: main_speaker
+  account:
+    server: pbx.local
+    username: !secret sip_user
+    password: !secret sip_password
+  on_incoming_call:
+    - logger.log: incoming call
+
+button:
+  - platform: template
+    name: Answer
+    on_press:
+      - sip_phone.answer: phone
+```
+
+`call_mic` is a `resampler` microphone (16 kHz, ideally with `echo_cancellation`), see
+[esphome-audio](https://github.com/p1ngb4ck/esphome-audio/blob/main/CONFIGURATION.md).
+
+## More
+
+**[CONFIGURATION.md](CONFIGURATION.md)**: every option - account, codecs and Opus settings, ports, timing, contacts,
+all triggers, actions, the text sensors and the event entity.
 
 ## Branches
 
+One branch per change; `main` contains every branch. Base: ESPHome `dev` at `1f70f86b47`.
+
 | Branch | Change | Needs | Chips |
 |---|---|---|---|
-| `pr/sip-phone` | sip_phone: SIP phone (account registration, Opus / G.722 / PCMA / PCMU, contacts, DTMF), sound from a resampler microphone to a speaker | `pr/resampler-routing` ([esphome-audio](https://github.com/p1ngb4ck/esphome-audio)), `pr/network-priority` ([esphome-network](https://github.com/p1ngb4ck/esphome-network)) | ESP32 |
+| `pr/sip-phone` | `sip_phone`: SIP phone (account registration, Opus / G.722 / PCMA / PCMU, contacts, DTMF, messages), sound from a resampler microphone to a speaker | `pr/resampler-routing` ([esphome-audio](https://github.com/p1ngb4ck/esphome-audio)), `pr/network-priority` ([esphome-network](https://github.com/p1ngb4ck/esphome-network)) | ESP32 |
+
+All topics together: `github://p1ngb4ck/esphome@dev`. `external_components` replaces components only; the ESPHome
+core of the build host stays as installed.
+
+## Thanks
+
+Everyone this project builds on: [ATTRIBUTIONS.md](https://github.com/p1ngb4ck/esphome/blob/dev/ATTRIBUTIONS.md).
