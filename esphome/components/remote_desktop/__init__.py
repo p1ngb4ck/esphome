@@ -11,6 +11,7 @@ from esphome.components.lvgl.video_output import (
 )
 import esphome.config_validation as cv
 from esphome.const import (
+    CONF_CLOSE_ACTION,
     CONF_HOST,
     CONF_ID,
     CONF_INDEX,
@@ -59,6 +60,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_CONNECTIONS, default=8): cv.int_range(min=1, max=16),
             cv.Optional(CONF_CONNECTIONS_FILE): _storage_path,
             cv.Optional(CONF_KEY_BINDINGS_ID): cv.use_id(KeyBindings),
+            cv.Optional(CONF_CLOSE_ACTION, default="back"): cv.string_strict,
         }
     )
     .extend(VIDEO_OUTPUT_SCHEMA)
@@ -94,6 +96,7 @@ async def to_code(config):
     if CONF_KEY_BINDINGS_ID in config:
         cg.add_define("USE_REMOTE_DESKTOP_KEY_BINDINGS")
         cg.add(var.set_key_bindings(await cg.get_variable(config[CONF_KEY_BINDINGS_ID])))
+        cg.add(var.set_close_action_name(config[CONF_CLOSE_ACTION]))
 
 
 CONNECT_SCHEMA = cv.Schema(
