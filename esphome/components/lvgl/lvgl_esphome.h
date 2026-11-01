@@ -578,12 +578,20 @@ class LvglComponent final : public PollingComponent {
   uint32_t cam_frames_{0};      // pictures presented since cam_rate_since_ (the log's rate line)
   uint32_t cam_rate_since_{0};
   enum VideoCanvasState : uint8_t { VC_IDLE, VC_WANT, VC_GRANTED, VC_REFUSED, VC_DONE, VC_DONE_NEXT };
-  bool vc_shown_now_(lv_area_t *rows) const;
+  bool vc_shown_now_(lv_area_t *rows, lv_area_t *over) const;
+  void vc_overlay_set_(const lv_area_t *over);
+  void vc_overlay_draw_(const lv_area_t *area, const uint8_t *src);
+  void vc_overlay_apply_();
   void vc_service_();
   void vc_drop_();
   uint8_t vc_outside_(const lv_area_t *area, lv_area_t *parts) const;
   lv_obj_t *vc_marker_{nullptr};
   lv_area_t vc_rows_{0, 0, -1, -1};
+  lv_area_t vc_over_{0, 0, -1, -1};
+  uint8_t *vc_over_buf_{nullptr};
+  int32_t vc_over_y_{0};
+  int32_t vc_over_h_{0};
+  bool vc_over_ready_{false};
   VideoCanvasTarget vc_target_{};
   TaskHandle_t vc_waiter_{nullptr};
   uint32_t vc_layout_{0};

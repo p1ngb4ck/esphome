@@ -1177,7 +1177,8 @@ void LvglComponent::video_canvas_close() {
   App.wake_loop_threadsafe();
 }
 
-bool LvglComponent::vc_shown_now_(lv_area_t *rows) const {
+bool LvglComponent::vc_shown_now_(lv_area_t *rows, lv_area_t *over) const {
+  *over = lv_area_t{0, 0, -1, -1};
   if (this->vc_marker_ == nullptr || this->paused_ || this->scanout_[0] == nullptr ||
       lv_obj_get_screen(this->vc_marker_) != lv_screen_active() || !lv_obj_is_visible(this->vc_marker_))
     return false;
@@ -1189,10 +1190,97 @@ bool LvglComponent::vc_shown_now_(lv_area_t *rows) const {
   this->scanout_rect_(&box, x, y, w, h);
   const int32_t y1 = (y + 1) & ~1;
   const int32_t y2 = (y + h) & ~1;
-  if (x != 0 || w != static_cast<int32_t>(this->width_) || y2 <= y1 || this->top_layer_over_(&box))
+  if (x != 0 || w != static_cast<int32_t>(this->width_) || y2 <= y1)
     return false;
   this->panel_to_area_(0, y1, w, y2 - y1, rows);
+  lv_obj_t *top = lv_layer_top();
+  const uint32_t count = lv_obj_get_child_count(top);
+  for (uint32_t i = 0; i != count; i++) {
+    lv_obj_t *child = lv_obj_get_child(top, static_cast<int32_t>(i));
+    if (lv_obj_is_hidden(child))
+      continue;
+    lv_area_t area;
+    lv_obj_get_coords(child, &area);
+    lv_area_t part;
+    if (!lv_area_intersect(&part, &area, rows))
+      continue;
+    if (lv_area_get_width(over) <= 0) {
+      *over = part;
+    } else {
+      lv_area_join(over, over, &part);
+    }
+  }
   return true;
+}
+
+void LvglComponent::vc_overlay_set_(const lv_area_t *over) {
+  heap_caps_free(this->vc_over_buf_);
+  this->vc_over_buf_ = nullptr;
+  this->vc_over_ready_ = false;
+  this->vc_over_ = lv_area_t{0, 0, -1, -1};
+  if (lv_area_get_width(over) <= 0 || lv_area_get_height(over) <= 0)
+    return;
+  int32_t x, y, w, h;
+  this->scanout_rect_(over, x, y, w, h);
+  this->vc_over_buf_ = static_cast<uint8_t *>(
+      heap_caps_calloc(1, static_cast<size_t>(h) * this->scanout_stride_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (this->vc_over_buf_ == nullptr)
+    return;
+  this->vc_over_ = *over;
+  this->vc_over_y_ = y;
+  this->vc_over_h_ = h;
+  lv_inv_area(this->disp_, over);
+}
+
+void LvglComponent::vc_overlay_draw_(const lv_area_t *area, const uint8_t *src) {
+  lv_area_t clip;
+  if (this->vc_over_buf_ == nullptr || !lv_area_intersect(&clip, area, &this->vc_over_))
+    return;
+  const int32_t src_w = lv_area_get_width(area);
+  const int32_t sx = clip.x1 - area->x1;
+  const int32_t sy = clip.y1 - area->y1;
+  const int32_t cw = lv_area_get_width(&clip);
+  const int32_t ch = lv_area_get_height(&clip);
+  int32_t x, y, w, h;
+  this->scanout_rect_(&clip, x, y, w, h);
+  y -= this->vc_over_y_;
+  if (y < 0 || y + h > this->vc_over_h_)
+    return;
+  const auto rotation =
+      this->rotation_type_ == ROTATION_SOFTWARE ? this->rotation_ : display::DISPLAY_ROTATION_0_DEGREES;
+  const auto *in = reinterpret_cast<const ScanoutPixel *>(src);
+  auto *out = reinterpret_cast<ScanoutPixel *>(this->vc_over_buf_);
+  const size_t stride = this->width_;
+  for (int32_t r = 0; r != ch; r++) {
+    const ScanoutPixel *row = in + static_cast<size_t>(sy + r) * src_w + sx;
+    switch (rotation) {
+      case display::DISPLAY_ROTATION_90_DEGREES:
+        for (int32_t c = 0; c != cw; c++)
+          out[static_cast<size_t>(y + c) * stride + x + ch - 1 - r] = row[c];
+        break;
+      case display::DISPLAY_ROTATION_180_DEGREES:
+        for (int32_t c = 0; c != cw; c++)
+          out[static_cast<size_t>(y + ch - 1 - r) * stride + x + cw - 1 - c] = row[c];
+        break;
+      case display::DISPLAY_ROTATION_270_DEGREES:
+        for (int32_t c = 0; c != cw; c++)
+          out[static_cast<size_t>(y + cw - 1 - c) * stride + x + r] = row[c];
+        break;
+      default:
+        std::memcpy(out + static_cast<size_t>(y + r) * stride + x, row, cw * SCANOUT_BPP);
+        break;
+    }
+  }
+  this->vc_over_ready_ = true;
+}
+
+void LvglComponent::vc_overlay_apply_() {
+  if (this->vc_over_buf_ == nullptr || !this->vc_over_ready_)
+    return;
+  uint8_t *back = this->scanout_[this->scanout_back_] + static_cast<size_t>(this->vc_over_y_) * this->scanout_stride_;
+  const size_t len = static_cast<size_t>(this->vc_over_h_) * this->scanout_stride_;
+  std::memcpy(back, this->vc_over_buf_, len);
+  esp_cache_msync(back, len, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
 }
 
 uint8_t LvglComponent::vc_outside_(const lv_area_t *area, lv_area_t *parts) const {
@@ -1205,6 +1293,8 @@ uint8_t LvglComponent::vc_outside_(const lv_area_t *area, lv_area_t *parts) cons
 }
 
 void LvglComponent::vc_drop_() {
+  const lv_area_t none{0, 0, -1, -1};
+  this->vc_overlay_set_(&none);
   this->vc_shown_.store(false);
   this->vc_rows_ = lv_area_t{0, 0, -1, -1};
   this->vc_ui_back_ = false;
@@ -1221,7 +1311,11 @@ void LvglComponent::vc_drop_() {
 
 void LvglComponent::vc_service_() {
   lv_area_t rows{0, 0, -1, -1};
-  const bool shown = this->vc_shown_now_(&rows);
+  lv_area_t over{0, 0, -1, -1};
+  const bool shown = this->vc_shown_now_(&rows, &over);
+  if (!lv_area_is_equal(&over, &this->vc_over_) &&
+      (lv_area_get_width(&over) > 0 || this->vc_over_buf_ != nullptr))
+    this->vc_overlay_set_(&over);
   if (shown != this->vc_shown_.load() || (shown && !lv_area_is_equal(&rows, &this->vc_rows_))) {
     if (this->vc_shown_.load())
       lv_inv_area(this->disp_, &this->vc_rows_);
@@ -1233,8 +1327,10 @@ void LvglComponent::vc_service_() {
   }
   uint8_t state = this->vc_state_.load();
   if (state == VC_DONE || state == VC_DONE_NEXT) {
-    if (this->vc_ok_.load() && shown && this->vc_target_.layout == this->vc_layout_)
+    if (this->vc_ok_.load() && shown && this->vc_target_.layout == this->vc_layout_) {
+      this->vc_overlay_apply_();
       this->present_scanout_();
+    }
     this->vc_ui_back_ = false;
     uint8_t done = VC_DONE;
     if (!this->vc_state_.compare_exchange_strong(done, VC_IDLE))
@@ -1269,6 +1365,8 @@ void LvglComponent::vc_service_() {
   if (state != VC_IDLE)
     return;
   if (this->vc_ui_back_ && (!this->vc_fed_.load() || !shown)) {
+    if (shown)
+      this->vc_overlay_apply_();
     this->present_scanout_();
     this->vc_ui_back_ = false;
   }
@@ -1298,6 +1396,8 @@ void LvglComponent::flush_cb_(lv_display_t *disp_drv, const lv_area_t *area, uin
       const uint8_t count = this->vc_outside_(area, parts);
       for (uint8_t i = 0; i != count; i++)
         this->draw_scanout_(area, color_p, this->scanout_[this->scanout_back_], &parts[i]);
+      if (this->vc_over_buf_ != nullptr)
+        this->vc_overlay_draw_(area, color_p);
 #else
       this->draw_scanout_(area, color_p, this->scanout_[this->scanout_back_]);
 #endif
