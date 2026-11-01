@@ -71,6 +71,7 @@ RpiTouchDisplayV1(
     color_depth="24",
     pixel_mode="24bit",
     color_order="RGB",
+    video_mode="non_burst_sync_pulses",
     frame_ack=False,
     continuous_clock=True,
     eotp=False,
