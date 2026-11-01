@@ -8,6 +8,12 @@
 #include "core/lv_obj_class_private.h"
 #include "core/lv_obj_private.h"
 
+#include "misc/lv_text_private.h"
+#include <algorithm>
+#include <climits>
+#include <cstdint>
+#include <cstdlib>
+#include <new>
 #include <numeric>
 
 #ifdef USE_ESP32
@@ -900,6 +906,1130 @@ LVEncoderListener::LVEncoderListener(lv_indev_type_t type, uint16_t long_press_t
 }
 #endif  // USE_LVGL_KEY_LISTENER
 
+#ifdef USE_LVGL_HID
+// Keys that type into a focused text area rather than act: letters, digits, space, punctuation and
+// the keypad but its Enter, without Ctrl or GUI.
+static bool types_text(uint16_t page, uint16_t usage, uint8_t mods) {
+  if (page != hid::PAGE_KEYBOARD || (mods & (KeyBindings::MOD_CTRL | KeyBindings::MOD_GUI)) != 0)
+    return false;
+  return (usage >= 0x04 && usage <= 0x27) || (usage >= 0x2C && usage <= 0x38) ||
+         (usage >= 0x54 && usage <= 0x63 && usage != 0x58) || usage == 0x64 || (usage >= 0x87 && usage <= 0x89);
+}
+
+static bool is_textarea(lv_obj_t *obj) {
+#ifdef USE_LVGL_TEXTAREA
+  return obj != nullptr && lv_obj_check_type(obj, &lv_textarea_class);
+#else
+  return false;
+#endif
+}
+
+// Whether the widget does something with the arrow key itself (a slider its value, an open
+// dropdown its selection); otherwise the arrow moves the focus.
+static bool uses_key(lv_obj_t *obj, uint32_t key) {
+  [[maybe_unused]] const bool vertical = key == LV_KEY_UP || key == LV_KEY_DOWN;
+#ifdef USE_LVGL_SLIDER
+  if (lv_obj_check_type(obj, &lv_slider_class)) {
+    const lv_slider_orientation_t orientation = lv_slider_get_orientation(obj);
+    const bool upright = orientation == LV_SLIDER_ORIENTATION_VERTICAL ||
+                         (orientation == LV_SLIDER_ORIENTATION_AUTO && lv_obj_get_height(obj) > lv_obj_get_width(obj));
+    return vertical == upright;
+  }
+#endif
+#ifdef USE_LVGL_ARC
+  if (lv_obj_check_type(obj, &lv_arc_class))
+    return !vertical;
+#endif
+#ifdef USE_LVGL_ROLLER
+  if (lv_obj_check_type(obj, &lv_roller_class))
+    return vertical;
+#endif
+#ifdef USE_LVGL_DROPDOWN
+  if (lv_obj_check_type(obj, &lv_dropdown_class))
+    return lv_dropdown_is_open(obj);
+#endif
+#ifdef USE_LVGL_TEXTAREA
+  if (lv_obj_check_type(obj, &lv_textarea_class))
+    return !vertical || !lv_textarea_get_one_line(obj);
+#endif
+#ifdef USE_LVGL_SPINBOX
+  if (lv_obj_check_type(obj, &lv_spinbox_class))
+    return true;
+#endif
+#ifdef USE_LVGL_BUTTONMATRIX
+  if (lv_obj_check_type(obj, &lv_buttonmatrix_class))
+    return true;
+#endif
+#ifdef USE_LVGL_KEYBOARD
+  if (lv_obj_check_type(obj, &lv_keyboard_class))
+    return true;
+#endif
+#ifdef USE_LVGL_TABLE
+  if (lv_obj_check_type(obj, &lv_table_class))
+    return true;
+#endif
+  return false;
+}
+
+LVHIDKeypadListener::LVHIDKeypadListener(hid::HIDInput *input, KeyBindings *bindings, uint16_t long_press_time,
+                                         uint16_t long_press_repeat_time)
+    : bindings_(bindings) {
+  this->drv_ = lv_indev_create();
+  lv_indev_set_type(this->drv_, LV_INDEV_TYPE_KEYPAD);
+  lv_indev_set_long_press_time(this->drv_, long_press_time);
+  lv_indev_set_long_press_repeat_time(this->drv_, long_press_repeat_time);
+  lv_indev_set_user_data(this->drv_, this);
+  lv_indev_set_read_cb(this->drv_, [](lv_indev_t *d, lv_indev_data_t *data) {
+    static_cast<LVHIDKeypadListener *>(lv_indev_get_user_data(d))->read_(data);
+  });
+  if (input == nullptr)
+    return;
+  input->add_on_key_event_callback([this, input](uint16_t page, uint16_t usage, bool pressed) {
+    LvglComponent::KeyTap *tap = this->parent_ != nullptr ? this->parent_->get_key_tap() : nullptr;
+    if (tap != nullptr && tap->key_tap(input->key_source(), input->key_source_label(), page, usage, pressed))
+      return;
+    const bool keyboard = page == hid::PAGE_KEYBOARD;
+    this->push_(static_cast<uint32_t>(page) << 16 | usage, KeyBindings::modifiers_of(input->get_modifiers()),
+                pressed ? KEY_PRESS : KEY_RELEASE, keyboard ? input->layout_char(usage) : 0,
+                keyboard && usage == 0xE6 && input->layout_has_level3(), input->key_source());
+  });
+  // Typed characters; Enter and Tab are keys.
+  input->add_on_text_callback([this](const std::string &text) { this->push_text(text); });
+}
+
+void LVHIDKeypadListener::push_text(const std::string &text) {
+  for (size_t i = 0; i < text.size();) {
+    const auto lead = static_cast<uint8_t>(text[i]);
+    const size_t n = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+    uint32_t c = n == 1 ? lead : lead & (0x7F >> n);
+    for (size_t j = 1; j < n && i + j < text.size(); j++)
+      c = (c << 6) | (static_cast<uint8_t>(text[i + j]) & 0x3F);
+    i += n;
+    if (c == '\n' || c == '\t')
+      continue;
+    this->push_(c, 0, TEXT);
+  }
+}
+
+bool LVHIDKeypadListener::push_action(int action) {
+  return action >= 0 && this->push_(static_cast<uint32_t>(action), 0, ACTION);
+}
+
+// From the HID transport's task; read_() takes them on the LVGL thread.
+bool LVHIDKeypadListener::push_(uint32_t code, uint8_t mods, EventKind kind, uint32_t layout_char, bool level3,
+                                uint32_t source) {
+  if (this->parent_->is_paused()) {
+    if (kind == KEY_RELEASE)
+      this->parent_->maybe_wakeup();
+    if (kind == TEXT && this->parent_->get_paused_input() == nullptr)
+      return false;
+  }
+  const uint8_t tail = this->tail_.load(std::memory_order_relaxed);
+  if (static_cast<uint8_t>(tail - this->head_.load(std::memory_order_acquire)) == QUEUE_SIZE)
+    return false;
+  this->queue_[tail % QUEUE_SIZE] = {code, layout_char, mods, kind, level3, source};
+  this->tail_.store(tail + 1, std::memory_order_release);
+  return true;
+}
+
+void LVHIDKeypadListener::read_(lv_indev_data_t *data) {
+  if (this->release_next_) {
+    this->release_next_ = false;
+    this->pressed_ = false;
+  } else {
+    uint8_t head = this->head_.load(std::memory_order_relaxed);
+    while (head != this->tail_.load(std::memory_order_acquire)) {
+      const Event event = this->queue_[head % QUEUE_SIZE];
+      this->head_.store(++head, std::memory_order_release);
+      if (event.kind == TEXT) {
+        if (!is_textarea(this->focused_()))
+          continue;
+        this->key_ = lv_text_unicode_to_encoded(event.code);
+        this->pressed_ = true;
+        this->release_next_ = true;
+        break;
+      }
+      // A key_bindings action given by name (remote input): what one of its keys does, pressed and let go.
+      if (event.kind == ACTION) {
+        const int action = static_cast<int>(event.code);
+        const uint32_t key = action < KeyBindings::BUILTIN_COUNT ? this->builtin_(action, this->focused_()) : 0;
+        this->bindings_->fire(action);
+        if (key == 0)
+          continue;
+        this->key_ = key;
+        this->pressed_ = true;
+        this->release_next_ = true;
+        break;
+      }
+      this->track_(event.code, event.kind == KEY_PRESS);
+      if (event.kind == KEY_PRESS) {
+        Held *slot = nullptr;
+        for (Held &held : this->held_) {
+          if (held.code == 0) {
+            slot = &held;
+            break;
+          }
+        }
+        const uint32_t key = this->press_(event.code >> 16, event.code & 0xFFFF, event.mods);
+        if (key == 0 || slot == nullptr)
+          continue;
+        *slot = {event.code, key};
+        this->key_ = key;
+        this->pressed_ = true;
+        break;
+      }
+      if (this->bindings_->take_learned_release(event.code >> 16, event.code & 0xFFFF))
+        continue;
+      if (LVHIDPointerListener *pointer = this->parent_->get_key_pointer())
+        pointer->key_release(event.code);
+      Held *held = nullptr;
+      for (Held &h : this->held_) {
+        if (h.code == event.code)
+          held = &h;
+      }
+      if (held == nullptr)
+        continue;
+      this->key_ = held->lv_key;
+      held->code = 0;
+      this->pressed_ = false;
+      break;
+    }
+  }
+  data->key = this->key_;
+  data->state = this->pressed_ ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+  data->continue_reading =
+      this->release_next_ || this->head_.load(std::memory_order_relaxed) != this->tail_.load(std::memory_order_acquire);
+}
+
+void LVHIDKeypadListener::run_paused() {
+  LvglComponent::PausedInput *taker = this->parent_->get_paused_input();
+  uint8_t head = this->head_.load(std::memory_order_relaxed);
+  while (head != this->tail_.load(std::memory_order_acquire)) {
+    const Event event = this->queue_[head % QUEUE_SIZE];
+    this->head_.store(++head, std::memory_order_release);
+    if (event.kind == TEXT) {
+      if (taker != nullptr)
+        taker->paused_text(event.code);
+      continue;
+    }
+    const uint16_t page = event.code >> 16;
+    const uint16_t usage = event.code & 0xFFFF;
+    this->track_(event.code, event.kind == KEY_PRESS);
+    if (event.kind == KEY_RELEASE) {
+      if (this->bindings_->take_learned_release(page, usage))
+        continue;
+      for (Held &held : this->held_) {
+        if (held.code == event.code) {
+          held.code = 0;
+          this->pressed_ = false;
+        }
+      }
+      if (taker != nullptr)
+        taker->paused_key(page, usage, event.mods, false, this->bindings_->resolve(page, usage, event.mods),
+                          event.layout_char, event.level3, event.source);
+      continue;
+    }
+    if (event.kind != KEY_PRESS)
+      continue;
+    if (this->bindings_->take_learned(page, usage, event.mods))
+      continue;
+    const int combo = this->bindings_->resolve_combo(page, usage, this->down_, this->down_count_);
+    const int action = combo >= 0 ? combo : this->bindings_->resolve(page, usage, event.mods);
+    if (taker != nullptr &&
+        taker->paused_key(page, usage, event.mods, true, action, event.layout_char, event.level3, event.source) &&
+        action < KeyBindings::BUILTIN_COUNT)
+      continue;
+    this->bindings_->fire(action);
+  }
+}
+
+void LVHIDKeypadListener::track_(uint32_t code, bool pressed) {
+  uint8_t at = 0;
+  while (at < this->down_count_ && this->down_[at] != code)
+    at++;
+  if (pressed && at == this->down_count_ && this->down_count_ < DOWN_SIZE) {
+    this->down_[this->down_count_++] = code;
+  } else if (!pressed && at < this->down_count_) {
+    this->down_[at] = this->down_[--this->down_count_];
+  }
+}
+
+uint32_t LVHIDKeypadListener::press_(uint16_t page, uint16_t usage, uint8_t mods) {
+  if (this->bindings_->take_learned(page, usage, mods))
+    return 0;
+  const int combo = this->bindings_->resolve_combo(page, usage, this->down_, this->down_count_);
+  // A page testing a gamepad gets its buttons and D-pad; only combos still act.
+  if (this->bindings_->capturing() && KeyBindings::is_pad_key(page, usage)) {
+    this->bindings_->fire(combo);
+    return 0;
+  }
+  lv_obj_t *focused = this->focused_();
+  if (combo >= 0) {
+    const uint32_t key = combo < KeyBindings::BUILTIN_COUNT ? this->builtin_(combo, focused) : 0;
+    this->bindings_->fire(combo);
+    return key;
+  }
+  if (is_textarea(focused) && types_text(page, usage, mods))
+    return 0;
+  const int action = this->bindings_->resolve(page, usage, mods);
+  if (action < 0)
+    return 0;
+  LVHIDPointerListener *pointer = this->parent_->get_key_pointer();
+  if (pointer != nullptr && pointer->is_key_mode() &&
+      ((action >= KeyBindings::ACT_UP && action <= KeyBindings::ACT_RIGHT) || action == KeyBindings::ACT_ENTER)) {
+    static constexpr uint32_t KEYS[] = {LV_KEY_UP, LV_KEY_DOWN, LV_KEY_LEFT, LV_KEY_RIGHT};
+    pointer->key_press(static_cast<uint32_t>(page) << 16 | usage,
+                       action == KeyBindings::ACT_ENTER ? static_cast<uint32_t>(LV_KEY_ENTER)
+                                                        : KEYS[action - KeyBindings::ACT_UP]);
+    return 0;
+  }
+  const uint32_t key = action < KeyBindings::BUILTIN_COUNT ? this->builtin_(action, focused) : 0;
+  this->bindings_->fire(action);
+  return key;
+}
+
+uint32_t LVHIDKeypadListener::builtin_(int action, lv_obj_t *focused) {
+  lv_obj_t *modal = this->modal_();
+  lv_obj_t *from = focused != nullptr && this->reachable_(focused, modal) ? focused : nullptr;
+  switch (action) {
+    case KeyBindings::ACT_UP:
+    case KeyBindings::ACT_DOWN:
+    case KeyBindings::ACT_LEFT:
+    case KeyBindings::ACT_RIGHT: {
+      static constexpr uint32_t ARROWS[] = {LV_KEY_UP, LV_KEY_DOWN, LV_KEY_LEFT, LV_KEY_RIGHT};
+      const uint32_t key = ARROWS[action - KeyBindings::ACT_UP];
+      if (from != nullptr && uses_key(from, key))
+        return key;
+      this->move_focus_(key, from, modal);
+      return 0;
+    }
+    case KeyBindings::ACT_NEXT:
+    case KeyBindings::ACT_PREV:
+      this->step_focus_(action == KeyBindings::ACT_NEXT, from, modal);
+      return 0;
+    case KeyBindings::ACT_ENTER:
+      if (from == nullptr) {
+        this->move_focus_(0, nullptr, modal);
+        return 0;
+      }
+      return LV_KEY_ENTER;
+    case KeyBindings::ACT_BACK:
+      return LV_KEY_ESC;
+    case KeyBindings::ACT_HOME:
+      return LV_KEY_HOME;
+    case KeyBindings::ACT_END:
+      return LV_KEY_END;
+    case KeyBindings::ACT_PAGE_UP:
+    case KeyBindings::ACT_PAGE_DOWN:
+      this->scroll_page_(action == KeyBindings::ACT_PAGE_DOWN, from, modal);
+      return 0;
+    case KeyBindings::ACT_BACKSPACE:
+      return LV_KEY_BACKSPACE;
+    case KeyBindings::ACT_DELETE:
+      return LV_KEY_DEL;
+    default:
+      return 0;
+  }
+}
+
+lv_obj_t *LVHIDKeypadListener::focused_() const {
+  lv_group_t *group = lv_indev_get_group(this->drv_);
+  return group != nullptr ? lv_group_get_focused(group) : nullptr;
+}
+
+lv_obj_t *LVHIDKeypadListener::modal_() const {
+  lv_obj_t *top = lv_display_get_layer_top(this->parent_->get_disp());
+  if (top == nullptr)
+    return nullptr;
+  lv_area_t full;
+  lv_obj_get_coords(top, &full);
+  for (auto i = static_cast<int32_t>(lv_obj_get_child_count(top)) - 1; i >= 0; i--) {
+    lv_obj_t *child = lv_obj_get_child(top, i);
+    if (lv_obj_is_hidden(child))
+      continue;
+    lv_area_t area;
+    lv_obj_get_coords(child, &area);
+    if (area.x1 <= full.x1 && area.y1 <= full.y1 && area.x2 >= full.x2 && area.y2 >= full.y2)
+      return child;
+  }
+  return nullptr;
+}
+
+bool LVHIDKeypadListener::reachable_(lv_obj_t *obj, lv_obj_t *modal) const {
+  if (lv_obj_is_disabled(obj))
+    return false;
+  bool in_modal = false;
+  lv_obj_t *root = obj;
+  for (lv_obj_t *o = obj; o != nullptr; o = lv_obj_get_parent(o)) {
+    if (lv_obj_is_hidden(o))
+      return false;
+    in_modal = in_modal || o == modal;
+    root = o;
+  }
+  if (modal != nullptr)
+    return in_modal;
+  lv_display_t *disp = this->parent_->get_disp();
+  return root == lv_display_get_screen_active(disp) || root == lv_display_get_layer_top(disp);
+}
+
+void LVHIDKeypadListener::move_focus_(uint32_t direction, lv_obj_t *from, lv_obj_t *modal) {
+  lv_group_t *group = lv_indev_get_group(this->drv_);
+  if (group == nullptr)
+    return;
+  lv_area_t cur{};
+  if (from != nullptr)
+    lv_obj_get_coords(from, &cur);
+  const int32_t cx = (cur.x1 + cur.x2) / 2;
+  const int32_t cy = (cur.y1 + cur.y2) / 2;
+  lv_obj_t *best = nullptr;
+  bool best_aligned = false;
+  int64_t best_score = INT64_MAX;
+  const uint32_t count = lv_group_get_obj_count(group);
+  for (uint32_t i = 0; i < count; i++) {
+    lv_obj_t *obj = lv_group_get_obj_by_index(group, i);
+    if (obj == from || !this->reachable_(obj, modal))
+      continue;
+    lv_area_t area;
+    lv_obj_get_coords(obj, &area);
+    const int32_t ax = (area.x1 + area.x2) / 2;
+    const int32_t ay = (area.y1 + area.y2) / 2;
+    int64_t score;
+    bool aligned = false;
+    if (from == nullptr) {
+      // The first one: top-most, then left-most.
+      score = static_cast<int64_t>(area.y1) * 65536 + area.x1;
+    } else {
+      int32_t ahead, gap, offset;
+      switch (direction) {
+        case LV_KEY_RIGHT:
+          if (ax <= cx)
+            continue;
+          ahead = area.x1 - cur.x2;
+          gap = std::max(area.y1 - cur.y2, cur.y1 - area.y2);
+          offset = std::abs(ay - cy);
+          break;
+        case LV_KEY_LEFT:
+          if (ax >= cx)
+            continue;
+          ahead = cur.x1 - area.x2;
+          gap = std::max(area.y1 - cur.y2, cur.y1 - area.y2);
+          offset = std::abs(ay - cy);
+          break;
+        case LV_KEY_DOWN:
+          if (ay <= cy)
+            continue;
+          ahead = area.y1 - cur.y2;
+          gap = std::max(area.x1 - cur.x2, cur.x1 - area.x2);
+          offset = std::abs(ax - cx);
+          break;
+        default:  // LV_KEY_UP
+          if (ay >= cy)
+            continue;
+          ahead = cur.y1 - area.y2;
+          gap = std::max(area.x1 - cur.x2, cur.x1 - area.x2);
+          offset = std::abs(ax - cx);
+          break;
+      }
+      // In line with the focused one (overlapping across the direction) wins; then the nearest.
+      ahead = std::max<int32_t>(ahead, 0);
+      aligned = gap <= 0;
+      score = aligned ? static_cast<int64_t>(ahead) * 4 + offset : static_cast<int64_t>(ahead) + 2LL * gap;
+    }
+    if ((aligned && !best_aligned) || (aligned == best_aligned && score < best_score)) {
+      best = obj;
+      best_aligned = aligned;
+      best_score = score;
+    }
+  }
+  if (best != nullptr)
+    lv_group_focus_obj(best);
+}
+
+void LVHIDKeypadListener::step_focus_(bool forward, lv_obj_t *from, lv_obj_t *modal) {
+  lv_group_t *group = lv_indev_get_group(this->drv_);
+  if (group == nullptr)
+    return;
+  const auto count = static_cast<int32_t>(lv_group_get_obj_count(group));
+  int32_t start = forward ? -1 : 0;
+  for (int32_t i = 0; from != nullptr && i < count; i++) {
+    if (lv_group_get_obj_by_index(group, i) == from)
+      start = i;
+  }
+  for (int32_t n = 1; n <= count; n++) {
+    const int32_t index = ((start + (forward ? n : -n)) % count + count) % count;
+    lv_obj_t *obj = lv_group_get_obj_by_index(group, index);
+    if (obj != from && this->reachable_(obj, modal)) {
+      lv_group_focus_obj(obj);
+      return;
+    }
+  }
+}
+
+void LVHIDKeypadListener::scroll_page_(bool down, lv_obj_t *from, lv_obj_t *modal) {
+  if (from == nullptr) {
+    this->move_focus_(0, nullptr, modal);
+    return;
+  }
+  lv_obj_t *list = nullptr;
+  for (lv_obj_t *o = lv_obj_get_parent(from); o != nullptr; o = lv_obj_get_parent(o)) {
+    if (lv_obj_is_scrollable(o) && (lv_obj_get_scroll_dir(o) & LV_DIR_VER) != 0 &&
+        lv_obj_get_scroll_top(o) + lv_obj_get_scroll_bottom(o) > 0) {
+      list = o;
+      break;
+    }
+  }
+  lv_group_t *group = lv_indev_get_group(this->drv_);
+  if (list == nullptr || group == nullptr)
+    return;
+  lv_area_t before;
+  lv_obj_get_coords(from, &before);
+  const int32_t page = lv_obj_get_content_height(list);
+  lv_obj_scroll_by_bounded(list, 0, down ? -page : page, LV_ANIM_OFF);
+  const int32_t cx = (before.x1 + before.x2) / 2;
+  const int32_t cy = (before.y1 + before.y2) / 2;
+  lv_obj_t *best = nullptr;
+  int64_t best_distance = INT64_MAX;
+  const uint32_t count = lv_group_get_obj_count(group);
+  for (uint32_t i = 0; i < count; i++) {
+    lv_obj_t *obj = lv_group_get_obj_by_index(group, i);
+    if (!this->reachable_(obj, modal))
+      continue;
+    bool inside = false;
+    for (lv_obj_t *o = lv_obj_get_parent(obj); o != nullptr && !inside; o = lv_obj_get_parent(o))
+      inside = o == list;
+    if (!inside)
+      continue;
+    lv_area_t area;
+    lv_obj_get_coords(obj, &area);
+    const int64_t distance = std::abs((area.y1 + area.y2) / 2 - cy) + std::abs((area.x1 + area.x2) / 2 - cx);
+    if (distance < best_distance) {
+      best = obj;
+      best_distance = distance;
+    }
+  }
+  if (best != nullptr)
+    lv_group_focus_obj(best);
+}
+
+LVHIDPointerListener::LVHIDPointerListener(hid::HIDInput *input, uint16_t long_press_time,
+                                           uint16_t long_press_repeat_time, LvglComponent *parent) {
+  this->set_parent(parent);
+  this->drv_ = lv_indev_create();
+  lv_indev_set_type(this->drv_, LV_INDEV_TYPE_POINTER);
+  lv_indev_set_display(this->drv_, parent->get_disp());
+  lv_indev_set_long_press_time(this->drv_, long_press_time);
+  lv_indev_set_long_press_repeat_time(this->drv_, long_press_repeat_time);
+  lv_indev_set_user_data(this->drv_, this);
+  if (parent->get_key_pointer() == nullptr)
+    parent->set_key_pointer(this);
+  lv_indev_set_read_cb(this->drv_, [](lv_indev_t *d, lv_indev_data_t *data) {
+    auto *l = static_cast<LVHIDPointerListener *>(lv_indev_get_user_data(d));
+    const bool pad = l->pad_read_();
+    if (l->key_mode_)
+      l->key_read_();
+    data->point.x = l->x_;
+    data->point.y = l->y_;
+    data->state = l->pressed_ || l->press_unread_ || l->key_pressed_ || pad ? LV_INDEV_STATE_PRESSED
+                                                                            : LV_INDEV_STATE_RELEASED;
+    l->press_unread_ = false;
+    if (l->hide_after_ != 0 && l->cursor_ != nullptr && !l->pressed_ && !pad &&
+        millis() - l->last_motion_ > l->hide_after_ && !lv_obj_is_hidden(l->cursor_))
+      lv_obj_set_hidden(l->cursor_, true);
+  });
+  this->add_input(input);
+}
+
+void LVHIDPointerListener::add_input(hid::HIDInput *input) {
+  input->add_on_pointer_callback([this](int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
+    this->move_(dx, dy, wheel, pan, buttons);
+  });
+  this->add_pad_touch_input(input);
+}
+
+void LVHIDPointerListener::add_pad_touch_input(hid::HIDInput *input) {
+  input->add_on_control_callback(
+      [this](uint16_t page, uint16_t usage, int32_t value) { this->pad_control_(page, usage, value); });
+  input->add_on_key_event_callback(
+      [this](uint16_t page, uint16_t usage, bool down) { this->pad_key_(page, usage, down); });
+}
+
+void LVHIDPointerListener::pad_reset_() {
+  this->pad_dx_ = this->pad_dy_ = this->pad_sx_ = this->pad_sy_ = 0;
+  this->pad_tap_ = this->pad_tap_shown_ = false;
+}
+
+void LVHIDPointerListener::pad_control_(uint16_t page, uint16_t usage, int32_t value) {
+  if (page != hid::PAGE_DIGITIZER)
+    return;
+  const bool active = this->pad_touch_ && !this->parent_->is_paused();
+  if (!active)
+    this->pad_reset_();
+  for (uint8_t i = 0; i < 2; i++) {
+    PadFinger &finger = this->pad_fingers_[i];
+    int32_t dx = 0;
+    int32_t dy = 0;
+    if (usage == hid::USAGE_FINGER_DOWN[i]) {
+      const uint8_t before = this->pad_fingers_[0].down + this->pad_fingers_[1].down;
+      finger = {finger.x, finger.y, value != 0, false, false};
+      const uint8_t now = this->pad_fingers_[0].down + this->pad_fingers_[1].down;
+      if (before == 0 && now != 0) {
+        this->pad_since_ = millis();
+        this->pad_moved_ = 0;
+        this->pad_most_ = 0;
+        this->pad_no_tap_ = this->pad_button_;
+      }
+      this->pad_most_ = std::max(this->pad_most_, now);
+      if (active && now == 0 && before != 0 && this->pad_most_ == 1 && !this->pad_no_tap_ &&
+          this->pad_moved_ < PAD_TAP_MOVE && millis() - this->pad_since_ < PAD_TAP_MS)
+        this->pad_tap_ = true;
+      return;
+    }
+    if (usage == hid::USAGE_FINGER_X[i]) {
+      if (finger.has_x)
+        dx = value - finger.x;
+      finger.x = value;
+      finger.has_x = true;
+    } else if (usage == hid::USAGE_FINGER_Y[i]) {
+      if (finger.has_y)
+        dy = value - finger.y;
+      finger.y = value;
+      finger.has_y = true;
+    } else {
+      continue;
+    }
+    if (!active)
+      return;
+    this->pad_moved_ += std::abs(dx) + std::abs(dy);
+    // Two fingers scroll by their mean motion, one moves the pointer.
+    if (this->pad_fingers_[0].down && this->pad_fingers_[1].down) {
+      this->pad_sx_ += dx;
+      this->pad_sy_ += dy;
+    } else {
+      this->pad_dx_ += dx;
+      this->pad_dy_ += dy;
+    }
+    return;
+  }
+}
+
+void LVHIDPointerListener::pad_key_(uint16_t page, uint16_t usage, bool down) {
+  // hid::PAD_TOUCHPAD's button.
+  static constexpr uint16_t TOUCHPAD_BUTTON = __builtin_ctz(hid::PAD_TOUCHPAD) + 1;
+  if (page != hid::PAGE_BUTTON || usage != TOUCHPAD_BUTTON)
+    return;
+  this->pad_button_ = down && this->pad_touch_ && !this->parent_->is_paused();
+  if (down)
+    this->pad_no_tap_ = true;
+}
+
+bool LVHIDPointerListener::pad_read_() {
+  if (!this->pad_touch_)
+    return false;
+  if (this->pad_capture_ != nullptr && lv_obj_get_screen(this->pad_capture_) == lv_screen_active() &&
+      lv_obj_is_visible(this->pad_capture_)) {
+    this->pad_reset_();
+    return false;
+  }
+  lv_display_t *disp = this->parent_->get_disp();
+  const int32_t width = lv_display_get_horizontal_resolution(disp);
+  const int32_t height = lv_display_get_vertical_resolution(disp);
+  if (this->pad_dx_ != 0 || this->pad_dy_ != 0) {
+    // A touchpad width is the display's width.
+    const float px = static_cast<float>(this->pad_dx_) * width / 65535.0f;
+    const float py = static_cast<float>(this->pad_dy_) * width / 65535.0f;
+    this->pad_dx_ = this->pad_dy_ = 0;
+    float factor = this->speed_;
+    if (this->acceleration_)
+      factor *= std::min(3.0f, 1.0f + (std::abs(px) + std::abs(py)) / 20.0f);
+    const float fx = px * factor + this->pad_rest_x_;
+    const float fy = py * factor + this->pad_rest_y_;
+    const auto mx = static_cast<int32_t>(fx);
+    const auto my = static_cast<int32_t>(fy);
+    this->pad_rest_x_ = fx - mx;
+    this->pad_rest_y_ = fy - my;
+    this->x_ = std::clamp<int32_t>(this->x_ + mx, 0, width - 1);
+    this->y_ = std::clamp<int32_t>(this->y_ + my, 0, height - 1);
+    this->last_motion_ = millis();
+    if (this->cursor_ != nullptr && lv_obj_is_hidden(this->cursor_))
+      lv_obj_set_hidden(this->cursor_, false);
+  }
+  // The content follows the fingers (reversed by the reverse wheel setting); what is below a pixel
+  // waits for the next read. Both fingers' motion is gathered: halved.
+  const int32_t sx = this->pad_sx_ * width / (2 * 65535);
+  const int32_t sy = this->pad_sy_ * width / (2 * 65535);
+  if (sx != 0 || sy != 0) {
+    this->pad_sx_ -= sx * 2 * 65535 / width;
+    this->pad_sy_ -= sy * 2 * 65535 / width;
+    const int32_t sign = this->reverse_wheel_ ? -1 : 1;
+    lv_point_t point{this->x_, this->y_};
+    for (lv_obj_t *obj = lv_indev_search_obj(lv_screen_active(), &point); obj != nullptr; obj = lv_obj_get_parent(obj)) {
+      if (lv_obj_is_scrollable(obj)) {
+        lv_obj_scroll_by_bounded(obj, sign * sx, sign * sy, LV_ANIM_OFF);
+        break;
+      }
+    }
+  }
+  // A tap is pressed for one read, let go at the next.
+  if (this->pad_tap_shown_) {
+    this->pad_tap_ = this->pad_tap_shown_ = false;
+  } else if (this->pad_tap_) {
+    this->pad_tap_shown_ = true;
+    return true;
+  }
+  return this->pad_button_;
+}
+
+void LVHIDPointerListener::set_key_mode(bool on) {
+  this->key_mode_ = on;
+  for (KeyHeld &held : this->keys_)
+    held = {};
+  this->key_pressed_ = false;
+  if (on && this->cursor_ != nullptr && !this->parent_->is_paused()) {
+    this->last_motion_ = millis();
+    if (lv_obj_is_hidden(this->cursor_))
+      lv_obj_set_hidden(this->cursor_, false);
+  }
+}
+
+void LVHIDPointerListener::key_press(uint32_t code, uint32_t key) {
+  if (key == LV_KEY_ENTER) {
+    this->key_pressed_ = true;
+  } else {
+    bool any = false;
+    for (const KeyHeld &held : this->keys_)
+      any = any || (held.code != 0 && held.key != LV_KEY_ENTER);
+    if (!any)
+      this->key_since_ = millis();
+  }
+  for (KeyHeld &held : this->keys_) {
+    if (held.code == 0) {
+      held = {code, key};
+      break;
+    }
+  }
+  this->last_motion_ = millis();
+  if (this->cursor_ != nullptr && lv_obj_is_hidden(this->cursor_))
+    lv_obj_set_hidden(this->cursor_, false);
+}
+
+void LVHIDPointerListener::key_release(uint32_t code) {
+  for (KeyHeld &held : this->keys_) {
+    if (held.code == code) {
+      if (held.key == LV_KEY_ENTER)
+        this->key_pressed_ = false;
+      held = {};
+    }
+  }
+}
+
+// Every read while a direction is held: a step that way, faster once held long enough.
+void LVHIDPointerListener::key_read_() {
+  int32_t dx = 0;
+  int32_t dy = 0;
+  for (const KeyHeld &held : this->keys_) {
+    if (held.code == 0)
+      continue;
+    dx += held.key == LV_KEY_RIGHT ? 1 : held.key == LV_KEY_LEFT ? -1 : 0;
+    dy += held.key == LV_KEY_DOWN ? 1 : held.key == LV_KEY_UP ? -1 : 0;
+  }
+  if (dx == 0 && dy == 0)
+    return;
+  const uint32_t held_ms = millis() - this->key_since_;
+  float factor = 1.0f;
+  if (held_ms > this->key_after_ms_ && this->key_most_ > 1) {
+    const uint32_t ramp = this->key_after_ms_ < 2000 ? 2000 - this->key_after_ms_ : 1;
+    factor += (this->key_most_ - 1) * std::min(1.0f, static_cast<float>(held_ms - this->key_after_ms_) / ramp);
+  }
+  const auto step = static_cast<int32_t>(this->key_step_ * factor);
+  lv_display_t *disp = this->parent_->get_disp();
+  this->x_ = std::clamp<int32_t>(this->x_ + dx * step, 0, lv_display_get_horizontal_resolution(disp) - 1);
+  this->y_ = std::clamp<int32_t>(this->y_ + dy * step, 0, lv_display_get_vertical_resolution(disp) - 1);
+  this->last_motion_ = millis();
+}
+
+void LVHIDPointerListener::set_cursor_(lv_obj_t *cursor) {
+  lv_obj_set_clickable(cursor, false);
+  lv_indev_set_cursor(this->drv_, cursor);
+  this->cursor_ = cursor;
+  if (this->hide_after_ != 0)
+    lv_obj_set_hidden(cursor, true);  // until the pointer first moves
+}
+
+void LVHIDPointerListener::set_hide_after(uint32_t ms) {
+  this->hide_after_ = ms;
+  if (ms != 0 && this->cursor_ != nullptr)
+    lv_obj_set_hidden(this->cursor_, true);
+}
+
+#ifdef USE_LVGL_IMAGE
+void LVHIDPointerListener::set_cursor_image(const void *src) {
+  lv_obj_t *cursor = lv_image_create(lv_layer_sys());
+  lv_image_set_src(cursor, src);
+  this->set_cursor_(cursor);
+}
+#endif
+
+void LVHIDPointerListener::set_default_cursor() {
+  this->own_cursor_ = true;
+  this->set_cursor_look(0, 1);
+}
+
+// The arrow cursor: a white triangle on a dark one a pixel larger, its tip at the pointer.
+static void draw_arrow_cursor(lv_event_t *e) {
+  lv_obj_t *obj = lv_event_get_current_target_obj(e);
+  lv_layer_t *layer = lv_event_get_layer(e);
+  lv_area_t a;
+  lv_obj_get_coords(obj, &a);
+  const int32_t h = lv_area_get_height(&a) - 3;
+  const int32_t w = h * 3 / 4;
+  lv_draw_triangle_dsc_t dsc;
+  lv_draw_triangle_dsc_init(&dsc);
+  dsc.opa = LV_OPA_COVER;
+  for (int32_t edge = 1; edge >= 0; edge--) {
+    dsc.color = edge != 0 ? lv_color_black() : lv_color_white();
+    dsc.p[0].x = a.x1 + 1 - edge;
+    dsc.p[0].y = a.y1 + 1 - 2 * edge;
+    dsc.p[1].x = a.x1 + 1 - edge;
+    dsc.p[1].y = a.y1 + 1 + h + edge;
+    dsc.p[2].x = a.x1 + 1 + w + 2 * edge;
+    dsc.p[2].y = a.y1 + 1 + w + edge;
+    lv_draw_triangle(layer, &dsc);
+  }
+}
+
+void LVHIDPointerListener::set_cursor_look(uint8_t style, uint8_t size) {
+  if (!this->own_cursor_)
+    return;  // a configured cursor image stays as it is
+  this->look_style_ = style;
+  this->look_size_ = std::min<uint8_t>(size, 2);
+  // Nothing of LVGL while it is paused: the next motion (LVGL runs again) makes it.
+  this->look_pending_ = this->parent_->is_paused();
+  if (!this->look_pending_)
+    this->apply_look_();
+}
+
+void LVHIDPointerListener::apply_look_() {
+  this->look_pending_ = false;
+  const uint8_t style = this->look_style_;
+  static constexpr int32_t DIAMETER[3] = {10, 14, 20};
+  const int32_t d = DIAMETER[this->look_size_];
+  lv_obj_t *old = this->cursor_;
+  const bool shown = old != nullptr && !lv_obj_is_hidden(old);
+  lv_obj_t *cursor = lv_obj_create(lv_layer_sys());
+  lv_obj_remove_style_all(cursor);
+  if (style >= 2) {
+    const int32_t h = d * 3 / 2;
+    lv_obj_set_size(cursor, h * 3 / 4 + 4, h + 4);
+    lv_obj_add_event_cb(cursor, draw_arrow_cursor, LV_EVENT_DRAW_MAIN, nullptr);
+  } else {
+    // Dot and ring: centred on the point
+    lv_obj_set_size(cursor, d, d);
+    lv_obj_set_style_translate_x(cursor, -d / 2, 0);
+    lv_obj_set_style_translate_y(cursor, -d / 2, 0);
+    lv_obj_set_style_radius(cursor, LV_RADIUS_CIRCLE, 0);
+    if (style == 0) {
+      lv_obj_set_style_bg_opa(cursor, LV_OPA_COVER, 0);
+      lv_obj_set_style_bg_color(cursor, lv_color_white(), 0);
+      lv_obj_set_style_border_width(cursor, 2, 0);
+      lv_obj_set_style_border_color(cursor, lv_color_black(), 0);
+    } else {
+      lv_obj_set_style_border_width(cursor, 3, 0);
+      lv_obj_set_style_border_color(cursor, lv_color_white(), 0);
+      lv_obj_set_style_outline_width(cursor, 1, 0);
+      lv_obj_set_style_outline_color(cursor, lv_color_black(), 0);
+      lv_obj_set_style_outline_opa(cursor, LV_OPA_COVER, 0);
+    }
+  }
+  this->set_cursor_(cursor);
+  if (shown)
+    lv_obj_set_hidden(cursor, false);
+  if (old != nullptr)
+    lv_obj_delete(old);
+}
+
+void LVHIDPointerListener::long_press_here() {
+  if (this->parent_->is_paused())
+    return;
+  lv_point_t point{this->x_, this->y_};
+  lv_obj_t *obj = lv_indev_search_obj(lv_layer_top(), &point);
+  if (obj == nullptr || obj == lv_layer_top())
+    obj = lv_indev_search_obj(lv_screen_active(), &point);
+  for (; obj != nullptr; obj = lv_obj_get_parent(obj)) {
+    if (lv_obj_is_clickable(obj)) {
+      lv_obj_send_event(obj, LV_EVENT_LONG_PRESSED, nullptr);
+      return;
+    }
+  }
+}
+
+void LVHIDPointerListener::move_(int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
+  if (this->parent_->is_paused()) {
+    LvglComponent::PausedInput *taker = this->parent_->get_paused_input();
+    if (taker != nullptr && taker->paused_pointer(dx, dy, wheel, buttons))
+      return;
+    if (buttons == 0)
+      this->parent_->maybe_wakeup();
+    return;
+  }
+  this->last_motion_ = millis();
+  if (this->cursor_ != nullptr && lv_obj_is_hidden(this->cursor_))
+    lv_obj_set_hidden(this->cursor_, false);
+  if (this->look_pending_)
+    this->apply_look_();
+  lv_display_t *disp = this->parent_->get_disp();
+  float factor = this->speed_;
+  if (this->acceleration_)
+    factor *= std::min(3.0f, 1.0f + static_cast<float>(std::abs(dx) + std::abs(dy)) / 20.0f);
+  const float fx = dx * factor + this->rest_x_;
+  const float fy = dy * factor + this->rest_y_;
+  const auto mx = static_cast<int32_t>(fx);
+  const auto my = static_cast<int32_t>(fy);
+  this->rest_x_ = fx - mx;
+  this->rest_y_ = fy - my;
+  this->x_ = std::clamp<int32_t>(this->x_ + mx, 0, lv_display_get_horizontal_resolution(disp) - 1);
+  this->y_ = std::clamp<int32_t>(this->y_ + my, 0, lv_display_get_vertical_resolution(disp) - 1);
+  const uint8_t primary = this->left_handed_ ? 0x02 : 0x01;
+  const uint8_t second = this->left_handed_ ? 0x01 : 0x02;
+  this->pressed_ = (buttons & primary) != 0;
+  if (this->pressed_)
+    this->press_unread_ = true;
+  const uint8_t changed = buttons ^ this->last_buttons_;
+  this->last_buttons_ = buttons;
+  if (changed & second)
+    this->button_cb_.call(2, (buttons & second) != 0);
+  for (uint8_t bit = 2; bit < 5; bit++) {  // middle, side 4, side 5
+    if (changed & (1u << bit))
+      this->button_cb_.call(bit + 1, ((buttons >> bit) & 1) != 0);
+  }
+  if (wheel == 0 && pan == 0)
+    return;
+  if (this->reverse_wheel_)
+    wheel = -wheel;
+  lv_point_t point{this->x_, this->y_};
+  for (lv_obj_t *obj = lv_indev_search_obj(lv_screen_active(), &point); obj != nullptr; obj = lv_obj_get_parent(obj)) {
+    if (lv_obj_is_scrollable(obj)) {
+      const int32_t step = WHEEL_LINE * this->wheel_lines_;
+      lv_obj_scroll_by_bounded(obj, -pan * step, wheel * step, LV_ANIM_ON);
+      break;
+    }
+  }
+}
+
+#ifdef USE_LVGL_REMOTE_INPUT
+LVRemoteInput *LVRemoteInput::create(KeyBindings *bindings, uint16_t long_press_time,
+                                     uint16_t long_press_repeat_time, LvglComponent *parent, lv_group_t *group) {
+  void *mem = RAMAllocator<LVRemoteInput>(RAMAllocator<LVRemoteInput>::ALLOC_EXTERNAL).allocate(1);
+  if (mem == nullptr) {
+    ESP_LOGE(TAG, "No PSRAM for the remote input");
+    return nullptr;
+  }
+  auto *remote = new (mem) LVRemoteInput(bindings, long_press_time, long_press_repeat_time, parent);
+  if (group != nullptr)
+    lv_indev_set_group(remote->keypad_.get_drv(), group);
+  return remote;
+}
+
+LVRemoteInput::LVRemoteInput(KeyBindings *bindings, uint16_t long_press_time, uint16_t long_press_repeat_time,
+                             LvglComponent *parent)
+    : keypad_(nullptr, bindings, long_press_time, long_press_repeat_time), bindings_(bindings) {
+  this->set_parent(parent);
+  this->keypad_.set_parent(parent);
+  this->drv_ = lv_indev_create();
+  lv_indev_set_type(this->drv_, LV_INDEV_TYPE_POINTER);
+  lv_indev_set_disp(this->drv_, parent->get_disp());
+  lv_indev_set_long_press_time(this->drv_, long_press_time);
+  lv_indev_set_long_press_repeat_time(this->drv_, long_press_repeat_time);
+  lv_indev_set_user_data(this->drv_, this);
+  lv_indev_set_read_cb(this->drv_, [](lv_indev_t *d, lv_indev_data_t *data) {
+    static_cast<LVRemoteInput *>(lv_indev_get_user_data(d))->read_(data);
+  });
+}
+
+bool LVRemoteInput::push_(const Step &step) {
+  if (this->count_ == STEPS)
+    return false;
+  this->steps_[(this->head_ + this->count_) % STEPS] = step;
+  this->count_++;
+  return true;
+}
+
+const char *LVRemoteInput::run(const std::string &command, int32_t x, int32_t y, int32_t x2, int32_t y2, int32_t ms,
+                               const std::string &text) {
+  if (this->parent_->is_paused()) {
+    // The screen is the player's (dashboard, video, desktop): only key_bindings actions, fired at once as
+    // an HID key fires them then (LVHIDKeypadListener::run_paused); the queue is not read while paused.
+    if (command != "key")
+      return "LVGL is paused";
+    const int action = this->bindings_ != nullptr ? this->bindings_->find_action(text) : -1;
+    if (action < 0)
+      return "no such key_bindings action";
+    this->bindings_->fire(action);
+    return nullptr;
+  }
+  auto coord = [](int32_t v) { return static_cast<int16_t>(clamp<int32_t>(v, 0, INT16_MAX)); };
+  Step step{coord(x), coord(y), coord(x2), coord(y2), static_cast<uint16_t>(clamp<int32_t>(ms, 0, 10000)), STEP_TAP};
+  if (command == "tap") {
+    step.kind = STEP_TAP;
+  } else if (command == "press") {
+    step.kind = STEP_PRESS;
+  } else if (command == "move") {
+    step.kind = STEP_MOVE;
+  } else if (command == "release") {
+    step.kind = STEP_RELEASE;
+  } else if (command == "swipe") {
+    step.kind = STEP_SWIPE;
+  } else if (command == "key") {
+    const int action = this->bindings_ != nullptr ? this->bindings_->find_action(text) : -1;
+    if (action < 0)
+      return "no such key_bindings action";
+    return this->keypad_.push_action(action) ? nullptr : "key queue full";
+  } else if (command == "text") {
+    if (!is_textarea(this->focused()))
+      return "no text area has the focus";
+    this->keypad_.push_text(text);
+    return nullptr;
+  } else {
+    return "unknown command";
+  }
+  return this->push_(step) ? nullptr : "pointer queue full";
+}
+
+// LVGL thread, each read: the current step goes on, else the next one starts.
+void LVRemoteInput::read_(lv_indev_data_t *data) {
+  const uint32_t now = lv_tick_get();
+  if (!this->running_ && this->count_ != 0) {
+    this->current_ = this->steps_[this->head_];
+    this->head_ = (this->head_ + 1) % STEPS;
+    this->count_--;
+    this->running_ = true;
+    this->begun_ = false;
+    this->started_ = now;
+  }
+  if (this->running_) {
+    const Step &step = this->current_;
+    switch (step.kind) {
+      case STEP_TAP:
+        // Down for one read, up the next: a click where it is
+        if (!this->begun_) {
+          this->x_ = step.x;
+          this->y_ = step.y;
+          this->pressed_ = true;
+          this->begun_ = true;
+        } else {
+          this->pressed_ = false;
+          this->running_ = false;
+        }
+        break;
+      case STEP_PRESS:
+        this->x_ = step.x;
+        this->y_ = step.y;
+        this->pressed_ = true;
+        this->running_ = false;
+        break;
+      case STEP_MOVE:
+        this->x_ = step.x;
+        this->y_ = step.y;
+        this->running_ = false;
+        break;
+      case STEP_RELEASE:
+        this->pressed_ = false;
+        this->running_ = false;
+        break;
+      case STEP_SWIPE: {
+        const uint32_t elapsed = now - this->started_;
+        if (!this->begun_) {
+          this->x_ = step.x;
+          this->y_ = step.y;
+          this->pressed_ = true;
+          this->begun_ = true;
+        } else if (elapsed < step.ms) {
+          this->x_ = static_cast<int16_t>(step.x + (step.x2 - step.x) * static_cast<int32_t>(elapsed) / step.ms);
+          this->y_ = static_cast<int16_t>(step.y + (step.y2 - step.y) * static_cast<int32_t>(elapsed) / step.ms);
+        } else if (this->x_ != step.x2 || this->y_ != step.y2) {
+          this->x_ = step.x2;
+          this->y_ = step.y2;
+        } else {
+          this->pressed_ = false;
+          this->running_ = false;
+        }
+        break;
+      }
+    }
+  }
+  data->point.x = this->x_;
+  data->point.y = this->y_;
+  data->state = this->pressed_ ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+}
+
+lv_obj_t *LVRemoteInput::focused() {
+  lv_group_t *group = lv_indev_get_group(this->keypad_.get_drv());
+  return group != nullptr ? lv_group_get_focused(group) : nullptr;
+}
+
+const char *LVRemoteInput::type_name(lv_obj_t *obj) {
+  if (obj == nullptr)
+    return "";
+#ifdef USE_LVGL_BUTTON
+  if (lv_obj_check_type(obj, &lv_button_class))
+    return "button";
+#endif
+#ifdef USE_LVGL_TEXTAREA
+  if (lv_obj_check_type(obj, &lv_textarea_class))
+    return "textarea";
+#endif
+#ifdef USE_LVGL_DROPDOWN
+  if (lv_obj_check_type(obj, &lv_dropdown_class))
+    return "dropdown";
+#endif
+#ifdef USE_LVGL_SLIDER
+  if (lv_obj_check_type(obj, &lv_slider_class))
+    return "slider";
+#endif
+#ifdef USE_LVGL_LABEL
+  if (lv_obj_check_type(obj, &lv_label_class))
+    return "label";
+#endif
+#ifdef USE_LVGL_SWITCH
+  if (lv_obj_check_type(obj, &lv_switch_class))
+    return "switch";
+#endif
+#ifdef USE_LVGL_CHECKBOX
+  if (lv_obj_check_type(obj, &lv_checkbox_class))
+    return "checkbox";
+#endif
+#ifdef USE_LVGL_ROLLER
+  if (lv_obj_check_type(obj, &lv_roller_class))
+    return "roller";
+#endif
+#ifdef USE_LVGL_KEYBOARD
+  if (lv_obj_check_type(obj, &lv_keyboard_class))
+    return "keyboard";
+#endif
+  return "obj";
+}
+
+const char *LVRemoteInput::text_of(lv_obj_t *obj) {
+  if (obj == nullptr)
+    return "";
+#ifdef USE_LVGL_TEXTAREA
+  if (lv_obj_check_type(obj, &lv_textarea_class))
+    return lv_textarea_get_text(obj);
+#endif
+#ifdef USE_LVGL_LABEL
+  if (lv_obj_check_type(obj, &lv_label_class))
+    return lv_label_get_text(obj);
+  const uint32_t children = lv_obj_get_child_count(obj);
+  for (uint32_t i = 0; i < children; i++) {
+    lv_obj_t *child = lv_obj_get_child(obj, static_cast<int32_t>(i));
+    if (lv_obj_check_type(child, &lv_label_class))
+      return lv_label_get_text(child);
+  }
+#endif
+  return "";
+}
+#endif  // USE_LVGL_REMOTE_INPUT
+#endif  // USE_LVGL_HID
+
 #if defined(USE_LVGL_DROPDOWN) || defined(LV_USE_ROLLER)
 std::string LvSelectable::get_selected_text() {
   auto selected = this->get_selected_index();
@@ -1208,6 +2338,10 @@ void LvglComponent::update() {
 
 void LvglComponent::loop() {
   if (this->paused_) {
+#ifdef USE_LVGL_HID
+    for (auto *keypad : this->hid_keypads_)
+      keypad->run_paused();
+#endif
     if (this->show_snow_)
       this->write_random_();
     return;
