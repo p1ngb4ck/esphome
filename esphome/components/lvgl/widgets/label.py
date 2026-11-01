@@ -1,6 +1,7 @@
 from esphome.components.const import CONF_LABEL
 import esphome.config_validation as cv
 from esphome.const import CONF_TEXT
+from esphome.core import CORE
 
 from ..defines import (
     CONF_LONG_MODE,
@@ -39,9 +40,11 @@ class LabelType(WidgetType):
 
     async def _text_to_code(self, w: Widget, config, create: bool):
         if (value := config.get(CONF_TEXT)) is not None:
-            from esphome.components import runtime_language
+            key = None
+            if isinstance(value, str) and "runtime_language" in CORE.config:
+                from esphome.components import runtime_language
 
-            key = runtime_language.register_text(value) if isinstance(value, str) else None
+                key = runtime_language.register_text(value)
             if key is None:
                 await w.set_property(CONF_TEXT, await lv_text.process(value))
             elif create and str(config.get(CONF_LONG_MODE, "")).upper().endswith("DOT"):
