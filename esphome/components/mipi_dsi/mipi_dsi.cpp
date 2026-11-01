@@ -6,6 +6,8 @@
 #include "hal/mipi_dsi_hal.h"
 #include "hal/mipi_dsi_host_ll.h"
 
+#include <hal/axi_icm_ll.h>
+
 #include <algorithm>
 #include <cstring>
 
@@ -13,6 +15,8 @@ namespace esphome::mipi_dsi {
 
 // Maximum bytes to log for init commands (truncated if larger)
 static constexpr size_t MIPI_DSI_MAX_CMD_LOG_BYTES = 64;
+// Highest AXI QoS priority (4 bits); all masters start at 0
+static constexpr uint32_t DSI_DMA_READ_PRIORITY = 15;
 
 bool MipiDsi::notify_refresh_ready_(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata,
                                     void *user_ctx) {
@@ -176,6 +180,12 @@ void MipiDsi::setup() {
   } else if (esp_lcd_dpi_panel_get_frame_buffer(this->handle_, 1, &this->draw_fb_) != ESP_OK) {
     this->draw_fb_ = nullptr;
   }
+
+  // The panel reads its frame buffer from PSRAM all the time through DW-GDMA. With all AXI masters at the same
+  // priority, heavy PSRAM use by the CPU or the PPA can hold those reads up until the panel runs out of data and
+  // shows a corrupt frame. Raise the read priority on both DW-GDMA master ports; the panel does not write.
+  axi_icm_ll_set_dw_gdma_qos_arbiter_prio(0, 0, DSI_DMA_READ_PRIORITY);
+  axi_icm_ll_set_dw_gdma_qos_arbiter_prio(1, 0, DSI_DMA_READ_PRIORITY);
 
   ESP_LOGCONFIG(TAG, "MIPI DSI setup complete");
 }
@@ -430,6 +440,7 @@ void MipiDsi::fill(Color color) {
     default:
       break;
   }
+  this->mark_dirty_(0, 0, this->get_width(), this->get_height());
 }
 
 int MipiDsi::get_width() {
