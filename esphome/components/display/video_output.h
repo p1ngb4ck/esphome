@@ -145,6 +145,7 @@ class VideoOutput {
   VideoCanvas *show_frame(const uint8_t *pixels, uint32_t width, uint32_t height, uint32_t fps, uint8_t bpp,
                           Component *owner);
   VideoCanvas *open_page(Component *owner);
+  VideoCanvas *open_page_on(uint8_t index, uint32_t width, uint32_t height, Component *owner);
   VideoCanvas *open_rows(Component *owner);
   bool page_size(uint32_t *width, uint32_t *height, const Component *owner) const;
 #endif

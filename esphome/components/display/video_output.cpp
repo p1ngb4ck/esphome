@@ -718,6 +718,26 @@ VideoCanvas *VideoOutput::open_page(Component *owner) {
   return canvas->open_page(width, height, owner) ? canvas : nullptr;
 }
 
+VideoCanvas *VideoOutput::open_page_on(uint8_t index, uint32_t width, uint32_t height, Component *owner) {
+  if (this->held(owner) != nullptr || index >= this->count_)
+    return nullptr;
+  VideoCanvas *canvas = this->canvases_[index];
+  bool other = false;
+  bool claimed = false;
+  portENTER_CRITICAL(&this->lock_);
+  for (uint8_t i = 0; i != this->count_; i++) {
+    if (i != index && !this->canvases_[i]->idle())
+      other = true;
+  }
+  if (canvas->idle())
+    claimed = canvas->claim();
+  portEXIT_CRITICAL(&this->lock_);
+  if (!claimed)
+    return nullptr;
+  canvas->set_combined(other);
+  return canvas->open_page(width, height, owner) ? canvas : nullptr;
+}
+
 VideoCanvas *VideoOutput::open_rows(Component *owner) {
   if (this->held(owner) != nullptr)
     return nullptr;
