@@ -29,11 +29,11 @@ ExtendedApiServices *ExtendedApiServices::create() {
 }
 
 void ExtendedApiServices::setup() {
-  this->register_service(&ExtendedApiServices::on_play_audio, "svp_play_audio", {"url", "announce"});
-  this->register_service(&ExtendedApiServices::on_audio_command, "svp_audio_command", {"command"});
-  this->register_service(&ExtendedApiServices::on_set_volume, "svp_set_volume", {"volume"});
+  this->register_service(&ExtendedApiServices::on_play_audio, "media_play_audio", {"url", "announce"});
+  this->register_service(&ExtendedApiServices::on_audio_command, "media_audio_command", {"command"});
+  this->register_service(&ExtendedApiServices::on_set_volume, "media_set_volume", {"volume"});
 #ifdef USE_MEDIA_PLAYER_COVER
-  this->register_service(&ExtendedApiServices::on_cover, "svp_cover");
+  this->register_service(&ExtendedApiServices::on_cover, "media_cover");
 #endif
   this->build_traits_();
   this->player_->add_on_state_callback([this](MediaPlayerState) { this->publish_status_(); });
@@ -68,7 +68,7 @@ void ExtendedApiServices::publish_status_() {
 #endif
   char json[384];
   std::snprintf(json, sizeof(json),
-                "{\"svp\":1,\"port\":%u,\"state\":\"%s\",\"volume\":%.2f,\"muted\":%s,\"playlist\":false,"
+                "{\"extended_api\":1,\"port\":%u,\"state\":\"%s\",\"volume\":%.2f,\"muted\":%s,\"playlist\":false,"
                 "\"video\":false,\"game\":\"\",\"link\":\"off\",%s}",
                 port, media_player_state_to_string(this->player_->state), this->player_->volume,
                 this->player_->is_muted() ? "true" : "false", this->traits_);
