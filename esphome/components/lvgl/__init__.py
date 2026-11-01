@@ -104,6 +104,7 @@ from .schemas import (
 from .styles import styles_to_code, theme_to_code
 from .touchscreens import touchscreen_schema, touchscreens_to_code
 from .trigger import generate_align_tos, generate_triggers
+from .video_output import CONF_VIDEO_OUTPUT, LVGL_VIDEO_OUTPUT_SCHEMA, lvgl_video_output_to_code
 from .types import (
     IdleTrigger,
     PlainTrigger,
@@ -498,6 +499,8 @@ async def to_code(configs):
             rotation_type,
         )
         await cg.register_component(lv_component, config)
+        if (video_output := config.get(CONF_VIDEO_OUTPUT)) is not None:
+            CORE.add_job(lvgl_video_output_to_code, lv_component, displays[0], video_output)
         if rotation := config.get(CONF_ROTATION):
             cg.add(lv_component.set_rotation(rotation))
         if paused := config[df.CONF_PAUSED]:
@@ -653,6 +656,7 @@ LVGL_TOP_LEVEL_SCHEMA = (
             cv.Optional(CONF_DRAW_ROUNDING, default=2): cv.positive_int,
             cv.Optional(CONF_BUFFER_SIZE, default=0): cv.percentage,
             cv.Optional(CONF_ROTATION): validate_rotation,
+            cv.Optional(CONF_VIDEO_OUTPUT): LVGL_VIDEO_OUTPUT_SCHEMA,
             cv.Optional(CONF_LOG_LEVEL, default="WARN"): cv.one_of(
                 *df.LV_LOG_LEVELS, upper=True
             ),

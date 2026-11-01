@@ -416,6 +416,19 @@ class Display : public PollingComponent {
   /// The frame buffer draw_pixels_at() writes into, native orientation, packed rows of the native
   /// width, for a caller that reads back what is shown; nullptr when the display has none.
   virtual uint8_t *get_draw_buffer(ColorBitness *bitness) { return nullptr; }
+  uint8_t *scanout_back_buffer(uint32_t timeout_ms) {
+    void *fbs[2]{};
+    ColorBitness bitness{};
+    if (this->get_scanout_buffers(fbs, 2, &bitness) != 2 || !this->wait_scanout_flipped(timeout_ms))
+      return nullptr;
+    uint8_t *shown = this->get_draw_buffer(&bitness);
+    return static_cast<uint8_t *>(fbs[0] == shown ? fbs[1] : fbs[0]);
+  }
+  void show_scanout_buffer(void *buffer) {
+    ColorBitness bitness{};
+    if (buffer != this->get_draw_buffer(&bitness))
+      this->present_scanout_buffer(buffer);
+  }
 
   /// Draw a straight line from the point [x1,y1] to [x2,y2] with the given color.
   void line(int x1, int y1, int x2, int y2, Color color = COLOR_ON);

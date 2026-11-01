@@ -30,6 +30,8 @@
 
 #ifdef USE_ESP32_VARIANT_ESP32P4
 #include "driver/ppa.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #endif
 
 #ifdef USE_FONT
@@ -251,6 +253,17 @@ class LvglComponent final : public PollingComponent {
   void update() override;
   void loop() override;
   template<typename F> void add_on_idle_callback(F &&callback) { this->idle_callbacks_.add(std::forward<F>(callback)); }
+  void add_on_draw_end_callback(std::function<void()> &&callback) {
+    this->draw_end_callbacks_.add(std::move(callback));
+    // setup() only wires up the LV_EVENT_REFR_READY listener if draw_end_callback_ (YAML
+    // on_draw_end:) or update_when_display_idle_ was already set at that point -- a lower-
+    // priority consumer calling this after setup() has already run needs to register it itself.
+    // Guarded so it's wired exactly once regardless of which path gets there first.
+    if (!this->draw_end_event_registered_) {
+      lv_display_add_event_cb(this->disp_, render_end_cb, LV_EVENT_REFR_READY, this);
+      this->draw_end_event_registered_ = true;
+    }
+  }
 
   static void render_end_cb(lv_event_t *event);
   static void render_start_cb(lv_event_t *event);
@@ -377,10 +390,68 @@ class LvglComponent final : public PollingComponent {
   /// Set the rotation from an angle in degrees. Must be a multiple of 90.
   void set_rotation(int angle);
   display::DisplayRotation get_rotation() const { return this->rotation_; }
+#ifdef USE_ESP32
+  bool has_scanout() const { return this->scanout_[0] != nullptr; }
+#endif
   void rotate_coordinates(int32_t &x, int32_t &y) const;
 
   uint16_t get_width() const { return lv_display_get_horizontal_resolution(this->disp_); }
   uint16_t get_height() const { return lv_display_get_vertical_resolution(this->disp_); }
+
+#ifdef USE_ESP32
+  /// Gets what LVGL draws as the LVGL screen shows it (its size, orientation and colour format): every
+  /// area rendered while it is set goes into the buffer capture_target() gives, and capture_done()
+  /// follows once a refresh is complete. All three on the LVGL thread (the main loop).
+  class FrameCapture {
+   public:
+    /// The buffer this area goes into: capture_bytes() long, cache-line aligned, packed rows of the
+    /// LVGL screen's width. nullptr: this area is not wanted.
+    virtual uint8_t *capture_target() = 0;
+    /// The area (clipped to the screen) is in the buffer now.
+    virtual void capture_area(const lv_area_t &area) = 0;
+    virtual void capture_done() = 0;
+  };
+  void set_frame_capture(FrameCapture *capture) { this->frame_capture_ = capture; }
+  /// Bytes per pixel of the LVGL screen (2 RGB565, 3 RGB888) and the size of a buffer for its picture
+  /// (whole cache lines).
+  static size_t capture_bpp();
+  size_t capture_bytes() const;
+  /// LVGL thread, not paused: the picture shown (the display's frame buffer flipped in last) into dst
+  /// (capture_bytes(), cache-line aligned), turned back into the LVGL screen's orientation. False when
+  /// LVGL does not draw into the display's frame buffers itself.
+  bool copy_shown(uint8_t *dst);
+#endif
+#if defined(USE_ESP32_VARIANT_ESP32P4)
+  /// A camera's picture straight into the display's frame buffers (scanout with the PPA only), not drawn by LVGL:
+  /// each frame copied 1:1 in the panel's own orientation (the camera mounted to match; never scaled or turned:
+  /// only a YUV frame is converted) into the marker object's rectangle, centred and cut to it, then presented. Only while LVGL runs, the marker shows and nothing of the top layer lies over it. Main loop.
+  /// False: no scanout or no PPA.
+  bool scanout_layer_start(lv_obj_t *marker);
+  /// The layer ends: a pending frame is dropped (its done() called), the marker drawn by LVGL again.
+  void scanout_layer_stop();
+  /// A frame: a pic_w x pic_h picture (colour mode cm, a ppa_srm_color_mode_t), its top-left w x h block shown.
+  /// done() once the frame is not read any more (drawn, dropped, or replaced by a newer one). False: not taken (no
+  /// layer, LVGL paused, the marker not shown or covered), done() is not called.
+  bool scanout_layer_frame(const void *data, uint16_t pic_w, uint16_t pic_h, uint16_t w, uint16_t h,
+                          ppa_srm_color_mode_t cm, std::function<void()> &&done);
+  /// The pending frame dropped now (its done() called): its buffer goes away.
+  void scanout_layer_drop();
+  bool scanout_layer_running() const { return this->cam_marker_ != nullptr; }
+  struct VideoCanvasTarget {
+    uint8_t *rows;
+    uint16_t width;
+    uint16_t height;
+    uint8_t bpp;
+    uint8_t index;
+    uint32_t layout;
+  };
+  bool video_canvas_start(lv_obj_t *marker);
+  void video_canvas_stop();
+  bool video_canvas_running() const { return this->vc_marker_ != nullptr; }
+  bool video_canvas_begin(VideoCanvasTarget *target, uint32_t wait_ms);
+  void video_canvas_end(bool ok);
+  void video_canvas_close();
+#endif
 
  protected:
   void set_resolution_() const;
@@ -407,13 +478,19 @@ class LvglComponent final : public PollingComponent {
   bool setup_scanout_();
   bool scanout_clip_(const lv_area_t *area, lv_area_t *clipped) const;
   void scanout_rect_(const lv_area_t *area, int32_t &x, int32_t &y, int32_t &w, int32_t &h) const;
-  void draw_scanout_(const lv_area_t *area, const uint8_t *src, uint8_t *fb);
+  void draw_scanout_(const lv_area_t *area, const uint8_t *src, uint8_t *fb, const lv_area_t *part = nullptr);
   void sync_scanout_(const lv_area_t *area);
+  void copy_front_(const lv_area_t *clip);
+  void present_scanout_();
   void wait_scanout_flip_();
   static void scanout_sync_cb(lv_display_t *disp, const lv_area_t *area);
 #ifdef USE_ESP32_VARIANT_ESP32P4
   bool ppa_blit_(const uint8_t *src, uint16_t src_w, uint16_t src_h, uint16_t sx, uint16_t sy, uint16_t w, uint16_t h,
                  uint8_t *dst, uint16_t dx, uint16_t dy, ppa_srm_rotation_angle_t angle);
+  /// The same into a picture of dst_w x dst_h (dst_size bytes).
+  bool ppa_blit_to_(const uint8_t *src, uint16_t src_w, uint16_t src_h, uint16_t sx, uint16_t sy, uint16_t w,
+                    uint16_t h, uint8_t *dst, uint16_t dst_w, uint16_t dst_h, size_t dst_size, uint16_t dx, uint16_t dy,
+                    ppa_srm_rotation_angle_t angle);
 #endif
 #endif
   void flush_cb_(lv_display_t *disp_drv, const lv_area_t *area, uint8_t *color_p);
@@ -451,6 +528,8 @@ class LvglComponent final : public PollingComponent {
   std::map<lv_group_t *, lv_obj_t *> focus_marks_{};
 
   CallbackManager<void(uint32_t)> idle_callbacks_{};
+  CallbackManager<void()> draw_end_callbacks_{};
+  bool draw_end_event_registered_{false};
   Trigger<> *pause_callback_{};
   Trigger<> *resume_callback_{};
   Trigger<> *draw_start_callback_{};
@@ -471,6 +550,50 @@ class LvglComponent final : public PollingComponent {
   uint8_t scanout_back_{1};
   bool scanout_wait_{};
   uint32_t scanout_presented_{};
+  FrameCapture *frame_capture_{nullptr};
+  void capture_area_(const lv_area_t *area, const uint8_t *src);
+#endif
+#if defined(USE_ESP32_VARIANT_ESP32P4)
+  bool top_layer_over_(const lv_area_t *box) const;
+  bool cam_layer_shown_() const;
+  void cam_layer_service_();
+  void cam_layer_draw_();
+  void cam_layer_reset_();
+  void cam_layer_restore_();
+  void panel_to_area_(int32_t x, int32_t y, int32_t w, int32_t h, lv_area_t *area) const;
+  struct CamFrame {
+    const void *data;
+    uint16_t pic_w, pic_h, w, h;
+    ppa_srm_color_mode_t cm;
+  };
+  lv_obj_t *cam_marker_{nullptr};
+  CamFrame cam_frame_{};
+  std::function<void()> cam_done_{};
+  bool cam_pending_{false};
+  bool cam_shown_{false};
+  uint32_t cam_seq_[2]{};  // the picture each frame buffer holds, 0: none
+  uint32_t cam_latest_{0};
+  lv_area_t cam_box_{};  // the marker's area at the last frame (LVGL coordinates)
+  lv_area_t cam_pic_{0, 0, -1, -1};  // the newest picture's area, empty: none
+  uint32_t cam_frames_{0};      // pictures presented since cam_rate_since_ (the log's rate line)
+  uint32_t cam_rate_since_{0};
+  enum VideoCanvasState : uint8_t { VC_IDLE, VC_WANT, VC_GRANTED, VC_REFUSED, VC_DONE, VC_DONE_NEXT };
+  bool vc_shown_now_(lv_area_t *rows) const;
+  void vc_service_();
+  void vc_drop_();
+  uint8_t vc_outside_(const lv_area_t *area, lv_area_t *parts) const;
+  lv_obj_t *vc_marker_{nullptr};
+  lv_area_t vc_rows_{0, 0, -1, -1};
+  VideoCanvasTarget vc_target_{};
+  TaskHandle_t vc_waiter_{nullptr};
+  uint32_t vc_layout_{0};
+  std::atomic<uint8_t> vc_state_{VC_IDLE};
+  std::atomic<bool> vc_shown_{false};
+  std::atomic<bool> vc_fed_{false};
+  std::atomic<bool> vc_close_{false};
+  std::atomic<bool> vc_ok_{false};
+  bool vc_ui_back_{false};
+  bool vc_resync_{false};
 #endif
 };
 

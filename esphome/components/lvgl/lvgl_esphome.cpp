@@ -7,10 +7,14 @@
 #include "core/lv_global.h"
 #include "core/lv_obj_class_private.h"
 #include "core/lv_obj_private.h"
-
+#include "core/lv_refr_private.h"
+#include "display/lv_display_private.h"
+#include "misc/lv_area_private.h"
 #include "misc/lv_text_private.h"
+
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <new>
@@ -18,6 +22,9 @@
 
 #ifdef USE_ESP32
 #include <esp_cache.h>
+#endif
+#ifdef USE_ESP32_VARIANT_ESP32P4
+#include "esphome/core/application.h"
 #endif
 
 static void *lv_alloc_draw_buf(size_t size, bool internal);
@@ -206,6 +213,20 @@ void LvglComponent::set_paused(bool paused, bool show_snow) {
     display::ColorBitness bitness{};
     this->scanout_back_ = this->displays_[0]->get_draw_buffer(&bitness) == this->scanout_[0] ? 1 : 0;
   }
+#endif
+#ifdef USE_ESP32_VARIANT_ESP32P4
+  // Paused, others draw into the frame buffers: no picture in them is the camera's any more (the screen is drawn anew)
+  if (this->cam_marker_ != nullptr) {
+    this->scanout_layer_drop();
+    this->cam_shown_ = false;
+    this->cam_seq_[0] = 0;
+    this->cam_seq_[1] = 0;
+    this->cam_latest_ = 0;
+    this->cam_box_ = lv_area_t{};
+    this->cam_pic_ = lv_area_t{0, 0, -1, -1};
+  }
+  if (paused)
+    this->vc_drop_();
 #endif
   if (!paused && lv_screen_active() != nullptr) {
     lv_display_trigger_activity(this->disp_);  // resets the inactivity time
@@ -601,9 +622,9 @@ void LvglComponent::scanout_rect_(const lv_area_t *area, int32_t &x, int32_t &y,
 }
 
 // Writes a rendered area (packed rows of its full width) into frame buffer fb.
-void LvglComponent::draw_scanout_(const lv_area_t *area, const uint8_t *src, uint8_t *fb) {
+void LvglComponent::draw_scanout_(const lv_area_t *area, const uint8_t *src, uint8_t *fb, const lv_area_t *part) {
   lv_area_t clip;
-  if (!this->scanout_clip_(area, &clip))
+  if (!this->scanout_clip_(part != nullptr ? part : area, &clip))
     return;
   const int32_t src_w = lv_area_get_width(area);
   const int32_t sx = clip.x1 - area->x1;
@@ -664,8 +685,21 @@ void LvglComponent::sync_scanout_(const lv_area_t *area) {
   lv_area_t clip;
   if (!this->scanout_clip_(area, &clip))
     return;
+#ifdef USE_ESP32_VARIANT_ESP32P4
+  if (lv_area_is_on(&clip, &this->cam_pic_))  // the shown buffer's picture comes with it
+    this->cam_seq_[this->scanout_back_] = this->cam_seq_[this->scanout_back_ ^ 1];
+  lv_area_t parts[4];
+  const uint8_t count = this->vc_outside_(&clip, parts);
+  for (uint8_t i = 0; i != count; i++)
+    this->copy_front_(&parts[i]);
+#else
+  this->copy_front_(&clip);
+#endif
+}
+
+void LvglComponent::copy_front_(const lv_area_t *clip) {
   int32_t x, y, w, h;
-  this->scanout_rect_(&clip, x, y, w, h);
+  this->scanout_rect_(clip, x, y, w, h);
   const uint8_t *front = this->scanout_[this->scanout_back_ ^ 1];
   uint8_t *back = this->scanout_[this->scanout_back_];
 #ifdef USE_ESP32_VARIANT_ESP32P4
@@ -682,14 +716,125 @@ void LvglComponent::sync_scanout_(const lv_area_t *area) {
                   ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
 }
 
+void LvglComponent::present_scanout_() {
+  this->displays_[0]->present_scanout_buffer(this->scanout_[this->scanout_back_]);
+  this->scanout_back_ ^= 1;
+  this->scanout_wait_ = true;
+  this->scanout_presented_ = millis();
+}
+
 void LvglComponent::scanout_sync_cb(lv_display_t *disp, const lv_area_t *area) {
   static_cast<LvglComponent *>(lv_display_get_user_data(disp))->sync_scanout_(area);
   lv_display_sync_ready(disp);
 }
 
+size_t LvglComponent::capture_bpp() { return SCANOUT_BPP; }
+
+size_t LvglComponent::capture_bytes() const {
+#ifdef USE_ESP32_VARIANT_ESP32P4
+  static constexpr size_t LINE = CONFIG_CACHE_L2_CACHE_LINE_SIZE;
+#else
+  static constexpr size_t LINE = 64;
+#endif
+  const size_t bytes = static_cast<size_t>(lv_display_get_horizontal_resolution(this->disp_)) *
+                       lv_display_get_vertical_resolution(this->disp_) * SCANOUT_BPP;
+  return (bytes + LINE - 1) / LINE * LINE;
+}
+
+// A rendered area (packed rows of its full width) also into the capture's buffer, as LVGL has it.
+void LvglComponent::capture_area_(const lv_area_t *area, const uint8_t *src) {
+  lv_area_t clip;
+  if (!this->scanout_clip_(area, &clip))
+    return;
+  uint8_t *dst = this->frame_capture_->capture_target();
+  if (dst == nullptr)
+    return;
+  const int32_t hor = lv_display_get_horizontal_resolution(this->disp_);
+  const int32_t src_w = lv_area_get_width(area);
+  const int32_t sx = clip.x1 - area->x1;
+  const int32_t sy = clip.y1 - area->y1;
+  const int32_t cw = lv_area_get_width(&clip);
+  const int32_t ch = lv_area_get_height(&clip);
+#ifdef USE_ESP32_VARIANT_ESP32P4
+  if (this->ppa_client_ != nullptr &&
+      this->ppa_blit_to_(src, src_w, lv_area_get_height(area), sx, sy, cw, ch, dst, hor,
+                         lv_display_get_vertical_resolution(this->disp_), this->capture_bytes(), clip.x1, clip.y1,
+                         PPA_SRM_ROTATION_ANGLE_0)) {
+    this->frame_capture_->capture_area(clip);
+    return;
+  }
+#endif
+  const size_t stride = static_cast<size_t>(hor) * SCANOUT_BPP;
+  for (int32_t r = 0; r != ch; r++) {
+    std::memcpy(dst + static_cast<size_t>(clip.y1 + r) * stride + clip.x1 * SCANOUT_BPP,
+                src + (static_cast<size_t>(sy + r) * src_w + sx) * SCANOUT_BPP, cw * SCANOUT_BPP);
+  }
+  esp_cache_msync(dst + clip.y1 * stride, ch * stride, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+  this->frame_capture_->capture_area(clip);
+}
+
+bool LvglComponent::copy_shown(uint8_t *dst) {
+  if (this->scanout_[0] == nullptr || this->paused_ || dst == nullptr)
+    return false;
+  const uint8_t *front = this->scanout_[this->scanout_back_ ^ 1];
+  const int32_t hor = lv_display_get_horizontal_resolution(this->disp_);
+  const int32_t ver = lv_display_get_vertical_resolution(this->disp_);
+  const auto rotation =
+      this->rotation_type_ == ROTATION_SOFTWARE ? this->rotation_ : display::DISPLAY_ROTATION_0_DEGREES;
+#ifdef USE_ESP32_VARIANT_ESP32P4
+  if (this->scanout_ppa_ && this->ppa_client_ != nullptr) {
+    // Back the other way than draw_scanout_() turns it (the PPA turns counter-clockwise).
+    ppa_srm_rotation_angle_t angle = PPA_SRM_ROTATION_ANGLE_0;
+    if (rotation == display::DISPLAY_ROTATION_90_DEGREES) {
+      angle = PPA_SRM_ROTATION_ANGLE_90;
+    } else if (rotation == display::DISPLAY_ROTATION_180_DEGREES) {
+      angle = PPA_SRM_ROTATION_ANGLE_180;
+    } else if (rotation == display::DISPLAY_ROTATION_270_DEGREES) {
+      angle = PPA_SRM_ROTATION_ANGLE_270;
+    }
+    if (this->ppa_blit_to_(front, this->width_, this->height_, 0, 0, this->width_, this->height_, dst, hor, ver,
+                           this->capture_bytes(), 0, 0, angle))
+      return true;
+  }
+#endif
+  // LVGL pixel (lx, ly) is where draw_scanout_() put it on the panel.
+  const auto *in = reinterpret_cast<const ScanoutPixel *>(front);
+  auto *out = reinterpret_cast<ScanoutPixel *>(dst);
+  const size_t panel = this->width_;
+  for (int32_t ly = 0; ly != ver; ly++) {
+    ScanoutPixel *row = out + static_cast<size_t>(ly) * hor;
+    switch (rotation) {
+      case display::DISPLAY_ROTATION_90_DEGREES:
+        for (int32_t lx = 0; lx != hor; lx++)
+          row[lx] = in[static_cast<size_t>(lx) * panel + this->width_ - 1 - ly];
+        break;
+      case display::DISPLAY_ROTATION_180_DEGREES:
+        for (int32_t lx = 0; lx != hor; lx++)
+          row[lx] = in[static_cast<size_t>(this->height_ - 1 - ly) * panel + this->width_ - 1 - lx];
+        break;
+      case display::DISPLAY_ROTATION_270_DEGREES:
+        for (int32_t lx = 0; lx != hor; lx++)
+          row[lx] = in[static_cast<size_t>(this->height_ - 1 - lx) * panel + ly];
+        break;
+      default:
+        std::memcpy(row, in + static_cast<size_t>(ly) * panel, hor * SCANOUT_BPP);
+        break;
+    }
+  }
+  esp_cache_msync(dst, this->capture_bytes(), ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+  return true;
+}
+
 #ifdef USE_ESP32_VARIANT_ESP32P4
 bool LvglComponent::ppa_blit_(const uint8_t *src, uint16_t src_w, uint16_t src_h, uint16_t sx, uint16_t sy, uint16_t w,
                               uint16_t h, uint8_t *dst, uint16_t dx, uint16_t dy, ppa_srm_rotation_angle_t angle) {
+  return this->ppa_blit_to_(src, src_w, src_h, sx, sy, w, h, dst, this->width_, this->height_,
+                            this->scanout_stride_ * this->height_, dx, dy, angle);
+}
+
+bool LvglComponent::ppa_blit_to_(const uint8_t *src, uint16_t src_w, uint16_t src_h, uint16_t sx, uint16_t sy,
+                                 uint16_t w, uint16_t h, uint8_t *dst, uint16_t dst_w, uint16_t dst_h, size_t dst_size,
+                                 uint16_t dx, uint16_t dy, ppa_srm_rotation_angle_t angle) {
   ppa_srm_oper_config_t cfg{};
   cfg.in.buffer = src;
   cfg.in.pic_w = src_w;
@@ -699,6 +844,9 @@ bool LvglComponent::ppa_blit_(const uint8_t *src, uint16_t src_w, uint16_t src_h
   cfg.in.block_offset_x = sx;
   cfg.in.block_offset_y = sy;
   cfg.out.buffer = dst;
+  cfg.out.buffer_size = dst_size;
+  cfg.out.pic_w = dst_w;
+  cfg.out.pic_h = dst_h;
   cfg.out.block_offset_x = dx;
   cfg.out.block_offset_y = dy;
 #if LV_COLOR_DEPTH == 16
@@ -714,6 +862,423 @@ bool LvglComponent::ppa_blit_(const uint8_t *src, uint16_t src_w, uint16_t src_h
   cfg.mode = PPA_TRANS_MODE_BLOCKING;
   return ppa_do_scale_rotate_mirror(this->ppa_client_, &cfg) == ESP_OK;
 }
+
+// The area of the LVGL screen a panel rectangle shows (the inverse of scanout_rect_())
+void LvglComponent::panel_to_area_(int32_t x, int32_t y, int32_t w, int32_t h, lv_area_t *area) const {
+  const auto rotation =
+      this->rotation_type_ == ROTATION_SOFTWARE ? this->rotation_ : display::DISPLAY_ROTATION_0_DEGREES;
+  int32_t ax, ay, aw, ah;
+  switch (rotation) {
+    case display::DISPLAY_ROTATION_90_DEGREES:
+      ax = y;
+      ay = this->width_ - x - w;
+      aw = h;
+      ah = w;
+      break;
+    case display::DISPLAY_ROTATION_180_DEGREES:
+      ax = this->width_ - x - w;
+      ay = this->height_ - y - h;
+      aw = w;
+      ah = h;
+      break;
+    case display::DISPLAY_ROTATION_270_DEGREES:
+      ax = this->height_ - y - h;
+      ay = x;
+      aw = h;
+      ah = w;
+      break;
+    default:
+      ax = x;
+      ay = y;
+      aw = w;
+      ah = h;
+      break;
+  }
+  area->x1 = ax;
+  area->y1 = ay;
+  area->x2 = ax + aw - 1;
+  area->y2 = ay + ah - 1;
+}
+
+/* ---------------- camera layer ---------------- */
+
+bool LvglComponent::scanout_layer_start(lv_obj_t *marker) {
+  if (marker == nullptr || this->scanout_[0] == nullptr || !this->scanout_ppa_ || this->ppa_client_ == nullptr)
+    return false;
+  if (this->cam_marker_ != nullptr && this->cam_marker_ != marker)
+    this->scanout_layer_stop();
+  this->cam_marker_ = marker;
+  this->cam_shown_ = false;
+  this->cam_layer_reset_();
+  return true;
+}
+
+void LvglComponent::scanout_layer_stop() {
+  if (this->cam_marker_ == nullptr)
+    return;
+  this->scanout_layer_drop();
+  this->cam_layer_reset_();
+  this->cam_marker_ = nullptr;
+  this->cam_shown_ = false;
+}
+
+bool LvglComponent::scanout_layer_frame(const void *data, uint16_t pic_w, uint16_t pic_h, uint16_t w, uint16_t h,
+                                       ppa_srm_color_mode_t cm, std::function<void()> &&done) {
+  if (this->cam_marker_ == nullptr || !this->cam_shown_ || this->paused_ || data == nullptr || w == 0 || h == 0 ||
+      w > pic_w || h > pic_h)
+    return false;
+  this->scanout_layer_drop();  // an older one not drawn yet: the newer one instead
+  this->cam_frame_ = CamFrame{data, pic_w, pic_h, w, h, cm};
+  this->cam_done_ = std::move(done);
+  this->cam_pending_ = true;
+  return true;
+}
+
+void LvglComponent::scanout_layer_drop() {
+  if (!this->cam_pending_)
+    return;
+  this->cam_pending_ = false;
+  auto done = std::move(this->cam_done_);
+  this->cam_done_ = nullptr;
+  if (done)
+    done();
+}
+
+bool LvglComponent::top_layer_over_(const lv_area_t *box) const {
+  lv_obj_t *top = lv_layer_top();
+  const uint32_t count = lv_obj_get_child_count(top);
+  for (uint32_t i = 0; i != count; i++) {
+    lv_obj_t *child = lv_obj_get_child(top, static_cast<int32_t>(i));
+    if (lv_obj_is_hidden(child))
+      continue;
+    lv_area_t area;
+    lv_obj_get_coords(child, &area);
+    if (lv_area_is_on(&area, box))
+      return true;
+  }
+  return false;
+}
+
+// Nothing of LVGL over the picture: the marker on the screen shown, visible, no top-layer object over it
+bool LvglComponent::cam_layer_shown_() const {
+  if (this->paused_ || lv_obj_get_screen(this->cam_marker_) != lv_screen_active() ||
+      !lv_obj_is_visible(this->cam_marker_))
+    return false;
+  lv_area_t box;
+  lv_obj_get_coords(this->cam_marker_, &box);
+  return !this->top_layer_over_(&box);
+}
+
+// The marker drawn by LVGL again (black, its sync carries it into the other buffer); no buffer holds a picture
+void LvglComponent::cam_layer_reset_() {
+  if (!this->paused_ && this->cam_marker_ != nullptr)
+    lv_obj_invalidate(this->cam_marker_);
+  this->cam_seq_[0] = 0;
+  this->cam_seq_[1] = 0;
+  this->cam_latest_ = 0;
+  this->cam_box_ = lv_area_t{};
+  this->cam_pic_ = lv_area_t{0, 0, -1, -1};
+  this->cam_rate_since_ = 0;
+}
+
+// Main loop, outside LVGL's refresh
+void LvglComponent::cam_layer_service_() {
+  const bool shown = this->cam_layer_shown_();
+  if (shown != this->cam_shown_) {
+    this->cam_shown_ = shown;
+    this->cam_layer_reset_();
+  }
+  if (!this->cam_pending_)
+    return;
+  if (!shown) {
+    this->scanout_layer_drop();
+    return;
+  }
+  if (!this->scanout_wait_)
+    this->cam_layer_draw_();  // else after the flip, a later pass
+}
+
+void LvglComponent::cam_layer_draw_() {
+  const CamFrame f = this->cam_frame_;
+  lv_area_t box;
+  lv_obj_get_coords(this->cam_marker_, &box);
+  if (!this->scanout_clip_(&box, &box)) {
+    this->scanout_layer_drop();
+    return;
+  }
+  if (!lv_area_is_equal(&box, &this->cam_box_)) {
+    this->cam_layer_reset_();  // moved or resized (full screen): LVGL draws it black, then the pictures
+    this->cam_box_ = box;
+  }
+  // The frame as it comes, in the panel's own orientation (the camera is mounted to match): 1:1, never scaled or
+  // turned (the device does not resize at runtime). Centred in the box's panel rectangle, cut to it when larger.
+  int32_t bx, by, bw, bh;
+  this->scanout_rect_(&box, bx, by, bw, bh);
+  const int32_t step = std::max<int32_t>(1, std::min<int32_t>(16, std::min<int32_t>(bw * 16 / f.w, bh * 16 / f.h)));
+  const bool scaled = step < 16;
+  const int32_t ow =
+      (scaled ? f.w * step / 16 : std::min<int32_t>(f.w, bw)) & ~1;  // even: a YUV422 frame is cut between pixel pairs
+  const int32_t oh = scaled ? f.h * step / 16 : std::min<int32_t>(f.h, bh);
+  const int32_t sx = scaled ? 0 : ((f.w - ow) / 2) & ~1;
+  const int32_t sy = scaled ? 0 : (f.h - oh) / 2;
+  const int32_t x = bx + (bw - ow) / 2;
+  const int32_t y = by + (bh - oh) / 2;
+  lv_area_t pic;
+  this->panel_to_area_(x, y, ow, oh, &pic);
+  if (!lv_area_is_equal(&pic, &this->cam_pic_) && this->cam_latest_ != 0) {
+    // Another picture size: the old one's edges go black (LVGL), both buffers
+    lv_obj_invalidate(this->cam_marker_);
+    this->cam_seq_[0] = 0;
+    this->cam_seq_[1] = 0;
+  }
+  uint8_t *back = this->scanout_[this->scanout_back_];
+  // LVGL's last areas are in the shown buffer only: into this one first, it is presented before LVGL's next refresh
+  lv_ll_t *areas = &this->disp_->sync_areas;
+  for (auto *area = static_cast<lv_area_t *>(lv_ll_get_head(areas)); area != nullptr;
+       area = static_cast<lv_area_t *>(lv_ll_get_next(areas, area)))
+    this->sync_scanout_(area);
+  lv_ll_clear(areas);
+
+  ppa_srm_oper_config_t cfg{};
+  cfg.in.buffer = f.data;
+  cfg.in.pic_w = f.pic_w;
+  cfg.in.pic_h = f.pic_h;
+  cfg.in.block_w = scaled ? f.w & ~1 : ow;
+  cfg.in.block_h = scaled ? f.h : oh;
+  cfg.in.block_offset_x = sx;
+  cfg.in.block_offset_y = sy;
+  cfg.in.srm_cm = f.cm;
+  cfg.in.yuv_range = PPA_COLOR_RANGE_LIMIT;
+  cfg.in.yuv_std = PPA_COLOR_CONV_STD_RGB_YUV_BT601;
+  cfg.out.buffer = back;
+  cfg.out.buffer_size = this->scanout_stride_ * this->height_;
+  cfg.out.pic_w = this->width_;
+  cfg.out.pic_h = this->height_;
+  cfg.out.block_offset_x = x;
+  cfg.out.block_offset_y = y;
+#if LV_COLOR_DEPTH == 16
+  cfg.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+#elif LV_COLOR_DEPTH == 32
+  cfg.out.srm_cm = PPA_SRM_COLOR_MODE_RGB888;
+#endif
+  // A copy (and a YUV conversion): no scaling, no rotation
+  cfg.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
+  cfg.scale_x = static_cast<float>(step) / 16.0f;
+  cfg.scale_y = static_cast<float>(step) / 16.0f;
+  cfg.mode = PPA_TRANS_MODE_BLOCKING;
+  const bool ok = ppa_do_scale_rotate_mirror(this->ppa_client_, &cfg) == ESP_OK;
+  this->scanout_layer_drop();  // read: the camera's buffer goes back
+  if (!ok)
+    return;
+  this->cam_pic_ = pic;
+  if (++this->cam_latest_ == 0)
+    this->cam_latest_ = 1;
+  this->cam_seq_[this->scanout_back_] = this->cam_latest_;
+  this->displays_[0]->present_scanout_buffer(back);
+  this->scanout_back_ ^= 1;
+  this->scanout_wait_ = true;
+  this->scanout_presented_ = millis();
+  // The pictures' rate: one line per 10 s while they come (counted per picture, nothing runs between them)
+  this->cam_frames_++;
+  const uint32_t elapsed = this->scanout_presented_ - this->cam_rate_since_;
+  if (this->cam_rate_since_ == 0) {
+    this->cam_rate_since_ = this->scanout_presented_;
+    this->cam_frames_ = 0;
+  } else if (elapsed >= 10000) {
+    ESP_LOGI(TAG, "Camera layer: %.1f pictures/s", this->cam_frames_ * 1000.0f / elapsed);
+    this->cam_rate_since_ = this->scanout_presented_;
+    this->cam_frames_ = 0;
+  }
+}
+
+// LVGL presents its buffer (last flush): an older picture in it gets the newest one from the shown buffer
+void LvglComponent::cam_layer_restore_() {
+  const uint8_t b = this->scanout_back_;
+  if (this->cam_latest_ == 0 || this->cam_seq_[b] == this->cam_latest_ || this->cam_seq_[b ^ 1] != this->cam_latest_)
+    return;
+  int32_t x, y, w, h;
+  this->scanout_rect_(&this->cam_pic_, x, y, w, h);
+  if (this->ppa_blit_(this->scanout_[b ^ 1], this->width_, this->height_, x, y, w, h, this->scanout_[b], x, y,
+                      PPA_SRM_ROTATION_ANGLE_0))
+    this->cam_seq_[b] = this->cam_latest_;
+}
+
+bool LvglComponent::video_canvas_start(lv_obj_t *marker) {
+  if (marker == nullptr || this->scanout_[0] == nullptr)
+    return false;
+  if (this->vc_marker_ != nullptr && this->vc_marker_ != marker)
+    this->video_canvas_stop();
+  this->vc_marker_ = marker;
+  return true;
+}
+
+void LvglComponent::video_canvas_stop() {
+  if (this->vc_marker_ == nullptr)
+    return;
+  this->vc_marker_ = nullptr;
+  if (this->paused_) {
+    this->vc_drop_();
+  } else {
+    this->vc_service_();
+  }
+}
+
+bool LvglComponent::video_canvas_begin(VideoCanvasTarget *target, uint32_t wait_ms) {
+  if (target == nullptr || !this->vc_shown_.load())
+    return false;
+  this->displays_[0]->wait_scanout_flipped(wait_ms);
+  this->vc_waiter_ = xTaskGetCurrentTaskHandle();
+  uint8_t state = this->vc_state_.load();
+  while (true) {
+    if (state == VC_IDLE && this->vc_state_.compare_exchange_strong(state, VC_WANT))
+      break;
+    if (state == VC_DONE && this->vc_state_.compare_exchange_strong(state, VC_DONE_NEXT))
+      break;
+    if (state != VC_IDLE && state != VC_DONE)
+      return false;
+  }
+  this->vc_fed_.store(true);
+  App.wake_loop_threadsafe();
+  const TickType_t start = xTaskGetTickCount();
+  const TickType_t limit = pdMS_TO_TICKS(wait_ms);
+  while (true) {
+    state = this->vc_state_.load();
+    if (state == VC_GRANTED) {
+      *target = this->vc_target_;
+      return true;
+    }
+    if (state == VC_REFUSED) {
+      this->vc_state_.store(VC_IDLE);
+      return false;
+    }
+    const TickType_t spent = xTaskGetTickCount() - start;
+    if (spent < limit) {
+      ulTaskNotifyTake(pdTRUE, limit - spent);
+      continue;
+    }
+    if (state == VC_DONE_NEXT && this->vc_state_.compare_exchange_strong(state, VC_DONE))
+      return false;
+    if (state == VC_WANT && this->vc_state_.compare_exchange_strong(state, VC_IDLE))
+      return false;
+    if (state != VC_WANT && state != VC_DONE_NEXT && state != VC_GRANTED && state != VC_REFUSED)
+      return false;
+  }
+}
+
+void LvglComponent::video_canvas_end(bool ok) {
+  this->vc_ok_.store(ok);
+  this->vc_state_.store(VC_DONE);
+  App.wake_loop_threadsafe();
+}
+
+void LvglComponent::video_canvas_close() {
+  this->vc_fed_.store(false);
+  this->vc_close_.store(true);
+  App.wake_loop_threadsafe();
+}
+
+bool LvglComponent::vc_shown_now_(lv_area_t *rows) const {
+  if (this->vc_marker_ == nullptr || this->paused_ || this->scanout_[0] == nullptr ||
+      lv_obj_get_screen(this->vc_marker_) != lv_screen_active() || !lv_obj_is_visible(this->vc_marker_))
+    return false;
+  lv_area_t box;
+  lv_obj_get_coords(this->vc_marker_, &box);
+  if (!this->scanout_clip_(&box, &box))
+    return false;
+  int32_t x, y, w, h;
+  this->scanout_rect_(&box, x, y, w, h);
+  const int32_t y1 = (y + 1) & ~1;
+  const int32_t y2 = (y + h) & ~1;
+  if (x != 0 || w != static_cast<int32_t>(this->width_) || y2 <= y1 || this->top_layer_over_(&box))
+    return false;
+  this->panel_to_area_(0, y1, w, y2 - y1, rows);
+  return true;
+}
+
+uint8_t LvglComponent::vc_outside_(const lv_area_t *area, lv_area_t *parts) const {
+  if (!this->vc_shown_.load() || !lv_area_is_on(area, &this->vc_rows_)) {
+    parts[0] = *area;
+    return 1;
+  }
+  const int8_t count = lv_area_diff(parts, area, &this->vc_rows_);
+  return count > 0 ? static_cast<uint8_t>(count) : 0;
+}
+
+void LvglComponent::vc_drop_() {
+  this->vc_shown_.store(false);
+  this->vc_rows_ = lv_area_t{0, 0, -1, -1};
+  this->vc_ui_back_ = false;
+  this->vc_resync_ = false;
+  if (++this->vc_layout_ == 0)
+    this->vc_layout_ = 1;
+  uint8_t state = this->vc_state_.load();
+  if ((state == VC_WANT || state == VC_DONE_NEXT) && this->vc_state_.compare_exchange_strong(state, VC_REFUSED)) {
+    xTaskNotifyGive(this->vc_waiter_);
+  } else if (state == VC_DONE) {
+    this->vc_state_.compare_exchange_strong(state, VC_IDLE);
+  }
+}
+
+void LvglComponent::vc_service_() {
+  lv_area_t rows{0, 0, -1, -1};
+  const bool shown = this->vc_shown_now_(&rows);
+  if (shown != this->vc_shown_.load() || (shown && !lv_area_is_equal(&rows, &this->vc_rows_))) {
+    if (this->vc_shown_.load())
+      lv_inv_area(this->disp_, &this->vc_rows_);
+    this->vc_rows_ = shown ? rows : lv_area_t{0, 0, -1, -1};
+    if (++this->vc_layout_ == 0)
+      this->vc_layout_ = 1;
+    this->vc_resync_ = false;
+    this->vc_shown_.store(shown);
+  }
+  uint8_t state = this->vc_state_.load();
+  if (state == VC_DONE || state == VC_DONE_NEXT) {
+    if (this->vc_ok_.load() && shown && this->vc_target_.layout == this->vc_layout_)
+      this->present_scanout_();
+    this->vc_ui_back_ = false;
+    uint8_t done = VC_DONE;
+    if (!this->vc_state_.compare_exchange_strong(done, VC_IDLE))
+      this->vc_state_.store(VC_WANT);
+    state = this->vc_state_.load();
+  }
+  if (state == VC_WANT) {
+    if (!shown) {
+      if (this->vc_state_.compare_exchange_strong(state, VC_REFUSED))
+        xTaskNotifyGive(this->vc_waiter_);
+    } else if (!this->scanout_wait_) {
+      if (!this->vc_ui_back_) {
+        lv_ll_t *areas = &this->disp_->sync_areas;
+        for (auto *area = static_cast<lv_area_t *>(lv_ll_get_head(areas)); area != nullptr;
+             area = static_cast<lv_area_t *>(lv_ll_get_next(areas, area)))
+          this->sync_scanout_(area);
+        lv_ll_clear(areas);
+      }
+      int32_t x, y, w, h;
+      this->scanout_rect_(&rows, x, y, w, h);
+      this->vc_target_.rows = this->scanout_[this->scanout_back_] + static_cast<size_t>(y) * this->scanout_stride_;
+      this->vc_target_.width = static_cast<uint16_t>(w);
+      this->vc_target_.height = static_cast<uint16_t>(h);
+      this->vc_target_.bpp = SCANOUT_BPP;
+      this->vc_target_.index = this->scanout_back_;
+      this->vc_target_.layout = this->vc_layout_;
+      if (this->vc_state_.compare_exchange_strong(state, VC_GRANTED))
+        xTaskNotifyGive(this->vc_waiter_);
+    }
+    return;
+  }
+  if (state != VC_IDLE)
+    return;
+  if (this->vc_ui_back_ && (!this->vc_fed_.load() || !shown)) {
+    this->present_scanout_();
+    this->vc_ui_back_ = false;
+  }
+  if (this->vc_close_.exchange(false) && shown)
+    this->vc_resync_ = true;
+  if (this->vc_resync_ && shown && !this->scanout_wait_) {
+    this->copy_front_(&this->vc_rows_);
+    this->vc_resync_ = false;
+  }
+}
 #endif  // USE_ESP32_VARIANT_ESP32P4
 #endif  // USE_ESP32
 
@@ -723,20 +1288,51 @@ void LvglComponent::flush_cb_(lv_display_t *disp_drv, const lv_area_t *area, uin
   // busy there are bigger problems.
   if (!this->paused_) {
     auto now = millis();
-    this->draw_buffer_(area, reinterpret_cast<lv_color_data *>(color_p));
 #ifdef USE_ESP32
+    if (this->frame_capture_ != nullptr)
+      this->capture_area_(area, color_p);
     if (this->scanout_[0] != nullptr) {
       this->wait_scanout_flip_();
+#ifdef USE_ESP32_VARIANT_ESP32P4
+      lv_area_t parts[4];
+      const uint8_t count = this->vc_outside_(area, parts);
+      for (uint8_t i = 0; i != count; i++)
+        this->draw_scanout_(area, color_p, this->scanout_[this->scanout_back_], &parts[i]);
+#else
       this->draw_scanout_(area, color_p, this->scanout_[this->scanout_back_]);
+#endif
+#ifdef USE_ESP32_VARIANT_ESP32P4
+      // Drawn over the picture: this buffer's is gone; before the present the newest one comes back
+      if (this->cam_shown_ && lv_area_is_on(area, &this->cam_pic_))
+        this->cam_seq_[this->scanout_back_] = 0;
+      if (this->cam_shown_ && lv_display_flush_is_last(disp_drv)) {
+        lv_area_t box;
+        lv_obj_get_coords(this->cam_marker_, &box);
+        if (this->scanout_clip_(&box, &box) && lv_area_is_equal(&box, &this->cam_box_)) {
+          this->cam_layer_restore_();
+        } else {
+          this->cam_seq_[0] = 0;
+          this->cam_seq_[1] = 0;
+          this->cam_latest_ = 0;
+          this->cam_pic_ = lv_area_t{0, 0, -1, -1};
+        }
+      }
+#endif
       if (lv_display_flush_is_last(disp_drv)) {
-        this->displays_[0]->present_scanout_buffer(this->scanout_[this->scanout_back_]);
-        this->scanout_back_ ^= 1;
-        this->scanout_wait_ = true;
-        this->scanout_presented_ = millis();
+#ifdef USE_ESP32_VARIANT_ESP32P4
+        if (this->vc_fed_.load() && this->vc_shown_.load()) {
+          this->vc_ui_back_ = true;
+        } else
+#endif
+          this->present_scanout_();
       }
     } else
 #endif
       this->draw_buffer_(area, reinterpret_cast<lv_color_data *>(color_p));
+#ifdef USE_ESP32
+    if (this->frame_capture_ != nullptr && lv_display_flush_is_last(disp_drv))
+      this->frame_capture_->capture_done();
+#endif
     ESP_LOGV(TAG, "flush_cb, area=%d/%d, %d/%d took %dms", (int) area->x1, (int) area->y1,
              (int) lv_area_get_width(area), (int) lv_area_get_height(area), (int) (millis() - now));
   }
@@ -2125,6 +2721,7 @@ void LvKeyboardType::set_obj(lv_obj_t *lv_obj) {
 void LvglComponent::draw_end_() {
   if (this->draw_end_callback_ != nullptr)
     this->draw_end_callback_->trigger();
+  this->draw_end_callbacks_.call();
   // Only reachable once the display is idle again: while busy, the display's refr_timer_ is
   // paused (see loop()), so LVGL never renders/flushes and this event never fires.
   if (this->update_when_display_idle_) {
@@ -2308,6 +2905,7 @@ void LvglComponent::setup() {
   }
   if (this->draw_end_callback_ != nullptr || this->update_when_display_idle_) {
     lv_display_add_event_cb(this->disp_, render_end_cb, LV_EVENT_REFR_READY, this);
+    this->draw_end_event_registered_ = true;
   }
   this->refr_timer_ = lv_display_get_refr_timer(this->disp_);
   lv_timer_set_period(this->refr_timer_, this->refr_timer_period_);
@@ -2359,6 +2957,16 @@ void LvglComponent::loop() {
     } else {
       hold = true;
     }
+  }
+#endif
+#ifdef USE_ESP32_VARIANT_ESP32P4
+  if (this->cam_marker_ != nullptr) {
+    this->cam_layer_service_();
+    hold = hold || this->scanout_wait_;  // a picture just presented: LVGL draws after its flip
+  }
+  if (this->vc_marker_ != nullptr || this->vc_state_.load() != VC_IDLE || this->vc_ui_back_ || this->vc_shown_.load()) {
+    this->vc_service_();
+    hold = hold || this->scanout_wait_ || this->vc_ui_back_ || this->vc_state_.load() != VC_IDLE;
   }
 #endif
   if (hold && !this->refr_timer_paused_) {
