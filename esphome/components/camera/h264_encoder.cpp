@@ -14,7 +14,7 @@ extern "C" {
 
 #include "esphome/core/log.h"
 
-namespace esphome::camera_encoder {
+namespace esphome::camera {
 
 ESPHOME_LOG_TAG(TAG, "camera_encoder.h264");
 
