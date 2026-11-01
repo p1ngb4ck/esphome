@@ -4448,7 +4448,7 @@ async def _init_hw_jpeg() -> None:
         cg.add_library(
             "JPEGDEC",
             "1.8.4",
-            "https://github.com/esphome-libs/JPEGDEC#1.8.4-esphome.3",
+            "https://github.com/esphome-libs/JPEGDEC#1.8.4-esphome.4",
         )
         cg.add_define("USE_JPEGDEC")
         _LOGGER.info("Using JPEGDec library (software, ESP32-%s)", variant)
