@@ -136,10 +136,17 @@ void StreamMediaPlayer::loop() {
     call.perform();
   }
 #endif
-  if (this->close_page_.load() && !this->draw_busy_.load() && uxQueueMessagesWaiting(this->filled_q_) == 0) {
+  bool closing = this->close_page_.load();
+#ifdef USE_STREAM_CANVAS
+  closing = closing || this->reopen_.load();
+#endif
+  if (closing && !this->draw_busy_.load() && uxQueueMessagesWaiting(this->filled_q_) == 0) {
     this->close_page_.store(false);
     if (this->canvas_ != nullptr && this->canvas_->held_by(this))
       this->canvas_->close();
+#ifdef USE_STREAM_CANVAS
+    this->reopen_.store(false);
+#endif
   }
   if (this->state_changed_.exchange(false)) {
     bool playing = this->connected_.load();
@@ -153,6 +160,43 @@ void StreamMediaPlayer::loop() {
   if (!this->connected_.load() && !this->close_page_.load() && !held)
     this->disable_loop();
 }
+
+bool StreamMediaPlayer::page_target_(uint32_t *width, uint32_t *height) const {
+#ifdef USE_STREAM_CANVAS
+  if (!this->fullscreen_.load()) {
+    *width = this->canvas_w_;
+    *height = this->canvas_h_;
+    return true;
+  }
+#endif
+  return this->output_ != nullptr && this->output_->page_size(width, height, this);
+}
+
+display::VideoCanvas *StreamMediaPlayer::open_target_() {
+#ifdef USE_STREAM_CANVAS
+  if (!this->fullscreen_.load())
+    return this->output_->open_page_on(this->canvas_index_, this->canvas_w_, this->canvas_h_, this);
+#endif
+  return this->output_->open_page(this);
+}
+
+#ifdef USE_STREAM_CANVAS
+void StreamMediaPlayer::set_fullscreen(bool fullscreen) {
+  if (this->fullscreen_.exchange(fullscreen) == fullscreen)
+    return;
+  ESP_LOGI(TAG, "Streams are made for the %s", fullscreen ? "screen" : "canvas");
+  uint32_t width = 0;
+  uint32_t height = 0;
+  if (!this->page_target_(&width, &height))
+    width = height = 0;
+  this->page_w_ = static_cast<uint16_t>(width);
+  this->page_h_ = static_cast<uint16_t>(height);
+  this->reopen_.store(true);
+  this->view_pending_.store(true);
+  this->wake_();
+  this->enable_loop();
+}
+#endif
 
 void StreamMediaPlayer::wake_() {
   if (this->wake_fd_ < 0)
@@ -276,7 +320,7 @@ void StreamMediaPlayer::serve_(int client) {
   this->echo_.store(0);
   uint32_t width = 0;
   uint32_t height = 0;
-  if (this->output_ == nullptr || !this->output_->page_size(&width, &height, this))
+  if (!this->page_target_(&width, &height))
     width = height = 0;
   this->page_w_ = static_cast<uint16_t>(width);
   this->page_h_ = static_cast<uint16_t>(height);
@@ -645,9 +689,18 @@ void StreamMediaPlayer::draw_loop_() {
     if (xQueueReceive(this->filled_q_, &frame, portMAX_DELAY) != pdTRUE || frame == nullptr)
       continue;
     this->draw_busy_.store(true);
+#ifdef USE_STREAM_CANVAS
+    if (this->reopen_.load()) {
+      xQueueSend(this->empty_q_, &frame, 0);
+      this->draw_busy_.store(false);
+      this->wake_();
+      this->enable_loop_soon_any_context();
+      continue;
+    }
+#endif
     if (this->connected_.load() && this->output_ != nullptr &&
         (this->canvas_ == nullptr || !this->canvas_->held_by(this))) {
-      display::VideoCanvas *canvas = this->output_->open_page(this);
+      display::VideoCanvas *canvas = this->open_target_();
       if (canvas != nullptr) {
         this->canvas_ = canvas;
         if (canvas->width() != this->page_w_ || canvas->height() != this->page_h_) {

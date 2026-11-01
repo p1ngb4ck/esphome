@@ -8,6 +8,10 @@
 #include "esphome/components/display/video_output.h"
 #include "esphome/components/media_player/media_player.h"
 #include "esphome/core/component.h"
+#ifdef USE_STREAM_CHANNELS
+#include "esphome/components/relay_link/relay_link.h"
+#include "esphome/core/automation.h"
+#endif
 #ifdef USE_SPEAKER
 #include "esphome/components/speaker/speaker.h"
 #endif
@@ -73,6 +77,15 @@ class StreamMediaPlayer : public Component, public media_player::MediaPlayer {
   void set_touchscreen(touchscreen::Touchscreen *touchscreen) { this->touchscreen_ = touchscreen; }
   void on_touch(const touchscreen::TouchPoints_t &points);
 #endif
+#ifdef USE_STREAM_CANVAS
+  void set_canvas_page(uint8_t index, uint16_t width, uint16_t height) {
+    this->canvas_index_ = index;
+    this->canvas_w_ = width;
+    this->canvas_h_ = height;
+  }
+  void set_fullscreen(bool fullscreen);
+  bool is_fullscreen() const { return this->fullscreen_.load(); }
+#endif
 
   media_player::MediaPlayerTraits get_traits() override;
 
@@ -109,6 +122,8 @@ class StreamMediaPlayer : public Component, public media_player::MediaPlayer {
   void feed_(const uint8_t *data, size_t len);
   void send_pending_(int client);
   void hold_wifi_(bool &held, bool want);
+  bool page_target_(uint32_t *width, uint32_t *height) const;
+  display::VideoCanvas *open_target_();
 #ifdef USE_SPEAKER
   void play_sound_(const uint8_t *data, size_t len);
   void emit_sound_(const uint8_t *src, size_t frames);
@@ -141,6 +156,13 @@ class StreamMediaPlayer : public Component, public media_player::MediaPlayer {
   std::atomic<bool> drop_{false};
   std::atomic<bool> draw_busy_{false};
   std::atomic<bool> close_page_{false};
+#ifdef USE_STREAM_CANVAS
+  std::atomic<bool> fullscreen_{true};
+  std::atomic<bool> reopen_{false};
+  uint8_t canvas_index_{0};
+  uint16_t canvas_w_{0};
+  uint16_t canvas_h_{0};
+#endif
   std::atomic<bool> state_changed_{false};
   std::atomic<bool> view_pending_{false};
   std::atomic<bool> sound_pending_{false};
@@ -180,6 +202,37 @@ class StreamMediaPlayer : public Component, public media_player::MediaPlayer {
   bool last_touch_valid_{false};
 #endif
 };
+
+#ifdef USE_STREAM_CANVAS
+template<typename... Ts> class OutputAction : public Action<Ts...>, public Parented<StreamMediaPlayer> {
+ public:
+  TEMPLATABLE_VALUE(bool, fullscreen)
+  void play(const Ts &...x) override { this->parent_->set_fullscreen(this->fullscreen_.value(x...)); }
+};
+#endif
+
+#ifdef USE_STREAM_CHANNELS
+template<typename... Ts> class ChannelsAction : public Action<Ts...>, public Parented<StreamMediaPlayer> {
+ public:
+  TEMPLATABLE_VALUE(int, index)
+  void set_mode(uint8_t mode) { this->mode_ = mode; }
+  void play(const Ts &...x) override {
+    relay_link::RelayLink *relay = relay_link::global_relay_link;
+    if (relay == nullptr)
+      return;
+    if (this->mode_ == 0) {
+      relay->channel_list_refresh();
+    } else if (this->mode_ == 1) {
+      relay->channel_play(this->index_.value(x...));
+    } else {
+      relay->channel_stop();
+    }
+  }
+
+ protected:
+  uint8_t mode_{0};
+};
+#endif
 
 }
 
