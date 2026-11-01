@@ -1,8 +1,9 @@
 from esphome import automation
 import esphome.codegen as cg
+from esphome.components.const import CONF_HOST
 from esphome.components.remote_desktop import PROTOCOLS, RemoteDesktop
 import esphome.config_validation as cv
-from esphome.const import CONF_HOST, CONF_ID, CONF_PASSWORD, CONF_PORT, CONF_PROTOCOL
+from esphome.const import CONF_ID, CONF_PASSWORD, CONF_PORT, CONF_PROTOCOL
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["remote_desktop"]
