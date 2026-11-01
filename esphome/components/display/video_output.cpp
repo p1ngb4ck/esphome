@@ -157,6 +157,111 @@ bool VideoCanvas::page_rect(const uint8_t *jpeg, size_t len, uint32_t x, uint32_
   return true;
 }
 
+uint8_t VideoCanvas::page_bpp() { return BUFFER_BPP; }
+
+bool VideoCanvas::open_rows(Component *owner) {
+  if (this->display_ == nullptr) {
+    this->release_();
+    return false;
+  }
+  this->rows_wanted_ = true;
+  const bool ok = this->open(static_cast<uint32_t>(this->display_->get_native_width()),
+                             static_cast<uint32_t>(this->display_->get_native_height()) & ~15u, 0, false, owner);
+  this->rows_wanted_ = false;
+  return ok;
+}
+
+bool VideoCanvas::rows_begin(lvgl::LvglComponent::VideoCanvasTarget *target, uint32_t wait_ms) {
+  if (this->mode_.load() != MODE_ROWS || this->closing_ || target == nullptr)
+    return false;
+  return this->lvgl_->video_canvas_begin(target, wait_ms);
+}
+
+void VideoCanvas::rows_end(bool ok) {
+  if (this->mode_.load() == MODE_ROWS)
+    this->lvgl_->video_canvas_end(ok);
+}
+
+DisplayRotation VideoCanvas::rotation() const {
+  return this->lvgl_ != nullptr ? this->lvgl_->get_rotation() : DISPLAY_ROTATION_0_DEGREES;
+}
+
+static void page_sync(uint8_t *page, size_t stride, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
+  uint8_t *first = page + static_cast<size_t>(y) * stride + static_cast<size_t>(x) * BUFFER_BPP;
+  uint8_t *last = page + (static_cast<size_t>(y) + height - 1) * stride + (static_cast<size_t>(x) + width) * BUFFER_BPP;
+  esp_cache_msync(first, last - first, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+}
+
+bool VideoCanvas::page_fill(uint32_t x, uint32_t y, uint32_t width, uint32_t height, const uint8_t *pixel) {
+  if (this->mode_.load() != MODE_PAGE || pixel == nullptr || width == 0 || height == 0 || x + width > this->width_ ||
+      y + height > this->height_)
+    return false;
+  uint8_t *page = this->buffers_[0];
+  uint8_t *row = page + static_cast<size_t>(y) * this->stride_ + static_cast<size_t>(x) * BUFFER_BPP;
+  for (uint32_t i = 0; i != width; i++)
+    std::memcpy(row + static_cast<size_t>(i) * BUFFER_BPP, pixel, BUFFER_BPP);
+  for (uint32_t r = 1; r != height; r++)
+    std::memcpy(row + static_cast<size_t>(r) * this->stride_, row, static_cast<size_t>(width) * BUFFER_BPP);
+  page_sync(page, this->stride_, x, y, width, height);
+  return true;
+}
+
+bool VideoCanvas::page_pixels(const uint8_t *pixels, size_t stride, uint32_t x, uint32_t y, uint32_t width,
+                              uint32_t height) {
+  if (this->mode_.load() != MODE_PAGE || pixels == nullptr || width == 0 || height == 0 ||
+      x + width > this->width_ || y + height > this->height_)
+    return false;
+  uint8_t *page = this->buffers_[0];
+  for (uint32_t r = 0; r != height; r++)
+    std::memcpy(page + (static_cast<size_t>(y) + r) * this->stride_ + static_cast<size_t>(x) * BUFFER_BPP,
+                pixels + static_cast<size_t>(r) * stride, static_cast<size_t>(width) * BUFFER_BPP);
+  page_sync(page, this->stride_, x, y, width, height);
+  return true;
+}
+
+bool VideoCanvas::page_copy(uint32_t from_x, uint32_t from_y, uint32_t x, uint32_t y, uint32_t width,
+                            uint32_t height) {
+  if (this->mode_.load() != MODE_PAGE || width == 0 || height == 0 || x + width > this->width_ ||
+      y + height > this->height_ || from_x + width > this->width_ || from_y + height > this->height_)
+    return false;
+  uint8_t *page = this->buffers_[0];
+  const size_t bytes = static_cast<size_t>(width) * BUFFER_BPP;
+  if (y <= from_y) {
+    for (uint32_t r = 0; r != height; r++)
+      std::memmove(page + (static_cast<size_t>(y) + r) * this->stride_ + static_cast<size_t>(x) * BUFFER_BPP,
+                   page + (static_cast<size_t>(from_y) + r) * this->stride_ + static_cast<size_t>(from_x) * BUFFER_BPP,
+                   bytes);
+  } else {
+    for (uint32_t r = height; r != 0; r--)
+      std::memmove(page + (static_cast<size_t>(y) + r - 1) * this->stride_ + static_cast<size_t>(x) * BUFFER_BPP,
+                   page + (static_cast<size_t>(from_y) + r - 1) * this->stride_ +
+                       static_cast<size_t>(from_x) * BUFFER_BPP,
+                   bytes);
+  }
+  page_sync(page, this->stride_, x, y, width, height);
+  return true;
+}
+
+bool VideoCanvas::page_read(uint8_t *pixels, size_t stride, uint32_t x, uint32_t y, uint32_t width,
+                            uint32_t height) const {
+  if (this->mode_.load() != MODE_PAGE || pixels == nullptr || width == 0 || height == 0 ||
+      x + width > this->width_ || y + height > this->height_)
+    return false;
+  const uint8_t *page = this->buffers_[0];
+  for (uint32_t r = 0; r != height; r++)
+    std::memcpy(pixels + static_cast<size_t>(r) * stride,
+                page + (static_cast<size_t>(y) + r) * this->stride_ + static_cast<size_t>(x) * BUFFER_BPP,
+                static_cast<size_t>(width) * BUFFER_BPP);
+  return true;
+}
+
+void VideoCanvas::page_show() {
+  if (this->mode_.load() != MODE_PAGE)
+    return;
+  this->page_dirty_.store(true);
+  this->wake_();
+}
+
 bool VideoCanvas::canvas_point(int32_t *x, int32_t *y) const {
   if (this->canvas_ == nullptr || this->lvgl_ == nullptr || !this->open_)
     return false;
@@ -295,7 +400,7 @@ bool VideoCanvas::open(uint32_t width, uint32_t height, uint32_t fps, bool worke
       const bool turned = this->turned_();
       this->canvas_w_ = turned ? rows : width;
       this->canvas_h_ = turned ? width : rows;
-    } else if (this->picture_fit_(width, height, fps, this->combined_)) {
+    } else if (!this->rows_wanted_ && this->picture_fit_(width, height, fps, this->combined_)) {
       this->mode_.store(MODE_PICTURE);
       if (!this->allocate_buffers_()) {
         this->closing_ = true;
@@ -311,18 +416,20 @@ bool VideoCanvas::open(uint32_t width, uint32_t height, uint32_t fps, bool worke
   } else
 #endif
   {
-    if (!this->screen_fits_(width, height)) {
+    if (this->rows_wanted_ || !this->screen_fits_(width, height)) {
       this->release_();
       return false;
     }
     this->mode_.store(MODE_SCREEN);
   }
-  jpeg_decode_engine_cfg_t eng{};
-  eng.timeout_ms = 200;
-  if (jpeg_new_decoder_engine(&eng, &this->decoder_) != ESP_OK) {
-    this->decoder_ = nullptr;
-    this->closing_ = true;
-    return false;
+  if (!this->rows_wanted_) {
+    jpeg_decode_engine_cfg_t eng{};
+    eng.timeout_ms = 200;
+    if (jpeg_new_decoder_engine(&eng, &this->decoder_) != ESP_OK) {
+      this->decoder_ = nullptr;
+      this->closing_ = true;
+      return false;
+    }
   }
   if (worker && xTaskCreatePinnedToCoreWithCaps(&VideoCanvas::worker_entry_, "video_out", 4096, this, 1,
                                                 &this->worker_, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
@@ -609,6 +716,17 @@ VideoCanvas *VideoOutput::open_page(Component *owner) {
     return nullptr;
   }
   return canvas->open_page(width, height, owner) ? canvas : nullptr;
+}
+
+VideoCanvas *VideoOutput::open_rows(Component *owner) {
+  if (this->held(owner) != nullptr)
+    return nullptr;
+  bool combined = false;
+  VideoCanvas *canvas = this->acquire_(&combined);
+  if (canvas == nullptr)
+    return nullptr;
+  canvas->set_combined(combined);
+  return canvas->open_rows(owner) ? canvas : nullptr;
 }
 
 bool VideoOutput::page_size(uint32_t *width, uint32_t *height, const Component *owner) const {

@@ -36,9 +36,20 @@ class VideoCanvas {
   void drop_frames();
   bool open_page(uint32_t width, uint32_t height, Component *owner);
   bool page_rect(const uint8_t *jpeg, size_t len, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
+  static uint8_t page_bpp();
+  bool page_fill(uint32_t x, uint32_t y, uint32_t width, uint32_t height, const uint8_t *pixel);
+  bool page_pixels(const uint8_t *pixels, size_t stride, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
+  bool page_copy(uint32_t from_x, uint32_t from_y, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
+  bool page_read(uint8_t *pixels, size_t stride, uint32_t x, uint32_t y, uint32_t width, uint32_t height) const;
+  void page_show();
   bool page_size(uint32_t *width, uint32_t *height, bool combined) const;
   bool canvas_point(int32_t *x, int32_t *y) const;
+  bool open_rows(Component *owner);
+  bool rows_begin(lvgl::LvglComponent::VideoCanvasTarget *target, uint32_t wait_ms);
+  void rows_end(bool ok);
+  DisplayRotation rotation() const;
 #endif
+  Display *display() const { return this->display_; }
   bool fits(uint32_t width, uint32_t height, uint32_t fps, bool rows, bool combined) const;
   bool within_half() const;
   bool open(uint32_t width, uint32_t height, uint32_t fps, bool worker, Component *owner);
@@ -116,6 +127,7 @@ class VideoCanvas {
   bool rows_started_{false};
   uint32_t refused_{0};
   bool page_wanted_{false};
+  bool rows_wanted_{false};
   std::atomic<bool> page_dirty_{false};
 #endif
 };
@@ -133,6 +145,7 @@ class VideoOutput {
   VideoCanvas *show_frame(const uint8_t *pixels, uint32_t width, uint32_t height, uint32_t fps, uint8_t bpp,
                           Component *owner);
   VideoCanvas *open_page(Component *owner);
+  VideoCanvas *open_rows(Component *owner);
   bool page_size(uint32_t *width, uint32_t *height, const Component *owner) const;
 #endif
   VideoCanvas *held(const Component *owner) const;
