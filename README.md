@@ -1,51 +1,78 @@
 # esphome-hid
 
-ESPHome `dev` plus the HID input of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome) `testing_dev`: the `hid`
-component (report maps, keyboard layouts, keyboards, mice, gamepads, remotes as inputs for any transport) and LVGL
-driven by them (HID keyboards and pointers, key bindings, input from outside). One branch per change; `main`
-contains every branch. Base: ESPHome `dev` at `1f70f86b47`. The code is taken over unchanged from `testing_dev`:
-`hid` is identical, the lvgl lines are those `git blame` assigns to these commits.
+HID input for ESPHome: one `hid` component that understands keyboards, mice, gamepads and remotes from any
+transport (USB, Bluetooth Classic, BLE), with keyboard layouts for about a hundred languages, and LVGL driven by
+them - keyboard navigation, a mouse cursor, key bindings that users can learn on the device, and input from outside
+(Home Assistant, scripts).
 
-The transports are in other topics: `usb_hid` in [esphome-usb-drivers](https://github.com/p1ngb4ck/esphome-usb-drivers),
-`bt_hid` / `ble_client_hid` in esphome-bluetooth.
+The transports are in other repositories: `usb_hid` in
+[esphome-usb-drivers](https://github.com/p1ngb4ck/esphome-usb-drivers), `bt_hid` / `ble_client_hid` in
+[esphome-bluetooth](https://github.com/p1ngb4ck/esphome-bluetooth).
 
-## Branches
+## Getting started
 
-| Branch | Change | Chips | Needs |
-|---|---|---|---|
-| `pr/hid` | `hid`: report maps, keyboard layouts (also as files), keyboards, mice, gamepads, remotes; key events carry their device; `on_key`, `on_text`, `on_pointer`, `on_control`, API actions | all | - |
-| `pr/lvgl-hid-input` | `lvgl` `hid_keyboards` and `hid_pointers` (cursor look, `hide_after`, speed, acceleration, wheel, key mode, a gamepad touchpad as pointer or touch), `key_bindings` (built-in navigation, combos up to 3 keys, `reset`, a key file on a storage), keys / text / pointer handed to another component while LVGL is paused | all | `pr/hid` |
-| `pr/lvgl-remote-input` | `lvgl` `remote_input`: LVGL from outside (pointer, keys by key_bindings action, text), keys fire their action while LVGL is paused | all | `pr/lvgl-hid-input` |
-
-The paused hand-over (`set_paused_input`, which simple_video_player uses to send keys, text and the mouse to a
-udisp sender) sits in the same lines as
-the HID key and pointer path, so it is part of `pr/lvgl-hid-input`. `key_bindings` `file:` needs the storage
-interface ([esphome-storage-interface](https://github.com/p1ngb4ck/esphome-storage-interface)).
-
-## Use
+A USB keyboard and mouse that operate an LVGL UI:
 
 ```yaml
 external_components:
   - source: github://p1ngb4ck/esphome-hid@main
     components: [hid, lvgl]
+  - source: github://p1ngb4ck/esphome-usb-drivers@main
+    components: [usb_host, usb_hid]
+
+usb_host:
+  enable_hubs: true
+
+usb_hid:
+  - id: keyboard
+    layout: de
+  - id: mouse
 
 lvgl:
-  hid_pointers:
-    - id: mouse_pointer
-      hid_id: [kbd]
-      hide_after: 10s
-  remote_input:
-    id: lv_remote
   hid_keyboards:
-    - kbd
-  key_bindings:
-    id: key_bindings
-    actions:
-      - name: back
-        then:
-          - lvgl.page.previous:
+    - hid_id: keyboard
+  hid_pointers:
+    - hid_id: mouse
+      hide_after: 10s
 ```
 
-`kbd` is a HID input, for example a `usb_hid` block. `external_components` replaces components only; the ESPHome
-core of the build host stays as installed. With the other topics together use the combined branch
-`github://p1ngb4ck/esphome@topics-combined`.
+Arrow keys, Tab, Enter and Escape navigate the UI out of the box. React to keys in an automation:
+
+```yaml
+usb_hid:
+  - id: keyboard
+    on_key:
+      - key: F1
+        then:
+          - logger.log: help pressed
+```
+
+## More
+
+**[CONFIGURATION.md](CONFIGURATION.md)**: every option - layouts and custom keys, all triggers with their variables,
+gamepad rumble and LEDs, the `hid` sensors, LVGL keyboards / pointers / remote input, key bindings (built-in
+actions, combos, learning, a key file).
+
+## Branches
+
+One branch per change; `main` contains every branch. Base: ESPHome `dev` at `1f70f86b47`.
+
+| Branch | Change | Chips | Needs |
+|---|---|---|---|
+| `pr/hid` | `hid`: report maps, keyboard layouts (also as files), keyboards, mice, gamepads, remotes; key events carry their device; `on_key`, `on_text`, `on_pointer`, `on_control`, API actions | all | - |
+| `pr/lvgl-hid-input` | `lvgl` `hid_keyboards` and `hid_pointers`, `key_bindings` (built-in navigation, combos up to 3 keys, learning, a key file on a storage), keys / text / pointer handed to another component while LVGL is paused | all | `pr/hid` |
+| `pr/lvgl-remote-input` | `lvgl` `remote_input`: LVGL from outside (pointer, keys by key binding action, text), keys fire their action while LVGL is paused | all | `pr/lvgl-hid-input` |
+
+`key_bindings: file:` needs the storage interface
+([esphome-storage-interface](https://github.com/p1ngb4ck/esphome-storage-interface)).
+
+All topics together: `github://p1ngb4ck/esphome@dev`. `external_components` replaces components only; the ESPHome
+core of the build host stays as installed.
+
+## Thanks
+
+The keyboard layouts are generated from freedesktop.org's
+[xkeyboard-config](https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config) - thank you for the
+world's keyboards in one place. Thank you, [NonaSuomy](https://github.com/NonaSuomy), for many of the ideas behind
+the HID work. Everyone this project builds on:
+[ATTRIBUTIONS.md](https://github.com/p1ngb4ck/esphome/blob/dev/ATTRIBUTIONS.md).
