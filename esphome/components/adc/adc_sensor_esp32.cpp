@@ -2,7 +2,9 @@
 
 #include "adc_sensor.h"
 #include "esphome/core/log.h"
+#include <algorithm>
 #include <cinttypes>
+#include <cmath>
 
 namespace esphome::adc {
 
@@ -97,7 +99,7 @@ void ADCSensor::setup() {
         .unit_id = this->adc_unit_,
         .atten = this->attenuation_,
         .bitwidth = ADC_BITWIDTH_DEFAULT,
-#if !defined(USE_ESP32_VARIANT_ESP32S2) && !defined(USE_ESP32_VARIANT_ESP32C2)
+#if !defined(USE_ESP32_VARIANT_ESP32S2) && !defined(USE_ESP32_VARIANT_ESP32C2) && !defined(USE_ESP32_VARIANT_ESP32S31)
         .default_vref = 1100,  // Default reference voltage in mV
 #endif  // !defined(USE_ESP32_VARIANT_ESP32S2) && !defined(USE_ESP32_VARIANT_ESP32C2)
     };
@@ -174,6 +176,18 @@ float ADCSensor::sample_fixed_attenuation_() {
       continue;
     }
 
+#if defined(USE_ESP32_VARIANT_ESP32S31) && defined(ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED)
+    if (this->calibration_handle_ != nullptr && !this->output_raw_) {
+      int voltage_mv;
+      err = adc_cali_chan_raw_to_voltage(this->calibration_handle_, this->channel_, raw, &voltage_mv);
+      if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ADC calibration conversion failed with error %d", err);
+        continue;
+      }
+      raw = std::max(voltage_mv, 0);
+    }
+#endif
+
     aggr.add_sample(raw);
   }
 
@@ -183,6 +197,16 @@ float ADCSensor::sample_fixed_attenuation_() {
     return final_value;
   }
 
+#ifdef USE_ESP32_VARIANT_ESP32S31
+#ifdef ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+  if (this->calibration_handle_ != nullptr) {
+    return final_value / 1000.0f;
+  }
+  return NAN;
+#else
+  return std::max(0.0f, final_value * 4000.0f / 4393.0f - 2000.0f) / 1000.0f;
+#endif
+#else
   if (this->calibration_handle_ != nullptr) {
     int voltage_mv;
     esp_err_t err = adc_cali_raw_to_voltage(this->calibration_handle_, final_value, &voltage_mv);
@@ -202,6 +226,7 @@ float ADCSensor::sample_fixed_attenuation_() {
   }
 
   return final_value * 3.3f / 4095.0f;
+#endif
 }
 
 float ADCSensor::sample_autorange_() {
@@ -251,7 +276,7 @@ float ADCSensor::sample_autorange_() {
         .unit_id = this->adc_unit_,
         .atten = atten,
         .bitwidth = ADC_BITWIDTH_DEFAULT,
-#if !defined(USE_ESP32_VARIANT_ESP32S2) && !defined(USE_ESP32_VARIANT_ESP32C2)
+#if !defined(USE_ESP32_VARIANT_ESP32S2) && !defined(USE_ESP32_VARIANT_ESP32C2) && !defined(USE_ESP32_VARIANT_ESP32S31)
         .default_vref = 1100,
 #endif
     };
