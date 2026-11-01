@@ -421,7 +421,7 @@ void AviMediaPlayer::play_() {
       return;
     this->wait_until_(due);
     due += this->frame_us_;
-    const bool shown = this->frame_(this->frame_, static_cast<size_t>(n));
+    const bool shown = this->show_picture_(this->frame_, static_cast<size_t>(n));
     if (!shown && !this->frame_failed_) {
       ESP_LOGW(TAG, "Frames of %s not decoded", this->path_.c_str());
       this->error_.store(ERROR_DECODE);
@@ -430,7 +430,7 @@ void AviMediaPlayer::play_() {
   }
 }
 
-bool AviMediaPlayer::frame_(const uint8_t *data, size_t len) {
+bool AviMediaPlayer::show_picture_(const uint8_t *data, size_t len) {
   return this->canvas_ != nullptr && this->canvas_->frame(data, len, FLIP_WAIT_MS);
 }
 
