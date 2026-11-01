@@ -102,11 +102,13 @@ CONFIG_SCHEMA = cv.COMPONENT_SCHEMA.extend(HID_INPUT_SCHEMA).extend(
 
 
 def _final_validate(config):
+    from esphome.components.bt_host import classic_controller
+
     full = fv.full_config.get()
-    if not any(c.get("bluedroid") for c in full.get("usb_bluetooth") or []):
+    if classic_controller(full) is None:
         raise cv.Invalid(
-            "bt_hid needs a Bluetooth Classic controller: a usb_bluetooth dongle with "
-            "bluedroid: true"
+            "bt_hid needs a Bluetooth Classic controller: on the chip (ESP32, ESP32-S31) or a "
+            "usb_bluetooth dongle with bluedroid: true"
         )
     macs = [
         str(c[CONF_MAC_ADDRESS])

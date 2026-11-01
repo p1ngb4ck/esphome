@@ -807,7 +807,8 @@ void BTHIDDevice::unpair() {
     return;
   }
   esp_err_t err =
-      this->connected_ ? esp_bt_hid_host_virtual_cable_unplug(this->bda_) : esphome::bt_host::remove_bond(this->bda_, false);
+      this->connected_ ? esp_bt_hid_host_virtual_cable_unplug(this->bda_)
+                       : esphome::bt_host::remove_bond(this->bda_, false);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "[%s] Unpair failed: %s", mac, esp_err_to_name(err));
   } else {

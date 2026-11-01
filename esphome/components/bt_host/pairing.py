@@ -11,6 +11,7 @@ import logging
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import esp32, esp32_ble, esp32_ble_tracker, hid
+from esphome.components.esp32.const import VARIANT_ESP32, VARIANT_ESP32S31
 from esphome.components.storage import request_storage_worker
 from esphome.components.globals import GlobalsComponent
 import esphome.config_validation as cv
@@ -35,6 +36,7 @@ DEPENDENCIES = ["esp32"]
 _LOGGER = logging.getLogger(__name__)
 
 CONF_BT_HOST_ID = "bt_host_id"
+CLASSIC_ON_CHIP = (VARIANT_ESP32, VARIANT_ESP32S31)
 CONF_ADDRESS_GLOBAL = "address_global"
 CONF_MAX_RESTORE_DATA_LENGTH = "max_restore_data_length"
 CONF_MAX_DEVICES = "max_devices"
@@ -146,7 +148,7 @@ def _generate_slots(config):
 
     hid_count = config[CONF_MAX_HID_DEVICES]
     slots = {}
-    if hid_count and "usb_bluetooth" in CORE.loaded_integrations:
+    if hid_count and ("usb_bluetooth" in CORE.loaded_integrations or esp32.get_esp32_variant() in CLASSIC_ON_CHIP):
         slots["bt_hid"] = [
             bt_hid.CONFIG_SCHEMA({CONF_ID: f"bt_host_bt_hid_{i}"})
             for i in range(1, hid_count + 1)
@@ -309,11 +311,13 @@ def _final_validate(config):
         raise cv.Invalid(
             f"{CONF_FILE} needs a storage (sd_storage, usb_storage, ...) mounted there"
         )
-    if config[CONF_SLOTS].get("bt_hid") and not any(
-        c.get("bluedroid") for c in full.get("usb_bluetooth") or []
+    if config[CONF_SLOTS].get("bt_hid") and not (
+        any(c.get("bluedroid") for c in full.get("usb_bluetooth") or [])
+        or esp32.get_esp32_variant() in CLASSIC_ON_CHIP
     ):
         raise cv.Invalid(
-            "Bluetooth Classic HID needs a usb_bluetooth dongle with bluedroid: true"
+            "Bluetooth Classic HID needs Classic on the chip (ESP32, ESP32-S31) or a usb_bluetooth "
+            "dongle with bluedroid: true"
         )
 
 

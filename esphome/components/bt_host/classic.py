@@ -6,7 +6,7 @@ to each registered handler. Auto-loaded, no configuration.
 
 import esphome.codegen as cg
 from esphome.components.esp32 import add_idf_sdkconfig_option, get_esp32_variant
-from esphome.components.esp32.const import VARIANT_ESP32S31
+from esphome.components.esp32.const import VARIANT_ESP32, VARIANT_ESP32S31
 import esphome.config_validation as cv
 from esphome.core import CORE
 
@@ -22,7 +22,7 @@ def _dongle_host(full_config) -> bool:
 
 async def to_code(config):
     cg.add_define("USE_BT_CLASSIC")
-    if get_esp32_variant() == VARIANT_ESP32S31 and not _dongle_host(CORE.config):
+    if get_esp32_variant() in (VARIANT_ESP32, VARIANT_ESP32S31) and not _dongle_host(CORE.config):
         add_idf_sdkconfig_option("CONFIG_BT_CLASSIC_ENABLED", True)
         add_idf_sdkconfig_option("CONFIG_BTDM_CTRL_MODE_BTDM", True)
         add_idf_sdkconfig_option("CONFIG_BTDM_CTRL_MODE_BLE_ONLY", False)
