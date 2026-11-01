@@ -6,7 +6,7 @@
 
 #include "screen_capture.h"
 
-#ifdef SVP_CAPTURE
+#ifdef USE_SCREEN_CAPTURE
 
 #include "esphome/core/application.h"
 #include "esp_heap_caps.h"
@@ -29,7 +29,7 @@
 
 namespace esphome::screen_capture {
 
-static const char *const TAG = "simple_video_player.capture";
+static const char *const TAG = "screen_capture";
 
 static const char *const R_VIDEO = "A video started";
 static const char *const R_STREAM = "A stream took the panel";
@@ -57,7 +57,7 @@ void ScreenCapture::setup() {
   if (camera::Camera::instance() != nullptr)
     camera::Camera::instance()->add_listener(&this->cam_h264_feed_);
 #endif
-#ifdef SVP_CAPTURE_MIC
+#ifdef USE_SCREEN_CAPTURE_MIC
   if (this->cap_mic_ != nullptr) {
     // Registered once; it writes only while a screencast takes the sound.
     this->cap_mic_->add_data_callback([this](const microphone::AudioCapture &capture) {
@@ -133,7 +133,7 @@ bool ScreenCapture::capture_take_(bool cast) {
     ok = (this->cap_frame_[1] = take(this->cap_frame_bytes_)) != nullptr &&
          (this->cap_jpeg_[1] = take(CAP_JPEG_BYTES)) != nullptr &&
          (this->cap_index_ = take(CAP_INDEX_BYTES)) != nullptr;
-#ifdef SVP_CAPTURE_MIC
+#ifdef USE_SCREEN_CAPTURE_MIC
     if (ok && this->cast_sound_ && this->cap_mic_ != nullptr)
       ok = (this->cap_pcm_ = take(CAP_PCM_BYTES)) != nullptr;
 #endif
@@ -161,7 +161,7 @@ void ScreenCapture::capture_free_frames_() {
 }
 
 void ScreenCapture::capture_free_rest_() {
-#ifdef SVP_CAPTURE_MIC
+#ifdef USE_SCREEN_CAPTURE_MIC
   this->cap_ring_.reset();
 #endif
   if (this->cap_pcm_ != nullptr)
@@ -494,7 +494,7 @@ void ScreenCapture::capture_compose_() {
     // After the JPEG kept there: a screenshot may still write that one.
     pic += this->cap_wlen_ + (this->cap_wlen_ & 1) + avi::CastAvi::CHUNK_HEADER;
   }
-#ifdef SVP_CAPTURE_MIC
+#ifdef USE_SCREEN_CAPTURE_MIC
   ring_buffer::RingBuffer *ring = this->cap_ring_raw_.load(std::memory_order_acquire);
   if (ring != nullptr && this->cap_channels_ != 0) {
     const size_t block = static_cast<size_t>(this->cap_channels_) * 2;
@@ -503,7 +503,7 @@ void ScreenCapture::capture_compose_() {
   }
 #endif
   uint8_t *sound = avi::CastAvi::lay_out(pic, batch);
-#ifdef SVP_CAPTURE_MIC
+#ifdef USE_SCREEN_CAPTURE_MIC
   if (sound != nullptr) {
     const size_t got = ring->read(sound, batch.audio_len, 0);
     if (got < batch.audio_len)
@@ -560,6 +560,7 @@ void ScreenCapture::capture_sink_done_(uint8_t sink) {
 //==================================================================================================
 
 bool ScreenCapture::screenshot() {
+  this->host_->capture_wake();
   auto refuse = [this](const char *why) {
     ESP_LOGW(TAG, "No screenshot: %s", why);
     this->shot_trigger_.trigger(std::string());
@@ -666,6 +667,7 @@ void ScreenCapture::shot_done_(bool ok) {
 }
 
 bool ScreenCapture::screencast_start() {
+  this->host_->capture_wake();
   auto refuse = [this](const char *why) {
     ESP_LOGW(TAG, "No screencast: %s", why);
     this->cast_stopped_trigger_.trigger(std::string(why));
@@ -685,7 +687,7 @@ bool ScreenCapture::screencast_start() {
   if (blocked & CaptureHost::BLOCKED_DESKTOP)
     return refuse(R_DESKTOP);
   uint8_t target = this->cast_target_;
-  if (this->host_->capture_relay_url().empty())
+  if (*this->host_->capture_relay_url() == '\0')
     target &= ~CAST_RELAY;
   if (this->cast_dir_.empty())
     target &= ~CAST_LOCAL;
@@ -721,6 +723,7 @@ bool ScreenCapture::screencast_start() {
 }
 
 bool ScreenCapture::camera_screenshot() {
+  this->host_->capture_wake();
   auto refuse = [this](const char *why) {
     ESP_LOGW(TAG, "No camera screenshot: %s", why);
     this->shot_trigger_.trigger(std::string());
@@ -751,6 +754,7 @@ bool ScreenCapture::camera_screenshot() {
 }
 
 bool ScreenCapture::camera_record_start(uint16_t width, uint16_t height) {
+  this->host_->capture_wake();
   auto refuse = [this](const char *why) {
     ESP_LOGW(TAG, "No camera recording: %s", why);
     this->cast_stopped_trigger_.trigger(std::string(why));
@@ -770,7 +774,7 @@ bool ScreenCapture::camera_record_start(uint16_t width, uint16_t height) {
   bool ok = (this->cap_jpeg_[0] = take(CAP_JPEG_BYTES)) != nullptr &&
             (this->cap_jpeg_[1] = take(CAP_JPEG_BYTES)) != nullptr &&
             (this->cap_index_ = take(CAP_INDEX_BYTES)) != nullptr;
-#ifdef SVP_CAPTURE_MIC
+#ifdef USE_SCREEN_CAPTURE_MIC
   if (ok && this->cast_sound_ && this->cap_mic_ != nullptr)
     ok = (this->cap_pcm_ = take(CAP_PCM_BYTES)) != nullptr;
 #endif
@@ -846,6 +850,7 @@ void ScreenCapture::camera_capture_end() {
 
 bool ScreenCapture::camera_capture_frame(const uint8_t *data, size_t length, FrameFormat format,
                                              uint16_t width, uint16_t height, std::function<void()> &&done) {
+  this->host_->capture_wake();
   const bool recording = this->cap_camera_ && this->cast_state_ == CAST_RUNNING;
   const bool h264 = format == FrameFormat::H264;
   if (data == nullptr || (this->cam_cap_ == 0 && !recording) || format == FrameFormat::YUYV ||
@@ -897,7 +902,7 @@ bool ScreenCapture::capture_cast_begin_(uint8_t target) {
   // The sound: the microphone's format.
   this->cap_rate_ = 0;
   this->cap_channels_ = 0;
-#ifdef SVP_CAPTURE_MIC
+#ifdef USE_SCREEN_CAPTURE_MIC
   if (this->cap_pcm_ != nullptr) {
     const audio::AudioStreamInfo info = this->cap_mic_->get_audio_stream_info();
     if (info.get_bits_per_sample() == 16 && info.get_channels() != 0 && info.get_channels() <= 2) {
@@ -1025,7 +1030,7 @@ void ScreenCapture::loop() {
       this->cap_casting_.store(true, std::memory_order_release);
       if (!this->cap_camera_)
         this->lvgl_->set_frame_capture(&this->cap_sink_);
-#ifdef SVP_CAPTURE_MIC
+#ifdef USE_SCREEN_CAPTURE_MIC
       if (this->cap_ring_ != nullptr) {
         this->cap_ring_->reset();
         this->cap_ring_raw_.store(this->cap_ring_.get(), std::memory_order_release);
@@ -1071,7 +1076,7 @@ void ScreenCapture::loop() {
       this->cap_casting_.store(false, std::memory_order_release);
       if (!this->cap_camera_)
         this->lvgl_->set_frame_capture(nullptr);
-#ifdef SVP_CAPTURE_MIC
+#ifdef USE_SCREEN_CAPTURE_MIC
       this->cap_ring_raw_.store(nullptr, std::memory_order_release);
       if (this->cap_mic_on_) {
         this->cap_mic_->stop();
@@ -1112,7 +1117,7 @@ void ScreenCapture::loop() {
 }
 
 void ScreenCapture::capture_finished_() {
-#ifdef SVP_CAPTURE_MIC
+#ifdef USE_SCREEN_CAPTURE_MIC
   // The microphone's task may still be inside its write.
   while (this->cap_mic_in_.load(std::memory_order_acquire) != 0)
     delay(1);
@@ -1480,4 +1485,4 @@ void ScreenCapture::cast_tx_loop_() {
 
 }  // namespace esphome::screen_capture
 
-#endif  // SVP_CAPTURE
+#endif
