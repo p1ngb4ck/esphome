@@ -330,7 +330,7 @@ class SpiceSession {
   void stream_create_(const uint8_t *body, uint32_t size);
   void stream_data_(const uint8_t *body, uint32_t size, bool sized);
   Stream *stream_(uint32_t id);
-  bool inputs_();
+  bool send_inputs_();
   bool motion_flush_(bool force);
   bool buttons_(uint16_t now);
   void cursor_message_(uint16_t type, const uint8_t *body, uint32_t size);
@@ -1185,7 +1185,7 @@ bool SpiceSession::buttons_(uint16_t now) {
   return true;
 }
 
-bool SpiceSession::inputs_() {
+bool SpiceSession::send_inputs_() {
   RemoteDesktop *rd = this->rd_;
   RemoteDesktop::Input input;
   bool moved = false;
@@ -1442,7 +1442,7 @@ void SpiceSession::run() {
       if (FD_ISSET(rd->wake_fd_, &readable)) {
         uint64_t count = 0;
         ::read(rd->wake_fd_, &count, sizeof(count));
-        if (!this->inputs_())
+        if (!this->send_inputs_())
           this->drop_(this->inputs_);
       }
       if (rd->stop_.load())
