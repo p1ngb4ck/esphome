@@ -82,6 +82,16 @@ One branch per change; `main` contains every branch. Base: ESPHome `dev` at `1f7
 All topics together: `github://p1ngb4ck/esphome@dev`. `external_components` replaces components only; the ESPHome
 core of the build host stays as installed.
 
+## License
+
+- ESPHome's own files, also where this repository changes them: the [ESPHome License](LICENSE) (MIT for the Python
+  code and everything else, GPLv3 for the C++ runtime files).
+- New files written for this repository (new components, their code, tests and documentation): MIT,
+  [LICENSE-MIT](LICENSE-MIT).
+- Third-party code keeps its own licence:
+  - `a2dp_source/BluetoothA2DP*`, `A2DPVolumeControl.h`, `config.h`: ESP32-A2DP (Phil Schatzmann), Apache-2.0
+    (`LICENSE.ESP32-A2DP`).
+
 ## Thanks
 
 Thank you, [NonaSuomy](https://github.com/NonaSuomy), for many of the ideas behind the Bluetooth work, among them
