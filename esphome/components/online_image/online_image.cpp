@@ -1,4 +1,6 @@
 #include "online_image.h"
+
+#include <strings.h>
 #include "esphome/components/runtime_image/image_decoder.h"
 #include "esphome/core/application.h"
 #include "esphome/core/helpers.h"
@@ -82,14 +84,28 @@ void OnlineImage::update() {
       this->download_error_callback_.call();
       return;
     }
-    if (!this->begin_decode(this->storage_size_)) {
-      ESP_LOGE(TAG, "Failed to initialize decoder for format %d", this->get_format());
+    runtime_image::ImageFormat format = this->get_format();
+    if (format == runtime_image::AUTO) {
+      const size_t dot = this->url_.rfind('.');
+      const char *ext = dot == std::string::npos ? "" : this->url_.c_str() + dot;
+      if (strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0) {
+        format = runtime_image::JPEG;
+      } else if (strcasecmp(ext, ".png") == 0) {
+        format = runtime_image::PNG;
+      } else if (strcasecmp(ext, ".bmp") == 0) {
+        format = runtime_image::BMP;
+      } else if (strcasecmp(ext, ".qoi") == 0) {
+        format = runtime_image::QOI;
+      }
+    }
+    if (!this->begin_decode(this->storage_size_, format)) {
+      ESP_LOGE(TAG, "Failed to initialize decoder for format %d", format);
       this->end_connection_();
       this->download_error_callback_.call();
       return;
     }
     // JPEG requires the complete image in the buffer before decoding — same rule as http
-    if (this->get_format() == runtime_image::JPEG && this->storage_size_ > this->download_buffer_.size()) {
+    if (format == runtime_image::JPEG && this->storage_size_ > this->download_buffer_.size()) {
       this->download_buffer_.resize(this->storage_size_);
     }
     ESP_LOGI(TAG, "Reading image from storage (Size: %llu)", (unsigned long long) this->storage_size_);
