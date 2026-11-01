@@ -12,11 +12,24 @@
 
 import esphome.components.image as espImage
 import esphome.config_validation as cv
+from esphome.const import CONF_PATH
+from esphome.types import ConfigType
 
 from .image import ONLINE_IMAGE_CONFIG_SCHEMA, setup_online_image
 
-AUTO_LOAD = ["image", "runtime_image"]
-DEPENDENCIES = ["display", "http_request"]
+
+def AUTO_LOAD(config: ConfigType) -> list[str]:
+    """Legacy top-level form: image + runtime_image always; http_request only for a network
+    url: source, storage only for a local path: source."""
+    load = ["image", "runtime_image"]
+    if config and config.get(CONF_PATH) is not None:
+        load.append("storage")
+    else:
+        load.append("http_request")
+    return load
+
+
+DEPENDENCIES = ["display"]
 CODEOWNERS = ["@guillempages", "@clydebarrow"]
 MULTI_CONF = True
 
