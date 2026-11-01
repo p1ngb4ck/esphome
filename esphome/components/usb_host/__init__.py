@@ -1,6 +1,7 @@
 import itertools
 import logging
 from pathlib import Path
+from typing import NamedTuple
 
 import esphome.codegen as cg
 from esphome.components.const import CONF_MANUFACTURER
