@@ -91,7 +91,7 @@ class FTPClient final : public storage::NetworkStorage, public storage::Mountabl
   // (cert_store::global_cert_store) by entry id and is required when auth_tls is on -- the server
   // is always verified against it.
   void set_auth_tls(bool auth_tls) { this->auth_tls_ = auth_tls; }
-  void set_ca_entry(const char *ca_entry) { this->ca_entry_ = ca_entry; }
+  void set_tls_refs(const cert_store::TlsRefs &refs) { this->tls_refs_ = refs; }
 #endif
 
   bool is_mounted() const { return this->connected_; }
@@ -158,10 +158,10 @@ class FTPClient final : public storage::NetworkStorage, public storage::Mountabl
   // every data connection; the CA comes from the single cert_store by entry id.
   bool setup_tls_();
   bool auth_tls_{false};
-  const char *ca_entry_{nullptr};
+  cert_store::TlsRefs tls_refs_{};
   bool tls_ready_{false};
   mbedtls_ssl_config conf_{};
-  mbedtls_x509_crt cacert_{};
+  cert_store::TlsMaterial tls_material_{};
   mbedtls_ctr_drbg_context drbg_{};
   mbedtls_entropy_context entropy_{};
 #endif

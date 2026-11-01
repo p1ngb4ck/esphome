@@ -1,4 +1,5 @@
 import esphome.codegen as cg
+from esphome.components import cert_store
 from esphome.components.storage import (
     MountableStorage,
     register_mount_path,
@@ -39,7 +40,6 @@ ftp_client_ns = cg.esphome_ns.namespace("ftp_client")
 # storage.unmount actions (cv.use_id(MountableStorage) checks declared Python parents).
 FTPClient = ftp_client_ns.class_("FTPClient", cg.Component, MountableStorage)
 CONF_AUTH_TLS = "auth_tls"
-CONF_CA = "ca"
 
 
 def _validate_ftps(config):
@@ -52,8 +52,8 @@ def _validate_ftps(config):
             raise cv.Invalid("auth_tls (FTPS) requires the esp-idf framework")
         # ca is optional: without it, cert_store uses the built-in Mozilla bundle (covers public
         # CAs). A named ca selects a specific cert_store entry (embedded or storage).
-    elif CONF_CA in config:
-        raise cv.Invalid("'ca' is only used with auth_tls: true")
+    elif cert_store.tls_keys_present(config):
+        raise cv.Invalid("ca / client_certificate / client_certificate_key are only used with auth_tls: true")
     return config
 
 DEFAULT_PORT = 21
@@ -75,9 +75,10 @@ CONFIG_SCHEMA = cv.All(
             # retry (schedule your own via interval:/automations calling storage.mount).
             cv.Optional(CONF_AUTO_CONNECT, default=True): cv.boolean,
             cv.Optional(CONF_AUTH_TLS, default=False): cv.boolean,
-            cv.Optional(CONF_CA): cv.string,
         }
-    ).extend(cv.COMPONENT_SCHEMA),
+    )
+    .extend(cert_store.TLS_SCHEMA)
+    .extend(cv.COMPONENT_SCHEMA),
     cv.only_on(
         [
             PLATFORM_BK72XX,
@@ -92,7 +93,7 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
-CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, _validate_ftps)
+CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, cert_store.validate_tls, _validate_ftps)
 
 
 async def to_code(config):
@@ -108,10 +109,7 @@ async def to_code(config):
     if config[CONF_AUTH_TLS]:
         cg.add_define("USE_FTP_CLIENT_TLS")
         cg.add(var.set_auth_tls(True))
-        # Optional: an explicit cert_store entry. Absent -> ca_entry stays null -> cert_store uses
-        # the built-in bundle.
-        if CONF_CA in config:
-            cg.add(var.set_ca_entry(config[CONF_CA]))
+        cg.add(var.set_tls_refs(cert_store.tls_refs(config)))
 
     cg.add(var.set_mount_path(config[CONF_MOUNT_PATH]))
     # Full VFS paths carry the mount point; the storage component sizes its buffers from the
