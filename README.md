@@ -8,8 +8,8 @@ Classic and BLE HID, BLE advertisement data, Bluetooth audio (A2DP source), the 
 `git blame`). The USB dongle (`usb_bluetooth`) is in
 [esphome-usb-drivers](https://github.com/p1ngb4ck/esphome-usb-drivers).
 
-A rework into one host component (scan, pairing, security, bonding for BLE and Classic) with the profiles as drivers
-is planned with Olli; these branches are the state it starts from.
+The rework into one host component (scan, pairing, security, bonding for BLE and Classic) with the profiles as
+drivers is on `pr/bt-host` (on top of `main`); the other branches are the state it starts from.
 
 ## Branches
 
@@ -24,6 +24,7 @@ is planned with Olli; these branches are the state it starts from.
 | `pr/esp32-ble-tracker-classic-scan-window` | the defaulted BLE scan window stays 30 ms when Bluetooth Classic runs on the same radio | ESP32, S31 | - |
 | `pr/esp32-ble-tracker-pause-scan` | `pause_scan` / `resume_scan`: BLE scanning paused while A2DP streams on the chip's own radio | ESP32, S31 | - |
 | `pr/a2dp-source` | `a2dp_source`: A2DP source with AVRCP (vendored ESP32-A2DP library) - speaker, device select, volume, microphone source, reconnect, `idle_timeout` | ESP32 on chip; S31 on chip (with esp32_ble); others with a usb_bluetooth bluedroid dongle | `pr/bt-pairing-hid`, `pr/esp32-ble-tracker-pause-scan` |
+| `pr/bt-host` | `bt_host`: `bt_classic`, `bt_pairing` and `bt_persistence` as one host component (`pairing:` / `persistence:` blocks); the drivers' discovery, SSP, bond removal and scan mode through it; `ble_controller` / `classic_controller` per role; Classic HID on the chip's own Classic (ESP32, ESP32-S31) | every chip with Bluedroid | `main` |
 | `pr/bt-offload` | `bt_offload`: Bluetooth HID input and speaker offloaded to the C6 (custom firmware), the 16 peer data handlers of esp32_hosted on the P4 | P4 with C6 | `pr/usb-bluetooth` |
 
 Chips as the code declares today: `ble_client_hid` and `ble_broadcast` on every chip with BLE (the P4 through the
@@ -71,6 +72,32 @@ bt_persistence:
   storage_timeout: 20s
   gatt_cache: true
 ```
+
+With `pr/bt-host` the same as one block (the preference keys are unchanged, so stored pairings stay):
+
+```yaml
+bt_host:
+  classic_controller: usb
+  ble_controller: c6
+  pairing:
+    id: bt_pairing_db
+    file: /sdcard/bluetooth/bt_pairing.bin
+    max_devices: 32
+    max_hid_devices: 7
+    max_broadcast_devices: 1
+    layout: de
+  persistence:
+    id: bt_store
+    backend: storage
+    path: /sdcard/bluetooth/bt_store.bin
+    write_delay: 2s
+    storage_timeout: 20s
+    gatt_cache: true
+```
+
+Actions `bt_pairing.*` are `bt_host.*`, `bt_persistence.set_path` is `bt_host.persistence_set_path`, the select
+platform `bt_pairing` is `bt_host`, `bt_pairing_id` is `bt_host_id`; `external_components` lists `bt_host` instead of
+`bt_classic`, `bt_pairing`, `bt_persistence`.
 
 From the Waveshare ESP32-P4 Pi board's config (BLE on the C6, Classic on a USB dongle). `external_components`
 replaces components only; the ESPHome core of the build host stays as installed. With the other topics together
