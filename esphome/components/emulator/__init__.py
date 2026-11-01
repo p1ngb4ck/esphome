@@ -2,7 +2,7 @@ from pathlib import Path
 
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components import socket, speaker
+from esphome.components import socket, speaker, touchscreen
 from esphome.components.esp32 import (
     VARIANT_ESP32P4,
     add_idf_component,
@@ -11,6 +11,7 @@ from esphome.components.esp32 import (
     require_vfs_select,
 )
 from esphome.components.lvgl.defines import CONF_LVGL_ID
+from esphome.components.lvgl.hid_input import KeyBindings
 from esphome.components.lvgl.video_output import (
     VIDEO_OUTPUT_SCHEMA,
     final_validate_video_output,
@@ -54,6 +55,8 @@ CONF_SLOT = "slot"
 CONF_SEAT = "seat"
 CONF_AUDIO_RATE = "audio_rate"
 CONF_AUDIO_CHANNELS = "audio_channels"
+CONF_KEY_BINDINGS_ID = "key_bindings_id"
+CONF_TOUCHSCREEN_ID = "touchscreen_id"
 
 emulator_ns = cg.esphome_ns.namespace("emulator")
 Emulator = emulator_ns.class_("Emulator", cg.Component)
@@ -157,6 +160,8 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_MIN_SCALE, default=1.0): _min_scale,
             cv.Optional(CONF_BIOS_DIR): _storage_dir,
             cv.Optional(CONF_SPEAKER): cv.use_id(speaker.Speaker),
+            cv.Optional(CONF_KEY_BINDINGS_ID): cv.use_id(KeyBindings),
+            cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
             cv.Optional(CONF_HID_IDS, default=[]): cv.ensure_list(cv.use_id(HIDInput)),
             cv.Optional(CONF_KEYS, default={}): cv.Schema(
                 {cv.Optional(button): cv.ensure_list(_emu_key) for button in EMU_BUTTONS}
@@ -243,6 +248,12 @@ async def to_code(config):
     if CONF_SPEAKER in config:
         cg.add_define("USE_EMULATOR_SPEAKER")
         cg.add(var.set_speaker(await cg.get_variable(config[CONF_SPEAKER])))
+    if CONF_KEY_BINDINGS_ID in config:
+        cg.add_define("USE_EMULATOR_KEY_BINDINGS")
+        cg.add(var.set_key_bindings(await cg.get_variable(config[CONF_KEY_BINDINGS_ID])))
+    if CONF_TOUCHSCREEN_ID in config:
+        cg.add_define("USE_EMULATOR_TOUCH")
+        cg.add(var.set_touchscreen(await cg.get_variable(config[CONF_TOUCHSCREEN_ID])))
     if CONF_BIOS_DIR in config:
         cg.add(var.set_bios_dir(config[CONF_BIOS_DIR]))
     for name, directory in config[CONF_SYSTEMS].items():

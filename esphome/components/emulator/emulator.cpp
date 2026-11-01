@@ -2,6 +2,7 @@
 
 #ifdef USE_EMULATOR
 
+#include <algorithm>
 #include <cstring>
 #include <new>
 #include <strings.h>
@@ -58,6 +59,10 @@ void Emulator::setup() {
     if (this->scale_pref_[system].load(&kept))
       this->scale_kept_[system] = kept;
   }
+#ifdef USE_EMULATOR_TOUCH
+  if (this->touchscreen_ != nullptr)
+    this->touchscreen_->register_listener(&this->touch_listener_);
+#endif
   this->disable_loop();
 }
 
@@ -233,6 +238,7 @@ bool Emulator::start_(const std::string &path, bool assign) {
   }
   if (this->output_ == nullptr || this->canvas_ != nullptr)
     return false;
+  this->closed_home_ = false;
   this->canvas_ = this->output_->open_rows(this);
   if (this->canvas_ == nullptr) {
     ESP_LOGW(TAG, "Refused: the screen is held by another app");
@@ -688,6 +694,11 @@ void Emulator::end_() {
   this->rom_size_ = 0;
   this->storage_ = nullptr;
   this->set_key_tap_(false);
+#ifdef USE_EMULATOR_KEY_BINDINGS
+  this->key_held_ = false;
+#endif
+  this->fingers_ = false;
+  this->cancel_timeout("close");
   if (this->canvas_ != nullptr && this->canvas_->held_by(this))
     this->canvas_->close();
   const bool was_loading = this->state_ == State::LOADING;
@@ -1658,10 +1669,90 @@ bool Emulator::game_key_(uint16_t page, uint16_t usage, bool pressed, uint32_t s
   return true;
 }
 
+bool Emulator::close_key_(uint16_t page, uint16_t usage, bool pressed, uint32_t source) {
+#ifdef USE_EMULATOR_KEY_BINDINGS
+  if (pressed && !this->key_held_ && this->bindings_ != nullptr) {
+    const int action = this->bindings_->resolve(page, usage, 0);
+    if ((action == lvgl::KeyBindings::ACT_BACK && (this->close_keys_ & 1)) ||
+        (action == lvgl::KeyBindings::ACT_HOME && (this->close_keys_ & 2))) {
+      this->key_held_ = true;
+      this->key_page_ = page;
+      this->key_usage_ = usage;
+      this->key_at_ = millis();
+      this->close_check_();
+      return true;
+    }
+  }
+  if (!pressed && this->key_held_ && page == this->key_page_ && usage == this->key_usage_) {
+    this->key_held_ = false;
+    this->close_check_();
+    this->game_key_(page, usage, true, source);
+    this->game_key_(page, usage, false, source);
+    return true;
+  }
+#endif
+  return false;
+}
+
+void Emulator::close_check_() {
+  const uint32_t now = millis();
+  uint32_t due = UINT32_MAX;
+  auto left = [now](uint32_t since, uint32_t hold) { return now - since >= hold ? 0 : hold - (now - since); };
+#ifdef USE_EMULATOR_KEY_BINDINGS
+  if (this->key_held_)
+    due = std::min(due, left(this->key_at_, this->close_hold_ms_));
+#endif
+  if (this->fingers_)
+    due = std::min(due, left(this->fingers_at_, this->touch_hold_ms_));
+  if (due == UINT32_MAX) {
+    this->cancel_timeout("close");
+    return;
+  }
+  if (due != 0) {
+    this->set_timeout("close", due, [this]() { this->close_check_(); });
+    return;
+  }
+#ifdef USE_EMULATOR_KEY_BINDINGS
+  this->key_held_ = false;
+#endif
+  this->fingers_ = false;
+  if (this->state_ != State::RUNNING && this->state_ != State::PAUSED)
+    return;
+  ESP_LOGI(TAG, "Closed by holding");
+  this->closed_home_ = true;
+  this->stop();
+}
+
+#ifdef USE_EMULATOR_TOUCH
+void EmulatorTouchListener::update(const touchscreen::TouchPoints_t &points) {
+  this->parent_->touch(static_cast<uint8_t>(points.size()));
+}
+
+void EmulatorTouchListener::release() { this->parent_->touch(0); }
+
+void Emulator::touch(uint8_t fingers) {
+  if (this->state_ != State::RUNNING)
+    return;
+  if (fingers >= 2) {
+    if (!this->fingers_) {
+      this->fingers_ = true;
+      this->fingers_at_ = millis();
+      this->close_check_();
+    }
+  } else if (this->fingers_) {
+    this->fingers_ = false;
+    this->close_check_();
+  }
+}
+#endif
+
 #ifdef USE_LVGL_HID
 bool Emulator::key_tap(uint32_t source, const char *label, uint16_t page, uint16_t usage, bool pressed) {
-  if (this->tap_game_.load(std::memory_order_acquire))
+  if (this->tap_game_.load(std::memory_order_acquire)) {
+    if (this->close_key_(page, usage, pressed, source))
+      return true;
     return this->game_key_(page, usage, pressed, source);
+  }
   if (!pressed)
     return true;
   const uint8_t tail = this->tap_tail_.load(std::memory_order_relaxed);
