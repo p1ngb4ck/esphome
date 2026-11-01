@@ -153,7 +153,7 @@ CONFIG_SCHEMA = cv.Schema(
             min=4096, max=32768
         ),
         # FreeRTOS priority. Default 9: consumers that block on a worker read from their own
-        # task (e.g. simple_video_player's loader task at priority 9) must not leave the worker
+        # task (e.g. a media player's loader task at priority 9) must not leave the worker
         # unable to run behind them. At the old default of 1 the worker tied with the main task
         # and lost to every component task, so a busy consumer would stall waiting on reads that
         # never got serviced. Still below hard-real-time audio/decode work (typically 10+).
