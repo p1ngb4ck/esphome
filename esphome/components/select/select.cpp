@@ -32,6 +32,12 @@ void Select::publish_state(size_t index) {
 #endif
 }
 
+void Select::publish_options() {
+#if defined(USE_SELECT) && defined(USE_CONTROLLER_REGISTRY)
+  ControllerRegistry::notify_select_update(this);
+#endif
+}
+
 optional<size_t> Select::index_of(const char *option, size_t len) const {
   const auto &options = traits.get_options();
   for (size_t i = 0; i < options.size(); i++) {
