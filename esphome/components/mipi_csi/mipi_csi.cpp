@@ -156,8 +156,60 @@ bool MipiCsiCamera::init_video_() {
   return true;
 }
 
+void MipiCsiCamera::add_resolution(uint16_t width, uint16_t height, uint8_t fps) {
+  for (uint8_t i = 0; i != this->resolution_count_; i++) {
+    Resolution &known = this->resolutions_[i];
+    if (known.width == width && known.height == height) {
+      known.fps = std::max(known.fps, fps);
+      return;
+    }
+  }
+  if (this->resolution_count_ != MAX_RESOLUTIONS)
+    this->resolutions_[this->resolution_count_++] = Resolution{width, height, fps};
+}
+
+void MipiCsiCamera::collect_resolutions_() {
+  v4l2_sensor_format_enum enumerator{};
+  for (enumerator.index = 0; ioctl(this->fd_, VIDIOC_ENUM_SENSOR_FMT, &enumerator) == 0; enumerator.index++) {
+    const esp_cam_sensor_format_t &format = enumerator.format;
+    if (format.port == ESP_CAM_SENSOR_MIPI_CSI)
+      this->add_resolution(format.width, format.height, format.fps);
+  }
+}
+
+bool MipiCsiCamera::switch_resolution(uint16_t width, uint16_t height) {
+  bool known = this->resolution_count_ == 0;
+  for (uint8_t i = 0; i != this->resolution_count_ && !known; i++)
+    known = this->resolutions_[i].width == width && this->resolutions_[i].height == height;
+  if (!known || width == 0 || height == 0)
+    return false;
+  if (width == this->width_ && height == this->height_)
+    return true;
+  this->width_ = width;
+  this->height_ = height;
+  if (this->state_ == State::RUNNING) {
+    this->state_ = State::STOPPING;
+    this->stop_wanted_.store(true);
+  }
+  this->enable_loop();
+  return true;
+}
+
+#ifdef USE_CSI_VIDEO_OUTPUT
+void MipiCsiCamera::show_on_canvas(bool on) {
+  if (on == this->output_on_)
+    return;
+  this->output_on_ = on;
+  this->set_direct(on);
+  if (!on && this->holds_())
+    this->canvas_->close();
+}
+#endif
+
 bool MipiCsiCamera::select_sensor_format_() {
   esp_cam_sensor_format_t chosen{};
+  if (this->resolution_count_ == 0)
+    this->collect_resolutions_();
 
   if (this->width_ == 0) {
     // No resolution configured, so keep the format the sensor driver starts up with.
@@ -495,6 +547,10 @@ bool MipiCsiCamera::start_capture_() {
 }
 
 void MipiCsiCamera::finish_stop_() {
+#ifdef USE_CSI_VIDEO_OUTPUT
+  if (this->holds_())
+    this->canvas_->drop_frames();
+#endif
   if (this->direct_given_) {
     this->direct_given_ = false;
     this->direct_callback_.call(nullptr, 0, 0);
@@ -706,13 +762,28 @@ void MipiCsiCamera::loop() {
     this->preview_wanted_.store(true);
   if (this->direct_ready_.exchange(false)) {
     const int8_t held = this->direct_held_.load();
+#ifdef USE_CSI_VIDEO_OUTPUT
+    if (held >= 0 && this->direct_.load() && this->output_on_) {
+      const FrameBuffer &frame = this->buffers_[held];
+      esp_cache_msync(frame.data, frame.length, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+      display::VideoCanvas *shown = this->output_->show_frame(frame.data, this->width_, this->height_,
+                                                              this->framerate_, this->bytes_per_pixel_(), this);
+      if (shown != nullptr)
+        this->canvas_ = shown;
+      this->release_direct_frame();
+    } else if (held >= 0 && this->direct_.load()) {
+#else
     if (held >= 0 && this->direct_.load()) {
+#endif
       this->direct_given_ = true;
       this->direct_callback_.call(this->buffers_[held].data, this->width_, this->height_);
     } else {
       this->release_direct_frame();
     }
   }
+#ifdef USE_CSI_VIDEO_OUTPUT
+  this->output_->loop();
+#endif
 
   this->h264_step_();
 
