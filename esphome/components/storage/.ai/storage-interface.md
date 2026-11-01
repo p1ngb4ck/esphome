@@ -163,7 +163,7 @@ loop-sliced. Two engines share one queue. Completions ALWAYS fire on the main lo
    reported caps (worker READING step + copy engine), additive fallback to the CPU path.
 2. Device drivers: SD gets a FatFs-direct DMA read path, then advertises `STORAGE_CAP_DMA_STREAM`.
    Others keep CPU-copy caps (verified they cannot DMA).
-3. Consumers: simple_video_player (and others) — read directly into a DMA-capable buffer; drop any
+3. Consumers: the avi media player (and others) — read directly into a DMA-capable buffer; drop any
    arena→ring double copy.
 
 ## Hard rules reminder (CLAUDE.md)
