@@ -270,7 +270,7 @@ class RemoteDesktop : public Component {
 #ifdef USE_REMOTE_DESKTOP_KEY_BINDINGS
   lvgl::KeyBindings *bindings_{nullptr};
   int close_action_{-1};
-  const char *close_name_{"back"};
+  const char *close_name_{"home"};
   uint32_t close_hold_ms_{1000};
   bool key_held_{false};
   uint16_t key_page_{0};

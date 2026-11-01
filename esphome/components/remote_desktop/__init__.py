@@ -60,7 +60,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_CONNECTIONS, default=8): cv.int_range(min=1, max=16),
             cv.Optional(CONF_CONNECTIONS_FILE): _storage_path,
             cv.Optional(CONF_KEY_BINDINGS_ID): cv.use_id(KeyBindings),
-            cv.Optional(CONF_CLOSE_ACTION, default="back"): cv.string_strict,
+            cv.Optional(CONF_CLOSE_ACTION, default="home"): cv.string_strict,
         }
     )
     .extend(VIDEO_OUTPUT_SCHEMA)
