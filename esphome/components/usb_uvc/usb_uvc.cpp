@@ -38,6 +38,14 @@ static const char *format_name(const UvcFrameInfo &f, char *buf, size_t size) {
 }
 
 void UVCClient::loop() {
+#ifdef USE_UVC_VIDEO_OUTPUT
+  if (this->output_ != nullptr) {
+    this->output_->loop();
+    if (this->holds_() && this->canvas_->is_open() && !this->canvas_->busy() &&
+        (this->output_camera_ == 0 || !this->is_streaming(this->output_camera_)))
+      this->canvas_->close();
+  }
+#endif
   for (size_t i = 0; i < this->cameras_.size(); i++) {
     Camera *cam = this->cameras_[i];
     if (cam->ready.load(std::memory_order_acquire)) {
@@ -324,10 +332,53 @@ bool UVCClient::parse_descriptors_(Camera &cam) {
   return true;
 }
 
+static uint32_t shortest_interval(const UvcFrameInfo &f) {
+  uint32_t shortest = f.interval_count == 0 ? f.min_interval : 0;
+  for (uint8_t i = 0; i < f.interval_count; i++) {
+    if (f.intervals[i] != 0 && (shortest == 0 || f.intervals[i] < shortest))
+      shortest = f.intervals[i];
+  }
+  return shortest != 0 ? shortest : f.default_interval;
+}
+
 // The configured format / size / rate where the camera reports it, else its first frame size that the panel can show
 // (MJPEG or uncompressed), else its first one.
+#ifdef USE_UVC_VIDEO_OUTPUT
+int UVCClient::best_frame_(const Camera &cam) const {
+  int pick = -1;
+  for (uint16_t i = 0; i < cam.frame_count; i++) {
+    const UvcFrameInfo &f = cam.frames[i];
+    const uint32_t interval = this->req_fps_ > 0 ? 10000000u / this->req_fps_ : shortest_interval(f);
+    const uint32_t fps = interval != 0 ? (10000000u + interval - 1) / interval : 0;
+    if (f.format == UvcFormat::MJPEG && (this->req_width_ == 0 || f.width == this->req_width_) &&
+        (this->req_height_ == 0 || f.height == this->req_height_) &&
+        this->output_->fits(f.width, f.height, fps, true, this) &&
+        (pick < 0 || static_cast<uint32_t>(f.width) * f.height >
+                         static_cast<uint32_t>(cam.frames[pick].width) * cam.frames[pick].height))
+      pick = i;
+  }
+  return pick;
+}
+#endif
+
 void UVCClient::select_default_(Camera &cam) {
   int pick = -1;
+#ifdef USE_UVC_VIDEO_OUTPUT
+  pick = this->best_frame_(cam);
+  if (pick < 0)
+    ESP_LOGW(TAG, "No MJPEG frame size of the camera fits the screen");
+#elif defined(USE_DISPLAY)
+  if (this->req_width_ == 0 && this->req_height_ == 0 && this->display_ != nullptr) {
+    const uint32_t width = static_cast<uint32_t>(this->display_->get_native_width());
+    const uint32_t height = static_cast<uint32_t>(this->display_->get_native_height());
+    for (uint16_t i = 0; i < cam.frame_count; i++) {
+      const UvcFrameInfo &f = cam.frames[i];
+      if (f.format == UvcFormat::MJPEG && f.width == width && ((f.height + 15u) & ~15u) <= height &&
+          (pick < 0 || f.height > cam.frames[pick].height))
+        pick = i;
+    }
+  }
+#endif
   for (uint16_t i = 0; i < cam.frame_count && pick < 0; i++) {
     const UvcFrameInfo &f = cam.frames[i];
     if (f.format == this->req_format_ && (this->req_width_ == 0 || f.width == this->req_width_) &&
@@ -341,8 +392,68 @@ void UVCClient::select_default_(Camera &cam) {
   if (pick < 0)
     pick = 0;
   cam.selected = static_cast<int16_t>(pick);
-  cam.interval = this->req_fps_ > 0 ? 10000000u / this->req_fps_ : cam.frames[pick].default_interval;
+  const UvcFrameInfo &f = cam.frames[pick];
+  cam.interval = this->req_fps_ > 0 ? 10000000u / this->req_fps_ : shortest_interval(f);
 }
+
+#ifdef USE_UVC_VIDEO_OUTPUT
+void UVCClient::set_video_output(display::VideoOutput *output) {
+  if (this->output_ == nullptr) {
+    this->add_frame_callback([this](uint8_t camera, const uint8_t *data, size_t len, const UvcFrameInfo &info) {
+      this->output_frame_(camera, data, len, info);
+    });
+  }
+  this->output_ = output;
+}
+
+void UVCClient::show_on_canvas(uint8_t camera, bool on) {
+  if (on) {
+    this->output_camera_ = camera;
+  } else if (camera == this->output_camera_) {
+    this->output_camera_ = 0;
+  }
+  this->enable_loop();
+}
+
+void UVCClient::output_frame_(uint8_t camera, const uint8_t *data, size_t len, const UvcFrameInfo &info) {
+  if (info.format != UvcFormat::MJPEG || camera != this->output_camera_ || this->output_camera_ == 0)
+    return;
+  if (this->holds_()) {
+    if (this->canvas_->busy())
+      return;
+    if (info.width != this->canvas_->width() || info.height != this->canvas_->height()) {
+      this->canvas_->close();
+      if (this->holds_())
+        return;
+    }
+  }
+  if (!this->holds_()) {
+    const Camera *cam = this->find_(camera);
+    const uint32_t interval = cam != nullptr ? cam->interval : 0;
+    const uint32_t fps = interval != 0 ? (10000000u + interval - 1) / interval : 0;
+    this->canvas_ = this->output_->open(info.width, info.height, fps, true, this);
+    if (this->canvas_ == nullptr) {
+      const uint32_t key = (static_cast<uint32_t>(info.width) << 16) | info.height;
+      if (this->output_refused_ != key) {
+        if (!this->output_->fits_screen(info.width, info.height, fps, true)) {
+          this->output_refused_ = key;
+          ESP_LOGW(TAG, "Camera frames of %ux%u: larger than the screen takes", static_cast<unsigned>(info.width),
+                   static_cast<unsigned>(info.height));
+        } else if (!this->output_->fits(info.width, info.height, fps, true, this)) {
+          this->output_refused_ = key;
+          ESP_LOGW(TAG, "Camera frames of %ux%u: larger than half the screen (another canvas shows)",
+                   static_cast<unsigned>(info.width), static_cast<unsigned>(info.height));
+        }
+      }
+      return;
+    }
+    this->output_refused_ = 0;
+  }
+  const uint32_t token = this->hold_frame(camera);
+  if (!this->canvas_->submit(data, len, [this, token]() { this->release_frame(token); }))
+    this->release_frame(token);
+}
+#endif
 
 // -- Probe / commit ------------------------------------------------------------------------
 
