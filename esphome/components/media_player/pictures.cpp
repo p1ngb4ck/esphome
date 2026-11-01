@@ -5,6 +5,7 @@
 #include "esphome/core/log.h"
 
 #include <algorithm>
+#include <iterator>
 #include <cstring>
 #include <new>
 #include <strings.h>
@@ -124,7 +125,7 @@ void MediaPictures::listed_() {
   this->listing_ = false;
   if (this->found_ != nullptr) {
     std::sort(this->found_->begin(), this->found_->end());
-    this->names_.swap(*this->found_);
+    this->names_.assign(std::make_move_iterator(this->found_->begin()), std::make_move_iterator(this->found_->end()));
     this->found_->~StringList();
     RAMAllocator<StringList>(RAMAllocator<StringList>::ALLOC_EXTERNAL).deallocate(this->found_, 1);
     this->found_ = nullptr;
