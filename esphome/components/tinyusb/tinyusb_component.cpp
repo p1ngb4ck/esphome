@@ -29,7 +29,7 @@ void TinyUSB::setup() {
   // Setters write into tusb_cfg_ before setup(), so anything they set has to survive the reset.
   const uint8_t *full_speed_config = this->tusb_cfg_.descriptor.full_speed_config;
   this->tusb_cfg_ = TINYUSB_DEFAULT_CONFIG();
-  this->tusb_cfg_.port = TINYUSB_PORT_FULL_SPEED_0;
+  this->tusb_cfg_.port = this->port_;
   this->tusb_cfg_.phy.skip_setup = false;
   // Without VBUS monitoring the OTG core only sees a cable pull as the bus going idle
   // (a suspend), so TinyUSB never reports a detach and stays "mounted".
@@ -63,7 +63,7 @@ void TinyUSB::setup() {
   this->tusb_cfg_.event_arg = this;
   esp_err_t result = tinyusb_driver_install(&this->tusb_cfg_);
   if (result != ESP_OK) {
-    ESP_LOGE(TAG, "tinyusb_driver_install failed: %s", esp_err_to_name(result));
+    ESP_LOGE(TAG, "tinyusb_driver_install failed: %s (0x%X)", esp_err_to_name(result), result);
     this->mark_failed();
     return;
   }
@@ -88,9 +88,11 @@ void TinyUSB::dump_config() {
                 "  Vendor ID: 0x%04X\n"
                 "  Manufacturer: '%s'\n"
                 "  Product: '%s'\n"
-                "  Serial: '%s'",
+                "  Serial: '%s'\n"
+                "  Port: %s",
                 this->usb_descriptor_.idProduct, this->usb_descriptor_.idVendor, this->string_descriptor_[MANUFACTURER],
-                this->string_descriptor_[PRODUCT], this->string_descriptor_[SERIAL_NUMBER]);
+                this->string_descriptor_[PRODUCT], this->string_descriptor_[SERIAL_NUMBER],
+                this->port_ == TINYUSB_PORT_FULL_SPEED_0 ? "full-speed" : "high-speed");
   if (this->vbus_monitor_pin_ >= 0) {
     ESP_LOGCONFIG(TAG, "  VBUS Monitor Pin: GPIO%d", this->vbus_monitor_pin_);
   }
