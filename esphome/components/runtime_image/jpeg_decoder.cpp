@@ -20,16 +20,6 @@ ESPHOME_LOG_TAG(TAG, "image_decoder.jpeg");
 
 namespace esphome::runtime_image {
 
-int HOT JpegDecoder::decode(uint8_t *buffer, size_t size) {
-  // JPEG decoder requires complete data
-  // If we know the expected size, wait for it
-  if (this->expected_size_ > 0 && size < this->expected_size_) {
-    ESP_LOGV(TAG, "Download not complete. Size: %zu/%zu", size, this->expected_size_);
-    return 0;
-  }
-  return this->decode_backend_<JPEG_BACKEND>(buffer, size);
-}
-
 #if defined(USE_HWJPG) || defined(USE_NEWJPEG)
 void JpegDecoder::draw_rgb888_buffer_(const uint8_t *rgb, uint32_t width, uint32_t height) {
   size_t position = 0;
@@ -423,6 +413,16 @@ int HOT JpegDecoder::decode_step() {
 }
 
 #endif
+
+int HOT JpegDecoder::decode(uint8_t *buffer, size_t size) {
+  // JPEG decoder requires complete data
+  // If we know the expected size, wait for it
+  if (this->expected_size_ > 0 && size < this->expected_size_) {
+    ESP_LOGV(TAG, "Download not complete. Size: %zu/%zu", size, this->expected_size_);
+    return 0;
+  }
+  return this->decode_backend_<JPEG_BACKEND>(buffer, size);
+}
 
 }  // namespace esphome::runtime_image
 
