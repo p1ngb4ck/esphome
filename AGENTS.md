@@ -412,3 +412,52 @@ Function and method comment blocks may include more detail as required to make
 calling contracts clear and document parameter usage, but should still be kept concise.
 
 Avoid redundancy and repetition; comments should never simply restate what the code already says.
+
+## 11. This repository: an ESPHome topic repository
+
+Everything above is ESPHome's own guide and applies unchanged. This section adds what is specific to the topic
+repositories of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome).
+
+### Layout
+- The tree is ESPHome `dev` (the base commit is named in `README.md`) plus the components and changes of one topic.
+- One branch per change, named `pr/<change>`. A branch contains the branches it needs as merges, also branches of
+  other topic repositories (the README's branch table names them). `main` merges every branch of the topic.
+- `p1ngb4ck/esphome@dev` merges the `main` of every topic repository; a change made here reaches `dev` through
+  `main`.
+- Components the topic adds carry their own `AGENTS.md` (in the component's folder) with the design, the threading
+  model and the memory rules of that component. Read it before changing the component.
+
+### Documentation belongs to the change
+- `README.md`: what the topic is, the first steps (the smallest working configuration), the branch table.
+- `CONFIGURATION.md`: every option of every component the topic adds or changes, with defaults and an example per
+  variant. A new or changed option is documented there in the same change.
+- The component's `AGENTS.md`: updated when the design, the threading or the memory use changes.
+
+### Target constraints (microcontrollers)
+- Internal RAM is scarce (an ESP32-P4 has 512 KB SRAM shared by everything, PSRAM up to 32 MB). Large buffers,
+  lists, strings and long-lived objects go to PSRAM where the chip has it (`RAMAllocator`, `ExternalRAMAllocator`);
+  buffers are allocated for the use and given back afterwards, not kept "for later".
+- No polling. Work is driven by events, callbacks and task notifications; a component with nothing to do disables
+  its loop (`disable_loop()` / `enable_loop()`).
+- The main loop is shared by every component: nothing blocks it (no bulk I/O, no network waits). Long work runs on
+  a task or in slices; results come back to the main loop (`defer()`, the storage worker's completions).
+- No driver, storage or network calls inside an LVGL event handler or another component's callback frame: defer
+  them to the next loop pass (`defer()` in C++, `delay: 0ms` first in a YAML script).
+- Library buffers are not cut below the library's tested defaults to save memory.
+- No log output in hot paths. INFO for operational events, DEBUG for setup detail, ERROR for errors.
+- Code must build on the ESP-IDF versions ESPHome supports (5.5 and 6.1 at the time of writing).
+- Components are general purpose: no board, device or user specific values in code, defaults or examples beyond
+  well-known boards named as such.
+
+### This topic: Bluetooth
+- Components with their own `AGENTS.md`: `bt_classic`, `bt_pairing`, `bt_persistence`, `bt_hid`, `ble_client_hid`,
+  `ble_broadcast`, `bt_offload`, `a2dp_source`. Changes to `esp32_ble`, `esp32_ble_tracker`, `ble_client`,
+  `esp32_hosted` and `ble_nus` live in their upstream folders.
+- One Classic GAP callback exists (`bt_classic`); one pairing database exists (`bt_pairing`). New drivers register
+  with them instead of talking to Bluedroid's GAP directly.
+- Bluedroid's start order (after WiFi's start-up, after a USB dongle is ready) and its task layout are deliberate;
+  do not move Bluedroid to another core or start it earlier.
+- The branch `pr/bt-host` reworks these components into one `bt_host`; changes to the current components should be
+  checked against it.
+- Controller hardware differs per chip: Classic on chip (ESP32, ESP32-S31), BLE through the ESP32-C6 on the ESP32-P4,
+  USB dongles (`usb_bluetooth`, esphome-usb-drivers) everywhere with USB host. Never assume one controller.
