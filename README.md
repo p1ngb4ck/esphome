@@ -1,10 +1,52 @@
 # esphome-relay-link
 
-ESPHome `dev` plus the relay link of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome) `testing_dev`. One branch per change; `main` contains every branch. Base: ESPHome `dev` at `1f70f86b47`. The code is taken over unchanged from `testing_dev`; `main` equals `testing_dev` for relay_link and fixed_containers. Branches of other topic repos it builds on are merged into the branch that needs them.
+`relay_link`: the device's link to a relay integration in Home Assistant (svp_relay), for what an MCU cannot do on
+its own - keyboard layouts, languages, certificates and pictures served by Home Assistant, cover art, screen
+captures sent to Home Assistant, streams rendered on the server. And `fixed_containers`: fixed-size strings and
+lists for components that must not grow memory at runtime.
+
+`relay_link` has no YAML block of its own: a component that uses a relay feature loads it (`keyboard_layouts:
+relay: true`, `runtime_language: relay: true`, `cert_store: relay: true`, `screen_capture: relay: true`, a media
+player's `extended_api_services` or `queue: relay: true`). URL, token and stream port are pushed by the relay
+integration through the API action `relay_link_set` and kept in the preferences.
+
+## Getting started
+
+```yaml
+external_components:
+  - source: github://p1ngb4ck/esphome-relay-link@main
+    components: [relay_link, fixed_containers]
+  - source: github://p1ngb4ck/esphome-keyboard-layouts@main
+    components: [keyboard_layouts]
+
+api:
+  custom_services: true
+
+keyboard_layouts:
+  relay: true
+  keyboards:
+    - keyboard
+```
+
+The relay integration then calls `relay_link_set` on the device once; from then on the device reaches it on its own.
+
+## More
+
+**[CONFIGURATION.md](CONFIGURATION.md)**: what the relay link serves, the plain HTTP sources (`http_sources`) the
+consumers take as an alternative, and `fixed_containers` for component authors.
 
 ## Branches
 
+One branch per change; `main` contains every branch. Base: ESPHome `dev` at `1f70f86b47`.
+
 | Branch | Change | Needs | Chips |
 |---|---|---|---|
-| `pr/fixed-containers` | fixed_containers: FixedString, TextView, FixedList (fixed-size texts and lists, no heap growth) | - | all |
-| `pr/relay-link` | relay_link: the panel's link to the svp_relay Home Assistant integration. No YAML block of its own: a consumer that enables a relay feature loads it (keyboard_layouts `relay`, runtime_language `relay`, screen_capture `relay`, a media player's `extended_api_services` cover art). URL, token and stream port are pushed by the relay through the `relay_link_set` API action (`api: custom_services: true`) and kept in preferences; `http_at()` serves the consumers' plain HTTP sources on the same task | `pr/fixed-containers` | all |
+| `pr/fixed-containers` | `fixed_containers`: `FixedString`, `TextView`, `FixedList` (fixed-size texts and lists, no heap growth) | - | all |
+| `pr/relay-link` | `relay_link`: the link to the relay integration (URL, token and stream port through `relay_link_set`, kept in the preferences), one task for the consumers' requests, `http_at()` for their plain HTTP sources | `pr/fixed-containers` | all |
+
+All topics together: `github://p1ngb4ck/esphome@dev`. `external_components` replaces components only; the ESPHome
+core of the build host stays as installed.
+
+## Thanks
+
+Everyone this project builds on: [ATTRIBUTIONS.md](https://github.com/p1ngb4ck/esphome/blob/dev/ATTRIBUTIONS.md).
