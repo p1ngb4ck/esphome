@@ -192,6 +192,8 @@ bool RemoteDesktop::connect(Protocol protocol, const std::string &host, uint16_t
   this->active_saved_ = -1;
   this->stop_.store(false);
   xQueueReset(this->inputs_q_);
+  this->failed_.store(false);
+  this->session_++;
   this->state_.store(STATE_STARTING);
   if (!this->task_.create(&RemoteDesktop::task_entry_, "remote_desktop", 8192, this, 4, true, 0)) {
     ESP_LOGE(TAG, "No session task");
@@ -199,6 +201,7 @@ bool RemoteDesktop::connect(Protocol protocol, const std::string &host, uint16_t
     return false;
   }
   this->enable_loop();
+  this->changed_();
   return true;
 }
 
@@ -286,6 +289,7 @@ void RemoteDesktop::loop() {
 void RemoteDesktop::task_entry_(void *param) {
   auto *self = static_cast<RemoteDesktop *>(param);
   self->session_();
+  self->failed_.store(self->state_.load() == STATE_STARTING);
   self->state_.store(STATE_ENDED);
   self->enable_loop_soon_any_context();
   vTaskSuspend(nullptr);
