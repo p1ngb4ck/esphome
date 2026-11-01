@@ -7,6 +7,7 @@
 #include "esphome/components/storage/transfer_buffer.h"
 #endif
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <strings.h>
@@ -65,6 +66,7 @@ void RuntimeLanguage::setup() {
     this->mark_failed();
     return;
   }
+  strncpy(this->names_->dir, this->dir_, PATH_MAX_LEN - 1);
   this->pref_ = global_preferences->make_preference<SavedPath>(fnv1_hash("i18n_language"));
   SavedPath saved{};
   if (this->pref_.load(&saved)) {
@@ -98,7 +100,7 @@ void RuntimeLanguage::retry_saved_() {
   if (strchr(this->names_->saved, '/') == nullptr) {
     char name[PATH_MAX_LEN];
     strncpy(name, this->names_->saved, PATH_MAX_LEN);
-    this->load_name(name);
+    this->load_name_now_(name);
     return;
   }
   const char *rel = nullptr;
@@ -107,7 +109,7 @@ void RuntimeLanguage::retry_saved_() {
     return;
   char path[PATH_MAX_LEN];
   strncpy(path, this->names_->saved, PATH_MAX_LEN);
-  this->load(path);
+  this->load_now_(path);
 }
 
 int RuntimeLanguage::find_(const char *key) const {
@@ -167,7 +169,7 @@ void RuntimeLanguage::fail_(const char *why) {
   this->change_callbacks_.call();
 }
 
-bool RuntimeLanguage::load(const char *path) {
+bool RuntimeLanguage::load_now_(const char *path) {
 #ifdef USE_STORAGE_WORKER
   if (this->names_ == nullptr || this->keys_ == nullptr)
     return false;
@@ -251,6 +253,7 @@ void RuntimeLanguage::read_done_(StorageError err) {
     if (!this->parse_())
       return;
     strncpy(this->names_->path, this->names_->loading, PATH_MAX_LEN);
+    this->name_from_path_();
     this->save_path_();
     this->busy_ = BUSY_NONE;
     ESP_LOGI(TAG, "Language file %s", this->names_->path);
@@ -390,7 +393,7 @@ bool RuntimeLanguage::parse_() {
   return true;
 }
 
-void RuntimeLanguage::unload() {
+void RuntimeLanguage::unload_now_() {
   if (this->names_ == nullptr || this->busy_ == BUSY_LOAD)
     return;
   if (this->next_set_)
@@ -398,6 +401,7 @@ void RuntimeLanguage::unload() {
   this->next_ = Language{};
   this->next_set_ = true;
   this->names_->path[0] = '\0';
+  this->names_->name[0] = '\0';
   this->names_->error[0] = '\0';
   this->save_path_();
   this->apply();
@@ -457,7 +461,7 @@ static size_t escaped(char *out, const char *text) {
   return n;
 }
 
-bool RuntimeLanguage::write_template(const char *path) {
+bool RuntimeLanguage::write_template_now_(const char *path) {
 #if defined(USE_STORAGE_WORKER) && defined(USE_STORAGE_TRANSFER_BUFFER)
   if (this->names_ == nullptr || this->keys_ == nullptr || this->is_busy())
     return false;
@@ -618,7 +622,7 @@ void RuntimeLanguage::list_add_(const char *name, const char *description) {
   entry.description[sizeof(entry.description) - 1] = '\0';
 }
 
-void RuntimeLanguage::list_fetch() {
+void RuntimeLanguage::list_now_() {
   if (this->list_busy_)
     return;
   if (this->list_ == nullptr)
@@ -645,8 +649,8 @@ void RuntimeLanguage::list_fetch() {
 
 void RuntimeLanguage::list_local_() {
   const char *rel = nullptr;
-  storage::PathStorage *ps = storage::global_storage_registry != nullptr && this->dir_[0] != '\0'
-                                 ? storage::global_storage_registry->resolve_path(this->dir_, &rel)
+  storage::PathStorage *ps = storage::global_storage_registry != nullptr && this->names_->dir[0] != '\0'
+                                 ? storage::global_storage_registry->resolve_path(this->names_->dir, &rel)
                                  : nullptr;
   if (ps != nullptr &&
       (storage::global_storage_worker == nullptr || !storage::global_storage_worker->has_active_task_io(ps))) {
@@ -675,20 +679,21 @@ void RuntimeLanguage::list_done_() {
   this->change_callbacks_.call();
 }
 
-bool RuntimeLanguage::load_name(const char *name) {
+bool RuntimeLanguage::load_name_now_(const char *name) {
   if (this->names_ == nullptr || this->keys_ == nullptr || name == nullptr || name[0] == '\0' ||
       strlen(name) >= sizeof(Entry::name))
     return false;
-  if (this->dir_[0] != '\0') {
+  if (this->names_->dir[0] != '\0') {
     char path[PATH_MAX_LEN];
-    if (snprintf(path, sizeof(path), "%s/%s%s", this->dir_, name, LANGUAGE_SUFFIX) < static_cast<int>(sizeof(path))) {
+    if (snprintf(path, sizeof(path), "%s/%s%s", this->names_->dir, name, LANGUAGE_SUFFIX) <
+        static_cast<int>(sizeof(path))) {
       const char *rel = nullptr;
       storage::PathStorage *ps = storage::global_storage_registry != nullptr
                                      ? storage::global_storage_registry->resolve_path(path, &rel)
                                      : nullptr;
       storage::FileStat st{};
       if (ps != nullptr && ps->stat(rel, &st) == StorageError::STORAGE_ERROR_OK && !st.is_dir)
-        return this->load(path);
+        return this->load_now_(path);
     }
   }
 #ifdef USE_RUNTIME_LANGUAGE_LINK
@@ -734,6 +739,7 @@ void RuntimeLanguage::remote_load_done_() {
   if (!this->parse_())
     return;
   strncpy(this->names_->path, this->names_->loading, PATH_MAX_LEN);
+  this->name_from_path_();
   this->save_path_();
   this->busy_ = BUSY_NONE;
   ESP_LOGI(TAG, "Language %s", this->names_->path);
@@ -780,6 +786,47 @@ void RuntimeLanguage::get_job_(void *ctx, uint16_t index) {
   self->enable_loop_soon_any_context();
 }
 #endif
+
+void RuntimeLanguage::name_from_path_() {
+  const char *base = strrchr(this->names_->path, '/');
+  base = base != nullptr ? base + 1 : this->names_->path;
+  size_t len = strlen(base);
+  const size_t suffix = strlen(LANGUAGE_SUFFIX);
+  if (len > suffix && strcasecmp(base + len - suffix, LANGUAGE_SUFFIX) == 0)
+    len -= suffix;
+  len = std::min(len, sizeof(this->names_->name) - 1);
+  memcpy(this->names_->name, base, len);
+  this->names_->name[len] = '\0';
+}
+
+void RuntimeLanguage::set_directory(const std::string &dir) {
+  if (this->names_ == nullptr || dir == this->names_->dir)
+    return;
+  strncpy(this->names_->dir, dir.c_str(), PATH_MAX_LEN - 1);
+  this->names_->dir[PATH_MAX_LEN - 1] = '\0';
+  this->listed_ = false;
+  this->change_callbacks_.call();
+}
+
+void RuntimeLanguage::load(const std::string &path) {
+  this->defer([this, path]() { this->load_now_(path.c_str()); });
+}
+
+void RuntimeLanguage::load_name(const std::string &name) {
+  this->defer([this, name]() { this->load_name_now_(name.c_str()); });
+}
+
+void RuntimeLanguage::list_fetch() {
+  this->defer([this]() { this->list_now_(); });
+}
+
+void RuntimeLanguage::unload() {
+  this->defer([this]() { this->unload_now_(); });
+}
+
+void RuntimeLanguage::write_template(const std::string &path) {
+  this->defer([this, path]() { this->write_template_now_(path.c_str()); });
+}
 
 }
 

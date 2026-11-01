@@ -41,6 +41,7 @@ class RuntimeLanguage : public Component {
   void set_lvgl(lvgl::LvglComponent *lvgl) { this->lvgl_ = lvgl; }
 #endif
   void set_directory(const char *dir) { this->dir_ = dir; }
+  void set_directory(const std::string &dir);
 #ifdef USE_RUNTIME_LANGUAGE_LINK
   void set_relay(relay_link::RelayLink *relay) {
     this->link_ = relay;
@@ -58,9 +59,11 @@ class RuntimeLanguage : public Component {
   const char *text(uint16_t key) const;
   const char *tr(const char *english) const;
 
-  bool load(const char *path);
-  bool load_name(const char *name);
+  void load(const std::string &path);
+  void load_name(const std::string &name);
   void list_fetch();
+  const char *get_directory() const { return this->names_ != nullptr ? this->names_->dir : this->dir_; }
+  const char *get_name() const { return this->names_ != nullptr ? this->names_->name : ""; }
   bool listed() const { return this->listed_; }
   size_t language_count() const { return this->list_count_; }
   const char *language_name(size_t index) const {
@@ -70,7 +73,7 @@ class RuntimeLanguage : public Component {
     return index < this->list_count_ && this->list_ != nullptr ? this->list_[index].description : "";
   }
   void unload();
-  bool write_template(const char *path);
+  void write_template(const std::string &path);
   void apply();
 
   const char *get_path() const { return this->names_ != nullptr ? this->names_->path : ""; }
@@ -118,7 +121,15 @@ class RuntimeLanguage : public Component {
   size_t list_count_{0};
   bool listed_{false};
   bool list_busy_{false};
+  bool load_now_(const char *path);
+  void name_from_path_();
+  bool load_name_now_(const char *name);
+  void list_now_();
+  void unload_now_();
+  bool write_template_now_(const char *path);
   struct Names {
+    char dir[PATH_MAX_LEN];
+    char name[32];
     char path[PATH_MAX_LEN];
     char loading[PATH_MAX_LEN];
     char saved[PATH_MAX_LEN];
@@ -187,9 +198,9 @@ template<typename... Ts> class LoadAction : public Action<Ts...>, public Parente
     if (value.empty()) {
       this->parent_->unload();
     } else if (this->by_name_) {
-      this->parent_->load_name(value.c_str());
+      this->parent_->load_name(value);
     } else {
-      this->parent_->load(value.c_str());
+      this->parent_->load(value);
     }
   }
 
@@ -210,7 +221,7 @@ template<typename... Ts> class UnloadAction : public Action<Ts...>, public Paren
 template<typename... Ts> class WriteTemplateAction : public Action<Ts...>, public Parented<RuntimeLanguage> {
  public:
   TEMPLATABLE_VALUE(std::string, path)
-  void play(const Ts &...x) override { this->parent_->write_template(this->path_.value(x...).c_str()); }
+  void play(const Ts &...x) override { this->parent_->write_template(this->path_.value(x...)); }
 };
 
 }
