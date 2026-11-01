@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -189,6 +190,12 @@ class Messenger : public Component
   const uint8_t *photo_data() const { return this->photo_; }
   size_t photo_size() const { return this->photo_len_; }
   void photo_release();
+  bool decode_into(const uint8_t *data, size_t len, uint8_t *target, size_t capacity, int32_t width, int32_t height,
+                   uint32_t stride, std::function<void(bool)> &&done);
+  bool decode_photo(int32_t width, int32_t height, std::function<void(bool)> &&done);
+  uint8_t *photo_pixels() const { return this->photo_px_; }
+  size_t photo_pixels_size() const { return this->photo_px_size_; }
+  void photo_pixels_release();
   bool set_photo_jpeg(const uint8_t *data, size_t len);
   bool download_file(Channel channel, const std::string &file_ref, const std::string &path);
   bool voice_start(Channel channel, int64_t chat_id);
@@ -221,6 +228,9 @@ class Messenger : public Component
   }
 
  protected:
+  bool decode_busy_{false};
+  uint8_t *photo_px_{nullptr};
+  size_t photo_px_size_{0};
   static constexpr size_t INBOUND_SLOTS = 8;
   static constexpr size_t HISTORY_SLOTS = 16;
   static constexpr size_t MAX_ALLOWED = 8;

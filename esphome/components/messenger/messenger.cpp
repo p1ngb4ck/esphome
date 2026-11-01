@@ -1,4 +1,5 @@
 #include "messenger.h"
+#include "esphome/components/runtime_image/runtime_image.h"
 
 #ifdef USE_ESP32
 
@@ -28,6 +29,68 @@
 namespace esphome::messenger {
 
 static const char *const TAG = "messenger";
+
+bool Messenger::decode_into(const uint8_t *data, size_t len, uint8_t *target, size_t capacity, int32_t width,
+                            int32_t height, uint32_t stride, std::function<void(bool)> &&done) {
+  if (data == nullptr || len == 0 || target == nullptr || width <= 0 || height <= 0 ||
+      stride < static_cast<uint32_t>(width) * 2 || capacity < static_cast<size_t>(stride) * height || this->decode_busy_)
+    return false;
+  this->decode_busy_ = true;
+  this->defer([this, data, len, target, width, height, stride, done = std::move(done)]() {
+    bool ok = false;
+    RAMAllocator<runtime_image::RuntimeImage> alloc(RAMAllocator<runtime_image::RuntimeImage>::ALLOC_EXTERNAL);
+    void *mem = alloc.allocate(1);
+    if (mem != nullptr) {
+      auto *image = new (mem) runtime_image::RuntimeImage(runtime_image::JPEG, image::IMAGE_TYPE_RGB565,
+                                                          image::TRANSPARENCY_OPAQUE, nullptr, false, width, height);
+      if (image->begin_decode(len, runtime_image::JPEG)) {
+        size_t offset = 0;
+        int used = 0;
+        while (offset < len && (used = image->feed_data(const_cast<uint8_t *>(data) + offset, len - offset)) > 0)
+          offset += static_cast<size_t>(used);
+        ok = used >= 0 && image->end_decode();
+        const uint8_t *pixels = image->get_data_start();
+        ok = ok && pixels != nullptr && image->get_width() == width && image->get_height() == height;
+        if (ok) {
+          const size_t row = static_cast<size_t>(width) * 2;
+          for (int32_t y = 0; y < height; y++)
+            std::memcpy(target + static_cast<size_t>(y) * stride, pixels + static_cast<size_t>(y) * image->get_width_stride(),
+                        row);
+        }
+      }
+      image->release();
+      image->~RuntimeImage();
+      alloc.deallocate(image, 1);
+    }
+    this->decode_busy_ = false;
+    done(ok);
+  });
+  return true;
+}
+
+bool Messenger::decode_photo(int32_t width, int32_t height, std::function<void(bool)> &&done) {
+  if (this->photo_ == nullptr || width <= 0 || height <= 0 || this->decode_busy_)
+    return false;
+  this->photo_pixels_release();
+  const uint32_t stride = static_cast<uint32_t>(width) * 2;
+  const size_t size = static_cast<size_t>(stride) * height;
+  this->photo_px_ = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (this->photo_px_ == nullptr)
+    return false;
+  this->photo_px_size_ = size;
+  if (!this->decode_into(this->photo_, this->photo_len_, this->photo_px_, size, width, height, stride,
+                         std::move(done))) {
+    this->photo_pixels_release();
+    return false;
+  }
+  return true;
+}
+
+void Messenger::photo_pixels_release() {
+  heap_caps_free(this->photo_px_);
+  this->photo_px_ = nullptr;
+  this->photo_px_size_ = 0;
+}
 static const char *const TELEGRAM_HOST = "https://api.telegram.org";
 static const char *const GRAPH_HOST = "https://graph.facebook.com/";
 static const char *const BOUNDARY = "p4panelMessengerBoundary7d3a";
