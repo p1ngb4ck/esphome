@@ -11,6 +11,7 @@ from ..defines import (
     LV_LONG_MODES,
 )
 from ..lv_validation import lv_bool, lv_text
+from ..lvcode import lv, lv_add
 from ..schemas import TEXT_SCHEMA
 from ..types import LvText
 from . import Widget, WidgetType
@@ -31,8 +32,26 @@ class LabelType(WidgetType):
 
     async def to_code(self, w: Widget, config):
         """For a text object, create and set text"""
+        await self._text_to_code(w, config, True)
+
+    async def update_to_code(self, w: Widget, config):
+        await self._text_to_code(w, config, False)
+
+    async def _text_to_code(self, w: Widget, config, create: bool):
         if (value := config.get(CONF_TEXT)) is not None:
-            await w.set_property(CONF_TEXT, await lv_text.process(value))
+            from esphome.components import runtime_language
+
+            key = runtime_language.register_text(value) if isinstance(value, str) else None
+            if key is None:
+                await w.set_property(CONF_TEXT, await lv_text.process(value))
+            elif create and str(config.get(CONF_LONG_MODE, "")).upper().endswith("DOT"):
+                lv.label_set_text(w.obj, runtime_language.key_expression(key))
+                lv_add(runtime_language.bind_expression(w.obj, key, True))
+            elif create:
+                lv.label_set_text_static(w.obj, runtime_language.key_expression(key))
+                lv_add(runtime_language.bind_expression(w.obj, key))
+            else:
+                lv.label_set_text(w.obj, runtime_language.text_expression(key))
         await w.set_property(CONF_LONG_MODE, config)
         await w.set_property(CONF_RECOLOR, config, processor=lv_bool)
 

@@ -18,6 +18,9 @@
 
 #include <cstdlib>
 
+#ifdef USE_RUNTIME_LANGUAGE
+#include "esphome/components/runtime_language/runtime_language.h"
+#endif
 #ifdef USE_LIGHT
 #include "esphome/components/light/light_json_schema.h"
 #endif
@@ -658,7 +661,12 @@ static void set_json_id(JsonObject root, EntityBase *obj, ProgmemStr prefix, Jso
     root[ESPHOME_F("name")] = name;  // in id_buf on the stack, so copied
 #else
     const StringRef &ram_name = obj->get_name_progmem().ram_ref();
+#ifdef USE_RUNTIME_LANGUAGE
+    const char *shown = runtime_language::tr(ram_name.c_str());
+    root[ESPHOME_F("name")] = linked(shown, strlen(shown));
+#else
     root[ESPHOME_F("name")] = linked(ram_name.c_str(), ram_name.size());
+#endif
 #endif
 #ifdef USE_DEVICES
     if (device_name) {
