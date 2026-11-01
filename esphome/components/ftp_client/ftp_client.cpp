@@ -317,7 +317,7 @@ bool FtpStream::start_tls(mbedtls_ssl_config *conf, const char *hostname) {
   this->tls_ = true;
   return true;
 }
-#endif  // USE_CERT_STORE
+#endif
 
 // Wraps a freshly connected socket in a stream (or nullptr if the connect failed).
 static std::unique_ptr<FtpStream> make_ftp_stream(std::unique_ptr<socket::Socket> sock) {
@@ -339,7 +339,7 @@ bool FTPClient::setup_tls_() {
     return false;
   }
   mbedtls_ssl_config_init(&this->conf_);
-  mbedtls_x509_crt_init(&this->cacert_);
+  this->tls_material_.init();
   mbedtls_ctr_drbg_init(&this->drbg_);
   mbedtls_entropy_init(&this->entropy_);
 
@@ -359,10 +359,10 @@ bool FTPClient::setup_tls_() {
   // ca_entry means "use the built-in bundle". apply_ca_async is async; setup_tls_() is retry-driven
   // from ensure_connected_, but for a storage-sourced CA the load runs to completion here (the
   // stream callbacks are pumped by loop()), so we wait for the one-shot result before proceeding.
-  const char *entry = this->ca_entry_ != nullptr ? this->ca_entry_ : "";
   volatile bool ca_done = false;
   volatile bool ca_ok = false;
-  cert_store::global_cert_store->apply_ca_async(&this->conf_, &this->cacert_, esphome::StringRef(entry),
+  cert_store::global_cert_store->apply_async(&this->conf_, &this->tls_material_, this->tls_refs_,
+                                            mbedtls_ctr_drbg_random, &this->drbg_,
                                                 [&ca_done, &ca_ok](storage::StorageError e) {
                                                   ca_ok = (e == storage::StorageError::STORAGE_ERROR_OK);
                                                   ca_done = true;
@@ -383,7 +383,7 @@ bool FTPClient::setup_tls_() {
   this->tls_ready_ = true;
   return true;
 }
-#endif  // USE_CERT_STORE
+#endif
 
 storage::StorageError FTPClient::do_connect_() {
   if (this->connected_)
