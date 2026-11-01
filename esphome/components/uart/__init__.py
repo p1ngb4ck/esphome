@@ -247,6 +247,7 @@ AFTER_DEFAULTS = {CONF_BYTES: 150, CONF_TIMEOUT: "100ms"}
 CONF_DEBUG_PREFIX = "debug_prefix"
 
 # By default, log in hex format when no specific sequence is provided.
+CONF_DEBUG_ADD_UART_SETTINGS = "debug_add_uart_settings"
 DEFAULT_DEBUG_OUTPUT = "UARTDebug::log_hex(direction, bytes, ':', debug_prefix);"
 DEFAULT_SEQUENCE = [{CONF_LAMBDA: make_data_base(DEFAULT_DEBUG_OUTPUT)}]
 
@@ -288,6 +289,7 @@ DEBUG_SCHEMA = cv.Schema(
         cv.Optional(CONF_DUMMY_RECEIVER, default=False): cv.boolean,
         cv.GenerateID(CONF_DUMMY_RECEIVER_ID): cv.declare_id(UARTDummyReceiver),
         cv.Optional(CONF_DEBUG_PREFIX, default=""): cv.string,
+        cv.Optional(CONF_DEBUG_ADD_UART_SETTINGS, default=False): cv.boolean,
     }
 )
 
@@ -360,6 +362,9 @@ async def debug_to_code(config, parent):
         await cg.register_component(dummy, {})
     if debug_prefix := config[CONF_DEBUG_PREFIX]:
         cg.add(trigger.set_debug_prefix(debug_prefix))
+    if config[CONF_DEBUG_ADD_UART_SETTINGS]:
+        cg.add(trigger.set_debug_add_settings(True))
+        cg.add_define("UART_DEBUGGER_ADD_SETTINGS")
     cg.add_define("USE_UART_DEBUGGER")
 
 
