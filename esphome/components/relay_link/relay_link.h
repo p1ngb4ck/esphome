@@ -68,6 +68,7 @@ class RelayLink : public Component
 #endif
 
   const char *get_url() const { return this->url_; }
+  const char *get_token() const { return this->token_; }
   uint16_t get_stream_port() const { return this->stream_port_; }
   bool is_ready() const { return this->queue_ != nullptr; }
 
