@@ -36,6 +36,6 @@ runtime_language:
 |---|---|
 | `FixedString<N>` | A string with a fixed capacity, no heap allocation; converts to and compares with `std::string` / `const char *`. |
 | `TextView` | A non-owning view on text. |
-| `FixedList<T, N>` | A list with a fixed capacity. |
+| `FixedList<T>` | A list in PSRAM whose capacity is set once (`reserve()`), then never grows. |
 
 Use them where a component keeps texts or lists for its whole life and must not grow memory at runtime.
