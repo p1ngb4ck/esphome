@@ -87,7 +87,7 @@ class CanvasType(WidgetType):
                     cv.Required(CONF_HEIGHT): size,
                     cv.Optional(CONF_TRANSPARENT, default=False): cv.boolean,
                     cv.Exclusive(CONF_DMA_BUFFER, "buffer"): cv.boolean,
-                    # No buffer of its own: another component (e.g. simple_video_player) sets one.
+                    # No buffer of its own: another component (e.g. a video output) sets one.
                     cv.Exclusive(CONF_EXTERNAL_BUFFER, "buffer"): cv.boolean,
                     cv.GenerateID(CONF_DRAW_BUF_ID): cv.declare_id(lv_draw_buf_t),
                 }
