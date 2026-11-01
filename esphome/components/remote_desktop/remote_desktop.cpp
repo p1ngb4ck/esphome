@@ -83,6 +83,9 @@ void RemoteDesktop::setup() {
     this->touchscreen_->register_listener(&this->touch_listener_);
 #endif
   this->saved_setup_();
+#ifdef USE_REMOTE_DESKTOP_KEY_BINDINGS
+  this->set_close_action(this->close_name_);
+#endif
   this->disable_loop();
 }
 
@@ -209,10 +212,9 @@ void RemoteDesktop::disconnect() {
 
 bool RemoteDesktop::close_key_(hid::HIDInput *input, uint16_t page, uint16_t usage, bool pressed) {
 #ifdef USE_REMOTE_DESKTOP_KEY_BINDINGS
-  if (pressed && !this->key_held_ && this->bindings_ != nullptr) {
+  if (pressed && !this->key_held_ && this->bindings_ != nullptr && this->close_action_ >= 0) {
     const int action = this->bindings_->resolve(page, usage, lvgl::KeyBindings::modifiers_of(input->get_modifiers()));
-    if ((action == lvgl::KeyBindings::ACT_BACK && (this->close_keys_ & 1)) ||
-        (action == lvgl::KeyBindings::ACT_HOME && (this->close_keys_ & 2))) {
+    if (action == this->close_action_) {
       this->key_held_ = true;
       this->key_page_ = page;
       this->key_usage_ = usage;
