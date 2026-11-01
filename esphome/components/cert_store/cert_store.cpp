@@ -1,164 +1,205 @@
 #include "cert_store.h"
+
 #ifdef USE_ESP_IDF
 
-#include <cstring>
-
-#include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
 #if defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE)
 #include "esp_crt_bundle.h"
 #endif
 
-namespace esphome {
-namespace cert_store {
+#include <cstdio>
+#include <cstring>
+#include <new>
+
+namespace esphome::cert_store {
 
 static const char *const TAG = "cert_store";
 
-CertStore *global_cert_store = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+CertStore *global_cert_store = nullptr;
 
-// Bytes requested per worker read_chunk() call for the STORAGE path.
-static constexpr size_t READ_CHUNK = 2048;
-// A CA/chain far larger than this is not a device trust anchor -- refuse rather than grow without
-// bound (the whole point of the interface is no runaway RAM on an MCU).
-static constexpr size_t MAX_CERT_BYTES = 10240;
-
-const char *cert_kind_to_string(CertKind kind) {
-  switch (kind) {
-    case CertKind::CA:
-      return "ca";
-    case CertKind::CLIENT_CERT:
-      return "client_cert";
-    case CertKind::PRIVATE_KEY:
-      return "private_key";
-    case CertKind::PSK:
-      return "psk";
-    case CertKind::SSH_KNOWN_HOST:
-      return "ssh_known_host";
-    case CertKind::SSH_USER_KEY:
-      return "ssh_user_key";
-    default:
-      return "raw";
-  }
+CertStore *CertStore::create() {
+  void *mem = RAMAllocator<CertStore>(RAMAllocator<CertStore>::ALLOC_EXTERNAL).allocate(1);
+  return mem != nullptr ? new (mem) CertStore() : new CertStore();
 }
 
-static const char *source_to_string(CertSource s) { return s == CertSource::EMBEDDED ? "embedded" : "storage"; }
+void CertStore::setup() { global_cert_store = this; }
 
-void CertStore::setup() {
-  // Publish the single instance so consumers can reach it without naming it. Nothing is loaded
-  // here -- entries are materialised on demand when a consumer applies them.
-  global_cert_store = this;
-}
-
-const CertStore::Entry *CertStore::find(StringRef id) const {
-  for (const auto &entry : this->entries_) {
-    if (id == entry.id)
-      return &entry;
-  }
-  return nullptr;
-}
-
-storage::StorageError CertStore::attach_parsed_(mbedtls_ssl_config *conf, mbedtls_x509_crt *ca_out,
-                                                const uint8_t *data, size_t len) {
-  mbedtls_x509_crt_init(ca_out);
-  // PEM parsing requires the terminating NUL to be counted in the length.
-  if (mbedtls_x509_crt_parse(ca_out, data, len + 1) != 0) {
-    ESP_LOGE(TAG, "CA parse failed");
-    return storage::StorageError::STORAGE_ERROR_READ_ERROR;
-  }
-  mbedtls_ssl_conf_ca_chain(conf, ca_out, nullptr);
-  return storage::StorageError::STORAGE_ERROR_OK;
-}
-
-storage::StorageError CertStore::attach_bundle_(mbedtls_ssl_config *conf) {
-#if defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE)
-  // The Mozilla root bundle ESP-IDF ships lives in flash and is attached directly to the config --
-  // no per-cert RAM, no storage read. This is the default trust anchor for public endpoints.
-  if (esp_crt_bundle_attach(conf) != 0) {
-    ESP_LOGE(TAG, "attaching the built-in CA bundle failed");
-    return storage::StorageError::STORAGE_ERROR_READ_ERROR;
-  }
-  return storage::StorageError::STORAGE_ERROR_OK;
-#else
-  ESP_LOGE(TAG, "no CA entry given and the built-in bundle is not compiled in");
-  return storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED;
+void CertStore::dump_config() {
+  ESP_LOGCONFIG(TAG, "Cert store:\n  Directory: %s", this->directory_ != nullptr ? this->directory_ : "none");
+#ifdef USE_CERT_STORE_LINK
+  ESP_LOGCONFIG(TAG, "  Relay: %s\n  HTTP sources: %u", YESNO(this->relay_source_), this->http_count_);
 #endif
 }
 
-void CertStore::apply_ca_async(mbedtls_ssl_config *conf, mbedtls_x509_crt *ca_out, StringRef id,
-                               ApplyCallback &&on_done) {
-  const Entry *entry = id.size() == 0 ? nullptr : this->find(id);
+const CertRef &CertStore::ref_(uint8_t step) const {
+  return step == STEP_CA ? this->refs_.ca : step == STEP_CERT ? this->refs_.cert : this->refs_.key;
+}
 
-  // No entry named (or unknown id) -> the built-in bundle. Immediate, no RAM, no worker.
-  if (entry == nullptr) {
-    if (id.size() != 0)
-      ESP_LOGW(TAG, "CA entry '%.*s' unknown -- falling back to the built-in bundle", (int) id.size(), id.c_str());
-    on_done(this->attach_bundle_(conf));
-    return;
-  }
-
-  if (entry->kind != CertKind::CA) {
-    ESP_LOGE(TAG, "'%s' is a %s entry, not a CA", entry->id, cert_kind_to_string(entry->kind));
-    on_done(storage::StorageError::STORAGE_ERROR_INVALID_ARGS);
-    return;
-  }
-
-  // EMBEDDED -> parse straight out of flash, no RAM buffer at all.
-  if (entry->source == CertSource::EMBEDDED) {
-    on_done(this->attach_parsed_(conf, ca_out, reinterpret_cast<const uint8_t *>(entry->embedded_data),
-                                 entry->embedded_len));
-    return;
-  }
-
-  // STORAGE -> stream the file on demand through the worker, parse, then free the buffer.
-#ifdef USE_STORAGE_WORKER
+void CertStore::apply_async(mbedtls_ssl_config *conf, TlsMaterial *out, const TlsRefs &refs, Rng rng, void *rng_ctx,
+                            ApplyCallback &&done) {
   if (this->applying_) {
-    on_done(storage::StorageError::STORAGE_ERROR_NOT_READY);  // one apply in flight; caller retries
-    return;
-  }
-  if (storage::global_storage_worker == nullptr || storage::global_storage_registry == nullptr) {
-    on_done(storage::StorageError::STORAGE_ERROR_NOT_READY);
-    return;
-  }
-  const char *rel = nullptr;
-  storage::PathStorage *ps = storage::global_storage_registry->resolve_path(entry->path, &rel);
-  if (ps == nullptr) {
-    ESP_LOGW(TAG, "'%s': storage for '%s' not mounted yet", entry->id, entry->path);
-    on_done(storage::StorageError::STORAGE_ERROR_NOT_READY);
+    done(storage::StorageError::STORAGE_ERROR_NOT_READY);
     return;
   }
   this->applying_ = true;
-  this->apply_conf_ = conf;
-  this->apply_ca_ = ca_out;
-  this->apply_cb_ = std::move(on_done);
+  this->conf_ = conf;
+  this->out_ = out;
+  this->refs_ = refs;
+  this->rng_ = rng;
+  this->rng_ctx_ = rng_ctx;
+  this->done_ = std::move(done);
+  this->step_ = STEP_CA;
+  this->next_();
+}
+
+void CertStore::next_() {
+  while (this->step_ != STEP_DONE) {
+    const CertRef &ref = this->ref_(this->step_);
+    if (ref.source != CertSource::NONE) {
+      this->load_(ref);
+      return;
+    }
+    if (this->step_ == STEP_CA) {
+#if defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE)
+      if (esp_crt_bundle_attach(this->conf_) != 0) {
+        ESP_LOGE(TAG, "Attaching the CA bundle failed");
+        this->finish_(storage::StorageError::STORAGE_ERROR_READ_ERROR);
+        return;
+      }
+#else
+      this->finish_(storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED);
+      return;
+#endif
+    }
+    this->step_++;
+  }
+  if (this->refs_.cert.source != CertSource::NONE &&
+      mbedtls_ssl_conf_own_cert(this->conf_, &this->out_->cert, &this->out_->key) != 0) {
+    ESP_LOGE(TAG, "Client certificate and key not taken");
+    this->finish_(storage::StorageError::STORAGE_ERROR_INVALID_ARGS);
+    return;
+  }
+  this->finish_(storage::StorageError::STORAGE_ERROR_OK);
+}
+
+void CertStore::load_(const CertRef &ref) {
+  this->from_directory_ = false;
+  switch (ref.source) {
+    case CertSource::EMBEDDED:
+      this->loaded_(reinterpret_cast<const uint8_t *>(ref.data), ref.len);
+      return;
+    case CertSource::STORAGE:
+      if (!this->read_path_(ref.data))
+        this->finish_(storage::StorageError::STORAGE_ERROR_NOT_READY);
+      return;
+    default:
+      break;
+  }
+  if (this->directory_ != nullptr &&
+      snprintf(this->path_, sizeof(this->path_), "%s/%s", this->directory_, ref.data) < static_cast<int>(sizeof(this->path_))) {
+    this->from_directory_ = true;
+    if (this->read_path_(this->path_))
+      return;
+  }
+#ifdef USE_CERT_STORE_LINK
+  if (this->fetch_remote_(0))
+    return;
+#endif
+  ESP_LOGW(TAG, "Certificate '%s' not found", ref.data);
+  this->finish_(storage::StorageError::STORAGE_ERROR_NOT_FOUND);
+}
+
+void CertStore::loaded_(const uint8_t *data, size_t len) {
+  int ret;
+  if (this->step_ == STEP_CA) {
+    ret = mbedtls_x509_crt_parse(&this->out_->ca, data, len + 1);
+    if (ret == 0)
+      mbedtls_ssl_conf_ca_chain(this->conf_, &this->out_->ca, nullptr);
+  } else if (this->step_ == STEP_CERT) {
+    ret = mbedtls_x509_crt_parse(&this->out_->cert, data, len + 1);
+  } else {
+    ret = mbedtls_pk_parse_key(&this->out_->key, data, len + 1, nullptr, 0, this->rng_, this->rng_ctx_);
+  }
+  this->release_buffer_();
+  if (ret != 0) {
+    ESP_LOGE(TAG, "%s not parsed (-0x%04X)",
+             this->step_ == STEP_CA ? "CA" : this->step_ == STEP_CERT ? "Client certificate" : "Client key",
+             static_cast<unsigned>(-ret));
+    this->finish_(storage::StorageError::STORAGE_ERROR_READ_ERROR);
+    return;
+  }
+  this->step_++;
+  this->next_();
+}
+
+void CertStore::finish_(storage::StorageError err) {
+  if (this->stream_open_ && storage::global_storage_worker != nullptr) {
+    storage::global_storage_worker->end_read(this->stream_, [](storage::StorageError) {});
+    this->stream_open_ = false;
+  }
+  this->release_buffer_();
+  ApplyCallback done = std::move(this->done_);
+  this->done_ = nullptr;
+  this->conf_ = nullptr;
+  this->out_ = nullptr;
+  this->step_ = STEP_DONE;
+  this->applying_ = false;
+  if (done)
+    done(err);
+}
+
+bool CertStore::grow_(size_t need) {
+  if (need <= this->buf_cap_)
+    return true;
+  size_t cap = this->buf_cap_ == 0 ? READ_CHUNK + 1 : this->buf_cap_;
+  while (cap < need)
+    cap *= 2;
+  if (cap > MAX_BYTES + 1)
+    cap = MAX_BYTES + 1;
+  if (cap < need) {
+    ESP_LOGE(TAG, "Certificate over %u bytes", static_cast<unsigned>(MAX_BYTES));
+    return false;
+  }
+  RAMAllocator<uint8_t> alloc(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
+  uint8_t *bigger = alloc.allocate(cap);
+  if (bigger == nullptr)
+    return false;
+  if (this->buf_ != nullptr) {
+    std::memcpy(bigger, this->buf_, this->buf_off_);
+    alloc.deallocate(this->buf_, this->buf_cap_);
+  }
+  this->buf_ = bigger;
+  this->buf_cap_ = cap;
+  return true;
+}
+
+void CertStore::release_buffer_() {
+  if (this->buf_ != nullptr)
+    RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::ALLOC_EXTERNAL).deallocate(this->buf_, this->buf_cap_);
   this->buf_ = nullptr;
   this->buf_cap_ = 0;
   this->buf_off_ = 0;
-  this->last_read_ = 0;
-  this->stream_open_ = false;
-  storage::StorageError err = storage::global_storage_worker->begin_read(
-      ps, rel, &this->stream_, [this](storage::StorageError e) { this->on_open_(e); });
-  if (err != storage::StorageError::STORAGE_ERROR_OK)
-    this->finish_storage_(err);
-#else
-  on_done(storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED);
-#endif
 }
 
-#ifdef USE_STORAGE_WORKER
-
-void CertStore::release_buffer_() {
-  if (this->buf_ != nullptr) {
-    this->alloc_.deallocate(this->buf_, this->buf_cap_);
-    this->buf_ = nullptr;
-  }
-  this->buf_cap_ = 0;
+bool CertStore::read_path_(const char *path) {
+  if (storage::global_storage_worker == nullptr || storage::global_storage_registry == nullptr)
+    return false;
+  const char *rel = nullptr;
+  storage::PathStorage *ps = storage::global_storage_registry->resolve_path(path, &rel);
+  if (ps == nullptr)
+    return false;
   this->buf_off_ = 0;
+  this->last_read_ = 0;
+  this->stream_open_ = false;
+  return storage::global_storage_worker->begin_read(ps, rel, &this->stream_, [this](storage::StorageError e) {
+           this->on_open_(e);
+         }) == storage::StorageError::STORAGE_ERROR_OK;
 }
 
 void CertStore::on_open_(storage::StorageError err) {
   if (err != storage::StorageError::STORAGE_ERROR_OK) {
-    this->finish_storage_(err);
+    this->read_failed_(err);
     return;
   }
   this->stream_open_ = true;
@@ -166,53 +207,34 @@ void CertStore::on_open_(storage::StorageError err) {
 }
 
 void CertStore::issue_read_() {
-  // Grow (doubling) to hold one more chunk plus a byte of slack for the terminating NUL.
-  if (this->buf_cap_ < this->buf_off_ + READ_CHUNK + 1) {
-    size_t cap = this->buf_cap_ == 0 ? READ_CHUNK + 1 : this->buf_cap_;
-    while (cap < this->buf_off_ + READ_CHUNK + 1)
-      cap *= 2;
-    if (cap > MAX_CERT_BYTES + 1) {
-      ESP_LOGE(TAG, "certificate exceeds %u bytes -- refusing", (unsigned) MAX_CERT_BYTES);
-      this->finish_storage_(storage::StorageError::STORAGE_ERROR_NO_SPACE);
-      return;
-    }
-    uint8_t *bigger = this->alloc_.allocate(cap);
-    if (bigger == nullptr) {
-      ESP_LOGE(TAG, "out of memory (%u bytes)", (unsigned) cap);
-      this->finish_storage_(storage::StorageError::STORAGE_ERROR_READ_ERROR);
-      return;
-    }
-    if (this->buf_ != nullptr) {
-      std::memcpy(bigger, this->buf_, this->buf_off_);
-      this->alloc_.deallocate(this->buf_, this->buf_cap_);
-    }
-    this->buf_ = bigger;
-    this->buf_cap_ = cap;
+  if (!this->grow_(this->buf_off_ + READ_CHUNK + 1)) {
+    this->finish_(storage::StorageError::STORAGE_ERROR_NO_SPACE);
+    return;
   }
   this->last_read_ = 0;
-  storage::StorageError e = storage::global_storage_worker->read_chunk(
+  const storage::StorageError e = storage::global_storage_worker->read_chunk(
       this->stream_, this->buf_ + this->buf_off_, READ_CHUNK, &this->last_read_,
       [this](storage::StorageError re) { this->on_read_(re); });
   if (e != storage::StorageError::STORAGE_ERROR_OK)
-    this->finish_storage_(e);
+    this->finish_(e);
 }
 
 void CertStore::on_read_(storage::StorageError err) {
   if (!this->applying_)
     return;
   if (err != storage::StorageError::STORAGE_ERROR_OK) {
-    this->finish_storage_(err);
+    this->finish_(err);
     return;
   }
   this->buf_off_ += this->last_read_;
-  if (this->last_read_ == 0) {
-    storage::StorageError e = storage::global_storage_worker->end_read(
-        this->stream_, [this](storage::StorageError ce) { this->on_closed_(ce); });
-    if (e != storage::StorageError::STORAGE_ERROR_OK)
-      this->finish_storage_(e);
+  if (this->last_read_ != 0) {
+    this->issue_read_();
     return;
   }
-  this->issue_read_();
+  const storage::StorageError e =
+      storage::global_storage_worker->end_read(this->stream_, [this](storage::StorageError ce) { this->on_closed_(ce); });
+  if (e != storage::StorageError::STORAGE_ERROR_OK)
+    this->finish_(e);
 }
 
 void CertStore::on_closed_(storage::StorageError err) {
@@ -220,42 +242,58 @@ void CertStore::on_closed_(storage::StorageError err) {
     return;
   this->stream_open_ = false;
   if (err != storage::StorageError::STORAGE_ERROR_OK) {
-    this->finish_storage_(err);
+    this->finish_(err);
     return;
   }
-  // Terminate so mbedTLS PEM parsing has its NUL, parse into the consumer's ca_out, attach.
   this->buf_[this->buf_off_] = 0;
-  storage::StorageError perr = attach_parsed_(this->apply_conf_, this->apply_ca_, this->buf_, this->buf_off_);
-  this->finish_storage_(perr);
+  this->loaded_(this->buf_, this->buf_off_);
 }
 
-void CertStore::finish_storage_(storage::StorageError err) {
-  // Single exit for the STORAGE path: close a still-open stream, free the buffer NOW (the parse,
-  // if any, is already done), then fire the consumer callback and clear all in-flight state.
-  if (this->stream_open_ && storage::global_storage_worker != nullptr) {
-    storage::global_storage_worker->end_read(this->stream_, [](storage::StorageError) {});
-    this->stream_open_ = false;
+void CertStore::read_failed_(storage::StorageError err) {
+#ifdef USE_CERT_STORE_LINK
+  if (this->from_directory_ && this->fetch_remote_(0))
+    return;
+#endif
+  this->finish_(err);
+}
+
+#ifdef USE_CERT_STORE_LINK
+uint8_t CertStore::next_source_(uint8_t from) const {
+  if (this->link_ == nullptr)
+    return NO_SOURCE;
+  for (uint8_t s = from; s <= this->http_count_; s++) {
+    if (s != 0 || (this->relay_source_ && this->link_->has_url()))
+      return s;
   }
-  this->release_buffer_();
-  ApplyCallback cb = std::move(this->apply_cb_);
-  this->apply_cb_ = nullptr;
-  this->apply_conf_ = nullptr;
-  this->apply_ca_ = nullptr;
-  this->applying_ = false;
-  if (cb)
-    cb(err);
+  return NO_SOURCE;
 }
 
-#endif  // USE_STORAGE_WORKER
+bool CertStore::fetch_remote_(uint8_t from) {
+  const uint8_t source = this->next_source_(from);
+  if (source == NO_SOURCE || !this->grow_(MAX_BYTES + 1))
+    return false;
+  return this->link_->submit(&CertStore::fetch_job_, this, source);
+}
 
-void CertStore::dump_config() {
-  ESP_LOGCONFIG(TAG, "Cert store:");
-  for (const auto &entry : this->entries_) {
-    ESP_LOGCONFIG(TAG, "  %s (%s, %s)", entry.id, cert_kind_to_string(entry.kind), source_to_string(entry.source));
+void CertStore::fetch_job_(void *ctx, uint16_t source) {
+  auto *self = static_cast<CertStore *>(ctx);
+  const std::string path = "/cert?name=" + relay_link::RelayLink::url_encoded(self->ref_(self->step_).data);
+  size_t len = 0;
+  const bool ok = source == 0 ? self->link_->http(path.c_str(), nullptr, nullptr, &len, self->buf_, MAX_BYTES)
+                              : self->link_->http_at(self->http_sources_[source - 1], nullptr, path.c_str(), nullptr,
+                                                     nullptr, &len, self->buf_, MAX_BYTES);
+  if (ok && len != 0 && len <= MAX_BYTES) {
+    self->buf_[len] = 0;
+    self->loaded_(self->buf_, len);
+    return;
+  }
+  if (!self->fetch_remote_(static_cast<uint8_t>(source + 1))) {
+    ESP_LOGW(TAG, "Certificate '%s' not found", self->ref_(self->step_).data);
+    self->finish_(storage::StorageError::STORAGE_ERROR_NOT_FOUND);
   }
 }
+#endif
 
-}  // namespace cert_store
-}  // namespace esphome
+}
 
-#endif  // USE_ESP_IDF
+#endif
