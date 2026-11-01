@@ -4,6 +4,7 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include "esphome/core/preferences_rtc.h"
+#include "nvs_guard.h"
 #ifdef USE_ESP32_PREFERENCES_STORAGE
 #include "esphome/components/storage/storage.h"
 #include "esphome/components/binary_storage/nvs_store.h"
@@ -163,12 +164,20 @@ void ESP32Preferences::open() {
   // Runs from app_main() before the logger is initialized; any logging here
   // must be deferred. See s_open_err and make_preference() below.
   // Components that need NVS check nvs_handle instead of initializing it again.
+#ifdef USE_ESP32_NVS_GUARD
+  nvs_guard::open_partition(&this->nvs_ready);
+  if (!this->nvs_ready) {
+    this->nvs_handle = 0;
+    return;
+  }
+#else
   esp_err_t init_err = nvs_flash_init();
   if (init_err == ESP_ERR_NVS_NO_FREE_PAGES || init_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     nvs_flash_erase();
     init_err = nvs_flash_init();
   }
   this->nvs_ready = init_err == ESP_OK;
+#endif
 #ifdef USE_ESP32_PREFERENCES_NO_INTERNAL
   // Preferences are backed by an external store bound later (set_external_preferences_store);
   // do not open the internal "esphome" namespace or fall back to it. nvs_flash_init() above is
@@ -178,7 +187,12 @@ void ESP32Preferences::open() {
   this->nvs_handle = 0;
   return;
 #endif
-  esp_err_t err = nvs_open("esphome", NVS_READWRITE, &this->nvs_handle);
+#ifdef USE_ESP32_NVS_GUARD
+  const nvs_open_mode_t mode = nvs_guard::state().read_only ? NVS_READONLY : NVS_READWRITE;
+#else
+  const nvs_open_mode_t mode = NVS_READWRITE;
+#endif
+  esp_err_t err = nvs_open("esphome", mode, &this->nvs_handle);
   if (err == 0) {
 #ifdef USE_ESP32_PREFERENCES_STORAGE
     s_pref_store.set_namespace("esphome");
@@ -189,6 +203,9 @@ void ESP32Preferences::open() {
   }
 
   s_open_err = err;
+#ifdef USE_ESP32_NVS_GUARD
+  this->nvs_handle = 0;
+#else
   nvs_flash_deinit();
   nvs_flash_erase();
   this->nvs_ready = nvs_flash_init() == ESP_OK;
@@ -203,6 +220,7 @@ void ESP32Preferences::open() {
     s_pref_store.adopt_handle(this->nvs_handle);
     s_kv = &s_pref_store;
   }
+#endif
 #endif
 }
 
@@ -227,6 +245,9 @@ ESPPreferenceObject ESP32Preferences::make_preference(size_t length, uint32_t ty
 }
 
 ESPPreferenceObject ESP32Preferences::make_preference(size_t length, uint32_t type) {
+#ifdef USE_ESP32_NVS_GUARD
+  nvs_guard::claim(type, length);
+#endif
   if (s_open_err != ESP_OK) {
     if (this->nvs_handle == 0) {
       ESP_LOGW(TAG, "nvs_open failed: %s - NVS unavailable", esp_err_to_name(s_open_err));
@@ -278,6 +299,12 @@ ESPPreferenceObject ESP32Preferences::make_rtc_preference_(size_t length, uint32
 bool ESP32Preferences::sync() {
   if (s_pending_save.empty())
     return true;
+#ifdef USE_ESP32_NVS_GUARD
+  if (nvs_guard::state().read_only) {
+    s_pending_save.clear();
+    return false;
+  }
+#endif
 
   ESP_LOGV(TAG, "Saving %zu items...", s_pending_save.size());
   int cached = 0, written = 0, failed = 0;
