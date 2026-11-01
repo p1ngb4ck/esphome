@@ -82,6 +82,9 @@ class RemoteDesktop : public Component {
   bool connect(Protocol protocol, const std::string &host, uint16_t port, const std::string &password);
   void disconnect();
   bool is_connected() const { return this->state_.load() == STATE_RUNNING; }
+  bool is_connecting() const { return this->state_.load() == STATE_STARTING; }
+  bool failed() const { return this->failed_.load(); }
+  uint32_t session() const { return this->session_; }
 
   void set_connections(uint8_t count) { this->saved_count_ = count; }
 #ifdef USE_REMOTE_DESKTOP_CONNECTIONS_FILE
@@ -191,6 +194,8 @@ class RemoteDesktop : public Component {
 
   std::atomic<uint8_t> state_{STATE_IDLE};
   std::atomic<bool> stop_{false};
+  std::atomic<bool> failed_{false};
+  uint32_t session_{0};
   std::atomic<bool> close_page_{false};
   StaticTask task_;
   int fd_{-1};
