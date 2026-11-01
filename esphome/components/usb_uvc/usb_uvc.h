@@ -4,6 +4,12 @@
     defined(USE_ESP32_VARIANT_ESP32S31)
 
 #include "esphome/components/usb_host/usb_host.h"
+#ifdef USE_DISPLAY
+#include "esphome/components/display/display.h"
+#endif
+#ifdef USE_UVC_VIDEO_OUTPUT
+#include "esphome/components/display/video_output.h"
+#endif
 #include "esphome/core/component.h"
 #include "esphome/core/defines.h"
 #include "esphome/core/helpers.h"
@@ -71,6 +77,16 @@ class UVCClient : public usb_host::USBClient {
   void set_width(uint16_t w) { this->req_width_ = w; }
   void set_height(uint16_t h) { this->req_height_ = h; }
   void set_fps(uint8_t fps) { this->req_fps_ = fps; }
+#ifdef USE_DISPLAY
+  void set_display(display::Display *display) { this->display_ = display; }
+#endif
+#ifdef USE_UVC_VIDEO_OUTPUT
+  void set_video_output(display::VideoOutput *output);
+  void show_on_canvas(uint8_t camera, bool on);
+  bool can_show(uint16_t width, uint16_t height, uint8_t fps) const {
+    return this->output_->fits(width, height, fps, true, this);
+  }
+#endif
   void set_num_urbs(uint8_t n) { this->num_urbs_ = n; }
   void set_buffer_allocator(BufferAlloc alloc, BufferFree free) {
     this->alloc_ = alloc;
@@ -172,6 +188,10 @@ class UVCClient : public usb_host::USBClient {
   bool parse_descriptors_(Camera &cam);
   void select_default_(Camera &cam);
   Camera *find_(uint8_t camera) const;
+#ifdef USE_UVC_VIDEO_OUTPUT
+  void output_frame_(uint8_t camera, const uint8_t *data, size_t len, const UvcFrameInfo &info);
+  int best_frame_(const Camera &cam) const;
+#endif
   Camera *find_camera_(uint32_t id) const;
   // The stream in the selection: probe / commit, buffers, isochronous stream
   void open_(Camera &cam);
@@ -196,6 +216,16 @@ class UVCClient : public usb_host::USBClient {
   uint16_t req_width_{0};  // 0: any
   uint16_t req_height_{0};
   uint8_t req_fps_{0};  // 0: the frame's default interval
+#ifdef USE_DISPLAY
+  display::Display *display_{nullptr};
+#endif
+#ifdef USE_UVC_VIDEO_OUTPUT
+  bool holds_() const { return this->canvas_ != nullptr && this->canvas_->held_by(this); }
+  display::VideoOutput *output_{nullptr};
+  display::VideoCanvas *canvas_{nullptr};
+  uint8_t output_camera_{0};
+  uint32_t output_refused_{0};
+#endif
   uint8_t num_urbs_{3};
   BufferAlloc alloc_{nullptr};
   BufferFree free_{nullptr};
