@@ -259,11 +259,13 @@ void BluetoothA2DPCommon::end(bool release_memory) {
 void BluetoothA2DPCommon::init_nvs() {
   ESP_LOGVV(BT_AV_TAG, "%s", __func__);
   esp_err_t err = nvs_flash_init();
+#ifndef USE_ESP32_NVS_GUARD
   if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
       err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     ESP_ERROR_CHECK(nvs_flash_erase());
     err = nvs_flash_init();
   }
+#endif
   if (err == ESP_ERR_NOT_FOUND || err == ESP_ERR_NVS_PART_NOT_FOUND) {
     ESP_LOGV(BT_AV_TAG, "No internal NVS partition: the last connection is not kept there");
     return;
