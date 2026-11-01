@@ -98,7 +98,7 @@ class JPEGFormat(Format):
 
             # Backend selection (USE_HWJPG / USE_NEWJPEG / USE_JPEGDEC, plus
             # the matching library/IDF component) is esp32's job - the single
-            # source of truth also used by simple_video_player.
+            # source of truth also used by the avi media player.
             require_hw_jpeg()
         else:
             cg.add_library(
