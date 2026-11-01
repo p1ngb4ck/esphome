@@ -18,12 +18,6 @@ class Browser : public Component {
     void *mem = RAMAllocator<Browser>(RAMAllocator<Browser>::ALLOC_EXTERNAL).allocate(1);
     return mem != nullptr ? new (mem) Browser() : new Browser();
   }
-  void setup() override {
-    this->desktop_->add_on_change_callback([this]() {
-      if (!this->desktop_->is_connected())
-        this->opened_ = false;
-    });
-  }
   void set_remote_desktop(remote_desktop::RemoteDesktop *desktop) { this->desktop_ = desktop; }
   void set_protocol(remote_desktop::RemoteDesktop::Protocol protocol) { this->protocol_ = protocol; }
   void set_host(const char *host) { this->host_ = host; }
@@ -31,14 +25,17 @@ class Browser : public Component {
   void set_password(const char *password) { this->password_ = password; }
 
   bool open() {
-    this->opened_ = this->desktop_->connect(this->protocol_, this->host_, this->port_, this->password_);
-    return this->opened_;
+    if (!this->desktop_->connect(this->protocol_, this->host_, this->port_, this->password_))
+      return false;
+    this->session_ = this->desktop_->session();
+    return true;
   }
   void close() {
-    if (this->opened_)
+    if (this->owns_session())
       this->desktop_->disconnect();
   }
-  bool is_open() const { return this->opened_ && this->desktop_->is_connected(); }
+  bool owns_session() const { return this->session_ != 0 && this->session_ == this->desktop_->session(); }
+  bool is_open() const { return this->owns_session() && this->desktop_->is_connected(); }
 
  protected:
   remote_desktop::RemoteDesktop *desktop_{nullptr};
@@ -46,7 +43,7 @@ class Browser : public Component {
   const char *host_{""};
   uint16_t port_{5900};
   const char *password_{""};
-  bool opened_{false};
+  uint32_t session_{0};
 };
 
 template<typename... Ts> class OpenAction : public Action<Ts...>, public Parented<Browser> {
