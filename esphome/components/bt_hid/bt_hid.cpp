@@ -246,7 +246,7 @@ bool gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void * /*
     case ESP_BT_GAP_CFM_REQ_EVT:
       if (find_or_adopt(param->cfm_req.bda) == nullptr)
         return false;
-      esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true);
+      esphome::bt_host::accept_ssp(param->cfm_req.bda);
       return true;
     case ESP_BT_GAP_READ_RSSI_DELTA_EVT: {
       if (param->read_rssi_delta.stat != ESP_BT_STATUS_SUCCESS || find_by_address(param->read_rssi_delta.bda) == nullptr)
@@ -411,7 +411,7 @@ void handle_event(HostEvent &e) {
       }
       h.ready = true;
       // Paired devices reconnect on their own when they wake up.
-      esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
+      esphome::bt_host::set_scan_mode(esphome::bt_host::SCAN_OWNER_HID, true, false);
       ESP_LOGV(TAG, "HID host ready");
       break;
     case HostEvent::OPEN: {
@@ -807,7 +807,7 @@ void BTHIDDevice::unpair() {
     return;
   }
   esp_err_t err =
-      this->connected_ ? esp_bt_hid_host_virtual_cable_unplug(this->bda_) : esp_bt_gap_remove_bond_device(this->bda_);
+      this->connected_ ? esp_bt_hid_host_virtual_cable_unplug(this->bda_) : esphome::bt_host::remove_bond(this->bda_, false);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "[%s] Unpair failed: %s", mac, esp_err_to_name(err));
   } else {
@@ -847,7 +847,7 @@ void BTHIDDevice::pair(uint32_t duration_ms) {
 #endif
   const uint32_t units =
       std::clamp<uint32_t>((duration_ms + 1279) / 1280, ESP_BT_GAP_MIN_INQ_LEN, ESP_BT_GAP_MAX_INQ_LEN);
-  if (esp_err_t err = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, units, 0); err != ESP_OK) {
+  if (esp_err_t err = esphome::bt_host::start_discovery(units); err != ESP_OK) {
     ESP_LOGW(TAG, "Pairing scan failed to start: %s", esp_err_to_name(err));
     return;
   }
@@ -957,7 +957,7 @@ bool BTHIDDevice::on_pairing_candidate(const uint8_t *bda, uint32_t device_class
   ESP_LOGV(TAG, "[%s] Pairing with '%s'", mac, name.c_str());
   // A device in pairing mode has dropped any key kept here from before; pair it anew.
   if (is_bonded(bda))
-    esp_bt_gap_remove_bond_device(const_cast<uint8_t *>(bda));
+    esphome::bt_host::remove_bond(bda, false);
   this->set_bda_(bda);
   this->candidate_class_ = device_class;
   this->candidate_name_ = name;
@@ -965,7 +965,7 @@ bool BTHIDDevice::on_pairing_candidate(const uint8_t *bda, uint32_t device_class
   this->next_connect_ms_ = millis();
   // Time to connect and type the PIN, whatever was left of the scan.
   host().pairing_until = millis() + 2 * CONNECT_TIMEOUT_MS;
-  esp_bt_gap_cancel_discovery();
+  esphome::bt_host::cancel_discovery();
   return true;
 }
 
@@ -1062,7 +1062,7 @@ void BTHIDDevice::on_adopted() {
   this->next_connect_ms_ = millis();
   host().pairing_until = millis() + 2 * CONNECT_TIMEOUT_MS;
   if (host().discovering)
-    esp_bt_gap_cancel_discovery();
+    esphome::bt_host::cancel_discovery();
 }
 
 void BTHIDDevice::cancel_pairing() {
@@ -1079,7 +1079,7 @@ void BTHIDDevice::end_pairing(bool success, const char *reason) {
     h.pairing = nullptr;
   }
   if (h.discovering)
-    esp_bt_gap_cancel_discovery();
+    esphome::bt_host::cancel_discovery();
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(this->bda_, mac);
   uint8_t previous[ESP_BD_ADDR_LEN];
@@ -1091,7 +1091,7 @@ void BTHIDDevice::end_pairing(bool success, const char *reason) {
       esp_bt_hid_host_disconnect(this->bda_);
     // A bond the failed attempt may have left goes; the device paired before comes back.
     if (this->has_address() && !same_device)
-      esp_bt_gap_remove_bond_device(this->bda_);
+      esphome::bt_host::remove_bond(this->bda_, false);
     this->set_bda_(has_previous ? previous : nullptr);
     // The window took it off: it is paged once again.
     this->page_pending_ = has_previous;
@@ -1102,7 +1102,7 @@ void BTHIDDevice::end_pairing(bool success, const char *reason) {
   ESP_LOGI(TAG, "[%s] Paired with '%s'", mac, this->candidate_name_.c_str());
   // The device it replaces loses its bond.
   if (has_previous && !same_device)
-    esp_bt_gap_remove_bond_device(previous);
+    esphome::bt_host::remove_bond(previous, false);
   if (this->address_set_ != nullptr)
     this->address_set_(mac);
 #ifdef USE_BT_PAIRING
@@ -1126,7 +1126,7 @@ void BTHIDDevice::scan(uint32_t duration_ms) {
   // Inquiry length is in units of 1.28 s.
   const uint32_t units =
       std::clamp<uint32_t>((duration_ms + 1279) / 1280, ESP_BT_GAP_MIN_INQ_LEN, ESP_BT_GAP_MAX_INQ_LEN);
-  if (esp_err_t err = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, units, 0); err != ESP_OK) {
+  if (esp_err_t err = esphome::bt_host::start_discovery(units); err != ESP_OK) {
     ESP_LOGW(TAG, "Scan failed to start: %s", esp_err_to_name(err));
     return;
   }

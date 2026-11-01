@@ -1,4 +1,5 @@
 #include "bt_host.h"
+#include "gap_classic.h"
 
 #ifdef USE_ESP32
 
@@ -249,11 +250,11 @@ void BTHost::delete_bond(const uint8_t *address, Transport transport) {
   [[maybe_unused]] esp_err_t err = ESP_ERR_NOT_SUPPORTED;
   if (transport == Transport::LE) {
 #ifdef CONFIG_BT_BLE_ENABLED
-    err = esp_ble_remove_bond_device(bda);
+    err = esphome::bt_host::remove_bond(bda, true);
 #endif
   } else {
 #ifdef CONFIG_BT_CLASSIC_ENABLED
-    err = esp_bt_gap_remove_bond_device(bda);
+    err = esphome::bt_host::remove_bond(bda, false);
 #endif
   }
   ESP_LOGV(TAG, "Bond of %s deleted: %s", mac, esp_err_to_name(err));
@@ -486,7 +487,7 @@ void BTHost::scan(uint32_t duration_ms) {
     // Inquiry length is in units of 1.28 s.
     const uint32_t units =
         std::clamp<uint32_t>((duration_ms + 1279) / 1280, ESP_BT_GAP_MIN_INQ_LEN, ESP_BT_GAP_MAX_INQ_LEN);
-    if (esp_err_t err = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, units, 0); err != ESP_OK) {
+    if (esp_err_t err = esphome::bt_host::start_discovery(units); err != ESP_OK) {
       ESP_LOGW(TAG, "Bluetooth Classic scan failed to start: %s", esp_err_to_name(err));
     } else {
       started = true;
@@ -522,7 +523,7 @@ void BTHost::cancel_scan() {
     target->cancel_device_pairing();
 #ifdef USE_BT_CLASSIC
   if (this->classic_discovering_.load())
-    esp_bt_gap_cancel_discovery();
+    esphome::bt_host::cancel_discovery();
 #endif
   if (active)
     this->status_("Scan cancelled");
@@ -685,7 +686,7 @@ void BTHost::pair_with(size_t index) {
 #ifdef USE_BT_CLASSIC
   if (device.transport == Transport::CLASSIC && this->classic_discovering_.load()) {
     // Paging during an inquiry fails.
-    esp_bt_gap_cancel_discovery();
+    esphome::bt_host::cancel_discovery();
     this->pending_ = device;
     this->pending_target_ = target;
     this->enable_loop();

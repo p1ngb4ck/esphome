@@ -5,6 +5,12 @@
 #include "esphome/core/log.h"
 
 #include <esp_bt_main.h>
+#include <sdkconfig.h>
+#ifdef CONFIG_BT_BLE_ENABLED
+#include <esp_gap_ble_api.h>
+#endif
+
+#include <atomic>
 #ifdef USE_USB_BLUETOOTH_HCI_SPLIT
 #include "esphome/components/usb_bluetooth/hci_split.h"
 #endif
@@ -38,8 +44,13 @@ bool is_pairing_request(esp_bt_gap_cb_event_t event) {
 }
 
 bool registered = false;
+std::atomic<uint8_t> discovery_users{0};
+bool scan_connectable[SCAN_OWNERS]{};
+bool scan_discoverable[SCAN_OWNERS]{};
 
 void dispatch(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
+  if (event == ESP_BT_GAP_DISC_STATE_CHANGED_EVT && param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED)
+    discovery_users.store(0);
   bool answered = false;
   for (const auto &h : handlers())
     answered = h.handler(event, param, h.arg) || answered;
@@ -102,6 +113,48 @@ bool ensure_gap_callback() {
     esp_bt_gap_set_pin(ESP_BT_PIN_TYPE_VARIABLE, 0, unused);
   }
   return true;
+}
+
+esp_err_t start_discovery(uint8_t units) {
+  if (discovery_users.fetch_add(1) != 0)
+    return ESP_OK;
+  const esp_err_t err = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, units, 0);
+  if (err != ESP_OK)
+    discovery_users.store(0);
+  return err;
+}
+
+void cancel_discovery() {
+  uint8_t users = discovery_users.load();
+  while (users != 0 && !discovery_users.compare_exchange_weak(users, users - 1)) {
+  }
+  if (users <= 1)
+    esp_bt_gap_cancel_discovery();
+}
+
+void accept_ssp(const uint8_t *bda) { esp_bt_gap_ssp_confirm_reply(const_cast<uint8_t *>(bda), true); }
+
+esp_err_t remove_bond(const uint8_t *bda, bool le) {
+#ifdef CONFIG_BT_BLE_ENABLED
+  if (le)
+    return esp_ble_remove_bond_device(const_cast<uint8_t *>(bda));
+#endif
+  if (le)
+    return ESP_ERR_NOT_SUPPORTED;
+  return esp_bt_gap_remove_bond_device(const_cast<uint8_t *>(bda));
+}
+
+void set_scan_mode(ScanOwner owner, bool connectable, bool discoverable) {
+  scan_connectable[owner] = connectable;
+  scan_discoverable[owner] = discoverable;
+  bool any_connectable = false;
+  bool any_discoverable = false;
+  for (uint8_t i = 0; i != SCAN_OWNERS; i++) {
+    any_connectable = any_connectable || scan_connectable[i];
+    any_discoverable = any_discoverable || scan_discoverable[i];
+  }
+  esp_bt_gap_set_scan_mode(any_connectable ? ESP_BT_CONNECTABLE : ESP_BT_NON_CONNECTABLE,
+                           any_discoverable ? ESP_BT_GENERAL_DISCOVERABLE : ESP_BT_NON_DISCOVERABLE);
 }
 
 }  // namespace esphome::bt_host

@@ -410,7 +410,7 @@ void BluetoothA2DPSource::filter_inquiry_scan_result(
     memcpy(peer_bd_addr, param->disc_res.bda, ESP_BD_ADDR_LEN);
     set_last_connection(peer_bd_addr);
     ESP_LOGVV(BT_AV_TAG, "Cancel device discovery ...");
-    esp_bt_gap_cancel_discovery();
+    esphome::bt_host::cancel_discovery();
   } else {
     ESP_LOGVV(BT_AV_TAG, "--Result: Target device not found");
   }
@@ -458,7 +458,7 @@ bool BluetoothA2DPSource::handle_gap_event(esp_bt_gap_cb_event_t event,
     if (param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS && s_a2d_state == APP_AV_STATE_DISCOVERING) {
       s_a2d_state = APP_AV_STATE_DISCOVERED;
       if (discovery_active) {
-        esp_bt_gap_cancel_discovery();
+        esphome::bt_host::cancel_discovery();
       } else {
         s_a2d_state = APP_AV_STATE_CONNECTING;
         esp_a2d_connect(peer_bd_addr);
@@ -574,7 +574,7 @@ void BluetoothA2DPSource::app_gap_callback(esp_bt_gap_cb_event_t event,
           BT_AV_TAG,
           "ESP_BT_GAP_CFM_REQ_EVT Please compare the numeric value: %" PRIu32,
           param->cfm_req.num_val);
-      esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true);
+      esphome::bt_host::accept_ssp(param->cfm_req.bda);
       break;
 
 #if ESP_IDF_VERSION > ESP_IDF_VERSION_VAL(4, 4, 4)
@@ -864,7 +864,7 @@ void BluetoothA2DPSource::start_discovery() {
     ESP_LOGVV(BT_AV_TAG, "Discovery waits for the pairing window");
     return;
   }
-  esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
+  esphome::bt_host::start_discovery(10);
 }
 
 void BluetoothA2DPSource::resume_discovery() {

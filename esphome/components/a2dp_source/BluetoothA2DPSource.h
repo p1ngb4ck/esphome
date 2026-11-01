@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "BluetoothA2DPCommon.h"
+#include "esphome/components/bt_host/gap_classic.h"
 
 #if IS_VALID_PLATFORM
 
@@ -275,7 +276,7 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   /// Cancels the discovery
   virtual void cancel_discovery() {
     is_end = true;
-    esp_bt_gap_cancel_discovery();
+    esphome::bt_host::cancel_discovery();
   }
 
   /// Ends the processing and releases the resources

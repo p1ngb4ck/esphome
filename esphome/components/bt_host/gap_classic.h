@@ -26,6 +26,14 @@ bool is_active();
 /// registered.
 bool ensure_gap_callback();
 
+enum ScanOwner : uint8_t { SCAN_OWNER_HID = 0, SCAN_OWNER_AUDIO = 1, SCAN_OWNERS = 2 };
+
+esp_err_t start_discovery(uint8_t units);
+void cancel_discovery();
+void accept_ssp(const uint8_t *bda);
+esp_err_t remove_bond(const uint8_t *bda, bool le);
+void set_scan_mode(ScanOwner owner, bool connectable, bool discoverable);
+
 }  // namespace esphome::bt_host
 
 #endif  // USE_ESP32
