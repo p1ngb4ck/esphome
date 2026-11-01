@@ -18,6 +18,7 @@ namespace esphome::keyboard_layouts {
 static const char *const TAG = "keyboard_layouts";
 
 static constexpr const char *KBD_SUFFIX = ".kbl";
+static constexpr uint32_t KBD_PREF_KEY = 0x427DA509;
 
 static uint8_t *psram_piece(size_t size) {
   return static_cast<uint8_t *>(heap_caps_calloc(1, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -66,7 +67,7 @@ void KeyboardLayouts::setup() {
     return;
   }
   std::memset(this->kbd_assign_, 0, sizeof(KbdAssignTable));
-  this->kbd_pref_ = global_preferences->make_preference<KbdAssignTable>(fnv1_hash("simple_video_player.keyboards"));
+  this->kbd_pref_ = global_preferences->make_preference<KbdAssignTable>(KBD_PREF_KEY);
   for (KbdInput &input : this->kbd_inputs_) {
     input.own = input.input->get_layout();
     const auto index = static_cast<uint8_t>(&input - this->kbd_inputs_.data());
