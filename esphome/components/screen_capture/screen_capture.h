@@ -2,7 +2,7 @@
 
 #include "esphome/core/defines.h"
 
-#ifdef SVP_CAPTURE
+#ifdef USE_SCREEN_CAPTURE
 
 #include "esphome/core/automation.h"
 #include "esphome/core/helpers.h"
@@ -14,7 +14,7 @@
 #ifdef USE_CAMERA
 #include "esphome/components/camera/camera.h"
 #endif
-#ifdef SVP_CAPTURE_MIC
+#ifdef USE_SCREEN_CAPTURE_MIC
 #include "esphome/components/microphone/microphone_source.h"
 #endif
 
@@ -47,10 +47,11 @@ class CaptureHost {
   virtual uint8_t capture_blocked() = 0;
   virtual void capture_defer(std::function<void()> &&f) = 0;
   virtual std::shared_ptr<ring_buffer::RingBuffer> capture_ring(uint8_t *storage, size_t len) = 0;
-  virtual const std::string &capture_relay_url() = 0;
+  virtual const char *capture_relay_url() = 0;
   virtual bool capture_relay_ask(bool start) = 0;
   virtual uint16_t capture_stream_port() = 0;
   virtual bool capture_http(const char *path, const char *payload, char **body, size_t *len) = 0;
+  virtual void capture_wake() {}
 
  protected:
   ~CaptureHost() = default;
@@ -84,7 +85,7 @@ class ScreenCapture {
   uint8_t get_screencast_target() const { return this->cast_target_; }
   void set_screencast_sound(bool on) { this->cast_sound_ = on; }
   bool get_screencast_sound() const { return this->cast_sound_; }
-#ifdef SVP_CAPTURE_MIC
+#ifdef USE_SCREEN_CAPTURE_MIC
   void set_capture_microphone(microphone::MicrophoneSource *mic) { this->cap_mic_ = mic; }
 #endif
   bool screenshot();
@@ -110,10 +111,15 @@ class ScreenCapture {
   bool camera_capture_frame(const uint8_t *data, size_t length, FrameFormat format, uint16_t width, uint16_t height,
                             std::function<void()> &&done);
   CastState screencast_state() const { return this->cast_state_; }
+  bool idle() const {
+    return this->cast_state_ == CAST_IDLE && !this->shot_busy_ && !this->shot_ready_.load(std::memory_order_acquire) &&
+           !this->cam_cap_busy_.load(std::memory_order_acquire) &&
+           !this->cam_cap_finished_.load(std::memory_order_acquire);
+  }
   bool screencast_running() const { return this->cast_state_ != CAST_IDLE; }
   jpeg_encoder_handle_t shared_jpeg_encoder();
   bool screencast_mic_on() const {
-#ifdef SVP_CAPTURE_MIC
+#ifdef USE_SCREEN_CAPTURE_MIC
     return this->cast_state_ == CAST_RUNNING && this->cap_mic_on_;
 #else
     return false;
@@ -232,7 +238,7 @@ class ScreenCapture {
   uint8_t cast_fps_{25};
   uint8_t cast_target_{CAST_LOCAL};
   bool cast_sound_{true};
-#ifdef SVP_CAPTURE_MIC
+#ifdef USE_SCREEN_CAPTURE_MIC
   microphone::MicrophoneSource *cap_mic_{nullptr};
 #endif
   Trigger<std::string> shot_trigger_;
@@ -332,7 +338,7 @@ class ScreenCapture {
   storage::StreamHandle shot_handle_{};
   std::string shot_last_stamp_;
   uint8_t shot_same_stamp_{0};
-#ifdef SVP_CAPTURE_MIC
+#ifdef USE_SCREEN_CAPTURE_MIC
   std::shared_ptr<ring_buffer::RingBuffer> cap_ring_;
   std::atomic<ring_buffer::RingBuffer *> cap_ring_raw_{nullptr};
   std::atomic<uint8_t> cap_mic_in_{0};
