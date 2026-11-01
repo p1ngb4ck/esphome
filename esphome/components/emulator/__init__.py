@@ -22,6 +22,7 @@ from esphome.components.storage import request_storage_worker
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_CHANNEL,
+    CONF_CLOSE_ACTION,
     CONF_HOST,
     CONF_ID,
     CONF_INDEX,
@@ -161,6 +162,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_BIOS_DIR): _storage_dir,
             cv.Optional(CONF_SPEAKER): cv.use_id(speaker.Speaker),
             cv.Optional(CONF_KEY_BINDINGS_ID): cv.use_id(KeyBindings),
+            cv.Optional(CONF_CLOSE_ACTION, default="back"): cv.string_strict,
             cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
             cv.Optional(CONF_HID_IDS, default=[]): cv.ensure_list(cv.use_id(HIDInput)),
             cv.Optional(CONF_KEYS, default={}): cv.Schema(
@@ -251,6 +253,7 @@ async def to_code(config):
     if CONF_KEY_BINDINGS_ID in config:
         cg.add_define("USE_EMULATOR_KEY_BINDINGS")
         cg.add(var.set_key_bindings(await cg.get_variable(config[CONF_KEY_BINDINGS_ID])))
+        cg.add(var.set_close_action_name(config[CONF_CLOSE_ACTION]))
     if CONF_TOUCHSCREEN_ID in config:
         cg.add_define("USE_EMULATOR_TOUCH")
         cg.add(var.set_touchscreen(await cg.get_variable(config[CONF_TOUCHSCREEN_ID])))

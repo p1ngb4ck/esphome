@@ -128,7 +128,10 @@ class Emulator : public Component
   void add_on_state_callback(std::function<void()> &&callback) { this->state_callbacks_.add(std::move(callback)); }
 #ifdef USE_EMULATOR_KEY_BINDINGS
   void set_key_bindings(lvgl::KeyBindings *bindings) { this->bindings_ = bindings; }
-  void set_close_keys(uint8_t keys) { this->close_keys_ = keys; }
+  void set_close_action_name(const char *name) { this->close_name_ = name; }
+  void set_close_action(const std::string &name) {
+    this->close_action_ = this->bindings_ != nullptr ? this->bindings_->find_action(name) : -1;
+  }
   void set_close_hold(float seconds) { this->close_hold_ms_ = static_cast<uint32_t>(seconds * 1000); }
 #endif
 #ifdef USE_EMULATOR_TOUCH
@@ -341,7 +344,8 @@ class Emulator : public Component
   bool closed_home_{false};
 #ifdef USE_EMULATOR_KEY_BINDINGS
   lvgl::KeyBindings *bindings_{nullptr};
-  uint8_t close_keys_{1};
+  int close_action_{-1};
+  const char *close_name_{"back"};
   uint32_t close_hold_ms_{1000};
   bool key_held_{false};
   uint16_t key_page_{0};

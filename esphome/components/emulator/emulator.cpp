@@ -63,6 +63,9 @@ void Emulator::setup() {
   if (this->touchscreen_ != nullptr)
     this->touchscreen_->register_listener(&this->touch_listener_);
 #endif
+#ifdef USE_EMULATOR_KEY_BINDINGS
+  this->set_close_action(this->close_name_);
+#endif
   this->disable_loop();
 }
 
@@ -1671,10 +1674,9 @@ bool Emulator::game_key_(uint16_t page, uint16_t usage, bool pressed, uint32_t s
 
 bool Emulator::close_key_(uint16_t page, uint16_t usage, bool pressed, uint32_t source) {
 #ifdef USE_EMULATOR_KEY_BINDINGS
-  if (pressed && !this->key_held_ && this->bindings_ != nullptr) {
+  if (pressed && !this->key_held_ && this->bindings_ != nullptr && this->close_action_ >= 0) {
     const int action = this->bindings_->resolve(page, usage, 0);
-    if ((action == lvgl::KeyBindings::ACT_BACK && (this->close_keys_ & 1)) ||
-        (action == lvgl::KeyBindings::ACT_HOME && (this->close_keys_ & 2))) {
+    if (action == this->close_action_) {
       this->key_held_ = true;
       this->key_page_ = page;
       this->key_usage_ = usage;
