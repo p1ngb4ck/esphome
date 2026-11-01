@@ -73,6 +73,15 @@ One branch per change; `main` contains every branch. Base: ESPHome `dev` at `1f7
 All topics together: `github://p1ngb4ck/esphome@dev`. `external_components` replaces components only; the ESPHome
 core of the build host stays as installed.
 
+## License
+
+- ESPHome's own files, also where this repository changes them: the [ESPHome License](LICENSE) (MIT for the Python
+  code and everything else, GPLv3 for the C++ runtime files).
+- New files written for this repository (new components, their code, tests and documentation): MIT,
+  [LICENSE-MIT](LICENSE-MIT).
+- Third-party code keeps its own licence:
+  - `web_server/file_explorer/`: CubicleSoft js-fileexplorer, MIT (its `LICENSE.txt`).
+
 ## Thanks
 
 The advanced file browser is CubicleSoft's [js-fileexplorer](https://github.com/cubiclesoft/js-fileexplorer) (MIT) -
