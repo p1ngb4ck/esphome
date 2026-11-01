@@ -83,7 +83,7 @@ CONFIG_SCHEMA = cv.All(
 
 async def to_code(config: ConfigType) -> None:
     if config[CONF_TYPE] == H264_ENCODER:
-        add_idf_component(name="espressif/esp_h264", ref="1.4.1")
+        esp32.require_h264_encoder()
         cg.add_define("USE_CAMERA_H264_ENCODER")
         cg.new_Pvariable(
             config[CONF_ID],
