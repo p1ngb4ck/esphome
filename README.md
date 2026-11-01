@@ -1,16 +1,3 @@
-# ESPHome [![Discord Chat](https://img.shields.io/discord/429907082951524364.svg)](https://discord.gg/KhAMKrd) [![GitHub release](https://img.shields.io/github/release/esphome/esphome.svg)](https://GitHub.com/esphome/esphome/releases/) [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/esphome/esphome)
+# esphome-cert-store
 
-<a href="https://esphome.io/">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://media.esphome.io/logo/logo-text-on-dark.svg">
-    <img src="https://media.esphome.io/logo/logo-text-on-light.svg" alt="ESPHome Logo">
-  </picture>
-</a>
-
----
-
-[Documentation](https://esphome.io) -- [Issues](https://github.com/esphome/esphome/issues) -- [Feature requests](https://github.com/orgs/esphome/discussions)
-
----
-
-[![ESPHome - A project from the Open Home Foundation](https://www.openhomefoundation.org/badges/esphome.png)](https://www.openhomefoundation.org/)
+ESPHome `dev` plus the cert_store component of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome) `testing_dev`. Base: ESPHome `dev` at `1f70f86b47`. Branches: `pr/cert-store` (on `pr/storage` and `pr/esp32-cert-bundle-sha512` of esphome-storage-drivers).
