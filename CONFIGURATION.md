@@ -426,6 +426,7 @@ ESP32 only. Where flash preferences live, and their backup.
 | `storage_backend` | `false` | Flash preferences through the storage interface. |
 | `use_internal_nvs` | `true` | `false`: the internal NVS is no preferences backend (it is still initialised for WiFi / Bluetooth). |
 | `keep_early` | - | Components that read their preferences before storages are up; their preferences stay in the early (RTC) store. |
+| `nvs_backup_dir` | - | With `nvs:`: the folder the NVS snapshot taken before a reset at boot is written to (`nvs-<result>-<config hash>.bin`). |
 
 With `external_nvs`, `safe_mode`'s boot counter stays in the RTC store, so a failing external chip cannot defeat it.
 `use_internal_nvs: false` needs `external_nvs`; preferences read before the external store is up then return
@@ -458,6 +459,70 @@ Exactly one of `path` and `device`.
     path: /sdcard/backup/preferences.json
     format: json
     reboot: true
+```
+
+## `nvs`
+
+ESP32 only. The NVS guard: it records which firmware wrote the default NVS partition (namespace `nvs_meta`: config
+hash, build time, `esphome: project:` name and version) and checks it at every boot, before any component reads a
+value. Without `nvs:` nothing changes.
+
+| Boot result | When |
+|---|---|
+| `fresh` | No record and no preferences. |
+| `adopted` | No record but preferences (NVS written before the guard was added). |
+| `same` | The same build. |
+| `upgraded` / `downgraded` | Another build: by the project version, else by the build time. |
+| `foreign` | Another project name. |
+| `corrupt` | The partition cannot be initialised or opened. |
+
+| Option | Default | Description |
+|---|---|---|
+| `on_upgrade` | `invalidate_changed` | Policy after an upgrade. |
+| `on_downgrade` | `invalidate_changed` | Policy after a downgrade. |
+| `on_foreign` | `read_only` | Policy for another project's NVS. |
+| `on_corrupt` | `reset` | `reset` (formatted) or `keep` (left alone, no NVS this boot). |
+| `protected_namespaces` | - | More namespaces kept through a reset. |
+| `state` | - | A text sensor: result, policy, entries, unreadable entries. |
+| `on_check` | - | Automation after each check; `result` and `state` as strings. |
+
+Policies: `keep` (nothing changes), `invalidate_changed` (preferences whose stored size differs from this build's are
+erased after setup; everything else stays), `read_only` (preferences are read, never written), `reset` (formatted,
+protected namespaces written back), `reset_all` (formatted).
+
+Protected namespaces: `nvs.net80211` (Wi-Fi), `phy` (RF calibration), `bt_config.conf` and `nimble_bond`
+(Bluetooth bonds), `connected_bda` (`a2dp_source`), every namespace of a `spi: nvs_pins`, `i2s_audio: nvs`,
+`network: name_from_nvs` and `improv_serial: identity` block, and `protected_namespaces`.
+
+Nothing is erased without a policy or an action saying so. Buffers (the snapshot, the list of preferences) are
+taken per use - PSRAM first, internal RAM without PSRAM - and freed when done.
+
+```yaml
+nvs:
+  on_upgrade: invalidate_changed
+  state:
+    name: NVS state
+
+preferences:
+  nvs_backup_dir: /sdcard/backup/nvs
+```
+
+### Actions
+
+| Action | Options | What |
+|---|---|---|
+| `nvs.check` | - | Reads every entry, publishes the state, runs `on_check`. |
+| `nvs.invalidate` | `namespace`, `key` (empty: the whole namespace) | Erases a key or a namespace. |
+| `nvs.reset` | `keep_protected` (`true`), `reboot` (`true`) | Formats the partition. |
+| `nvs.request` | `policy` | A policy applied once at the next boot (for example before flashing another firmware). |
+| `nvs.backup` | `path` | Every entry to a file (the boot snapshot if one is held). Needs `storage:`. |
+| `nvs.restore` | `path`, `protected_only` (`false`), `reboot` (`true`) | Writes a backup back. Needs `storage:`. |
+
+```yaml
+- nvs.request:
+    policy: reset
+- nvs.backup:
+    path: /sdcard/backup/nvs/now.bin
 ```
 
 ## `spi`: pins from the NVS

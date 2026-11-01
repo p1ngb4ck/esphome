@@ -86,7 +86,11 @@ One branch per component or change; `main` contains every branch. Base: ESPHome 
 | `pr/store-yaml` | `store_yaml`: the firmware's YAML embedded and exported to a storage | ESP32, host | `pr/storage` |
 | `pr/spi-nvs-pins` | `spi`: bus pins, SPI flash CS and data lines 2 / 3 read from the internal NVS | all ESP32 | - |
 | `pr/binary-storage` | `binary_storage`: EEPROM, FRAM, MRAM and SPI flash on I2C / SPI / 1-Wire as raw or file system storages, flash partitions, LittleFS regions, NVS regions, pre-fill | all ESP32 | `pr/storage`, `pr/spi-nvs-pins` |
+| `pr/esp32-nvs-ready` | `nvs_ready`: the default NVS partition formatted when it reports no free pages or a new version | all ESP32 | - |
+| `pr/esp32-nvs-defaults` | `add_nvs_default()`: defaults written into an NVS partition image at build time | all ESP32 | - |
+| `pr/esp32-nvs-actions` | NVS browsing and erasing, API actions `nvs_list` / `nvs_erase` | all ESP32 | `pr/esp32-chip-revision` ([esphome-esp32-platform](https://github.com/p1ngb4ck/esphome-esp32-platform)) |
 | `pr/preferences-storage` | `preferences`: flash preferences through the storage interface or an external NVS region, optional internal NVS, `keep_early`, backup / restore | ESP32 | `pr/binary-storage`, `pr/esp32-nvs-ready` |
+| `pr/nvs` | `nvs`: the NVS guard - what wrote the NVS (meta record), boot check, a policy per result, protected namespaces, actions, state sensor; `preferences: nvs_backup_dir`; the `nvs` text platform | ESP32 | `pr/preferences-storage`, `pr/esp32-nvs-actions` |
 
 `pr/storage` is in [esphome-storage-interface](https://github.com/p1ngb4ck/esphome-storage-interface),
 `pr/cert-store` in [esphome-cert-store](https://github.com/p1ngb4ck/esphome-cert-store), `pr/esp32-nvs-ready` in
