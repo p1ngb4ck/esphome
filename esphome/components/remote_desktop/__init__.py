@@ -1,6 +1,7 @@
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import speaker, touchscreen
+from esphome.components.const import CONF_HOST
 from esphome.components.esp32 import VARIANT_ESP32P4, only_on_variant, require_vfs_select
 from esphome.components.lvgl.defines import CONF_LVGL_ID
 from esphome.components.lvgl.hid_input import KeyBindings
@@ -12,7 +13,6 @@ from esphome.components.lvgl.video_output import (
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_CLOSE_ACTION,
-    CONF_HOST,
     CONF_ID,
     CONF_INDEX,
     CONF_NAME,
