@@ -51,6 +51,17 @@ One branch per change; `main` contains every branch. Base: ESPHome `dev` at `1f7
 All topics together: `github://p1ngb4ck/esphome@dev`. `external_components` replaces components only; the ESPHome
 core of the build host stays as installed.
 
+## License
+
+- ESPHome's own files, also where this repository changes them: the [ESPHome License](LICENSE) (MIT for the Python
+  code and everything else, GPLv3 for the C++ runtime files).
+- New files written for this repository (new components, their code, tests and documentation): MIT,
+  [LICENSE-MIT](LICENSE-MIT).
+- Third-party code keeps its own licence:
+  - `emulator/emu/`: the emulator cores under their own licences, in each core's folder - nofrendo, gnuboy, SMS Plus,
+    PCE-GO (GPL-2.0), Gwenesis, LCD-Game-Emulator (GPL-3.0), Handy (zlib-style), fMSX and Snes9x (their own licences,
+    which do not allow commercial use). A firmware that includes a core is bound by that core's licence.
+
 ## Thanks
 
 The emulator cores come from [Retro-Go](https://github.com/ducalex/retro-go) by Alex Duchesne and its contributors,
