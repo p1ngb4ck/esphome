@@ -1,6 +1,6 @@
 # esphome-relay-link
 
-`relay_link`: the device's link to a relay integration in Home Assistant (svp_relay), for what an MCU cannot do on
+`relay_link`: the device's link to a relay integration in Home Assistant (esphome-media-relay), for what an MCU cannot do on
 its own - keyboard layouts, languages, certificates and pictures served by Home Assistant, cover art, screen
 captures sent to Home Assistant, streams rendered on the server. And `fixed_containers`: fixed-size strings and
 lists for components that must not grow memory at runtime.
