@@ -162,7 +162,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_BIOS_DIR): _storage_dir,
             cv.Optional(CONF_SPEAKER): cv.use_id(speaker.Speaker),
             cv.Optional(CONF_KEY_BINDINGS_ID): cv.use_id(KeyBindings),
-            cv.Optional(CONF_CLOSE_ACTION, default="back"): cv.string_strict,
+            cv.Optional(CONF_CLOSE_ACTION, default="home"): cv.string_strict,
             cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
             cv.Optional(CONF_HID_IDS, default=[]): cv.ensure_list(cv.use_id(HIDInput)),
             cv.Optional(CONF_KEYS, default={}): cv.Schema(
