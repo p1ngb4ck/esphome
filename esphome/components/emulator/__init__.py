@@ -190,12 +190,6 @@ CONFIG_SCHEMA = cv.All(
 def _final_validate(config):
     config = final_validate_video_output(config)
     fconf = fv.full_config.get()
-    svp = fconf.get("simple_video_player")
-    for block in svp if isinstance(svp, list) else [svp] if svp else []:
-        if "emulator" in block:
-            raise cv.Invalid(
-                "simple_video_player's emulator is configured too: one emulator only (the cores share one allocator)"
-            )
     lvgl = fconf.get_config_for_path(fconf.get_path_for_id(config[CONF_LVGL_ID])[:-1])
     width, height = screen_size(config[CONF_LVGL_ID])
     if int(lvgl.get(CONF_ROTATION, 0)) in (90, 270):
