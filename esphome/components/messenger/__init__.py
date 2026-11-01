@@ -25,7 +25,7 @@ from esphome.const import (
 )
 from esphome.types import ConfigType
 
-AUTO_LOAD = ["json", "audio", "ring_buffer", "mtproto"]
+AUTO_LOAD = ["json", "audio", "ring_buffer", "mtproto", "image", "runtime_image"]
 DEPENDENCIES = ["network", "http_request"]
 
 CONF_TELEGRAM = "telegram"
@@ -221,6 +221,9 @@ CONFIG_SCHEMA = cv.All(
 async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
+    from esphome.components import runtime_image
+
+    runtime_image.enable_format("JPEG")
     http = await cg.get_variable(config[CONF_HTTP_REQUEST_ID])
     cg.add(var.set_http_request(http))
     cg.add(var.set_api_version(config[CONF_API_VERSION]))
