@@ -174,6 +174,14 @@ def _validate_output_list(config: ConfigType) -> None:
             config[key] = max(output[key] for output in outputs)
 
 
+def _resolve_output_format(config: ConfigType) -> None:
+    if _is_output_list(config) and any(key not in config for key in (CONF_SAMPLE_RATE, CONF_NUM_CHANNELS)):
+        _validate_output_list(config)
+
+
+audio.register_format_resolver("resampler", _resolve_output_format)
+
+
 def _validate_audio_compatibility(config: ConfigType) -> None:
     if _is_output_list(config):
         _validate_output_list(config)
