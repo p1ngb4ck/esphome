@@ -104,7 +104,7 @@ class JPEGFormat(Format):
             cg.add_library(
                 "JPEGDEC",
                 "1.8.4",
-                "https://github.com/esphome-libs/JPEGDEC#1.8.4-esphome.3",
+                "https://github.com/esphome-libs/JPEGDEC#1.8.4-esphome.4",
             )
             cg.add_define("USE_JPEGDEC")
             if CORE.is_host:
