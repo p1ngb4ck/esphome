@@ -69,6 +69,7 @@ class MipiDsi final : public display::Display {
   void set_model(const char *model) { this->model_ = model; }
   void set_lane_bit_rate(float lane_bit_rate) { this->lane_bit_rate_ = lane_bit_rate; }
   void set_lanes(uint8_t lanes) { this->lanes_ = lanes; }
+  void set_video_mode(uint8_t mode) { this->video_mode_ = mode; }
   void set_frame_ack(bool frame_ack) { this->frame_ack_ = frame_ack; }
   void set_continuous_clock(bool continuous) { this->continuous_clock_ = continuous; }
   void set_eotp(bool eotp) { this->eotp_ = eotp; }
@@ -145,6 +146,7 @@ class MipiDsi final : public display::Display {
   float pclk_frequency_ = 16;  // in MHz
   float lane_bit_rate_{1500};  // in Mbps
   uint8_t lanes_{2};           // 1, 2, 3 or 4 lanes
+  uint8_t video_mode_{2};
   bool frame_ack_{true};
   bool continuous_clock_{false};
   bool eotp_{true};
