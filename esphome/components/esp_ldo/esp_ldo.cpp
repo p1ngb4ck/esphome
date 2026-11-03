@@ -42,6 +42,8 @@ void EspLdo::turn_on() {
   if (this->handle_ != nullptr)
     return;
   this->setup();
+  if (this->handle_ != nullptr)
+    this->on_turn_on_.call();
 }
 
 void EspLdo::adjust_voltage(float voltage) {

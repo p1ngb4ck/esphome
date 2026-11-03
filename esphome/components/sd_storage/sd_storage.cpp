@@ -64,6 +64,13 @@ void SdMmc::setup() {
     this->mark_failed();
   }
 
+#ifdef USE_SD_STORAGE_POWER_LDO
+  if (this->defer_mount_until_powered_()) {
+    if (this->cd_pin_ != nullptr)
+      this->cd_pin_->setup();
+    return;
+  }
+#endif
   if (this->cd_pin_ != nullptr) {
     this->cd_pin_->setup();
     // With a CD pin configured, only mount if a card is actually seen at boot -- otherwise wait
@@ -73,12 +80,18 @@ void SdMmc::setup() {
     if (this->card_present_()) {
       if (this->mount() != storage::StorageError::STORAGE_ERROR_OK) {
         ESP_LOGE(TAG, "Failed to mount SD/MMC card");
+#ifdef USE_SD_STORAGE_POWER_LDO
+        this->power_cycle_retry_();
+#endif
       }
     } else {
       ESP_LOGD(TAG, "Waiting for card (CD)");
     }
   } else if (this->mount() != storage::StorageError::STORAGE_ERROR_OK) {
     ESP_LOGE(TAG, "Failed to mount SD/MMC card");
+#ifdef USE_SD_STORAGE_POWER_LDO
+    this->power_cycle_retry_();
+#endif
   }
 }
 
