@@ -1,4 +1,4 @@
-#include "bt_pairing_select.h"
+#include "bt_host_select.h"
 
 #ifdef USE_ESP32
 
@@ -7,26 +7,26 @@
 
 #include <algorithm>
 
-namespace esphome::bt_pairing {
+namespace esphome::bt_host {
 
-static const char *const TAG = "bt_pairing.select";
+static const char *const TAG = "bt_host.select";
 static const char *const NO_DEVICES = "(no devices found)";
 static const char *const PICK = "(pick a device)";
 
-void BTPairingSelect::setup() {
-  this->option_storage_.reserve(BTPairing::MAX_SCANNED + 1);
+void BTHostSelect::setup() {
+  this->option_storage_.reserve(BTHost::MAX_SCANNED + 1);
   this->option_storage_.emplace_back(NO_DEVICES);
   this->publish_options_();
 }
 
-void BTPairingSelect::set_devices(const std::vector<ScannedDevice> &devices) {
+void BTHostSelect::set_devices(const std::vector<ScannedDevice> &devices) {
   if (this->option_storage_.capacity() == 0)
     return;
   std::vector<std::string> wanted;
-  wanted.reserve(std::min(devices.size(), BTPairing::MAX_SCANNED) + 1);
+  wanted.reserve(std::min(devices.size(), BTHost::MAX_SCANNED) + 1);
   wanted.emplace_back(devices.empty() ? NO_DEVICES : PICK);
   for (const auto &device : devices) {
-    if (wanted.size() > BTPairing::MAX_SCANNED)
+    if (wanted.size() > BTHost::MAX_SCANNED)
       break;
     char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
     format_mac_addr_upper(device.address, mac);
@@ -65,7 +65,7 @@ void BTPairingSelect::set_devices(const std::vector<ScannedDevice> &devices) {
   }
 }
 
-void BTPairingSelect::publish_options_() {
+void BTHostSelect::publish_options_() {
   FixedVector<const char *> options;
   options.init(this->option_storage_.size());
   for (const auto &option : this->option_storage_)
@@ -74,7 +74,7 @@ void BTPairingSelect::publish_options_() {
   this->publish_state(size_t{0});
 }
 
-void BTPairingSelect::control(const std::string &value) {
+void BTHostSelect::control(const std::string &value) {
   if (this->parent_ == nullptr)
     return;
   // Option 0 is the placeholder; option i is device i - 1.
@@ -89,8 +89,8 @@ void BTPairingSelect::control(const std::string &value) {
   }
 }
 
-void BTPairingSelect::dump_config() { LOG_SELECT("", "Bluetooth pairing device", this); }
+void BTHostSelect::dump_config() { LOG_SELECT("", "Bluetooth pairing device", this); }
 
-}  // namespace esphome::bt_pairing
+}  // namespace esphome::bt_host
 
 #endif  // USE_ESP32

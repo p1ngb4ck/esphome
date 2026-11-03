@@ -322,7 +322,9 @@ CONFIG_SCHEMA = cv.All(
 
 
 def _classic_on_own_radio(full_config: ConfigType) -> bool:
-    return "bt_classic" in full_config and not any(
+    from esphome.components.bt_host import classic_in_use
+
+    return classic_in_use(full_config) and not any(
         c.get("bluedroid") for c in full_config.get("usb_bluetooth") or []
     )
 

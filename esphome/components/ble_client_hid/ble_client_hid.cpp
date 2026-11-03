@@ -1,4 +1,5 @@
 #include "ble_client_hid.h"
+#include "esphome/components/bt_host/gap_classic.h"
 #ifdef USE_BLE_CLIENT_HID_SELECT
 #include "select/ble_hid_device_select.h"
 #endif
@@ -220,7 +221,7 @@ void BLEClientHID::setup() {
   if (this->pairing_ != nullptr && this->dynamic_)
     this->pairing_->add_target(this);
   if (this->pairing_ != nullptr) {
-    this->pairing_->add_on_forget_callback([this](const bt_pairing::PairingRecord &record) {
+    this->pairing_->add_on_forget_callback([this](const bt_host::PairingRecord &record) {
       if (record.slot != this->slot_)
         return;
       if (this->address_set_ != nullptr)
@@ -342,7 +343,7 @@ bool BLEClientHID::is_free() const {
                                       : this->ble_client::BLEClientNode::parent_->get_address() == 0;
 }
 
-bool BLEClientHID::pair_device(const bt_pairing::ScannedDevice &device) {
+bool BLEClientHID::pair_device(const bt_host::ScannedDevice &device) {
   return this->pair_found_({address_to_uint64(device.address), static_cast<esp_ble_addr_type_t>(device.address_type),
                             static_cast<uint16_t>(device.device_class), device.name});
 }
@@ -459,7 +460,7 @@ void BLEClientHID::end_pairing_(bool success, const char *reason) {
     ESP_LOGW(TAG, "Pairing failed: %s", reason);
     // A bond the failed attempt may have left goes; the device paired before comes back.
     if (this->candidate_selected_ && !same_device)
-      esp_ble_remove_bond_device(this->parent()->get_remote_bda());
+      esphome::bt_host::remove_bond(this->parent()->get_remote_bda(), true);
     if (has_previous) {
       this->schedule_address_(address_to_uint64(previous), previous_type, true);
     } else {
@@ -470,14 +471,14 @@ void BLEClientHID::end_pairing_(bool success, const char *reason) {
   ESP_LOGI(TAG, "[%s] Paired with '%s'", this->parent()->address_str(), this->candidate_name_.c_str());
   // The device it replaces loses its bond.
   if (has_previous && !same_device)
-    esp_ble_remove_bond_device(previous);
+    esphome::bt_host::remove_bond(previous, true);
   if (this->address_set_ != nullptr)
     this->address_set_(this->parent()->address_str());
 #ifdef USE_BT_PAIRING
   if (this->pairing_ != nullptr) {
-    bt_pairing::PairingRecord record{};
+    bt_host::PairingRecord record{};
     memcpy(record.address, this->parent()->get_remote_bda(), sizeof(record.address));
-    record.transport = static_cast<uint8_t>(bt_pairing::Transport::LE);
+    record.transport = static_cast<uint8_t>(bt_host::Transport::LE);
     record.address_type = static_cast<uint8_t>(this->parent()->get_remote_addr_type());
     record.slot = this->slot_;
     record.device_class = this->candidate_appearance_;
@@ -498,7 +499,7 @@ void BLEClientHID::unpair() {
     ESP_LOGW(TAG, "No device paired");
     return;
   }
-  if (esp_err_t err = esp_ble_remove_bond_device(this->parent()->get_remote_bda()); err != ESP_OK) {
+  if (esp_err_t err = esphome::bt_host::remove_bond(this->parent()->get_remote_bda(), true); err != ESP_OK) {
     ESP_LOGW(TAG, "[%s] Unpair failed: %s", this->parent()->address_str(), esp_err_to_name(err));
   } else {
     ESP_LOGI(TAG, "[%s] Unpaired", this->parent()->address_str());

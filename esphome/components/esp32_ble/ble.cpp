@@ -30,7 +30,7 @@ extern "C" {
 #include <freertos/task.h>
 
 #ifdef USE_BT_PERSISTENCE
-#include "esphome/components/bt_persistence/bt_persistence.h"
+#include "esphome/components/bt_host/persistence.h"
 #endif
 #include <cstring>
 
@@ -658,7 +658,7 @@ void ESP32BLE::loop_handle_state_transition_not_active_() {
   } else if (this->state_ == BLE_COMPONENT_STATE_ENABLE) {
 #ifdef USE_BT_PERSISTENCE
     // Bluedroid reads its pairing data once, when it starts.
-    if (bt_persistence::global_bt_persistence != nullptr && !bt_persistence::global_bt_persistence->is_ready())
+    if (bt_host::global_bt_persistence != nullptr && !bt_host::global_bt_persistence->is_ready())
       return;
 #endif
     ESP_LOGD(TAG, "Enabling");

@@ -9,11 +9,11 @@ shared hid input (keys, text, pointer, controls, layouts), as usb_hid does.
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import ble_client, esp32_ble_tracker
-from esphome.components.bt_pairing import (
+from esphome.components.bt_host import (
     ADDRESS_GLOBAL_SCHEMA,
     CONF_ADDRESS_GLOBAL,
-    CONF_BT_PAIRING_ID,
-    BTPairing,
+    CONF_BT_HOST_ID,
+    BTHost,
     setup_address_global,
     validate_address_global,
 )
@@ -26,9 +26,9 @@ from esphome.helpers import fnv1_hash
 
 CODEOWNERS = ["@fsievers22", "@p1ngb4ck"]
 DEPENDENCIES = ["ble_client"]
-AUTO_LOAD = ["hid", "sha256", "bt_pairing"]
+AUTO_LOAD = ["hid", "sha256", "bt_host"]
 MULTI_CONF = True
-# Auto-loaded by bt_pairing, which creates its own instances.
+# Auto-loaded by bt_host, which creates its own instances.
 MULTI_CONF_NO_DEFAULT = True
 
 CONF_EVENT_SAMPLING_INTERVAL = "event_sampling_interval"
@@ -87,8 +87,8 @@ CONFIG_SCHEMA = (
         {
             cv.GenerateID(): cv.declare_id(BLEClientHID),
             # With a ble_client without mac_address this is a slot: ble_client_hid.pair
-            # finds an advertising HID device and bt_pairing keeps it across reboots.
-            cv.OnlyWith(CONF_BT_PAIRING_ID, "bt_pairing"): cv.use_id(BTPairing),
+            # finds an advertising HID device and bt_host keeps it across reboots.
+            cv.OnlyWith(CONF_BT_HOST_ID, "bt_host"): cv.use_id(BTHost),
             **ADDRESS_GLOBAL_SCHEMA,
             # Coalesces relative motion (pointer, dials) in the Home Assistant events and
             # last-event sensors; keys, text and on_pointer always see every report.
@@ -147,10 +147,10 @@ def _final_validate(config):
             f"{CONF_ADDRESS_GLOBAL} is for a ble_client_hid whose ble_client has no "
             "mac_address"
         )
-    if slot and CONF_BT_PAIRING_ID not in config and CONF_ADDRESS_GLOBAL not in config:
+    if slot and CONF_BT_HOST_ID not in config and CONF_ADDRESS_GLOBAL not in config:
         raise cv.Invalid(
             "a ble_client_hid whose ble_client has no mac_address is paired at runtime and "
-            "needs bt_pairing or an address_global to keep the device"
+            "needs bt_host or an address_global to keep the device"
         )
     validate_address_global(config)
 
@@ -163,7 +163,7 @@ async def to_code(config):
 
 
 async def slot_to_code(config, slot: bool = True):
-    """Also bt_pairing's internal slots, whose ble_client is not in the config."""
+    """Also bt_host's internal slots, whose ble_client is not in the config."""
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await ble_client.register_ble_node(var, config)
@@ -172,8 +172,8 @@ async def slot_to_code(config, slot: bool = True):
         cg.add(var.set_dynamic(True))
         # Pairing looks for advertising HID devices.
         await esp32_ble_tracker.register_ble_device(var, config)
-    if CONF_BT_PAIRING_ID in config:
-        pairing = await cg.get_variable(config[CONF_BT_PAIRING_ID])
+    if CONF_BT_HOST_ID in config:
+        pairing = await cg.get_variable(config[CONF_BT_HOST_ID])
         cg.add(var.set_pairing(pairing))
     await setup_address_global(var, config)
     await setup_hid_input(var, config)

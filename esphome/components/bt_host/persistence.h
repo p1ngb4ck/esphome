@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-namespace esphome::bt_persistence {
+namespace esphome::bt_host {
 
 // Keeps Bluedroid's pairing data (and GATT cache) in PSRAM and mirrors it to a file through the
 // storage worker. Bluetooth is held back until the file is loaded.
@@ -125,6 +125,6 @@ template<typename... Ts> class SetPathAction : public Action<Ts...>, public Pare
   void play(const Ts &...x) override { this->parent_->change_path(this->path_.value(x...)); }
 };
 
-}  // namespace esphome::bt_persistence
+}  // namespace esphome::bt_host
 
 #endif  // USE_BT_PERSISTENCE
