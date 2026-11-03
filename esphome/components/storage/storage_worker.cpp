@@ -1583,6 +1583,13 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
 
   const uint64_t total = req.bytes_total.load();
   if (req.offset >= total) {
+    if (to_file && !file_is_fs && !req.verifying && req.verify_pass_done == 0) {
+      const StorageError derr = static_cast<NetworkStorage *>(file_storage)->write_done(file_path, total);
+      if (derr != StorageError::STORAGE_ERROR_OK) {
+        finish_request(req, derr);
+        return;
+      }
+    }
     // A verify pass over a zero-length source never enters verify_chunk_ (the offset>=total check
     // here fires first), so the pass is never counted and this would re-enter begin_verify_pass_
     // forever. Close the empty pass here; for a non-empty pass verify_chunk_ has already counted it
@@ -2206,6 +2213,13 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
   }
   if (bytes_read == 0) {
     // EOF of the file in flight.
+    if (!req.dst_is_fs) {
+      err = static_cast<NetworkStorage *>(req.dst_storage)->write_done(req.dst_path, req.offset);
+      if (err != StorageError::STORAGE_ERROR_OK) {
+        finish_request(req, err);
+        return;
+      }
+    }
     if (is_tree_op(req.op)) {
       // Close it before touching the entry itself, then let the walk pick the next one on the
       // next call. The chunk buffer stays -- the next file reuses it.
@@ -2458,8 +2472,11 @@ static void run_stream_step(StreamRequest &req) {
     }
 
     case StreamState::CLOSING: {
-      if (req.is_fs && req.handle != nullptr)
+      if (req.is_fs && req.handle != nullptr) {
         err = static_cast<FilesystemStorage *>(req.storage)->close(req.handle);
+      } else if (!req.is_fs && req.op == StreamOp::WRITE) {
+        err = static_cast<NetworkStorage *>(req.storage)->write_done(req.path, req.offset);
+      }
       req.handle = nullptr;
       req.result = err;
       req.state = StreamState::DONE;

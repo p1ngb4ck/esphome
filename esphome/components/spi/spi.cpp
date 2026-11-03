@@ -46,6 +46,9 @@ void SPIComponent::unregister_device(SPIClient *device) {
 }
 
 void SPIComponent::setup() {
+#ifdef USE_SPI_NVS_PINS
+  this->apply_nvs_pins_();
+#endif
   if (this->sdo_pin_ == nullptr)
     this->sdo_pin_ = NullPin::NULL_PIN;
   if (this->sdi_pin_ == nullptr)
