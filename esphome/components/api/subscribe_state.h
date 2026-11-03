@@ -12,6 +12,8 @@ class APIConnection;
 // Calls send_*_state
 #define INITIAL_STATE_HANDLER(entity_type, EntityClass) \
   bool InitialStateIterator::on_##entity_type(EntityClass *entity) { /* NOLINT(bugprone-macro-parentheses) */ \
+    if (global_api_server->is_hidden(entity)) \
+      return true; \
     return this->client_->send_##entity_type##_state(entity); \
   }
 

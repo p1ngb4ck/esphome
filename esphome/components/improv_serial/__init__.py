@@ -5,6 +5,7 @@ from esphome.components.logger import DOMAIN as LOGGER_DOMAIN, USB_CDC
 import esphome.config_validation as cv
 from esphome.const import CONF_BAUD_RATE, CONF_HARDWARE_UART, CONF_ID, CONF_UART_ID
 from esphome.core import CORE
+from esphome.cpp_generator import cpp_string_escape
 import esphome.final_validate as fv
 from esphome.types import ConfigType
 
@@ -17,6 +18,9 @@ improv_serial_ns = cg.esphome_ns.namespace("improv_serial")
 
 ImprovSerialComponent = improv_serial_ns.class_("ImprovSerialComponent", cg.Component)
 
+CONF_IDENTITY = "identity"
+CONF_NAMESPACE = "namespace"
+
 CONFIG_SCHEMA = (
     cv.Schema(
         {
@@ -25,6 +29,16 @@ CONFIG_SCHEMA = (
             # visual editor and the device builder must not expose it
             cv.Optional(CONF_UART_ID, visibility=cv.Visibility.YAML_ONLY): cv.use_id(
                 uart.UARTComponent
+            ),
+            cv.Optional(CONF_IDENTITY): cv.All(
+                cv.Schema(
+                    {
+                        cv.Required(CONF_NAMESPACE): cv.All(
+                            cv.string_strict, cv.Length(min=1, max=15)
+                        ),
+                    }
+                ),
+                cv.only_on_esp32,
             ),
         }
     )
@@ -70,3 +84,8 @@ async def to_code(config: ConfigType) -> None:
     if (uart_id := config.get(CONF_UART_ID)) is not None:
         await cg.add_variable(var.set_uart, uart_id)
         cg.add_define("USE_IMPROV_SERIAL_UART")
+    if (identity := config.get(CONF_IDENTITY)) is not None:
+        cg.add_define(
+            "IMPROV_SERIAL_IDENTITY_NAMESPACE",
+            cg.RawExpression(cpp_string_escape(identity[CONF_NAMESPACE])),
+        )

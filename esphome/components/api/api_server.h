@@ -72,6 +72,10 @@ class APIServer final : public Component
   void on_camera_image(const std::shared_ptr<camera::CameraImage> &image) override;
 #endif
   void set_port(uint16_t port) { this->port_ = port; }
+  using HiddenFn = bool (*)(const EntityBase *entity);
+  void set_hidden_fn(HiddenFn hidden) { this->hidden_fn_ = hidden; }
+  bool is_hidden(const EntityBase *entity) const { return this->hidden_fn_ != nullptr && this->hidden_fn_(entity); }
+  void relist_clients();
   void set_reboot_timeout(uint32_t reboot_timeout) { this->reboot_timeout_ = reboot_timeout; }
   void set_batch_delay(uint16_t batch_delay) { this->batch_delay_ = batch_delay; }
   uint16_t get_batch_delay() const { return batch_delay_; }
@@ -278,6 +282,7 @@ class APIServer final : public Component
 #endif
 
  protected:
+  HiddenFn hidden_fn_{nullptr};
   // Accept incoming socket connections. Only called when socket has pending connections.
   void __attribute__((noinline)) accept_new_connections_();
   /// Takes the socket into a new connection and starts it; callers must have
