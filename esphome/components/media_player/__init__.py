@@ -15,6 +15,7 @@ from esphome.const import (
     CONF_ON_TURN_OFF,
     CONF_ON_TURN_ON,
     CONF_SAMPLE_RATE,
+    CONF_STATUS,
     CONF_VOLUME,
 )
 from esphome.core import CORE
@@ -29,6 +30,21 @@ from esphome.cpp_generator import MockObj, MockObjClass
 from esphome.types import ConfigType
 
 CODEOWNERS = ["@jesserockz"]
+
+
+def AUTO_LOAD(config=None) -> list[str]:
+    for entry in config if isinstance(config, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        extended = entry.get(CONF_EXTENDED_API_SERVICES)
+        queue = entry.get(CONF_QUEUE)
+        if (isinstance(extended, dict) and extended.get(CONF_COVER_CANVASES)) or (
+            isinstance(queue, dict) and queue.get(CONF_RELAY)
+        ):
+            return ["relay_link"]
+    return []
+
+
 DOMAIN = "media_player"
 
 IS_PLATFORM_COMPONENT = True
@@ -36,6 +52,211 @@ IS_PLATFORM_COMPONENT = True
 media_player_ns = cg.esphome_ns.namespace("media_player")
 
 MediaPlayer = media_player_ns.class_("MediaPlayer")
+ExtendedApiServices = media_player_ns.class_("ExtendedApiServices", cg.Component)
+MediaPictures = media_player_ns.class_("MediaPictures", cg.Component)
+PicturesShowAction = media_player_ns.class_("PicturesShowAction", automation.Action)
+PicturesOpenAction = media_player_ns.class_("PicturesOpenAction", automation.Action)
+PicturesIntervalAction = media_player_ns.class_("PicturesIntervalAction", automation.Action)
+PicturesThumbnailAction = media_player_ns.class_("PicturesThumbnailAction", automation.Action)
+PicturesCommandAction = media_player_ns.class_("PicturesCommandAction", automation.Action)
+
+CONF_PICTURES = "pictures"
+CONF_CONTROLS = "controls"
+CONF_QUEUE = "queue"
+CONF_MAX_ENTRIES = "max_entries"
+CONF_RELAY = "relay"
+MediaQueue = media_player_ns.class_("MediaQueue", cg.Component)
+QueueAddAction = media_player_ns.class_("QueueAddAction", automation.Action)
+QueuePlayAction = media_player_ns.class_("QueuePlayAction", automation.Action)
+QueueModeAction = media_player_ns.class_("QueueModeAction", automation.Action)
+QueueCommandAction = media_player_ns.class_("QueueCommandAction", automation.Action)
+QUEUE_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.declare_id(MediaQueue),
+        cv.Optional(CONF_MAX_ENTRIES, default=500): cv.int_range(min=1, max=5000),
+        cv.Optional(CONF_RELAY, default=False): cv.boolean,
+    }
+)
+
+
+async def _queue_to_code(player, conf):
+    cg.add_define("USE_MEDIA_PLAYER_QUEUE")
+    var = cg.Pvariable(conf[CONF_ID], cg.MockObj(str(MediaQueue), "::").create())
+    await cg.register_component(var, conf)
+    cg.add(var.set_player(player))
+    cg.add(var.set_max_entries(conf[CONF_MAX_ENTRIES]))
+    if conf[CONF_RELAY]:
+        from esphome.components import relay_link
+
+        cg.add_define("USE_MEDIA_PLAYER_QUEUE_RELAY")
+        cg.add_define("USE_RELAY_LINK_CHANNELS")
+        cg.add(var.set_relay(await relay_link.get_relay_link()))
+    return var
+CONF_HIDE_AFTER = "hide_after"
+CONF_BUTTONS = "buttons"
+CONF_TITLE = "title"
+CONF_BAR_STYLE_ID = "bar_style_id"
+CONF_BUTTON_STYLE_ID = "button_style_id"
+CONF_ACCENT_BUTTON_STYLE_ID = "accent_button_style_id"
+CONF_FOCUS_STYLE_ID = "focus_style_id"
+CONF_ON_EXIT = "on_exit"
+MediaControls = media_player_ns.class_("MediaControls", cg.Component)
+ControlsAction = media_player_ns.class_("ControlsAction", automation.Action)
+ControlsTitleAction = media_player_ns.class_("ControlsTitleAction", automation.Action)
+CONTROL_BUTTONS = {
+    "previous": 0,
+    "play_pause": 1,
+    "stop": 2,
+    "next": 3,
+    "volume_down": 4,
+    "volume_up": 5,
+    "exit": 6,
+}
+
+
+def _controls(value):
+    from esphome.components.lvgl.lvcode import LvglComponent
+    from esphome.components.lvgl.types import lv_style_t
+
+    return cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(MediaControls),
+            cv.GenerateID(CONF_LVGL_ID): cv.use_id(LvglComponent),
+            cv.Optional(CONF_HIDE_AFTER, default="5s"): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_BUTTONS, default=["previous", "play_pause", "stop", "next"]): cv.ensure_list(
+                cv.one_of(*CONTROL_BUTTONS, lower=True)
+            ),
+            cv.Optional(CONF_TITLE, default=True): cv.boolean,
+            cv.Optional(CONF_BAR_STYLE_ID): cv.use_id(lv_style_t),
+            cv.Optional(CONF_BUTTON_STYLE_ID): cv.use_id(lv_style_t),
+            cv.Optional(CONF_ACCENT_BUTTON_STYLE_ID): cv.use_id(lv_style_t),
+            cv.Optional(CONF_FOCUS_STYLE_ID): cv.use_id(lv_style_t),
+            cv.Optional(CONF_ON_EXIT): automation.validate_automation(single=True),
+        }
+    )(value)
+
+
+async def _controls_to_code(player, conf, pictures, queue):
+    cg.add_define("USE_MEDIA_PLAYER_CONTROLS")
+    var = cg.Pvariable(conf[CONF_ID], cg.MockObj(str(MediaControls), "::").create())
+    await cg.register_component(var, conf)
+    cg.add(var.set_player(player))
+    cg.add(var.set_lvgl(await cg.get_variable(conf[CONF_LVGL_ID])))
+    if pictures is not None:
+        cg.add(var.set_pictures(pictures))
+    if queue is not None:
+        cg.add(var.set_queue(queue))
+    cg.add(var.set_hide_after(conf[CONF_HIDE_AFTER]))
+    for button in conf[CONF_BUTTONS]:
+        cg.add(var.add_button(CONTROL_BUTTONS[button]))
+    cg.add(var.set_show_title(conf[CONF_TITLE]))
+    for key, setter in (
+        (CONF_BAR_STYLE_ID, "set_bar_style"),
+        (CONF_BUTTON_STYLE_ID, "set_button_style"),
+        (CONF_ACCENT_BUTTON_STYLE_ID, "set_accent_style"),
+        (CONF_FOCUS_STYLE_ID, "set_focus_style"),
+    ):
+        if key in conf:
+            cg.add(getattr(var, setter)(await cg.get_variable(conf[key])))
+    if on_exit := conf.get(CONF_ON_EXIT):
+        await automation.build_automation(var.get_exit_trigger(), [], on_exit)
+CONF_IMAGE_ID = "image_id"
+CONF_DIRECTORIES = "directories"
+CONF_SLIDESHOW_INTERVAL = "slideshow_interval"
+CONF_DEFAULT_IMAGE_INDEX = "default_image_index"
+CONF_THUMBNAILS = "thumbnails"
+CONF_ON_PICTURE = "on_picture"
+
+
+def _storage_dir(value):
+    value = cv.string_strict(value)
+    if not value.startswith("/") or value.endswith("/"):
+        raise cv.Invalid("a directory's storage path, as /sd/pictures")
+    return value
+
+
+def _pictures(value):
+    from esphome.components.online_image.image import OnlineImage
+
+    return cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(MediaPictures),
+            cv.Required(CONF_IMAGE_ID): cv.use_id(OnlineImage),
+            cv.Optional(CONF_DIRECTORIES, default=[]): cv.ensure_list(_storage_dir),
+            cv.Optional(CONF_SLIDESHOW_INTERVAL, default="5s"): cv.All(
+                cv.positive_time_period_milliseconds, cv.Range(min=cv.TimePeriod(milliseconds=500))
+            ),
+            cv.Optional(CONF_DEFAULT_IMAGE_INDEX, default=0): cv.Any(
+                cv.int_range(min=0), cv.one_of("off", lower=True)
+            ),
+            cv.Optional(CONF_THUMBNAILS, default=[]): cv.All(cv.ensure_list(cv.use_id(OnlineImage)), cv.Length(max=50)),
+            cv.Optional(CONF_ON_PICTURE): automation.validate_automation(single=True),
+        }
+    )(value)
+
+
+async def _pictures_to_code(conf):
+    cg.add_define("USE_MEDIA_PLAYER_PICTURES")
+    var = cg.Pvariable(conf[CONF_ID], cg.MockObj(str(MediaPictures), "::").create())
+    await cg.register_component(var, conf)
+    cg.add(var.set_image(await cg.get_variable(conf[CONF_IMAGE_ID])))
+    for directory in conf[CONF_DIRECTORIES]:
+        cg.add(var.add_directory(directory))
+    cg.add(var.set_slideshow_interval(conf[CONF_SLIDESHOW_INTERVAL]))
+    index = conf[CONF_DEFAULT_IMAGE_INDEX]
+    cg.add(var.set_default_index(-1 if index == "off" else index))
+    for thumb in conf[CONF_THUMBNAILS]:
+        cg.add(var.add_thumbnail(await cg.get_variable(thumb)))
+    if on_picture := conf.get(CONF_ON_PICTURE):
+        await automation.build_automation(var.get_picture_trigger(), [], on_picture)
+    return var
+
+CONF_EXTENDED_API_SERVICES = "extended_api_services"
+CONF_COVER_CANVASES = "cover_canvases"
+CONF_LVGL_ID = "lvgl_id"
+
+
+def _extended_api_services(value):
+    from esphome.components import text_sensor
+    from esphome.components.lvgl.lvcode import LvglComponent
+    from esphome.components.lvgl.widgets.canvas import lv_canvas_t
+
+    if value is True or value == {}:
+        value = {}
+    elif value is False:
+        return False
+    schema = cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(ExtendedApiServices),
+            cv.Optional(CONF_STATUS, default={"name": "Media status"}): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_COVER_CANVASES): cv.All(cv.ensure_list(cv.use_id(lv_canvas_t)), cv.Length(min=1, max=3)),
+            cv.Optional(CONF_LVGL_ID): cv.use_id(LvglComponent),
+        }
+    )
+    value = schema(value)
+    cv.requires_component("api")(value)
+    cv.requires_component("text_sensor")(value)
+    if CONF_COVER_CANVASES in value and CONF_LVGL_ID not in value:
+        raise cv.Invalid(f"{CONF_COVER_CANVASES}: the canvases are LVGL's: set {CONF_LVGL_ID}")
+    return value
+
+
+async def _extended_api_services_to_code(player, conf):
+    from esphome.components import text_sensor
+
+    cg.add_define("USE_MEDIA_PLAYER_EXTENDED_API")
+    var = cg.Pvariable(conf[CONF_ID], cg.MockObj(str(ExtendedApiServices), "::").create())
+    await cg.register_component(var, conf)
+    cg.add(var.set_media_player(player))
+    cg.add(var.set_status(await text_sensor.new_text_sensor(conf[CONF_STATUS])))
+    if CONF_COVER_CANVASES in conf:
+        cg.add_define("USE_MEDIA_PLAYER_COVER")
+        from esphome.components import relay_link
+
+        cg.add(var.set_relay(await relay_link.get_relay_link()))
+        cg.add(var.set_lvgl(await cg.get_variable(conf[CONF_LVGL_ID])))
+        for canvas in conf[CONF_COVER_CANVASES]:
+            cg.add(var.add_cover_canvas(await cg.get_variable(canvas)))
 
 MediaPlayerSupportedFormat = media_player_ns.struct("MediaPlayerSupportedFormat")
 
@@ -278,6 +499,16 @@ _CALLBACK_AUTOMATIONS = (
 @setup_entity("media_player")
 async def setup_media_player_core_(var, config):
     await automation.build_callback_automations(var, config, _CALLBACK_AUTOMATIONS)
+    if conf := config.get(CONF_EXTENDED_API_SERVICES):
+        await _extended_api_services_to_code(var, conf)
+    pictures = None
+    if conf := config.get(CONF_PICTURES):
+        pictures = await _pictures_to_code(conf)
+    queue = None
+    if conf := config.get(CONF_QUEUE):
+        queue = await _queue_to_code(var, conf)
+    if conf := config.get(CONF_CONTROLS):
+        await _controls_to_code(var, conf, pictures, queue)
 
 
 async def register_media_player(var, config):
@@ -296,8 +527,11 @@ async def new_media_player(config, *args):
 
 _MEDIA_PLAYER_SCHEMA = cv.ENTITY_BASE_SCHEMA.extend(
     {
-        cv.Optional(conf_key): automation.validate_automation({})
-        for conf_key, _ in _STATE_TRIGGERS
+        **{cv.Optional(conf_key): automation.validate_automation({}) for conf_key, _ in _STATE_TRIGGERS},
+        cv.Optional(CONF_EXTENDED_API_SERVICES): _extended_api_services,
+        cv.Optional(CONF_PICTURES): _pictures,
+        cv.Optional(CONF_CONTROLS): _controls,
+        cv.Optional(CONF_QUEUE): QUEUE_SCHEMA,
     }
 )
 
@@ -416,3 +650,218 @@ automation.register_apply_action(
 async def to_code(config):
     cg.add_global(media_player_ns.using)
     cg.add_define("USE_MEDIA_PLAYER")
+
+
+PICTURES_ACTION_SCHEMA = automation.maybe_simple_id({cv.GenerateID(): cv.use_id(MediaPictures)})
+PICTURES_COMMANDS = {
+    "next": 0,
+    "previous": 1,
+    "slideshow_start": 2,
+    "slideshow_stop": 3,
+    "slideshow_toggle": 4,
+    "thumbnails_next": 5,
+    "thumbnails_previous": 6,
+    "close": 7,
+}
+
+
+def _register_pictures_command(name, command):
+    @automation.register_action(
+        f"media_player.pictures.{name}", PicturesCommandAction, PICTURES_ACTION_SCHEMA, synchronous=True
+    )
+    async def _to_code(config, action_id, template_arg, args):
+        var = cg.new_Pvariable(action_id, template_arg)
+        await cg.register_parented(var, config[CONF_ID])
+        cg.add(var.set_command(command))
+        return var
+
+    return _to_code
+
+
+for _name, _command in PICTURES_COMMANDS.items():
+    _register_pictures_command(_name, _command)
+
+
+@automation.register_action(
+    "media_player.pictures.show",
+    PicturesShowAction,
+    cv.All(
+        cv.Schema(
+            {
+                cv.GenerateID(): cv.use_id(MediaPictures),
+                cv.Exclusive("index", "picture"): cv.templatable(cv.int_range(min=0)),
+                cv.Exclusive("path", "picture"): cv.templatable(cv.string),
+            }
+        ),
+        cv.has_exactly_one_key("index", "path"),
+    ),
+    synchronous=True,
+)
+async def pictures_show_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    if "path" in config:
+        cg.add(var.set_by_path(True))
+        cg.add(var.set_path(await cg.templatable(config["path"], args, cg.std_string)))
+    else:
+        cg.add(var.set_index(await cg.templatable(config["index"], args, cg.int_)))
+    return var
+
+
+@automation.register_action(
+    "media_player.pictures.open_directory",
+    PicturesOpenAction,
+    cv.Schema({cv.GenerateID(): cv.use_id(MediaPictures), cv.Required("directory"): cv.templatable(cv.string)}),
+    synchronous=True,
+)
+async def pictures_open_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    cg.add(var.set_directory(await cg.templatable(config["directory"], args, cg.std_string)))
+    return var
+
+
+@automation.register_action(
+    "media_player.pictures.set_interval",
+    PicturesIntervalAction,
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.use_id(MediaPictures),
+            cv.Required("interval"): cv.templatable(cv.positive_time_period_milliseconds),
+        }
+    ),
+    synchronous=True,
+)
+async def pictures_interval_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    cg.add(var.set_interval(await cg.templatable(config["interval"], args, cg.uint32)))
+    return var
+
+
+@automation.register_action(
+    "media_player.pictures.thumbnail_show",
+    PicturesThumbnailAction,
+    cv.Schema({cv.GenerateID(): cv.use_id(MediaPictures), cv.Required("slot"): cv.templatable(cv.int_range(min=0, max=49))}),
+    synchronous=True,
+)
+async def pictures_thumbnail_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    cg.add(var.set_slot(await cg.templatable(config["slot"], args, cg.int_)))
+    return var
+
+
+CONTROLS_ACTION_SCHEMA = automation.maybe_simple_id({cv.GenerateID(): cv.use_id(MediaControls)})
+
+
+def _register_controls(name, mode):
+    @automation.register_action(f"media_player.controls.{name}", ControlsAction, CONTROLS_ACTION_SCHEMA, synchronous=True)
+    async def _to_code(config, action_id, template_arg, args):
+        var = cg.new_Pvariable(action_id, template_arg)
+        await cg.register_parented(var, config[CONF_ID])
+        cg.add(var.set_mode(mode))
+        return var
+
+    return _to_code
+
+
+for _name, _mode in (("show", 0), ("hide", 1), ("toggle", 2)):
+    _register_controls(_name, _mode)
+
+
+@automation.register_action(
+    "media_player.controls.set_title",
+    ControlsTitleAction,
+    cv.Schema({cv.GenerateID(): cv.use_id(MediaControls), cv.Required(CONF_TITLE): cv.templatable(cv.string)}),
+    synchronous=True,
+)
+async def controls_title_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    cg.add(var.set_title(await cg.templatable(config[CONF_TITLE], args, cg.std_string)))
+    return var
+
+
+QUEUE_ACTION_SCHEMA = automation.maybe_simple_id({cv.GenerateID(): cv.use_id(MediaQueue)})
+
+
+def _register_queue_command(name, command):
+    @automation.register_action(f"media_player.queue.{name}", QueueCommandAction, QUEUE_ACTION_SCHEMA, synchronous=True)
+    async def _to_code(config, action_id, template_arg, args):
+        var = cg.new_Pvariable(action_id, template_arg)
+        await cg.register_parented(var, config[CONF_ID])
+        cg.add(var.set_command(command))
+        return var
+
+    return _to_code
+
+
+for _name, _command in (("next", 0), ("previous", 1), ("play_or_resume", 2), ("stop", 3), ("clear", 4)):
+    _register_queue_command(_name, _command)
+
+
+@automation.register_action(
+    "media_player.queue.add",
+    QueueAddAction,
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.use_id(MediaQueue),
+            cv.Required("path"): cv.templatable(cv.string),
+            cv.Optional("title", default=""): cv.templatable(cv.string),
+        }
+    ),
+    synchronous=True,
+)
+async def queue_add_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    cg.add(var.set_path(await cg.templatable(config["path"], args, cg.std_string)))
+    cg.add(var.set_title(await cg.templatable(config["title"], args, cg.std_string)))
+    return var
+
+
+@automation.register_action(
+    "media_player.queue.play",
+    QueuePlayAction,
+    cv.Schema({cv.GenerateID(): cv.use_id(MediaQueue), cv.Required("index"): cv.templatable(cv.int_range(min=0))}),
+    synchronous=True,
+)
+async def queue_play_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    cg.add(var.set_index(await cg.templatable(config["index"], args, cg.int_)))
+    return var
+
+
+@automation.register_action(
+    "media_player.queue.set_shuffle",
+    QueueModeAction,
+    cv.Schema({cv.GenerateID(): cv.use_id(MediaQueue), cv.Required("shuffle"): cv.templatable(cv.boolean)}),
+    synchronous=True,
+)
+async def queue_shuffle_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    cg.add(var.set_kind(0))
+    cg.add(var.set_shuffle(await cg.templatable(config["shuffle"], args, cg.bool_)))
+    return var
+
+
+@automation.register_action(
+    "media_player.queue.set_repeat",
+    QueueModeAction,
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.use_id(MediaQueue),
+            cv.Required("repeat"): cv.templatable(cv.enum({"off": 0, "one": 1, "all": 2}, lower=True)),
+        }
+    ),
+    synchronous=True,
+)
+async def queue_repeat_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    cg.add(var.set_kind(1))
+    cg.add(var.set_repeat(await cg.templatable(config["repeat"], args, cg.int_)))
+    return var

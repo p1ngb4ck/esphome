@@ -3758,6 +3758,7 @@ async def to_code(config):
     # finalized with esp_driver_jpeg still excluded. _init_hw_jpeg() self-guards on the
     # esp32_hw_jpeg_required flag and no-ops if nothing requested it.
     CORE.add_job(_init_hw_jpeg)
+    CORE.add_job(_init_h264_encoder)
 
     # Write EXCLUDE_COMPONENTS at FINAL priority after all components have had
     # a chance to call include_builtin_idf_component() to re-enable components they need.
@@ -4455,3 +4456,15 @@ async def _init_hw_jpeg() -> None:
         )
         cg.add_define("USE_JPEGDEC")
         _LOGGER.info("Using JPEGDec library (software, ESP32-%s)", variant)
+
+
+def require_h264_encoder():
+    CORE.data["esp32_h264_encoder_required"] = True
+
+
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _init_h264_encoder() -> None:
+    if not CORE.data.get("esp32_h264_encoder_required", False):
+        return
+    if CORE.is_esp32 and get_esp32_variant() == VARIANT_ESP32P4:
+        add_idf_component(name="espressif/esp_h264", ref="1.4.1")

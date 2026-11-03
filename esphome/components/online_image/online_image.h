@@ -1,12 +1,19 @@
 #pragma once
 
 #include "download_buffer.h"
-#include "esphome/components/http_request/http_request.h"
 #include "esphome/components/runtime_image/runtime_image.h"
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/defines.h"
 #include "esphome/core/helpers.h"
+
+#ifdef USE_ONLINE_IMAGE_HTTP
+#include "esphome/components/http_request/http_request.h"
+#endif
+
+#ifdef USE_STORAGE
+#include "esphome/components/storage/storage.h"
+#endif
 
 namespace esphome::online_image {
 
@@ -26,8 +33,12 @@ static constexpr size_t READ_CHUNK = 1460;
  * need to re-download or re-decode.
  */
 class OnlineImage final : public PollingComponent,
-                          public runtime_image::RuntimeImage,
-                          public Parented<esphome::http_request::HttpRequestComponent> {
+                          public runtime_image::RuntimeImage
+#ifdef USE_ONLINE_IMAGE_HTTP
+    ,
+                          public Parented<esphome::http_request::HttpRequestComponent>
+#endif
+{
  public:
   /**
    * @brief Construct a new OnlineImage object.
@@ -104,7 +115,20 @@ class OnlineImage final : public PollingComponent,
   LazyCallbackManager<void()> download_started_callback_{};
   LazyCallbackManager<void(float, size_t)> download_progress_callback_{};
 
+#ifdef USE_ONLINE_IMAGE_HTTP
   std::shared_ptr<http_request::HttpContainer> downloader_{nullptr};
+#endif
+#ifdef USE_STORAGE
+  /// Local storage source (bare path or file:// alias) — FILESYSTEM storages stream via handle,
+  /// NETWORK (NFS) via stateless read_chunk with a self-tracked offset (same pattern as audio).
+  bool start_storage_read_();
+  void storage_loop_();
+  storage::PathStorage *storage_{nullptr};
+  storage::FileHandle *storage_handle_{nullptr};  // FILESYSTEM only
+  std::string storage_path_;                      // NETWORK only (owned copy)
+  uint64_t storage_offset_{0};
+  uint64_t storage_size_{0};
+#endif
   DownloadBuffer download_buffer_;
   DownloadSource source_{download_buffer_};
   /**
