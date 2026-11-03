@@ -22,6 +22,7 @@
 #include "jpeg_encoder.h"
 #ifdef USE_CSI_VIDEO_OUTPUT
 #include "esphome/components/display/video_output.h"
+#include <driver/ppa.h>
 #endif
 
 namespace esphome::mipi_csi {
@@ -353,6 +354,18 @@ class MipiCsiCamera final : public camera::Camera {
   display::VideoOutput *output_{nullptr};
   display::VideoCanvas *canvas_{nullptr};
   bool output_on_{false};
+  bool fit_start_(const uint8_t *frame);
+  void fit_finish_();
+  void fit_free_();
+  static bool fit_done_cb_(ppa_client_handle_t client, ppa_event_data_t *event, void *arg);
+  ppa_client_handle_t fit_ppa_{nullptr};
+  uint8_t *fit_buf_[2]{nullptr, nullptr};
+  size_t fit_size_{0};
+  uint16_t fit_w_{0};
+  uint16_t fit_h_{0};
+  uint8_t fit_index_{0};
+  bool fit_busy_{false};
+  std::atomic<bool> fit_done_{false};
 #endif
 
   std::shared_ptr<MipiCsiImage> current_image_;

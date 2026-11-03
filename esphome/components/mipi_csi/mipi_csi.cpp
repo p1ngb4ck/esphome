@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cerrno>
 #include <cinttypes>
+#include <cmath>
 #include <cstring>
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -203,6 +204,112 @@ void MipiCsiCamera::show_on_canvas(bool on) {
   this->set_direct(on);
   if (!on && this->holds_())
     this->canvas_->close();
+  if (!on)
+    this->fit_free_();
+}
+
+bool MipiCsiCamera::fit_start_(const uint8_t *frame) {
+  uint32_t screen_w = 0, screen_h = 0;
+  if (!this->output_->page_size(&screen_w, &screen_h, this) || screen_w == 0 || screen_h == 0)
+    return false;
+  const float scale = std::floor(std::min(static_cast<float>(screen_w) / static_cast<float>(this->width_),
+                                          static_cast<float>(screen_h) / static_cast<float>(this->height_)) *
+                                 16.0f) /
+                      16.0f;
+  if (scale <= 0.0f)
+    return false;
+  const uint8_t bpp = this->bytes_per_pixel_();
+  const auto out_w = static_cast<uint16_t>(static_cast<uint32_t>(static_cast<float>(this->width_) * scale) & ~1u);
+  const auto out_h = static_cast<uint16_t>(static_cast<float>(this->height_) * scale);
+  const size_t line = CONFIG_CACHE_L2_CACHE_LINE_SIZE;
+  const size_t size = (static_cast<size_t>(out_w) * out_h * bpp + line - 1) & ~(line - 1);
+  if (size != this->fit_size_ || this->fit_buf_[0] == nullptr) {
+    if (this->holds_())
+      this->canvas_->drop_frames();
+    this->fit_free_();
+    ppa_client_config_t client{};
+    client.oper_type = PPA_OPERATION_SRM;
+    client.max_pending_trans_num = 1;
+    if (ppa_register_client(&client, &this->fit_ppa_) != ESP_OK) {
+      this->fit_ppa_ = nullptr;
+      return false;
+    }
+    ppa_event_callbacks_t cbs{};
+    cbs.on_trans_done = &MipiCsiCamera::fit_done_cb_;
+    for (auto &buf : this->fit_buf_)
+      buf = static_cast<uint8_t *>(heap_caps_aligned_calloc(line, 1, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (ppa_client_register_event_callbacks(this->fit_ppa_, &cbs) != ESP_OK || this->fit_buf_[0] == nullptr ||
+        this->fit_buf_[1] == nullptr) {
+      this->fit_free_();
+      ESP_LOGW(TAG, "No PSRAM to fit %ux%u frames to the screen", this->width_, this->height_);
+      return false;
+    }
+    this->fit_size_ = size;
+    this->fit_w_ = out_w;
+    this->fit_h_ = out_h;
+  }
+  ppa_srm_oper_config_t cfg{};
+  cfg.in.buffer = frame;
+  cfg.in.pic_w = this->width_;
+  cfg.in.pic_h = this->height_;
+  cfg.in.block_w = this->width_;
+  cfg.in.block_h = this->height_;
+  cfg.in.srm_cm = bpp == 3 ? PPA_SRM_COLOR_MODE_RGB888 : PPA_SRM_COLOR_MODE_RGB565;
+  cfg.out.buffer = this->fit_buf_[this->fit_index_];
+  cfg.out.buffer_size = this->fit_size_;
+  cfg.out.pic_w = this->fit_w_;
+  cfg.out.pic_h = this->fit_h_;
+  cfg.out.srm_cm = cfg.in.srm_cm;
+  cfg.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
+  cfg.scale_x = scale;
+  cfg.scale_y = scale;
+  cfg.mode = PPA_TRANS_MODE_NON_BLOCKING;
+  cfg.user_data = this;
+  this->fit_done_.store(false);
+  if (ppa_do_scale_rotate_mirror(this->fit_ppa_, &cfg) != ESP_OK)
+    return false;
+  this->fit_busy_ = true;
+  return true;
+}
+
+bool MipiCsiCamera::fit_done_cb_(ppa_client_handle_t client, ppa_event_data_t *event, void *arg) {
+  auto *self = static_cast<MipiCsiCamera *>(arg);
+  self->fit_done_.store(true);
+  self->enable_loop_soon_any_context();
+  return false;
+}
+
+void MipiCsiCamera::fit_finish_() {
+  if (!this->fit_busy_ || !this->fit_done_.exchange(false))
+    return;
+  this->fit_busy_ = false;
+  if (this->output_on_ && this->fit_buf_[this->fit_index_] != nullptr) {
+    uint8_t *shown_buf = this->fit_buf_[this->fit_index_];
+    esp_cache_msync(shown_buf, this->fit_size_, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+    display::VideoCanvas *shown = this->output_->show_frame(shown_buf, this->fit_w_, this->fit_h_, this->framerate_,
+                                                            this->bytes_per_pixel_(), this);
+    if (shown != nullptr)
+      this->canvas_ = shown;
+    this->fit_index_ ^= 1;
+  }
+  this->release_direct_frame();
+  if (!this->output_on_)
+    this->fit_free_();
+}
+
+void MipiCsiCamera::fit_free_() {
+  if (this->fit_busy_)
+    return;
+  if (this->fit_ppa_ != nullptr) {
+    ppa_unregister_client(this->fit_ppa_);
+    this->fit_ppa_ = nullptr;
+  }
+  for (auto &buf : this->fit_buf_) {
+    heap_caps_free(buf);
+    buf = nullptr;
+  }
+  this->fit_size_ = 0;
+  this->fit_index_ = 0;
 }
 #endif
 
@@ -550,6 +657,7 @@ void MipiCsiCamera::finish_stop_() {
 #ifdef USE_CSI_VIDEO_OUTPUT
   if (this->holds_())
     this->canvas_->drop_frames();
+  this->fit_free_();
 #endif
   if (this->direct_given_) {
     this->direct_given_ = false;
@@ -736,6 +844,11 @@ void MipiCsiCamera::loop() {
       this->disable_loop();  // the task wakes the loop once it has parked
       return;
     }
+#ifdef USE_CSI_VIDEO_OUTPUT
+    this->fit_finish_();
+    if (this->fit_busy_)
+      return;
+#endif
     const bool failed = this->failed_.load();
     this->finish_stop_();
     if (failed) {
@@ -763,7 +876,11 @@ void MipiCsiCamera::loop() {
   if (this->direct_ready_.exchange(false)) {
     const int8_t held = this->direct_held_.load();
 #ifdef USE_CSI_VIDEO_OUTPUT
-    if (held >= 0 && this->direct_.load() && this->output_on_) {
+    if (held >= 0 && this->direct_.load() && this->output_on_ &&
+        !this->output_->fits(this->width_, this->height_, this->framerate_, false, this)) {
+      if (!this->fit_start_(this->buffers_[held].data))
+        this->release_direct_frame();
+    } else if (held >= 0 && this->direct_.load() && this->output_on_) {
       const FrameBuffer &frame = this->buffers_[held];
       esp_cache_msync(frame.data, frame.length, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
       display::VideoCanvas *shown = this->output_->show_frame(frame.data, this->width_, this->height_,
@@ -782,6 +899,7 @@ void MipiCsiCamera::loop() {
     }
   }
 #ifdef USE_CSI_VIDEO_OUTPUT
+  this->fit_finish_();
   this->output_->loop();
 #endif
 
