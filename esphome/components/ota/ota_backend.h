@@ -29,6 +29,7 @@ enum OTAResponseTypes {
   OTA_RESPONSE_SUPPORTS_COMPRESSION = 0x46,
   OTA_RESPONSE_CHUNK_OK = 0x47,
   OTA_RESPONSE_FEATURE_FLAGS = 0x48,
+  OTA_RESPONSE_WRITE_PROGRESS = 0x49,
 
   OTA_RESPONSE_ERROR_MAGIC = 0x80,
   OTA_RESPONSE_ERROR_UPDATE_PREPARE = 0x81,
@@ -52,6 +53,7 @@ enum OTAResponseTypes {
   OTA_RESPONSE_ERROR_VERSION_DOWNGRADE = 0x93,
   OTA_RESPONSE_ERROR_ENCRYPTION_REQUIRED = 0x94,
   OTA_RESPONSE_ERROR_UPDATE_BUSY = 0x95,
+  OTA_RESPONSE_ERROR_DATA_PARTITION = 0x96,
   OTA_RESPONSE_ERROR_UNKNOWN = 0xFF,
 };
 
@@ -142,6 +144,19 @@ concept OTABackendContract = requires(T backend, size_t image_size, uint8_t *dat
   // The value must be a constant expression
   typename std::bool_constant<T::supports_compression()>;
 };
+
+/** Whoever keeps a filesystem mounted on a data partition registers one of these, so an OTA
+ * that rewrites the partition (an in-band pre-fill OTA) can have the mount let go of
+ * the flash before bytes fly and pick it back up afterwards — no reboot required. */
+class OTADataPartitionListener {
+ public:
+  virtual ~OTADataPartitionListener() = default;
+  virtual const char *ota_data_partition_label() = 0;
+  virtual void on_ota_data_partition_before_write() = 0;
+  virtual void on_ota_data_partition_after_write(bool success) = 0;
+};
+void register_data_partition_listener(OTADataPartitionListener *listener);
+OTADataPartitionListener *find_data_partition_listener(const char *label);
 
 /** Listener interface for OTA state changes.
  *
