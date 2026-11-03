@@ -72,6 +72,8 @@ class ES8388 final : public audio_dac::AudioDac, public Component, public i2c::I
   /// @brief Enables mute for audio out
   /// @return True if successful and false otherwise
   bool set_mute_on() override { return this->set_mute_state_(true); }
+  void on_audio_started() override;
+  void on_audio_stopping() override;
 
   bool is_muted() override { return this->is_muted_; }
 
@@ -94,6 +96,8 @@ class ES8388 final : public audio_dac::AudioDac, public Component, public i2c::I
   /// @param mute_state True to mute, false to unmute
   /// @return True if successful and false otherwise
   bool set_mute_state_(bool mute_state);
+
+  bool clocked_{false};
 
   ES8388MicGain mic_gain_{ES8388_MIC_GAIN_0DB};
 

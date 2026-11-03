@@ -15,6 +15,12 @@
 
 #include "esp_err.h"
 
+// Audio codec libraries
+#ifdef USE_AUDIO_AAC_SUPPORT
+// AAC comes from esp_audio_codec (via adapter for API compatibility)
+#include "aac_decoder_adapter.h"
+#endif
+
 // micro-flac
 #ifdef USE_AUDIO_FLAC_SUPPORT
 #include <micro_flac/flac_decoder.h>
@@ -63,7 +69,8 @@ class AudioDecoder {
   /// @brief Allocates the output transfer buffer and stores the input buffer size for later use by add_source()
   /// @param input_buffer_size Soft cap on the bytes a ring buffer source exposes per fill, in bytes.
   /// @param output_buffer_size Size of the output transfer buffer in bytes.
-  AudioDecoder(size_t input_buffer_size, size_t output_buffer_size);
+  /// @param heap Where its objects (sources, transfer buffer, codec decoders) come from; unset: new.
+  AudioDecoder(size_t input_buffer_size, size_t output_buffer_size, const AudioHeap &heap = {});
 
   ~AudioDecoder() = default;
 
@@ -120,32 +127,43 @@ class AudioDecoder {
   /// @param pause_state If true, audio data is not sent to the sink.
   void set_pause_output_state(bool pause_state) { this->pause_output_ = pause_state; }
 
+  /// @brief Drops decoded audio not yet written to the sink (e.g. before decoding a new position of a stream).
+  void discard_output() {
+    if (this->output_transfer_buffer_ != nullptr)
+      this->output_transfer_buffer_->decrease_buffer_length(this->output_transfer_buffer_->available());
+  }
+
  protected:
+#ifdef USE_AUDIO_AAC_SUPPORT
+  FileDecoderState decode_aac_();
+  AudioObjectPtr<esp_audio_codec_adapter::AACDecoder> aac_decoder_;
+#endif
 #ifdef USE_AUDIO_FLAC_SUPPORT
   FileDecoderState decode_flac_();
-  std::unique_ptr<micro_flac::FLACDecoder> flac_decoder_;
+  AudioObjectPtr<micro_flac::FLACDecoder> flac_decoder_;
 #endif
 #ifdef USE_AUDIO_MP3_SUPPORT
   FileDecoderState decode_mp3_();
-  std::unique_ptr<micro_mp3::Mp3Decoder> mp3_decoder_;
+  AudioObjectPtr<micro_mp3::Mp3Decoder> mp3_decoder_;
 #endif
 #ifdef USE_AUDIO_OPUS_SUPPORT
   FileDecoderState decode_opus_();
-  std::unique_ptr<micro_opus::OggOpusDecoder> opus_decoder_;
+  AudioObjectPtr<micro_opus::OggOpusDecoder> opus_decoder_;
 #endif
 #ifdef USE_AUDIO_WAV_SUPPORT
   FileDecoderState decode_wav_();
-  std::unique_ptr<micro_wav::WAVDecoder> wav_decoder_;
+  AudioObjectPtr<micro_wav::WAVDecoder> wav_decoder_;
 #endif
 
-  std::unique_ptr<AudioReadableBuffer> input_buffer_;
-  std::unique_ptr<AudioSinkTransferBuffer> output_transfer_buffer_;
+  AudioObjectPtr<AudioReadableBuffer> input_buffer_;
+  AudioObjectPtr<AudioSinkTransferBuffer> output_transfer_buffer_;
 
   AudioFileType audio_file_type_{AudioFileType::NONE};
   optional<AudioStreamInfo> audio_stream_info_{};
 
   size_t input_buffer_size_{0};
   size_t free_buffer_required_{0};
+  AudioHeap heap_{};
 
   uint32_t potentially_failed_count_{0};
   uint32_t accumulated_frames_written_{0};

@@ -17,15 +17,23 @@ static const uint8_t MAX_NO_OUTPUT_ITERATIONS = 32;
 
 static const uint32_t MAX_POTENTIALLY_FAILED_COUNT = 10;
 
-AudioDecoder::AudioDecoder(size_t input_buffer_size, size_t output_buffer_size)
-    : input_buffer_size_(input_buffer_size) {
-  this->output_transfer_buffer_ = AudioSinkTransferBuffer::create(output_buffer_size);
+#ifdef USE_AUDIO_AAC_SUPPORT
+// Widest frame this configuration declares, from codegen. Unlike FLAC, MP3 and Opus, AAC has
+// no header pass here: the buffer is sized at start(), before anything of the stream has been
+// read, so the count comes from the configuration rather than from the file.
+static const uint8_t MAX_DECODED_CHANNELS = AUDIO_MAX_CHANNELS;
+#endif
+
+AudioDecoder::AudioDecoder(size_t input_buffer_size, size_t output_buffer_size, const AudioHeap &heap)
+    : input_buffer_size_(input_buffer_size), heap_(heap) {
+  this->output_transfer_buffer_ = AudioSinkTransferBuffer::create(output_buffer_size, heap);
 }
 
 esp_err_t AudioDecoder::add_source(std::weak_ptr<ring_buffer::RingBuffer> &input_ring_buffer) {
   // Zero-copy source reading directly from the ring buffer's internal storage. Raw file data is byte
   // aligned, so no frame alignment is required.
-  auto source = RingBufferAudioSource::create(input_ring_buffer.lock(), this->input_buffer_size_);
+  auto source = RingBufferAudioSource::create(input_ring_buffer.lock(), this->input_buffer_size_, 1,
+                                              this->heap_);
   if (source == nullptr) {
     // create() only returns nullptr for invalid arguments (expired ring buffer or zero buffer size)
     return ESP_ERR_INVALID_ARG;
@@ -35,7 +43,10 @@ esp_err_t AudioDecoder::add_source(std::weak_ptr<ring_buffer::RingBuffer> &input
 }
 
 esp_err_t AudioDecoder::add_source(const uint8_t *data_pointer, size_t length) {
-  auto source = make_unique<ConstAudioSourceBuffer>();
+  auto source = make_audio_object<ConstAudioSourceBuffer>(this->heap_);
+  if (source == nullptr) {
+    return ESP_ERR_NO_MEM;
+  }
   source->set_data(data_pointer, length);
   this->input_buffer_ = std::move(source);
   return ESP_OK;
@@ -78,30 +89,57 @@ esp_err_t AudioDecoder::start(AudioFileType audio_file_type) {
   this->end_of_file_ = false;
 
   switch (this->audio_file_type_) {
+#ifdef USE_AUDIO_AAC_SUPPORT
+    case AudioFileType::AAC:
+      this->aac_decoder_ = make_audio_object<esp_audio_codec_adapter::AACDecoder>(this->heap_);
+      if (this->aac_decoder_ == nullptr) {
+        return ESP_ERR_NO_MEM;
+      }
+
+      // AAC typically has 1024 samples per frame
+      this->free_buffer_required_ =
+          1024 * sizeof(int16_t) * MAX_DECODED_CHANNELS;  // samples * size per sample * channels
+
+      // Reallocate the output transfer buffer to the smallest necessary size
+      this->output_transfer_buffer_->reallocate(this->free_buffer_required_);
+      break;
+#endif
 #ifdef USE_AUDIO_FLAC_SUPPORT
     case AudioFileType::FLAC:
-      this->flac_decoder_ = make_unique<micro_flac::FLACDecoder>();
+      this->flac_decoder_ = make_audio_object<micro_flac::FLACDecoder>(this->heap_);
+      if (this->flac_decoder_ == nullptr) {
+        return ESP_ERR_NO_MEM;
+      }
       this->free_buffer_required_ =
           this->output_transfer_buffer_->capacity();  // Adjusted and reallocated after reading the header
       break;
 #endif
 #ifdef USE_AUDIO_MP3_SUPPORT
     case AudioFileType::MP3:
-      this->mp3_decoder_ = make_unique<micro_mp3::Mp3Decoder>();
+      this->mp3_decoder_ = make_audio_object<micro_mp3::Mp3Decoder>(this->heap_);
+      if (this->mp3_decoder_ == nullptr) {
+        return ESP_ERR_NO_MEM;
+      }
       this->free_buffer_required_ =
           this->output_transfer_buffer_->capacity();  // Adjusted and reallocated after reading the header
       break;
 #endif
 #ifdef USE_AUDIO_OPUS_SUPPORT
     case AudioFileType::OPUS:
-      this->opus_decoder_ = make_unique<micro_opus::OggOpusDecoder>();
+      this->opus_decoder_ = make_audio_object<micro_opus::OggOpusDecoder>(this->heap_);
+      if (this->opus_decoder_ == nullptr) {
+        return ESP_ERR_NO_MEM;
+      }
       this->free_buffer_required_ =
           this->output_transfer_buffer_->capacity();  // Adjusted and reallocated after reading the header
       break;
 #endif
 #ifdef USE_AUDIO_WAV_SUPPORT
     case AudioFileType::WAV:
-      this->wav_decoder_ = make_unique<micro_wav::WAVDecoder>();
+      this->wav_decoder_ = make_audio_object<micro_wav::WAVDecoder>(this->heap_);
+      if (this->wav_decoder_ == nullptr) {
+        return ESP_ERR_NO_MEM;
+      }
       // 1 KiB suffices to always make progress while avoiding excessive CPU spinning for decoding
       this->free_buffer_required_ = 1024;
       if (this->output_transfer_buffer_->capacity() < this->free_buffer_required_) {
@@ -197,6 +235,11 @@ AudioDecoderState AudioDecoder::decode(bool stop_gracefully) {
       state = FileDecoderState::IDLE;
     } else {
       switch (this->audio_file_type_) {
+#ifdef USE_AUDIO_AAC_SUPPORT
+        case AudioFileType::AAC:
+          state = this->decode_aac_();
+          break;
+#endif
 #ifdef USE_AUDIO_FLAC_SUPPORT
         case AudioFileType::FLAC:
           state = this->decode_flac_();
@@ -245,6 +288,43 @@ AudioDecoderState AudioDecoder::decode(bool stop_gracefully) {
   }
   return AudioDecoderState::DECODING;
 }
+
+#ifdef USE_AUDIO_AAC_SUPPORT
+FileDecoderState AudioDecoder::decode_aac_() {
+  // AAC decoder processes frames from the input buffer
+  const uint8_t *buffer_start = this->input_buffer_->data();
+  size_t buffer_length = this->input_buffer_->available();
+
+  // Decode AAC frame
+  auto result = this->aac_decoder_->decode_frame(buffer_start, buffer_length,
+                                                 (int16_t *) this->output_transfer_buffer_->get_buffer_end(),
+                                                 this->output_transfer_buffer_->free());
+
+  if (result.status == esp_audio_codec_adapter::AAC_DECODER_SUCCESS) {
+    // Update buffers
+    this->input_buffer_->consume(result.bytes_consumed);
+    this->output_transfer_buffer_->increase_buffer_length(result.output_samples * sizeof(int16_t));
+
+    // Extract audio stream info on first successful decode
+    if (!this->audio_stream_info_.has_value() && result.sample_rate > 0) {
+      this->audio_stream_info_ =
+          audio::AudioStreamInfo(16, result.channels, result.sample_rate);  // AAC outputs 16-bit PCM
+    }
+
+    return FileDecoderState::MORE_TO_PROCESS;
+  } else if (result.status == esp_audio_codec_adapter::AAC_DECODER_OUT_OF_DATA) {
+    // Need more data
+    return FileDecoderState::IDLE;
+  } else if (result.status == esp_audio_codec_adapter::AAC_DECODER_SYNC_ERROR) {
+    // Recoverable sync error, skip some data and try again
+    this->input_buffer_->consume(std::min(buffer_length, (size_t) 1));
+    return FileDecoderState::POTENTIALLY_FAILED;
+  } else {
+    // Serious error
+    return FileDecoderState::FAILED;
+  }
+}
+#endif
 
 #ifdef USE_AUDIO_FLAC_SUPPORT
 FileDecoderState AudioDecoder::decode_flac_() {

@@ -11,6 +11,9 @@
 #include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
+#ifdef USE_I2S_AUDIO_NVS
+#include "esphome/components/esp32/gpio.h"
+#endif
 
 #include "esp_timer.h"
 
@@ -28,6 +31,25 @@ static constexpr float SOFTWARE_VOLUME_MIN_DB = -49.0f;
 static constexpr uint32_t GAIN_RAMP_MS_PER_DB = 1;
 
 void I2SAudioSpeakerBase::setup() {
+#ifdef USE_I2S_AUDIO_NVS
+  this->nvs_inactive_ = !this->nvs_active_();
+  if (!this->nvs_inactive_) {
+    if (this->parent_->get_nvs_dout_pin() >= 0)
+      this->dout_pin_ = static_cast<gpio_num_t>(this->parent_->get_nvs_dout_pin());
+    if (this->enable_pin_ == nullptr && this->parent_->get_nvs_enable_pin() >= 0) {
+      auto *pin = new esp32::ESP32InternalGPIOPin();
+      pin->set_pin(static_cast<gpio_num_t>(this->parent_->get_nvs_enable_pin()));
+      pin->set_flags(gpio::FLAG_OUTPUT);
+      this->enable_pin_ = pin;
+    }
+  }
+#endif
+  // An amplifier powered without I2S clocks can pass DC through the speaker: off until they run.
+  if (this->enable_pin_ != nullptr) {
+    this->enable_pin_->setup();
+    this->enable_pin_->digital_write(false);
+  }
+
   this->event_group_ = xEventGroupCreate();
 
   if (this->event_group_ == nullptr) {
@@ -40,6 +62,13 @@ void I2SAudioSpeakerBase::setup() {
   // When no audio_dac is configured, this initializes software volume control.
   this->set_volume(this->volume_);
   this->set_mute_state(this->mute_state_);
+
+#ifdef USE_I2S_AUDIO_NVS
+  if (this->nvs_inactive_) {
+    this->disable_loop();
+    return;
+  }
+#endif
 
 #ifdef USE_I2S_AUDIO_FULL_DUPLEX
   // The parent set up before us and already routed dout to the shared TX channel, which is never re-initialized.
@@ -58,6 +87,8 @@ void I2SAudioSpeakerBase::setup() {
 }
 
 void I2SAudioSpeakerBase::park_dout_pin_() {
+  if (this->dout_pin_ == GPIO_NUM_NC)
+    return;
   gpio_reset_pin(this->dout_pin_);
   gpio_set_direction(this->dout_pin_, GPIO_MODE_OUTPUT);
   gpio_set_level(this->dout_pin_, 0);
@@ -70,6 +101,7 @@ void I2SAudioSpeakerBase::dump_config() {
                 "  Buffer duration: %" PRIu32 "\n"
                 "  Keep alive: %s",
                 static_cast<int8_t>(this->dout_pin_), this->buffer_duration_ms_, YESNO(this->keep_alive_));
+  LOG_PIN("  Enable Pin: ", this->enable_pin_);
   if (this->timeout_.has_value()) {
     ESP_LOGCONFIG(TAG, "  Timeout: %" PRIu32 " ms", this->timeout_.value());
   }
@@ -99,6 +131,7 @@ void I2SAudioSpeakerBase::loop() {
     ESP_LOGV(TAG, "Started");
     xEventGroupClearBits(this->event_group_, SpeakerEventGroupBits::TASK_RUNNING);
     this->state_ = speaker::STATE_RUNNING;
+    this->set_amplifier_(true);
 #ifdef USE_AUDIO_DAC
     // The task raises TASK_RUNNING only after enabling the channel, so the clocks are already running
     this->notify_audio_dacs_started_();
@@ -107,10 +140,16 @@ void I2SAudioSpeakerBase::loop() {
   if (event_group_bits & SpeakerEventGroupBits::TASK_STOPPING) {
     ESP_LOGV(TAG, "Stopping");
     xEventGroupClearBits(this->event_group_, SpeakerEventGroupBits::TASK_STOPPING);
+    this->set_amplifier_(false);
+#ifdef USE_AUDIO_DAC_STOPPING
+    for (auto *audio_dac : this->audio_dacs_)
+      audio_dac->on_audio_stopping();
+#endif
     this->state_ = speaker::STATE_STOPPING;
   }
   if (event_group_bits & SpeakerEventGroupBits::TASK_STOPPED) {
     ESP_LOGD(TAG, "Stopped");
+    this->set_amplifier_(false);
 
     vTaskDelete(this->speaker_task_handle_);
     this->speaker_task_handle_ = nullptr;
@@ -173,8 +212,8 @@ void I2SAudioSpeakerBase::loop() {
       // from wherever the previous run left off. Posted here, not in the task: the ramp's mailbox
       // allows one writer, and that is the main loop.
       this->post_software_gain_(0);
-      xTaskCreate(I2SAudioSpeakerBase::speaker_task, "speaker_task", TASK_STACK_SIZE, (void *) this, TASK_PRIORITY,
-                  &this->speaker_task_handle_);
+      xTaskCreatePinnedToCore(I2SAudioSpeakerBase::speaker_task, "speaker_task", TASK_STACK_SIZE, (void *) this,
+                              TASK_PRIORITY, &this->speaker_task_handle_, LOOP_TASK_CORE);
 
       if (this->speaker_task_handle_ == nullptr) {
         ESP_LOGE(TAG, "Task failed to start, retrying in 1 second");
@@ -262,6 +301,10 @@ void I2SAudioSpeakerBase::speaker_task(void *params) {
 void I2SAudioSpeakerBase::start() {
   if (!this->is_ready() || this->is_failed() || this->status_has_error())
     return;
+#ifdef USE_I2S_AUDIO_NVS
+  if (this->nvs_inactive_)
+    return;
+#endif
   if ((this->state_ == speaker::STATE_STARTING) || (this->state_ == speaker::STATE_RUNNING))
     return;
   // play() calls start() on every write, so without this a rejected stream would be retried and logged nonstop

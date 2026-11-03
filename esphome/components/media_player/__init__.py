@@ -118,6 +118,8 @@ def validate_preferred_format(
         from esphome.components import audio
 
         # Inherit settings from audio device if not manually set
+        if (device_id := config.get(audio_device_key)) is not None:
+            audio.resolve_device_format(device_id)
         inherit_property_from(CONF_NUM_CHANNELS, audio_device_key)(config)
         inherit_property_from(CONF_SAMPLE_RATE, audio_device_key)(config)
 

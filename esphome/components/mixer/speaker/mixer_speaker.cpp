@@ -217,7 +217,11 @@ size_t SourceSpeaker::play(const uint8_t *data, size_t length, TickType_t ticks_
     this->start();
   }
   size_t bytes_written = 0;
-  std::shared_ptr<ring_buffer::RingBuffer> temp_ring_buffer = this->ring_buffer_.lock();
+  std::shared_ptr<ring_buffer::RingBuffer> temp_ring_buffer;
+  {
+    LockGuard guard(this->ring_buffer_lock_);
+    temp_ring_buffer = this->ring_buffer_.lock();
+  }
   if (temp_ring_buffer != nullptr) {
     // Only write to the ring buffer if the reference is valid
     bytes_written = temp_ring_buffer->write_without_replacement(data, length, ticks_to_wait);
@@ -251,9 +255,14 @@ esp_err_t SourceSpeaker::start_() {
   const size_t ring_buffer_size =
       (this->audio_stream_info_.ms_to_bytes(this->buffer_duration_ms_) / bytes_per_frame) * bytes_per_frame;
   if (this->audio_source_ == nullptr) {
-    std::shared_ptr<ring_buffer::RingBuffer> temp_ring_buffer = this->ring_buffer_.lock();
+    std::shared_ptr<ring_buffer::RingBuffer> temp_ring_buffer;
+    {
+      LockGuard guard(this->ring_buffer_lock_);
+      temp_ring_buffer = this->ring_buffer_.lock();
+    }
     if (temp_ring_buffer == nullptr) {
       temp_ring_buffer = ring_buffer::RingBuffer::create(ring_buffer_size);
+      LockGuard guard(this->ring_buffer_lock_);
       this->ring_buffer_ = temp_ring_buffer;
     }
 
@@ -267,6 +276,7 @@ esp_err_t SourceSpeaker::start_() {
     if (source == nullptr) {
       return ESP_ERR_NO_MEM;
     }
+    LockGuard guard(this->ring_buffer_lock_);
     this->audio_source_ = std::move(source);
   }
 
@@ -278,7 +288,12 @@ void SourceSpeaker::stop() { this->send_command_(SOURCE_SPEAKER_COMMAND_STOP); }
 void SourceSpeaker::finish() { this->send_command_(SOURCE_SPEAKER_COMMAND_FINISH); }
 
 bool SourceSpeaker::has_buffered_data() const {
-  return ((this->audio_source_ != nullptr) && this->audio_source_->has_buffered_data());
+  std::shared_ptr<audio::RingBufferAudioSource> source;
+  {
+    LockGuard guard(this->ring_buffer_lock_);
+    source = this->audio_source_;
+  }
+  return source != nullptr && source->has_buffered_data();
 }
 
 void SourceSpeaker::set_mute_state(bool mute_state) {
@@ -322,7 +337,11 @@ void SourceSpeaker::apply_ducking(uint8_t decibel_reduction, uint32_t duration) 
 void SourceSpeaker::enter_stopping_state_() {
   this->state_ = speaker::STATE_STOPPING;
   this->stopping_start_ms_ = millis();
-  this->audio_source_.reset();
+  std::shared_ptr<audio::RingBufferAudioSource> source;
+  {
+    LockGuard guard(this->ring_buffer_lock_);
+    source = std::move(this->audio_source_);
+  }
 }
 
 void MixerSpeaker::dump_config() {
@@ -355,7 +374,7 @@ void MixerSpeaker::loop() {
     // Only start the task if it's fully stopped and cleaned up
     if (!this->status_has_error() && !this->task_.is_created()) {
       if (this->task_.create(audio_mixer_task, "mixer", TASK_STACK_SIZE, (void *) this, MIXER_TASK_PRIORITY,
-                             this->task_stack_in_psram_)) {
+                             this->task_stack_in_psram_, LOOP_TASK_CORE)) {
         xEventGroupClearBits(this->event_group_, MIXER_TASK_COMMAND_START);
       } else {
         ESP_LOGE(TAG, "Failed to start; retrying in 1 second");

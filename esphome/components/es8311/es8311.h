@@ -85,7 +85,15 @@ class ES8311 final : public audio_dac::AudioDac, public Component, public i2c::I
   }
   void set_sample_frequency(uint32_t sample_frequency) { this->sample_frequency_ = sample_frequency; }
   void set_use_mic(bool use_mic) { this->use_mic_ = use_mic; }
-  void set_mic_gain(ES8311MicGain mic_gain) { this->mic_gain_ = mic_gain; }
+  void set_dac_reference(bool dac_reference) { this->dac_reference_ = dac_reference; }
+  /// @brief The microphone's PGA gain; after setup it is written to the codec at once
+  void set_mic_gain(ES8311MicGain mic_gain);
+  ES8311MicGain get_mic_gain() const { return this->mic_gain_; }
+  /// @brief The DAC volume 0..1 spans min_db..max_db (within -95.5..+32 dB, the register's range)
+  void set_volume_range_db(float min_db, float max_db) {
+    this->volume_min_db_ = min_db;
+    this->volume_max_db_ = max_db;
+  }
 
  protected:
   /// @brief Computes the register value for the configured resolution (bits per sample)
@@ -117,7 +125,10 @@ class ES8311 final : public audio_dac::AudioDac, public Component, public i2c::I
   bool set_mute_state_(bool mute_state);
 
   bool use_mic_;
+  bool dac_reference_{false};
   ES8311MicGain mic_gain_;
+  float volume_min_db_{-95.5f};
+  float volume_max_db_{32.0f};
 
   bool use_mclk_;                // true = use dedicated MCLK pin, false = use SCLK
   bool sclk_inverted_{false};    // SCLK is inverted
