@@ -32,9 +32,8 @@ _LOGGER = logging.getLogger(__name__)
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["storage"]
 
-LIB_BUILDER_NAME = "p1ngb4ck/esphome_component_as_lib"
-LIB_BUILDER_REPO = "https://github.com/p1ngb4ck/esphome_component_as_lib.git"
-LIB_BUILDER_REF = "f8f641a3f9877da673ad0718ae96d41c0251955f"
+LIB_BUILDER_NAME = "package_manager_lib_builder"
+LIB_BUILDER_PATH = Path(__file__).parent / LIB_BUILDER_NAME
 
 
 def AUTO_LOAD(config):
@@ -208,7 +207,7 @@ async def to_code(config):
         for repo in config.get(CONF_REPOSITORIES, []):
             cg.add(var.add_repository(repo[CONF_NAME], repo[CONF_URL], repo.get(CONF_PUBLIC_KEY, "")))
     request_storage_worker()
-    add_idf_component(name=LIB_BUILDER_NAME, repo=LIB_BUILDER_REPO, ref=LIB_BUILDER_REF)
+    add_idf_component(name=LIB_BUILDER_NAME, path=str(LIB_BUILDER_PATH.resolve()))
     if _api_enabled(config) and not build.package_pass():
         CORE.add_job(_add_api_actions, var)
     if _mqtt_enabled(config) and not build.package_pass():
