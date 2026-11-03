@@ -43,6 +43,11 @@ extern const uint8_t ESPHOME_WEBSERVER_FILE_BROWSER_JS[] PROGMEM;
 extern const size_t ESPHOME_WEBSERVER_FILE_BROWSER_JS_SIZE;
 #endif
 
+#ifdef USE_WEBSERVER_PACKAGE_API
+extern const uint8_t ESPHOME_WEBSERVER_PACKAGES_JS[] PROGMEM;
+extern const size_t ESPHOME_WEBSERVER_PACKAGES_JS_SIZE;
+#endif
+
 namespace esphome::web_server {
 
 // ESP-IDF cuts a log event here: nothing a browser log view needs is longer, and it bounds the
