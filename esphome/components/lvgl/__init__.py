@@ -17,7 +17,6 @@ from esphome.components.esp32 import (
     add_idf_component,
     add_idf_sdkconfig_option,
     get_esp32_variant,
-    idf_version,
 )
 from esphome.components.image import (
     CONF_OPAQUE,
@@ -36,6 +35,7 @@ from esphome.const import (
     CONF_BUFFER_SIZE,
     CONF_BUILD_FLAGS,
     CONF_ESPHOME,
+    CONF_FILE,
     CONF_GROUP,
     CONF_ID,
     CONF_LOG_LEVEL,
@@ -74,6 +74,17 @@ from .encoders import (
     initial_focus_to_code,
 )
 from .gradient import GRADIENT_SCHEMA, gradients_to_code
+from .hid_input import (
+    CONF_HID_KEYBOARDS,
+    CONF_HID_POINTERS,
+    CONF_KEY_BINDINGS,
+    CONF_REMOTE_INPUT,
+    HID_KEYBOARDS_CONFIG,
+    HID_POINTERS_CONFIG,
+    KEY_BINDINGS_SCHEMA,
+    REMOTE_INPUT_CONFIG,
+    hid_inputs_to_code,
+)
 from .keypads import KEYPADS_CONFIG, keypads_to_code
 from .lv_validation import lv_bool
 from .lvcode import LvContext, LvglComponent, lv_event_t_ptr, lvgl_static
@@ -94,6 +105,7 @@ from .schemas import (
 from .styles import styles_to_code, theme_to_code
 from .touchscreens import touchscreen_schema, touchscreens_to_code
 from .trigger import generate_align_tos, generate_triggers
+from .video_output import CONF_VIDEO_OUTPUT, LVGL_VIDEO_OUTPUT_SCHEMA, lvgl_video_output_to_code
 from .types import (
     IdleTrigger,
     PlainTrigger,
@@ -219,7 +231,7 @@ def multi_conf_validate(configs: list[dict]):
     if len(display_list) != len(set(display_list)):
         raise cv.Invalid("A display ID may be used in only one LVGL instance")
     for config in configs:
-        for item in (df.CONF_ENCODERS, df.CONF_KEYPADS):
+        for item in (df.CONF_ENCODERS, df.CONF_KEYPADS, CONF_HID_KEYBOARDS):
             for enc in config.get(item, ()):
                 if CONF_GROUP not in enc:
                     raise cv.Invalid(
@@ -256,6 +268,10 @@ def final_validation(config_list):
     global_config = full_config.get()
     # Resolve byte_order from display metadata before multi-config validation
     for config in config_list:
+        if CONF_FILE in config[CONF_KEY_BINDINGS] and "storage" not in global_config:
+            raise cv.Invalid(
+                "key_bindings file needs a storage (sd_storage, usb_storage, ...) mounted there"
+            )
         metas = [get_display_metadata(disp) for disp in config[df.CONF_DISPLAYS]]
         if any(m.has_writer for m in metas):
             raise cv.Invalid(
@@ -360,11 +376,8 @@ async def to_code(configs):
         add_idf_sdkconfig_option("CONFIG_LV_USE_CUSTOM_MALLOC", True)
         if get_esp32_variant() == VARIANT_ESP32P4:
             add_idf_sdkconfig_option("CONFIG_LV_DRAW_BUF_ALIGN", 64)
-            # The LVGL PPA driver uses cache functions added in ESP-IDF 6.0
-            if idf_version() >= cv.Version(6, 0, 0):
-                df.add_define("LV_USE_PPA", "1")
-            else:
-                df.add_define("LV_USE_PPA", "0")
+            # LVGL's own PPA draw unit stays off, as on dev: with it fills and images flicker
+            df.add_define("LV_USE_PPA", "0")
             df.add_define("LV_DRAW_BUF_ALIGN", "64")
         else:
             df.add_define("LV_DRAW_BUF_ALIGN", "32")
@@ -491,6 +504,8 @@ async def to_code(configs):
             rotation_type,
         )
         await cg.register_component(lv_component, config)
+        if (video_output := config.get(CONF_VIDEO_OUTPUT)) is not None:
+            CORE.add_job(lvgl_video_output_to_code, lv_component, displays[0], video_output)
         if rotation := config.get(CONF_ROTATION):
             cg.add(lv_component.set_rotation(rotation))
         if paused := config[df.CONF_PAUSED]:
@@ -505,6 +520,7 @@ async def to_code(configs):
             await touchscreens_to_code(lv_component, config)
             await encoders_to_code(lv_component, config, default_group)
             await keypads_to_code(lv_component, config, default_group)
+            await hid_inputs_to_code(lv_component, config, default_group)
             await gradients_to_code(config)
             await styles_to_code(config)
             await set_obj_properties(lv_scr_act, config)
@@ -635,7 +651,9 @@ LVGL_TOP_LEVEL_SCHEMA = (
             cv.GenerateID(CONF_ID): cv.declare_id(LvglComponent),
             cv.GenerateID(CONF_ALIGN_TO_LAMBDA_ID): cv.declare_id(lv_lambda_t),
             cv.GenerateID(df.CONF_DISPLAYS): display_schema,
-            cv.Optional(CONF_COLOR_DEPTH, default=16): cv.one_of(16),
+            cv.Optional(CONF_COLOR_DEPTH, default=16): cv.one_of(
+                16, 32
+            ),  # 32 = RGB888 (3 bytes/px) on ESP32-P4
             cv.Optional(df.CONF_DEFAULT_FONT, default="montserrat_14"): lvalid.lv_font,
             cv.Optional(df.CONF_FULL_REFRESH, default=False): cv.boolean,
             cv.Optional(df.CONF_UPDATE_WHEN_DISPLAY_IDLE, default=False): cv.boolean,
@@ -643,6 +661,7 @@ LVGL_TOP_LEVEL_SCHEMA = (
             cv.Optional(CONF_DRAW_ROUNDING, default=2): cv.positive_int,
             cv.Optional(CONF_BUFFER_SIZE, default=0): cv.percentage,
             cv.Optional(CONF_ROTATION): validate_rotation,
+            cv.Optional(CONF_VIDEO_OUTPUT): LVGL_VIDEO_OUTPUT_SCHEMA,
             cv.Optional(CONF_LOG_LEVEL, default="WARN"): cv.one_of(
                 *df.LV_LOG_LEVELS, upper=True
             ),
@@ -684,6 +703,10 @@ LVGL_TOP_LEVEL_SCHEMA = (
             cv.Optional(df.CONF_TOUCHSCREENS, default=None): touchscreen_schema,
             cv.Optional(df.CONF_ENCODERS, default=None): ENCODERS_CONFIG,
             cv.Optional(df.CONF_KEYPADS, default=None): KEYPADS_CONFIG,
+            cv.Optional(CONF_HID_KEYBOARDS): HID_KEYBOARDS_CONFIG,
+            cv.Optional(CONF_HID_POINTERS): HID_POINTERS_CONFIG,
+            cv.Optional(CONF_REMOTE_INPUT): REMOTE_INPUT_CONFIG,
+            cv.Optional(CONF_KEY_BINDINGS, default={}): KEY_BINDINGS_SCHEMA,
             cv.GenerateID(df.CONF_DEFAULT_GROUP): cv.declare_id(lv_group_t),
             cv.Optional(df.CONF_RESUME_ON_INPUT, default=True): cv.boolean,
             cv.Optional(df.CONF_PAUSED, default=False): cv.boolean,

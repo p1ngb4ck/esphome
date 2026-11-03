@@ -11,7 +11,7 @@
 
 #include "esphome/components/camera/encoder.h"
 
-namespace esphome::camera_encoder {
+namespace esphome::camera {
 
 class H264Output final : public camera::EncoderBuffer {
  public:

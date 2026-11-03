@@ -18,3 +18,9 @@ touchscreen:
       - logger.log:
           format: Touch at (%d, %d)
           args: [touch.x, touch.y]
+  - platform: ft5x06
+    i2c_id: i2c_bus
+    display: ft5x06_display
+    id: ft5x06_touchscreen_firmware_reads
+    address: 0x38
+    firmware_reads: true
