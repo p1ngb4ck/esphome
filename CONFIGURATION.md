@@ -45,9 +45,10 @@ in; only this firmware's entries are kept. An index whose signature does not ver
 repository downloads the `.ipk` with progress, checks its SHA-256 from the index and installs the packages it needs
 first.
 
-Signing: `tools/publish.py` of [esphome-packages](https://github.com/p1ngb4ck/esphome-packages) writes the
-directories and signs with the secret key in `ESPHOME_PACKAGES_SIGNING_KEY`; `publish.py keygen --out NAME` makes a
-key pair (`NAME.sec`, `NAME.pub`; the `.pub` line is the repository's `public_key`).
+Signing: the build tools' `tools/publish_packages.py` ([P4NOS](https://github.com/p1ngb4ck/P4NOS)) writes a build's
+directory into the repository and signs with the secret key in `ESPHOME_PACKAGES_SIGNING_KEY`;
+`publish_packages.py keygen --out NAME` makes a key pair (`NAME.sec`, `NAME.pub`; the `.pub` line is the
+repository's `public_key`). The repository itself holds only the packages.
 
 ## Interfaces
 
