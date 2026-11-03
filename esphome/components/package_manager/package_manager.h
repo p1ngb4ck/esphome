@@ -91,6 +91,7 @@ struct Repository {
   char url[128];
   uint8_t key[40];
   uint8_t has_key;
+  uint8_t signed_ok;
   uint8_t used;
   uint8_t enabled;
   uint8_t builtin;
@@ -111,6 +112,8 @@ struct IndexReader {
   uint8_t gz_state;
   bool arch_ok;
   bool reading_signature;
+  bool checking;
+  uint8_t fetching;
 };
 
 struct AvailablePackage {
@@ -273,7 +276,8 @@ class PackageManager : public Component {
   bool save_repositories_();
   void refresh_next_();
   void open_repo_index_();
-  bool open_signature_(const std::string &url);
+  bool open_signature_();
+  bool open_small_(const std::string &url, uint8_t what);
   bool signature_read_();
   bool signature_ok_();
   bool open_index_(const std::string &url, bool gz);

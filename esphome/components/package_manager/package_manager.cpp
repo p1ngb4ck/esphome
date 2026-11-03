@@ -55,8 +55,13 @@ struct IndexInflate {
   size_t window_pos;
 };
 
+static const uint8_t FETCH_KEY = 1;
+static const uint8_t FETCH_SIGNATURE = 2;
+
 struct IndexSignature {
   sha256::SHA256 sha;
+  uint8_t key[40]{};
+  bool has_key{false};
   uint8_t signature[64]{};
   char text[200]{};
   size_t len{0};
@@ -1388,21 +1393,33 @@ void PackageManager::refresh_next_() {
     return;
   }
   this->reader_->reading_signature = false;
-  if (this->repos_[this->refresh_repo_].has_key) {
-    char build[12];
-    snprintf(build, sizeof(build), "/%08" PRIx32, core_abi_id());
-    std::string url = this->repos_[this->refresh_repo_].url;
-    url += build;
-    url += "/Packages.sig";
-    if (!this->open_signature_(url)) {
-      this->index_read_(false);
-      return;
-    }
-    this->last_data_time_ = millis();
-    this->defer([this]() { this->read_index_(); });
+  this->reader_->checking = false;
+  const Repository &repo = this->repos_[this->refresh_repo_];
+  if (this->reader_->signature == nullptr) {
+    void *mem = RAMAllocator<IndexSignature>(RAMAllocator<IndexSignature>::ALLOC_EXTERNAL).allocate(1);
+    if (mem != nullptr)
+      this->reader_->signature = new (mem) IndexSignature();
+  }
+  IndexSignature *s = this->reader_->signature;
+  if (s == nullptr || sodium_init() < 0) {
+    this->open_repo_index_();
     return;
   }
+  s->has_key = repo.has_key != 0;
+  if (s->has_key)
+    std::memcpy(s->key, repo.key, sizeof(s->key));
+  if (s->has_key ? this->open_signature_() : this->open_small_(std::string(repo.url) + "/signing.pub", FETCH_KEY))
+    return;
   this->open_repo_index_();
+}
+
+bool PackageManager::open_signature_() {
+  char build[12];
+  snprintf(build, sizeof(build), "/%08" PRIx32, core_abi_id());
+  std::string url = this->repos_[this->refresh_repo_].url;
+  url += build;
+  url += "/Packages.sig";
+  return this->open_small_(url, FETCH_SIGNATURE);
 }
 
 void PackageManager::open_repo_index_() {
@@ -1419,19 +1436,9 @@ void PackageManager::open_repo_index_() {
   this->defer([this]() { this->read_index_(); });
 }
 
-bool PackageManager::open_signature_(const std::string &url) {
+bool PackageManager::open_small_(const std::string &url, uint8_t what) {
   IndexReader *r = this->reader_;
-  if (r->signature == nullptr) {
-    void *mem = RAMAllocator<IndexSignature>(RAMAllocator<IndexSignature>::ALLOC_EXTERNAL).allocate(1);
-    if (mem == nullptr) {
-      this->refuse_("No PSRAM to check the repository signature");
-      return false;
-    }
-    r->signature = new (mem) IndexSignature();
-  }
   r->signature->len = 0;
-  if (sodium_init() < 0)
-    return false;
   this->container_ = this->http_->get(url);
   if (this->container_ == nullptr || this->container_->status_code != 200) {
     if (this->container_ != nullptr) {
@@ -1441,6 +1448,9 @@ bool PackageManager::open_signature_(const std::string &url) {
     return false;
   }
   r->reading_signature = true;
+  r->fetching = what;
+  this->last_data_time_ = millis();
+  this->defer([this]() { this->read_index_(); });
   return true;
 }
 
@@ -1455,9 +1465,11 @@ bool PackageManager::signature_read_() {
   size_t len = 0;
   while (line[len] != '\0' && line[len] != '\n' && line[len] != '\r')
     len++;
+  if (!s->has_key)
+    return false;
   uint8_t raw[2 + 8 + 64];
   if (base64_decode(reinterpret_cast<const uint8_t *>(line), len, raw, sizeof(raw)) != sizeof(raw) || raw[0] != 'E' ||
-      raw[1] != 'd' || std::memcmp(raw + 2, repo.key, 8) != 0)
+      raw[1] != 'd' || std::memcmp(raw + 2, s->key, 8) != 0)
     return false;
   std::memcpy(s->signature, raw + 10, sizeof(s->signature));
   s->sha.init();
@@ -1469,8 +1481,7 @@ bool PackageManager::signature_ok_() {
   uint8_t digest[32];
   s->sha.calculate();
   s->sha.get_bytes(digest);
-  return crypto_sign_ed25519_verify_detached(s->signature, digest, sizeof(digest),
-                                             this->repos_[this->refresh_repo_].key + 8) == 0;
+  return crypto_sign_ed25519_verify_detached(s->signature, digest, sizeof(digest), s->key + 8) == 0;
 }
 
 bool PackageManager::open_index_(const std::string &url, bool gz) {
@@ -1510,33 +1521,34 @@ void PackageManager::read_index_() {
     IndexSignature *s = r->signature;
     const bool all = this->container_->content_length > 0 &&
                      this->container_->get_bytes_read() >= this->container_->content_length;
+    bool readable = true;
     if (!all) {
       const size_t room = sizeof(s->text) - 1 - s->len;
-      if (room == 0) {
-        this->index_read_(false);
-        return;
-      }
-      const int n = this->container_->read(reinterpret_cast<uint8_t *>(s->text + s->len), room);
-      const auto result = http_request::http_read_loop_result(n, this->last_data_time_, this->http_->get_timeout(),
-                                                              this->container_->is_read_complete());
+      const int n = room > 0 ? this->container_->read(reinterpret_cast<uint8_t *>(s->text + s->len), room) : -1;
+      const auto result = room > 0 ? http_request::http_read_loop_result(n, this->last_data_time_,
+                                                                         this->http_->get_timeout(),
+                                                                         this->container_->is_read_complete())
+                                   : http_request::HttpReadLoopResult::ERROR;
       if (result == http_request::HttpReadLoopResult::RETRY || result == http_request::HttpReadLoopResult::DATA) {
         if (result == http_request::HttpReadLoopResult::DATA)
           s->len += static_cast<size_t>(n);
         this->defer([this]() { this->read_index_(); });
         return;
       }
-      if (result != http_request::HttpReadLoopResult::COMPLETE) {
-        this->index_read_(false);
-        return;
-      }
+      readable = result == http_request::HttpReadLoopResult::COMPLETE;
     }
     this->container_->end();
     this->container_.reset();
     r->reading_signature = false;
-    if (!this->signature_read_()) {
-      this->index_read_(false);
+    if (r->fetching == FETCH_KEY) {
+      s->text[s->len] = '\0';
+      s->has_key = readable && parse_public_key(s->text, s->key);
+      if (s->has_key && this->open_signature_())
+        return;
+      this->open_repo_index_();
       return;
     }
+    r->checking = readable && this->signature_read_();
     this->open_repo_index_();
     return;
   }
@@ -1643,7 +1655,7 @@ bool PackageManager::index_input_(bool final) {
 
 void PackageManager::index_bytes_(const uint8_t *data, size_t len) {
   IndexReader *r = this->reader_;
-  if (len > 0 && this->repos_[this->refresh_repo_].has_key)
+  if (len > 0 && r->checking)
     r->signature->sha.add(data, len);
   for (size_t i = 0; i < len; i++) {
     if (data[i] == '\n') {
@@ -1660,12 +1672,8 @@ void PackageManager::index_read_(bool ok) {
     this->container_.reset();
   }
   Repository &repo = this->repos_[this->refresh_repo_];
-  if (ok && repo.has_key && !this->signature_ok_()) {
-    this->drop_available_(this->refresh_repo_);
-    repo.count = 0;
-    repo.state = RepoState::FAILED;
-    this->refuse_("Repository %s: index signature not valid", repo.name);
-  } else if (ok) {
+  repo.signed_ok = ok && this->reader_->checking && this->signature_ok_() ? 1 : 0;
+  if (ok) {
     repo.state = RepoState::OK;
   } else {
     repo.state = RepoState::FAILED;
