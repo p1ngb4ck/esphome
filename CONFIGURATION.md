@@ -45,10 +45,12 @@ in; only this firmware's entries are kept. An index whose signature does not ver
 repository downloads the `.ipk` with progress, checks its SHA-256 from the index and installs the packages it needs
 first.
 
-Signing: the build tools' `tools/publish_packages.py` ([P4NOS](https://github.com/p1ngb4ck/P4NOS)) writes a build's
-directory into the repository and signs with the secret key in `ESPHOME_PACKAGES_SIGNING_KEY`;
-`publish_packages.py keygen --out NAME` makes a key pair (`NAME.sec`, `NAME.pub`; the `.pub` line is the
-repository's `public_key`). The repository itself holds only the packages.
+Publishing: the device builder publishes after every compile on a host where `~/.config/esphome-packages/` holds
+`repository` (the repository's git URL), `deploy_key` (push access) and optionally `signing.sec`: only the packages
+of that compile's firmware id go into `<firmware id>/`, signed, then pushed. The same publisher
+(`python -m esphome_device_builder.helpers.package_publish`) has `keygen --out NAME` (`NAME.sec`, `NAME.pub`; the
+`.pub` line is the repository's `public_key`) and `publish` for other build tools. The repository itself holds only
+the packages.
 
 ## Interfaces
 
