@@ -242,6 +242,12 @@ void RelayLink::ha_browse(const std::string &type, const std::string &id) {
     return;
   }
   this->lock();
+  for (const auto &req : this->ha_reqs_) {
+    if (std::strcmp(req.first.c_str(), type.c_str()) == 0 && std::strcmp(req.second.c_str(), id.c_str()) == 0) {
+      this->unlock();
+      return;
+    }
+  }
   const bool queued = this->ha_reqs_.emplace_back(type.c_str(), id.c_str()) != nullptr;
   this->unlock();
   if (!queued) {
