@@ -20,7 +20,7 @@ SCREENCAST_TARGETS = {"local": 1, "relay": 2, "both": 3}
 
 
 def AUTO_LOAD(config=None) -> list[str]:
-    load = ["avi", "json"]
+    load = ["avi", "json", "ring_buffer"]
     if config and config.get(CONF_RELAY):
         load.append("relay_link")
     return load
