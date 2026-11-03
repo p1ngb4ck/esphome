@@ -266,7 +266,7 @@ def delay(ms):
     return DELAY_FLAG, ms
 
 
-def i2c_write(address: int, reg: int, value: int) -> tuple[int, int, int, int]:
+def i2c_write(address, reg, value):
     return I2C_FLAG, address, reg, value
 
 

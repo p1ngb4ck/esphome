@@ -44,15 +44,13 @@ void FT5x06Touchscreen::continue_setup_() {
     case FT5X06_ID_1:
     case FT5X06_ID_2:
     case FT5X06_ID_3:
-    case FT5X06_ID_4:
       this->vendor_id_ = (VendorId) data[0];
       ESP_LOGD(TAG, "Read vendor ID 0x%X", data[0]);
       break;
 
     default:
-      ESP_LOGE(TAG, "Unknown vendor ID 0x%X", data[0]);
-      this->mark_failed();
-      return;
+      ESP_LOGW(TAG, "Unknown vendor ID 0x%X, using the FT5x06 register map", data[0]);
+      break;
   }
 }
 
@@ -94,7 +92,7 @@ void FT5x06Touchscreen::update_touches_firmware_() {
     ESP_LOGW(TAG, "Failed to read status");
     return;
   }
-  if (touch_cnt == FT5X06_NOT_TOUCHED)
+  if (touch_cnt == 0xFF)
     return;
   touch_cnt = std::min<uint8_t>(touch_cnt & 0x0F, MAX_TOUCHES);
   for (uint8_t i = 0; i != touch_cnt; i++) {
@@ -104,7 +102,7 @@ void FT5x06Touchscreen::update_touches_firmware_() {
       return;
     }
     uint8_t status = data[0] >> 6;
-    if (status != FT5X06_EVENT_UP && status != FT5X06_EVENT_CONTACT)
+    if (status != 1 && status != 2)
       continue;
     uint8_t id = data[2] >> 4;
     uint16_t x = encode_uint16(data[0] & 0x0F, data[1]);

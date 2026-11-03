@@ -72,12 +72,18 @@ class MipiDsi final : public display::Display {
   void set_lane_bit_rate(float lane_bit_rate) { this->lane_bit_rate_ = lane_bit_rate; }
   void set_lanes(uint8_t lanes) { this->lanes_ = lanes; }
   void set_frame_buffers(uint8_t n) { this->num_fbs_ = n; }
+  void set_video_mode(uint8_t mode) { this->video_mode_ = mode; }
   void set_frame_ack(bool frame_ack) { this->frame_ack_ = frame_ack; }
   void set_continuous_clock(bool continuous) { this->continuous_clock_ = continuous; }
+  void set_video_mode_only(bool video_mode_only) { this->video_mode_only_ = video_mode_only; }
   void set_eotp(bool eotp) { this->eotp_ = eotp; }
   void set_lp_horizontal_blanking(bool lp) { this->lp_horizontal_blanking_ = lp; }
   void set_lp_vertical_active(bool lp) { this->lp_vertical_active_ = lp; }
   void set_generic_commands(bool generic) { this->generic_commands_ = generic; }
+  void set_read_registers(const uint16_t *registers, uint8_t count) {
+    this->read_registers_ = registers;
+    this->read_registers_count_ = count;
+  }
 #ifdef USE_I2C
   void set_i2c_bus(i2c::I2CBus *bus) { this->i2c_device_.set_i2c_bus(bus); }
 #endif
@@ -143,6 +149,7 @@ class MipiDsi final : public display::Display {
   void mark_dirty_(int x_start, int y_start, int w, int h);
   bool send_init_sequence_(uint32_t when);
   void write_generic_(uint8_t cmd, const uint8_t *args, uint8_t num_args);
+  void log_read_registers_();
   /// Pack a colour as the 565 value the panel's byte order expects in memory.
   uint16_t to_panel_565_(Color color) const {
     const uint16_t rgb565 = display::ColorUtil::color_to_565(color);
@@ -166,12 +173,16 @@ class MipiDsi final : public display::Display {
   float lane_bit_rate_{1500};  // in Mbps
   uint8_t lanes_{2};           // 1, 2, 3 or 4 lanes
   uint8_t num_fbs_{1};
+  uint8_t video_mode_{2};
   bool frame_ack_{true};
   bool continuous_clock_{false};
+  bool video_mode_only_{false};
   bool eotp_{true};
   bool lp_horizontal_blanking_{true};
   bool lp_vertical_active_{true};
   bool generic_commands_{false};
+  uint8_t read_registers_count_{0};
+  const uint16_t *read_registers_{nullptr};
 #ifdef USE_I2C
   i2c::I2CDevice i2c_device_;
 #endif
