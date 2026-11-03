@@ -10,7 +10,7 @@ must be configured, and the partition table needs a data partition named `packag
 | `directory` | - | A storage folder (full path without a trailing `/`, at most 63 characters) for `<name>.cfg` settings files, downloads and `<name>.files`. |
 | `max_packages` | `8` | Package slots, 1 to 15. |
 | `http_request_id` | - | An `http_request` component: enables repositories (needed by `repositories:`). Loads `noise` for libsodium. |
-| `repositories` | - | Up to 8 repositories from the configuration: `name` (1 to 23 characters), `url` (`http://` / `https://`, at most 127 characters), `public_key` (optional, a usign / signify Ed25519 public key: the repository's indexes must be signed with it). |
+| `repositories` | - | Up to 8 repositories from the configuration: `name` (1 to 23 characters), `url` (`http://` / `https://`, at most 127 characters), `public_key` (optional, a usign / signify Ed25519 public key used instead of the repository's own `signing.pub`). |
 | `packages` | - | `name: file` (or `name: {file:, depends: [...]}`): YAML documents built as packages during the firmware build. Names: a-z first, then a-z, 0-9, `_`, at most 23 characters. |
 | `api` | when `api:` exists | The Home Assistant API actions below. |
 | `mqtt` | when `mqtt:` exists | The MQTT interface below. |
@@ -40,8 +40,9 @@ index.json                                 every firmware: id, board, device, ve
 <firmware id>/<name>_<version>_<arch>.ipk  the packages
 ```
 
-Refresh reads `Packages.sig` (repositories with a `public_key`), then `Packages.gz`, else `Packages`, as it streams
-in; only this firmware's entries are kept. An index whose signature does not verify is refused. Install from a
+Refresh reads the repository's `signing.pub` (its root) and `<firmware id>/Packages.sig`, then `Packages.gz`, else
+`Packages`, as it streams in; only this firmware's entries are kept. The signature only marks the repository and its
+packages signed or unsigned (`signed` in the lists); an unsigned index loads as well. No key is in the firmware. Install from a
 repository downloads the `.ipk` with progress, checks its SHA-256 from the index and installs the packages it needs
 first.
 
@@ -49,7 +50,7 @@ Publishing: the device builder publishes after every compile on a host where `~/
 `repository` (the repository's git URL), `deploy_key` (push access) and optionally `signing.sec`: only the packages
 of that compile's firmware id go into `<firmware id>/`, signed, then pushed. The same publisher
 (`python -m esphome_device_builder.helpers.package_publish`) has `keygen --out NAME` (`NAME.sec`, `NAME.pub`; the
-`.pub` line is the repository's `public_key`) and `publish` for other build tools. The repository itself holds only
+publisher writes the public key as `signing.pub` into the repository root) and `publish` for other build tools. The repository itself holds only
 the packages.
 
 ## Interfaces
