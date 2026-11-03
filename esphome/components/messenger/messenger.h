@@ -119,6 +119,7 @@ class Messenger : public Component
   void setup() override;
   void loop() override;
   void dump_config() override;
+  bool teardown() override;
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
   void set_http_request(http_request::HttpRequestComponent *http) { this->http_ = http; }
@@ -322,6 +323,8 @@ class Messenger : public Component
   size_t max_upload_{4 * 1024 * 1024};
   std::atomic<bool> token_changed_{false};
   std::atomic<bool> history_changed_{false};
+  std::atomic<bool> stopping_{false};
+  std::atomic<uint8_t> parked_{0};
 
 #ifdef USE_MESSENGER_STORAGE
   Job *upload_job_{nullptr};

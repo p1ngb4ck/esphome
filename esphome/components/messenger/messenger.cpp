@@ -553,7 +553,7 @@ void Messenger::poll_task_entry_(void *param) { static_cast<Messenger *>(param)-
 void Messenger::send_task_entry_(void *param) { static_cast<Messenger *>(param)->send_loop_(); }
 
 void Messenger::poll_loop_() {
-  while (true) {
+  while (!this->stopping_.load()) {
     if (!this->is_ready(Channel::TELEGRAM)) {
       ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
       continue;
@@ -568,9 +568,11 @@ void Messenger::poll_loop_() {
     }
     if (this->token_changed_.exchange(false, std::memory_order_acq_rel))
       this->offset_ = 0;
-    if (!this->poll_once_())
+    if (!this->poll_once_() && !this->stopping_.load())
       ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(RETRY_MS));
   }
+  this->parked_.fetch_add(1);
+  vTaskSuspend(nullptr);
 }
 
 bool Messenger::poll_once_() {
@@ -1151,7 +1153,7 @@ bool Messenger::send_message(Channel channel, int64_t chat_id, const std::string
 }
 
 void Messenger::send_loop_() {
-  while (true) {
+  while (!this->stopping_.load()) {
     Job *job = nullptr;
     if (xQueueReceive(this->jobs_, &job, portMAX_DELAY) != pdTRUE || job == nullptr)
       continue;
@@ -1174,6 +1176,47 @@ void Messenger::send_loop_() {
     }
     this->finish_job_(job, ok, error);
   }
+  this->parked_.fetch_add(1);
+  vTaskSuspend(nullptr);
+}
+
+bool Messenger::teardown() {
+  if (!this->stopping_.exchange(true)) {
+#ifdef USE_MESSENGER_CALL
+    this->call_.hangup();
+#endif
+    if (this->poll_task_.is_created())
+      xTaskNotifyGive(this->poll_task_.get_handle());
+    if (this->send_task_.is_created()) {
+      Job *wake = nullptr;
+      xQueueSend(this->jobs_, &wake, 0);
+    }
+  }
+#ifdef USE_MESSENGER_CALL
+  if (this->call_.state() != CallState::IDLE)
+    return false;
+#endif
+  const uint8_t tasks = (this->poll_task_.is_created() ? 1 : 0) + (this->send_task_.is_created() ? 1 : 0);
+  if (this->parked_.load() < tasks || !this->poll_task_.deallocate() || !this->send_task_.deallocate())
+    return false;
+  if (this->jobs_ != nullptr) {
+    Job *job = nullptr;
+    while (xQueueReceive(this->jobs_, &job, 0) == pdTRUE) {
+      if (job != nullptr)
+        free_job_(job);
+    }
+    vQueueDelete(this->jobs_);
+    this->jobs_ = nullptr;
+  }
+  if (this->inbound_ != nullptr) {
+    RAMAllocator<Inbound>(RAMAllocator<Inbound>::ALLOC_EXTERNAL).deallocate(this->inbound_, INBOUND_SLOTS);
+    this->inbound_ = nullptr;
+  }
+  if (this->history_ != nullptr) {
+    RAMAllocator<HistoryEntry>(RAMAllocator<HistoryEntry>::ALLOC_EXTERNAL).deallocate(this->history_, HISTORY_SLOTS);
+    this->history_ = nullptr;
+  }
+  return true;
 }
 
 void Messenger::finish_job_(Job *job, bool ok, const std::string &error) {
