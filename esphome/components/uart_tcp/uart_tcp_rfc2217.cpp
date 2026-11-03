@@ -298,6 +298,7 @@ void UartTcp::rfc_control_(uint8_t value) {
     case CONTROL_DTR_OFF:
     case CONTROL_RTS_ON:
     case CONTROL_RTS_OFF: {
+#ifdef USE_UART_TCP_MODEM_CONTROL
       bool dtr = this->rfc_.dtr;
       bool rts = this->rfc_.rts;
       if (value == CONTROL_DTR_ON || value == CONTROL_DTR_OFF) {
@@ -305,7 +306,6 @@ void UartTcp::rfc_control_(uint8_t value) {
       } else {
         rts = value == CONTROL_RTS_ON;
       }
-#ifdef USE_UART_TCP_MODEM_CONTROL
       if (this->modem_ != nullptr && this->modem_->set_modem_control(dtr, rts)) {
         this->rfc_.dtr = dtr;
         this->rfc_.rts = rts;
