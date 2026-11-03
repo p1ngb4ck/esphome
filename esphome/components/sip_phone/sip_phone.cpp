@@ -2,6 +2,9 @@
 
 #ifdef USE_ESP32
 
+#include "g711.h"
+#include "g722.h"
+
 #include "esphome/components/md5/md5.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
@@ -12,6 +15,7 @@
 #include <freertos/idf_additions.h>
 #include <lwip/netdb.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstddef>
 #include <cstdio>
@@ -24,7 +28,43 @@ namespace esphome::sip_phone {
 
 static const char *const TAG = "sip_phone";
 
-static constexpr uint32_t SIG_TASK_STACK = 6144;
+static constexpr uint32_t SIG_TASK_STACK = 8192;
+static constexpr uint32_t TX_RING_MS = 100;
+static constexpr uint16_t MAX_CONCEAL = 5;
+static constexpr uint8_t DTMF_FRAMES = 8;
+static constexpr uint8_t DTMF_GAP_FRAMES = 3;
+
+template<typename T> static T *alloc_external(size_t count) {
+  RAMAllocator<T> allocator(RAMAllocator<T>::ALLOC_EXTERNAL);
+  return allocator.allocate(count);
+}
+
+template<typename T> static void free_external(T *&ptr, size_t count) {
+  if (ptr == nullptr)
+    return;
+  RAMAllocator<T> allocator(RAMAllocator<T>::ALLOC_EXTERNAL);
+  allocator.deallocate(ptr, count);
+  ptr = nullptr;
+}
+
+static int8_t dtmf_code(char digit) {
+  if (digit >= '0' && digit <= '9')
+    return static_cast<int8_t>(digit - '0');
+  if (digit == '*')
+    return 10;
+  if (digit == '#')
+    return 11;
+  if (digit >= 'A' && digit <= 'D')
+    return static_cast<int8_t>(12 + digit - 'A');
+  if (digit >= 'a' && digit <= 'd')
+    return static_cast<int8_t>(12 + digit - 'a');
+  return -1;
+}
+
+static char dtmf_char(uint8_t code) {
+  static const char DIGITS[] = "0123456789*#ABCD";
+  return code < 16 ? DIGITS[code] : '\0';
+}
 static constexpr UBaseType_t SIG_TASK_PRIORITY = 5;
 static constexpr uint32_t T1_MS = 500;
 static constexpr uint32_t T2_MS = 4000;
@@ -158,7 +198,7 @@ void SipPhone::setup() {
   this->opus_params_.channels = mic_info.get_channels() > 1 ? 2 : 1;
 
   this->microphone_->add_data_callback(
-      [this](const microphone::AudioCapture &capture) { this->media_.on_mic_data(capture.data); });
+      [this](const microphone::AudioCapture &capture) { this->on_mic_data_(capture.data); });
 
   this->commands_ = xQueueCreateWithCaps(COMMAND_QUEUE, sizeof(Command), MALLOC_CAP_SPIRAM);
   this->events_ = xQueueCreateWithCaps(EVENT_QUEUE, sizeof(Event), MALLOC_CAP_SPIRAM);
@@ -243,14 +283,8 @@ void SipPhone::dump_config() {
 void SipPhone::loop() {
   while (xQueueReceive(this->events_, &this->pending_event_, 0) == pdTRUE)
     this->process_event_(this->pending_event_);
-  if (this->media_parked_.load()) {
-    if (this->media_.release()) {
-      this->media_parked_.store(false);
-      this->speaker_->stop();
-    } else {
-      return;
-    }
-  }
+  if (this->media_stopping_ && !this->release_media_())
+    return;
   this->disable_loop();
 }
 
@@ -283,7 +317,7 @@ void SipPhone::send_dtmf(std::string digits) {
   if (this->state_ != PhoneState::IN_CALL)
     return;
   if (this->current_.codec[0] != '\0' && this->media_running_ && this->dtmf_rtp_) {
-    this->media_.send_dtmf(digits.c_str());
+    this->queue_dtmf_(digits.c_str());
   } else {
     this->post_command_(CommandType::DTMF_INFO, "", digits.c_str());
   }
@@ -295,7 +329,7 @@ void SipPhone::send_message(std::string destination, std::string text) {
 
 void SipPhone::set_mute(bool mute) {
   this->mute_ = mute;
-  this->media_.set_mute(mute);
+  this->tx_mute_.store(mute);
 }
 
 void SipPhone::set_dnd(bool dnd) {
@@ -453,18 +487,6 @@ void SipPhone::status_json(JsonObject root) const {
 }
 #endif
 
-void SipPhone::on_media_dtmf(char digit) {
-  Event event{};
-  event.type = EventType::DTMF;
-  event.digit = digit;
-  this->post_event_(event);
-}
-
-void SipPhone::on_media_parked() {
-  this->media_parked_.store(true);
-  this->enable_loop_soon_any_context();
-}
-
 #if defined(USE_NETWORK) && defined(NETWORK_ACTIVE_INTERFACE_LISTENER_COUNT)
 void SipPhone::on_active_interface(network::NetworkInterface interface) {
   if (this->is_failed())
@@ -599,8 +621,14 @@ void SipPhone::process_event_(const Event &event) {
       this->fire_event_("answered");
       break;
     case EventType::MEDIA_UPDATE:
-      if (this->media_running_)
-        this->media_.update_remote(event.media.remote, event.media.send, event.media.receive);
+      if (this->media_running_) {
+        {
+          LockGuard guard(this->remote_lock_);
+          this->rtp_remote_ = event.media.remote;
+        }
+        this->rtp_send_.store(event.media.send);
+        this->rtp_receive_.store(event.media.receive);
+      }
       break;
     case EventType::ENDED: {
       this->stop_media_();
@@ -663,62 +691,416 @@ void SipPhone::finish_call_record_(const char *reason) {
     this->recent_count_++;
 }
 
-void SipPhone::start_media_(const MediaConfig &media) {
-  if (this->media_running_ || this->media_parked_.load()) {
+void SipPhone::start_media_(const RtpParams &media) {
+  if (this->media_running_ || this->media_stopping_) {
     ESP_LOGW(TAG, "Media still busy");
+    if (media.socket_fd >= 0)
+      ::close(media.socket_fd);
     this->hangup();
     return;
   }
-  this->microphone_->set_target_format(media.pcm_rate, media.pcm_channels);
-  this->speaker_->set_audio_stream_info(audio::AudioStreamInfo(16, media.pcm_channels, media.pcm_rate));
+  const MediaFormat &format = media.format;
+  switch (format.codec) {
+    case Codec::OPUS:
+      this->rtp_rate_ = this->opus_params_.sample_rate;
+      this->rtp_channels_ = this->opus_params_.channels;
+      break;
+    case Codec::G722:
+      this->rtp_rate_ = 16000;
+      this->rtp_channels_ = 1;
+      break;
+    default:
+      this->rtp_rate_ = 8000;
+      this->rtp_channels_ = 1;
+      break;
+  }
+  this->rtp_format_ = format;
+  this->rtp_fd_ = media.socket_fd;
+  this->frame_samples_ = this->rtp_rate_ * format.ptime / 1000;
+  this->frame_bytes_ = this->frame_samples_ * this->rtp_channels_ * sizeof(int16_t);
+  this->ts_step_ = codec_rtp_clock(format.codec) * format.ptime / 1000;
+  const size_t opus_max = static_cast<size_t>(this->rtp_rate_) * 60 / 1000 * this->rtp_channels_;
+  this->rx_pcm_capacity_ =
+      std::max<size_t>(std::max<size_t>(opus_max, this->frame_bytes_ / sizeof(int16_t)), 2 * MAX_PAYLOAD);
+  this->tx_packet_ = alloc_external<uint8_t>(12 + MAX_PAYLOAD);
+  this->tx_pcm_ = alloc_external<int16_t>(this->frame_bytes_ / sizeof(int16_t));
+  this->rx_pcm_ = alloc_external<int16_t>(this->rx_pcm_capacity_);
+  this->tx_ring_ = ring_buffer::RingBuffer::create(this->rtp_rate_ * this->rtp_channels_ * sizeof(int16_t) *
+                                                   TX_RING_MS / 1000);
+  if (this->tx_packet_ == nullptr || this->tx_pcm_ == nullptr || this->rx_pcm_ == nullptr ||
+      this->tx_ring_ == nullptr || !this->alloc_codec_(this->rtp_rate_, this->rtp_channels_)) {
+    ESP_LOGE(TAG, "No PSRAM for the call's audio");
+    this->free_media_();
+    this->hangup();
+    return;
+  }
+  {
+    LockGuard guard(this->remote_lock_);
+    this->rtp_remote_ = media.remote;
+  }
+  this->rtp_send_.store(media.send);
+  this->rtp_receive_.store(media.receive);
+  this->ssrc_ = esp_random();
+  this->tx_seq_ = static_cast<uint16_t>(esp_random());
+  this->tx_ts_ = esp_random();
+  this->tx_marker_ = true;
+  this->rx_started_ = false;
+  this->dtmf_seen_ = false;
+  this->dtmf_event_ = -1;
+  this->dtmf_gap_ = 0;
+  {
+    LockGuard guard(this->dtmf_lock_);
+    this->dtmf_head_ = 0;
+    this->dtmf_tail_ = 0;
+  }
+  this->tx_mute_.store(this->mute_);
+  this->microphone_->set_target_format(this->rtp_rate_, this->rtp_channels_);
+  this->speaker_->set_audio_stream_info(audio::AudioStreamInfo(16, this->rtp_channels_, this->rtp_rate_));
   this->speaker_->start();
-  this->media_.set_mute(this->mute_);
-  if (!this->media_.start(media, this->speaker_, this, this->task_stack_in_psram_)) {
-    this->speaker_->stop();
-    this->hangup();
-    return;
-  }
   this->media_running_ = true;
+  this->media_on_.store(true, std::memory_order_release);
+  this->wake_sig_();
   this->microphone_->start();
 }
 
-bool SipPhone::start_transport_media(MediaTransport *transport, bool mute) {
-#ifdef USE_SIP_PHONE_OPUS
-  if (this->media_running_ || this->media_parked_.load())
-    return false;
-  MediaConfig media;
-  media.format.codec = Codec::OPUS;
-  media.format.ptime = this->ptime_;
-  media.pcm_rate = this->opus_params_.sample_rate;
-  media.pcm_channels = this->opus_params_.channels;
-  media.opus_bitrate = this->opus_bitrate_;
-  media.opus_complexity = this->opus_complexity_;
-  media.playout_ms = this->playout_ms_;
-  media.transport = transport;
-  this->start_media_(media);
+void SipPhone::stop_media_() {
   if (!this->media_running_)
+    return;
+  this->media_running_ = false;
+  this->media_on_.store(false, std::memory_order_release);
+  this->microphone_->stop();
+  this->media_stopping_ = true;
+  this->wake_sig_();
+  this->enable_loop();
+}
+
+bool SipPhone::release_media_() {
+  if (this->media_on_.load() || this->mic_users_.load() != 0 || this->rtp_users_.load() != 0)
     return false;
-  this->transport_media_ = true;
-  this->media_.set_mute(mute);
+  this->free_media_();
+  this->speaker_->stop();
+  this->media_stopping_ = false;
   return true;
-#else
-  return false;
+}
+
+bool SipPhone::alloc_codec_(uint32_t rate, uint8_t channels) {
+  switch (this->rtp_format_.codec) {
+#ifdef USE_SIP_PHONE_OPUS
+    case Codec::OPUS:
+      if (!this->opus_encoder_.start(rate, channels, this->rtp_format_.ptime,
+                                     static_cast<int32_t>(this->opus_bitrate_), this->opus_complexity_, true,
+                                     !this->rtp_format_.remote_stereo)) {
+        ESP_LOGE(TAG, "Opus encoder");
+        return false;
+      }
+      if (!this->opus_decoder_.start(rate, channels)) {
+        ESP_LOGE(TAG, "Opus decoder");
+        return false;
+      }
+      return true;
+#endif
+    case Codec::G722: {
+      G722Encoder *encoder = alloc_external<G722Encoder>(1);
+      G722Decoder *decoder = alloc_external<G722Decoder>(1);
+      if (encoder == nullptr || decoder == nullptr) {
+        free_external(encoder, 1);
+        free_external(decoder, 1);
+        return false;
+      }
+      this->g722_encoder_ = new (encoder) G722Encoder();
+      this->g722_decoder_ = new (decoder) G722Decoder();
+      this->g722_encoder_->reset();
+      this->g722_decoder_->reset();
+      return true;
+    }
+    case Codec::PCMA:
+    case Codec::PCMU:
+      return true;
+    default:
+      ESP_LOGE(TAG, "Codec %s not built in", codec_name(this->rtp_format_.codec));
+      return false;
+  }
+}
+
+void SipPhone::free_media_() {
+#ifdef USE_SIP_PHONE_OPUS
+  this->opus_encoder_.stop();
+  this->opus_decoder_.stop();
+#endif
+  free_external(this->g722_encoder_, 1);
+  free_external(this->g722_decoder_, 1);
+  free_external(this->tx_packet_, 12 + MAX_PAYLOAD);
+  free_external(this->tx_pcm_, this->frame_bytes_ / sizeof(int16_t));
+  free_external(this->rx_pcm_, this->rx_pcm_capacity_);
+  this->tx_ring_.reset();
+  if (this->rtp_fd_ >= 0) {
+    ::close(this->rtp_fd_);
+    this->rtp_fd_ = -1;
+  }
+}
+
+void SipPhone::on_mic_data_(std::span<const uint8_t> data) {
+  this->mic_users_.fetch_add(1);
+  if (this->media_on_.load(std::memory_order_acquire)) {
+    this->tx_ring_->write(data.data(), data.size());
+    if (this->tx_ring_->available() >= this->frame_bytes_)
+      this->wake_sig_();
+  }
+  this->mic_users_.fetch_sub(1);
+}
+
+void SipPhone::queue_dtmf_(const char *digits) {
+  LockGuard guard(this->dtmf_lock_);
+  for (const char *c = digits; *c != '\0'; c++) {
+    if (dtmf_code(*c) < 0)
+      continue;
+    const uint8_t next = static_cast<uint8_t>((this->dtmf_tail_ + 1) % sizeof(this->dtmf_queue_));
+    if (next == this->dtmf_head_)
+      break;
+    this->dtmf_queue_[this->dtmf_tail_] = *c;
+    this->dtmf_tail_ = next;
+  }
+}
+
+void SipPhone::drain_rtp_(int fd) {
+  for (;;) {
+    const ssize_t len = ::recvfrom(fd, this->rx_buf_, RX_BUFFER, MSG_DONTWAIT, nullptr, nullptr);
+    if (len <= 0)
+      return;
+    this->handle_rtp_(reinterpret_cast<const uint8_t *>(this->rx_buf_), static_cast<size_t>(len));
+  }
+}
+
+void SipPhone::start_playout_() {
+  if (this->rx_started_)
+    return;
+  this->rx_started_ = true;
+  memset(this->rx_pcm_, 0, this->rx_pcm_capacity_ * sizeof(int16_t));
+  size_t silence = static_cast<size_t>(this->rtp_rate_) * this->rtp_channels_ * sizeof(int16_t) *
+                   this->playout_ms_ / 1000;
+  while (silence > 0) {
+    const size_t chunk = std::min<size_t>(silence, this->rx_pcm_capacity_ * sizeof(int16_t));
+    this->speaker_->play(reinterpret_cast<const uint8_t *>(this->rx_pcm_), chunk, 0);
+    silence -= chunk;
+  }
+}
+
+void SipPhone::handle_rtp_(const uint8_t *packet, size_t len) {
+  if (len < 12 || (packet[0] >> 6) != 2 || !this->rtp_receive_.load())
+    return;
+  size_t header = 12 + 4 * (packet[0] & 0x0F);
+  if (packet[0] & 0x10) {
+    if (len < header + 4)
+      return;
+    header += 4 + 4 * ((packet[header + 2] << 8) | packet[header + 3]);
+  }
+  size_t end = len;
+  if (packet[0] & 0x20) {
+    const uint8_t padding = packet[len - 1];
+    if (padding > end)
+      return;
+    end -= padding;
+  }
+  if (end <= header)
+    return;
+  const uint8_t pt = packet[1] & 0x7F;
+  const uint16_t seq = static_cast<uint16_t>((packet[2] << 8) | packet[3]);
+  const uint32_t timestamp = (static_cast<uint32_t>(packet[4]) << 24) | (static_cast<uint32_t>(packet[5]) << 16) |
+                             (static_cast<uint32_t>(packet[6]) << 8) | packet[7];
+  const uint8_t *payload = packet + header;
+  const size_t payload_len = end - header;
+  const MediaFormat &format = this->rtp_format_;
+  if (format.dtmf_payload_type != 0 && pt == format.dtmf_payload_type) {
+    if (payload_len < 4 || (this->dtmf_seen_ && timestamp == this->last_dtmf_ts_))
+      return;
+    this->dtmf_seen_ = true;
+    this->last_dtmf_ts_ = timestamp;
+    const char digit = dtmf_char(payload[0]);
+    if (digit != '\0') {
+      Event event{};
+      event.type = EventType::DTMF;
+      event.digit = digit;
+      this->post_event_(event);
+    }
+    return;
+  }
+  if (pt != format.payload_type || payload_len > MAX_PAYLOAD)
+    return;
+  if (!this->rx_started_) {
+    this->rx_expected_ = seq;
+    this->start_playout_();
+  }
+  const int16_t diff = static_cast<int16_t>(seq - this->rx_expected_);
+  if (diff < 0)
+    return;
+  if (diff > 0 && diff <= 50)
+    this->conceal_(std::min<uint16_t>(static_cast<uint16_t>(diff), MAX_CONCEAL), payload, payload_len);
+  this->play_payload_(payload, payload_len);
+  this->rx_expected_ = static_cast<uint16_t>(seq + 1);
+}
+
+void SipPhone::play_payload_(const uint8_t *payload, size_t len) {
+  size_t samples = 0;
+  switch (this->rtp_format_.codec) {
+#ifdef USE_SIP_PHONE_OPUS
+    case Codec::OPUS: {
+      const int frames =
+          this->opus_decoder_.decode(payload, len, this->rx_pcm_, this->rx_pcm_capacity_ / this->rtp_channels_);
+      if (frames <= 0)
+        return;
+      samples = static_cast<size_t>(frames) * this->rtp_channels_;
+      break;
+    }
+#endif
+    case Codec::G722:
+      samples = this->g722_decoder_->decode(payload, len, this->rx_pcm_);
+      break;
+    case Codec::PCMA:
+      for (size_t i = 0; i < len; i++)
+        this->rx_pcm_[i] = g711::alaw_to_linear(payload[i]);
+      samples = len;
+      break;
+    case Codec::PCMU:
+      for (size_t i = 0; i < len; i++)
+        this->rx_pcm_[i] = g711::ulaw_to_linear(payload[i]);
+      samples = len;
+      break;
+    default:
+      return;
+  }
+  this->speaker_->play(reinterpret_cast<const uint8_t *>(this->rx_pcm_), samples * sizeof(int16_t), 0);
+}
+
+void SipPhone::conceal_(uint16_t frames, const uint8_t *next_payload, size_t next_len) {
+#ifdef USE_SIP_PHONE_OPUS
+  if (this->rtp_format_.codec != Codec::OPUS)
+    return;
+  for (uint16_t i = 0; i < frames; i++) {
+    const bool fec = i + 1 == frames;
+    const int decoded = fec ? this->opus_decoder_.decode(next_payload, next_len, this->rx_pcm_,
+                                                         this->frame_samples_, true)
+                            : this->opus_decoder_.conceal(this->rx_pcm_, this->frame_samples_);
+    if (decoded > 0)
+      this->speaker_->play(reinterpret_cast<const uint8_t *>(this->rx_pcm_),
+                           static_cast<size_t>(decoded) * this->rtp_channels_ * sizeof(int16_t), 0);
+  }
 #endif
 }
 
-void SipPhone::stop_transport_media() {
-  if (!this->transport_media_)
-    return;
-  this->transport_media_ = false;
-  this->stop_media_();
+void SipPhone::process_tx_() {
+  while (this->tx_ring_->available() >= this->frame_bytes_) {
+    this->tx_ring_->read(this->tx_pcm_, this->frame_bytes_, 0);
+    if (!this->rtp_send_.load()) {
+      this->tx_ts_ += this->ts_step_;
+      continue;
+    }
+    if (this->send_dtmf_frame_())
+      continue;
+    if (this->tx_mute_.load())
+      memset(this->tx_pcm_, 0, this->frame_bytes_);
+    this->send_audio_frame_();
+  }
 }
 
-void SipPhone::stop_media_() {
-  if (!this->media_running_ || this->transport_media_)
-    return;
-  this->media_running_ = false;
-  this->microphone_->stop();
-  this->media_.request_stop();
+void SipPhone::send_audio_frame_() {
+  uint8_t *payload = this->tx_packet_ + 12;
+  size_t len = 0;
+  switch (this->rtp_format_.codec) {
+#ifdef USE_SIP_PHONE_OPUS
+    case Codec::OPUS: {
+      const int bytes = this->opus_encoder_.encode(this->tx_pcm_, payload, MAX_PAYLOAD);
+      if (bytes <= 0)
+        return;
+      len = static_cast<size_t>(bytes);
+      break;
+    }
+#endif
+    case Codec::G722:
+      len = this->g722_encoder_->encode(this->tx_pcm_, this->frame_samples_, payload);
+      break;
+    case Codec::PCMA:
+      for (size_t i = 0; i < this->frame_samples_; i++)
+        payload[i] = g711::linear_to_alaw(this->tx_pcm_[i]);
+      len = this->frame_samples_;
+      break;
+    case Codec::PCMU:
+      for (size_t i = 0; i < this->frame_samples_; i++)
+        payload[i] = g711::linear_to_ulaw(this->tx_pcm_[i]);
+      len = this->frame_samples_;
+      break;
+    default:
+      return;
+  }
+  this->send_rtp_(this->rtp_format_.payload_type, this->tx_marker_, this->tx_ts_, payload, len);
+  this->tx_marker_ = false;
+  this->tx_ts_ += this->ts_step_;
+}
+
+bool SipPhone::send_dtmf_frame_() {
+  if (this->rtp_format_.dtmf_payload_type == 0)
+    return false;
+  if (this->dtmf_event_ < 0) {
+    if (this->dtmf_gap_ > 0) {
+      this->dtmf_gap_--;
+      return false;
+    }
+    char digit = '\0';
+    {
+      LockGuard guard(this->dtmf_lock_);
+      if (this->dtmf_head_ != this->dtmf_tail_) {
+        digit = this->dtmf_queue_[this->dtmf_head_];
+        this->dtmf_head_ = static_cast<uint8_t>((this->dtmf_head_ + 1) % sizeof(this->dtmf_queue_));
+      }
+    }
+    if (digit == '\0')
+      return false;
+    this->dtmf_event_ = dtmf_code(digit);
+    this->dtmf_frames_ = 0;
+    this->dtmf_ts_ = this->tx_ts_;
+  }
+  this->dtmf_frames_++;
+  const bool end = this->dtmf_frames_ >= DTMF_FRAMES;
+  const uint32_t duration = this->dtmf_frames_ * this->ts_step_;
+  uint8_t *payload = this->tx_packet_ + 12;
+  payload[0] = static_cast<uint8_t>(this->dtmf_event_);
+  payload[1] = static_cast<uint8_t>((end ? 0x80 : 0x00) | 10);
+  payload[2] = static_cast<uint8_t>(duration >> 8);
+  payload[3] = static_cast<uint8_t>(duration);
+  const uint8_t copies = end ? 3 : 1;
+  for (uint8_t i = 0; i < copies; i++)
+    this->send_rtp_(this->rtp_format_.dtmf_payload_type, this->dtmf_frames_ == 1 && i == 0, this->dtmf_ts_, payload,
+                    4);
+  this->tx_ts_ += this->ts_step_;
+  if (end) {
+    this->dtmf_event_ = -1;
+    this->dtmf_gap_ = DTMF_GAP_FRAMES;
+  }
+  return true;
+}
+
+void SipPhone::send_rtp_(uint8_t payload_type, bool marker, uint32_t timestamp, const uint8_t *payload, size_t len) {
+  uint8_t *packet = this->tx_packet_;
+  if (payload != packet + 12)
+    memmove(packet + 12, payload, len);
+  packet[0] = 0x80;
+  packet[1] = static_cast<uint8_t>((marker ? 0x80 : 0x00) | (payload_type & 0x7F));
+  packet[2] = static_cast<uint8_t>(this->tx_seq_ >> 8);
+  packet[3] = static_cast<uint8_t>(this->tx_seq_);
+  packet[4] = static_cast<uint8_t>(timestamp >> 24);
+  packet[5] = static_cast<uint8_t>(timestamp >> 16);
+  packet[6] = static_cast<uint8_t>(timestamp >> 8);
+  packet[7] = static_cast<uint8_t>(timestamp);
+  packet[8] = static_cast<uint8_t>(this->ssrc_ >> 24);
+  packet[9] = static_cast<uint8_t>(this->ssrc_ >> 16);
+  packet[10] = static_cast<uint8_t>(this->ssrc_ >> 8);
+  packet[11] = static_cast<uint8_t>(this->ssrc_);
+  this->tx_seq_++;
+  struct sockaddr_in remote;
+  {
+    LockGuard guard(this->remote_lock_);
+    remote = this->rtp_remote_;
+  }
+  ::sendto(this->rtp_fd_, packet, 12 + len, 0, reinterpret_cast<const struct sockaddr *>(&remote), sizeof(remote));
 }
 
 void SipPhone::sig_task_entry_(void *param) { static_cast<SipPhone *>(param)->sig_run_(); }
@@ -726,18 +1108,31 @@ void SipPhone::sig_task_entry_(void *param) { static_cast<SipPhone *>(param)->si
 void SipPhone::sig_run_() {
   if (this->network_up_.load())
     this->start_register_(false);
-  const int max_fd = std::max(this->sig_fd_, this->wake_fd_);
-  for (;;) {
+  while (!this->stopping_.load()) {
     const uint32_t now = millis();
     this->service_timers_(now);
     const uint32_t wait = this->next_deadline_(millis());
+    this->rtp_users_.fetch_add(1);
+    const int rtp = this->media_on_.load(std::memory_order_acquire) ? this->rtp_fd_ : -1;
+    if (rtp < 0)
+      this->rtp_users_.fetch_sub(1);
     fd_set readable;
     FD_ZERO(&readable);
     FD_SET(this->sig_fd_, &readable);
     FD_SET(this->wake_fd_, &readable);
+    if (rtp >= 0)
+      FD_SET(rtp, &readable);
+    const int max_fd = std::max(std::max(this->sig_fd_, this->wake_fd_), rtp);
     struct timeval tv = {.tv_sec = static_cast<time_t>(wait / 1000),
                          .tv_usec = static_cast<suseconds_t>((wait % 1000) * 1000)};
     const int n = ::select(max_fd + 1, &readable, nullptr, nullptr, wait == UINT32_MAX ? nullptr : &tv);
+    if (rtp >= 0) {
+      if (n > 0 && FD_ISSET(rtp, &readable))
+        this->drain_rtp_(rtp);
+      if (this->media_on_.load(std::memory_order_acquire))
+        this->process_tx_();
+      this->rtp_users_.fetch_sub(1);
+    }
     if (n < 0) {
       if (errno == EINTR)
         continue;
@@ -764,7 +1159,38 @@ void SipPhone::sig_run_() {
       }
     }
   }
+  this->hangup_call_(false);
+  this->sig_parked_.store(true);
   vTaskSuspend(nullptr);
+}
+
+bool SipPhone::teardown() {
+  if (!this->stopping_.exchange(true)) {
+    this->stop_media_();
+    if (this->wake_fd_ >= 0)
+      this->wake_sig_();
+  }
+  if (this->media_stopping_ && !this->release_media_())
+    return false;
+  if (this->sig_task_.is_created() && (!this->sig_parked_.load() || !this->sig_task_.deallocate()))
+    return false;
+  if (this->sig_fd_ >= 0) {
+    ::close(this->sig_fd_);
+    this->sig_fd_ = -1;
+  }
+  if (this->wake_fd_ >= 0) {
+    ::close(this->wake_fd_);
+    this->wake_fd_ = -1;
+  }
+  if (this->commands_ != nullptr) {
+    vQueueDeleteWithCaps(this->commands_);
+    this->commands_ = nullptr;
+  }
+  if (this->events_ != nullptr) {
+    vQueueDeleteWithCaps(this->events_);
+    this->events_ = nullptr;
+  }
+  return true;
 }
 
 void SipPhone::handle_command_(const Command &command) {
@@ -1231,33 +1657,13 @@ void SipPhone::close_rtp_() {
   }
 }
 
-bool SipPhone::fill_media_(MediaConfig &media, const char *remote_address, uint16_t remote_port) {
+bool SipPhone::fill_media_(RtpParams &media, const char *remote_address, uint16_t remote_port) {
   media.format = this->dialog_.format;
-  switch (media.format.codec) {
-    case Codec::OPUS:
-      media.pcm_rate = this->opus_params_.sample_rate;
-      media.pcm_channels = this->opus_params_.channels;
-      break;
-    case Codec::G722:
-      media.pcm_rate = 16000;
-      media.pcm_channels = 1;
-      break;
-    default:
-      media.pcm_rate = 8000;
-      media.pcm_channels = 1;
-      break;
-  }
   media.socket_fd = this->dialog_.rtp_fd;
   memset(&media.remote, 0, sizeof(media.remote));
   media.remote.sin_family = AF_INET;
   media.remote.sin_port = htons(remote_port);
-  if (inet_aton(remote_address, &media.remote.sin_addr) == 0)
-    return false;
-  media.ssrc = esp_random();
-  media.opus_bitrate = this->opus_bitrate_;
-  media.opus_complexity = this->opus_complexity_;
-  media.playout_ms = this->playout_ms_;
-  return true;
+  return inet_aton(remote_address, &media.remote.sin_addr) != 0;
 }
 
 void SipPhone::event_from_dialog_(Event &event) const {

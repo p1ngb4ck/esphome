@@ -2,11 +2,14 @@
 
 #ifdef USE_ESP32
 
-#include "media.h"
 #include "sdp.h"
 #include "sip_message.h"
 
+#ifdef USE_SIP_PHONE_OPUS
+#include "esphome/components/audio/opus_voice.h"
+#endif
 #include "esphome/components/resampler/microphone/resampler_microphone.h"
+#include "esphome/components/ring_buffer/ring_buffer.h"
 #include "esphome/components/speaker/speaker.h"
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -35,10 +38,15 @@
 #include <lwip/sockets.h>
 
 #include <atomic>
+#include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
 namespace esphome::sip_phone {
+
+class G722Encoder;
+class G722Decoder;
 
 enum class PhoneState : uint8_t { UNREGISTERED = 0, REGISTERING, IDLE, RINGING, CALLING, IN_CALL };
 
@@ -73,8 +81,7 @@ struct CallRecord {
   uint32_t duration_s;
 };
 
-class SipPhone final : public Component,
-                       public MediaListener
+class SipPhone final : public Component
 #if defined(USE_NETWORK) && defined(NETWORK_ACTIVE_INTERFACE_LISTENER_COUNT)
     ,
                        public network::ActiveInterfaceListener
@@ -93,12 +100,14 @@ class SipPhone final : public Component,
   static constexpr uint8_t TRANSACTIONS = 4;
   static constexpr uint8_t MAX_ROUTES = 3;
   static constexpr uint8_t MAX_VIAS = 4;
+  static constexpr size_t MAX_PAYLOAD = 1280;
 
   static SipPhone *create();
 
   void setup() override;
   void loop() override;
   void dump_config() override;
+  bool teardown() override;
   float get_setup_priority() const override { return setup_priority::AFTER_CONNECTION; }
 
   void set_microphone(resampler::ResamplerMicrophone *microphone) { this->microphone_ = microphone; }
@@ -176,16 +185,6 @@ class SipPhone final : public Component,
   Trigger<std::string, std::string> *get_message_trigger() { return &this->message_trigger_; }
   Trigger<std::string> *get_state_trigger() { return &this->state_trigger_; }
 
-  bool start_transport_media(MediaTransport *transport, bool mute);
-  void stop_transport_media();
-  void transport_payload(const uint8_t *payload, size_t len) { this->media_.on_payload(payload, len); }
-  void set_transport_mute(bool mute) {
-    if (this->transport_media_)
-      this->media_.set_mute(mute);
-  }
-
-  void on_media_dtmf(char digit) override;
-  void on_media_parked() override;
 #if defined(USE_NETWORK) && defined(NETWORK_ACTIVE_INTERFACE_LISTENER_COUNT)
   void on_active_interface(network::NetworkInterface interface) override;
 #endif
@@ -206,6 +205,13 @@ class SipPhone final : public Component,
     MESSAGE_SENT,
     MESSAGE_FAILED,
   };
+  struct RtpParams {
+    MediaFormat format;
+    int socket_fd;
+    struct sockaddr_in remote;
+    bool send;
+    bool receive;
+  };
   struct Event {
     EventType type;
     bool outgoing;
@@ -214,7 +220,7 @@ class SipPhone final : public Component,
     char peer_uri[96];
     char peer_name[48];
     char text[256];
-    MediaConfig media;
+    RtpParams media;
   };
   enum class CommandType : uint8_t {
     CALL,
@@ -323,7 +329,7 @@ class SipPhone final : public Component,
   void send_info_dtmf_(const char *digits);
   bool open_rtp_();
   void close_rtp_();
-  bool fill_media_(MediaConfig &media, const char *remote_address, uint16_t remote_port);
+  bool fill_media_(RtpParams &media, const char *remote_address, uint16_t remote_port);
 
   ClientTx &tx_(TxRole role) { return this->transactions_[static_cast<uint8_t>(role)]; }
   void begin_request_(SipWriter &w, const char *method, const char *request_uri, const char *branch);
@@ -348,8 +354,22 @@ class SipPhone final : public Component,
 
   void process_event_(const Event &event);
   void set_state_(PhoneState state);
-  void start_media_(const MediaConfig &media);
+  void start_media_(const RtpParams &media);
   void stop_media_();
+  bool release_media_();
+  bool alloc_codec_(uint32_t rate, uint8_t channels);
+  void free_media_();
+  void on_mic_data_(std::span<const uint8_t> data);
+  void queue_dtmf_(const char *digits);
+  void drain_rtp_(int fd);
+  void start_playout_();
+  void handle_rtp_(const uint8_t *packet, size_t len);
+  void play_payload_(const uint8_t *payload, size_t len);
+  void conceal_(uint16_t frames, const uint8_t *next_payload, size_t next_len);
+  void process_tx_();
+  void send_audio_frame_();
+  bool send_dtmf_frame_();
+  void send_rtp_(uint8_t payload_type, bool marker, uint32_t timestamp, const uint8_t *payload, size_t len);
   void finish_call_record_(const char *reason);
   void fire_event_(const char *type);
   void save_flags_();
@@ -386,6 +406,8 @@ class SipPhone final : public Component,
   int sig_fd_{-1};
   int wake_fd_{-1};
   std::atomic<bool> network_up_{false};
+  std::atomic<bool> stopping_{false};
+  std::atomic<bool> sig_parked_{false};
 
   char rx_buf_[RX_BUFFER + 1];
   char scratch_[TX_BUFFER];
@@ -415,9 +437,8 @@ class SipPhone final : public Component,
   bool dnd_{false};
   bool auto_answer_{false};
   bool media_running_{false};
-  bool transport_media_{false};
+  bool media_stopping_{false};
   bool dtmf_rtp_{false};
-  std::atomic<bool> media_parked_{false};
   char last_error_[64]{};
   char last_message_[256]{};
   char last_message_from_[96]{};
@@ -429,7 +450,48 @@ class SipPhone final : public Component,
   Contact contacts_[MAX_CONTACTS]{};
   uint8_t contact_count_{0};
   uint8_t config_contact_count_{0};
-  CallMedia media_;
+  MediaFormat rtp_format_{};
+  int rtp_fd_{-1};
+  uint32_t rtp_rate_{0};
+  uint8_t rtp_channels_{1};
+  uint32_t ssrc_{0};
+  std::atomic<bool> media_on_{false};
+  std::atomic<bool> tx_mute_{false};
+  std::atomic<bool> rtp_send_{true};
+  std::atomic<bool> rtp_receive_{true};
+  std::atomic<uint8_t> mic_users_{0};
+  std::atomic<uint8_t> rtp_users_{0};
+  Mutex remote_lock_;
+  struct sockaddr_in rtp_remote_ {};
+  std::unique_ptr<ring_buffer::RingBuffer> tx_ring_;
+  uint8_t *tx_packet_{nullptr};
+  int16_t *tx_pcm_{nullptr};
+  int16_t *rx_pcm_{nullptr};
+  size_t frame_samples_{0};
+  size_t frame_bytes_{0};
+  size_t rx_pcm_capacity_{0};
+  uint32_t ts_step_{0};
+#ifdef USE_SIP_PHONE_OPUS
+  audio::OpusVoiceEncoder opus_encoder_;
+  audio::OpusVoiceDecoder opus_decoder_;
+#endif
+  G722Encoder *g722_encoder_{nullptr};
+  G722Decoder *g722_decoder_{nullptr};
+  uint16_t tx_seq_{0};
+  uint32_t tx_ts_{0};
+  bool tx_marker_{true};
+  uint16_t rx_expected_{0};
+  bool rx_started_{false};
+  uint32_t last_dtmf_ts_{0};
+  bool dtmf_seen_{false};
+  Mutex dtmf_lock_;
+  char dtmf_queue_[33]{};
+  uint8_t dtmf_head_{0};
+  uint8_t dtmf_tail_{0};
+  int8_t dtmf_event_{-1};
+  uint8_t dtmf_frames_{0};
+  uint32_t dtmf_ts_{0};
+  uint8_t dtmf_gap_{0};
   Event pending_event_{};
   Command pending_command_{};
 
