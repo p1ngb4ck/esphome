@@ -3201,10 +3201,65 @@ void WiFiComponent::process_roaming_scan_() {
 optional<ManualIP> WiFiAP::get_manual_ip() const {
   if (!this->has_manual_ip())
     return {};
+  if (this->manual_ip_index_ >= MANUAL_IP_RUNTIME) {
+    const ManualIP *row = manual_ip_runtime_entry(this->manual_ip_index_);
+    if (row == nullptr)
+      return {};
+    return *row;
+  }
   uint8_t b[MANUAL_IP_ENTRY_SIZE];
   progmem_memcpy(b, MANUAL_IP_TABLE + this->manual_ip_index_ * MANUAL_IP_ENTRY_SIZE, sizeof(b));
   auto ip = [&b](size_t i) { return network::IPAddress(b[i], b[i + 1], b[i + 2], b[i + 3]); };
   return ManualIP{ip(0), ip(4), ip(8), ip(12), ip(16)};
+}
+
+static ManualIP *manual_ip_runtime_table = nullptr;
+static uint8_t manual_ip_runtime_used = 0;
+
+uint8_t manual_ip_runtime_row(const ManualIP &manual_ip) {
+  if (manual_ip_runtime_table == nullptr) {
+    manual_ip_runtime_table = RAMAllocator<ManualIP>().allocate(MANUAL_IP_RUNTIME_ROWS);
+    if (manual_ip_runtime_table == nullptr)
+      return MANUAL_IP_NONE;
+  }
+  auto same = [&manual_ip](const ManualIP &row) {
+    return row.static_ip == manual_ip.static_ip && row.gateway == manual_ip.gateway && row.subnet == manual_ip.subnet &&
+           row.dns1 == manual_ip.dns1 && row.dns2 == manual_ip.dns2;
+  };
+  for (uint8_t r = 0; r < manual_ip_runtime_used; r++) {
+    if (same(manual_ip_runtime_table[r]))
+      return MANUAL_IP_RUNTIME + r;
+  }
+  uint8_t row = manual_ip_runtime_used;
+  if (row >= MANUAL_IP_RUNTIME_ROWS) {
+    row = MANUAL_IP_RUNTIME_ROWS;
+    for (uint8_t r = 0; r < MANUAL_IP_RUNTIME_ROWS && row == MANUAL_IP_RUNTIME_ROWS; r++) {
+      if (global_wifi_component != nullptr && !global_wifi_component->manual_ip_index_in_use(MANUAL_IP_RUNTIME + r))
+        row = r;
+    }
+    if (row == MANUAL_IP_RUNTIME_ROWS)
+      return MANUAL_IP_NONE;
+  } else {
+    manual_ip_runtime_used++;
+  }
+  new (&manual_ip_runtime_table[row]) ManualIP(manual_ip);
+  return MANUAL_IP_RUNTIME + row;
+}
+
+const ManualIP *manual_ip_runtime_entry(uint8_t index) {
+  if (manual_ip_runtime_table == nullptr || index < MANUAL_IP_RUNTIME || index - MANUAL_IP_RUNTIME >= manual_ip_runtime_used)
+    return nullptr;
+  return &manual_ip_runtime_table[index - MANUAL_IP_RUNTIME];
+}
+
+bool WiFiComponent::manual_ip_index_in_use(uint8_t index) const {
+  if (this->ap_.get_manual_ip_index() == index)
+    return true;
+  for (const auto &sta : this->sta_) {
+    if (sta.get_manual_ip_index() == index)
+      return true;
+  }
+  return false;
 }
 #endif
 

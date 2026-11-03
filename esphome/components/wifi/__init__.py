@@ -958,16 +958,15 @@ async def to_code(config):
         cg.add_define("WIFI_SAVED_NETWORKS_MAX", saved_networks)
         # Several networks and a manual address each, at runtime; the networks around stay for the list
         cg.add_define("USE_WIFI_MULTI_SSID")
-        has_manual_ip = True
         request_wifi_scan_results()
 
     # Only define USE_WIFI_MANUAL_IP if any AP uses manual IP
-    if manual_ip_entries:
+    if manual_ip_entries or saved_networks is not None:
         cg.add_define("USE_WIFI_MANUAL_IP")
         cg.extern_progmem_array(
             "esphome::wifi::MANUAL_IP_TABLE",
             cg.uint8,
-            list(b"".join(manual_ip_entries)),
+            list(b"".join(manual_ip_entries)) or [0] * 20,
         )
 
     # The C++ initializers are DEFAULT_REBOOT_TIMEOUT, power save NONE and minimum
