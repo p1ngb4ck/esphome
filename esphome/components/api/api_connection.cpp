@@ -459,7 +459,9 @@ void APIConnection::on_subscribe_logs_request(const SubscribeLogsRequest &msg) {
   if (msg.dump_config)
     App.schedule_dump_config();
 #if defined(USE_LOGGER) && defined(USE_CRASH_HANDLER)
+  this->parent_->set_log_target(this);
   logger::log_crash_to_client();
+  this->parent_->set_log_target(nullptr);
 #endif
 }
 
@@ -1189,6 +1191,8 @@ void APIConnection::set_camera_state(std::shared_ptr<camera::CameraImage> image)
   if (!this->flags_.state_subscription)
     return;
   if (this->image_reader_ && this->image_reader_->available())
+    return;
+  if (image->get_format() != esphome::camera::IMAGE_FORMAT_JPEG)
     return;
   if (!image->was_requested_by(esphome::camera::API_REQUESTER) && !image->was_requested_by(esphome::camera::IDLE))
     return;
@@ -1935,7 +1939,7 @@ bool APIConnection::send_hello_response_(const HelloRequest &msg) {
   resp.api_version_minor = 19;
   // Send only the version string - the client only logs this for debugging and doesn't use it otherwise
   resp.server_info = esphome_version_ref();
-  resp.name = StringRef(App.get_name());
+  resp.name = network::device_name();
 
 #ifdef USE_PROVISIONING
   if (provisioning::global_provisioning_manager != nullptr && provisioning::global_provisioning_manager->closed()) {
@@ -1978,8 +1982,8 @@ bool APIConnection::send_ping_response_() {
 
 bool APIConnection::send_device_info_response_() {
   DeviceInfoResponse resp;
-  resp.name = StringRef(App.get_name());
-  resp.friendly_name = StringRef(App.get_friendly_name());
+  resp.name = network::device_name();
+  resp.friendly_name = network::device_friendly_name();
 #ifdef USE_AREAS
   resp.suggested_area = StringRef(App.get_area());
 #endif
