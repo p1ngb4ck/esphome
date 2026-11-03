@@ -193,6 +193,7 @@ void PackageManager::dump_available(JsonObject root) {
     e["builtin"] = r.builtin != 0;
     e["state"] = repo_state(r.state);
     e["count"] = r.count;
+    e["signed"] = r.signed_ok != 0;
   });
   JsonArray list = root["packages"].to<JsonArray>();
   this->for_each_available([this, &list](const AvailablePackage &p, const Repository &r) {
@@ -200,6 +201,7 @@ void PackageManager::dump_available(JsonObject root) {
     e["name"] = p.name;
     e["version"] = p.version;
     e["repository"] = r.name;
+    e["signed"] = r.signed_ok != 0;
     e["size"] = p.size;
     e["flash"] = p.flash;
     e["psram"] = p.psram;
