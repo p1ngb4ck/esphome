@@ -51,9 +51,9 @@ class JpegDecoder : public ImageDecoder {
   ~JpegDecoder() override {}
 #endif
   int HOT decode(uint8_t *buffer, size_t size) override;
-  void reset() override;
 
 #if !defined(USE_HWJPG) && !defined(USE_NEWJPEG)
+  void reset() override;
   /// The source is read as the decode needs it, through JPEGDEC's own 2 KB buffer
   bool supports_source() const override { return true; }
   int begin_source(DecodeSource *source) override;
