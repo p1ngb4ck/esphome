@@ -15,6 +15,7 @@
 #include "esphome/core/progmem.h"
 
 #include "log_buffer.h"
+#include "log_ring.h"
 #include "task_log_buffer_host.h"
 #include "task_log_buffer_esp32.h"
 #include "task_log_buffer_libretiny.h"

@@ -8,9 +8,10 @@ import esphome.codegen as cg
 from esphome.components.const import CONF_ROLE
 from esphome.config_helpers import filter_source_files_from_defines
 import esphome.config_validation as cv
-from esphome.const import CONF_TIMEOUT
-from esphome.core import CORE, ID
-from esphome.core.config import CONF_LOOP_INTERVAL, get_loop_interval
+from esphome.const import CONF_ESPHOME, CONF_TIMEOUT
+from esphome.core import CORE, ID, TimePeriodMilliseconds
+from esphome.core.config import CONF_LOOP_INTERVAL
+import esphome.final_validate as fv
 from esphome.types import ConfigType
 
 _LOGGER = logging.getLogger(__name__)
@@ -40,6 +41,17 @@ MIN_TCP_SOCKETS = 8
 MIN_UDP_SOCKETS = 6
 # Minimum listening sockets — at least api + ota baseline.
 MIN_TCP_LISTEN_SOCKETS = 2
+
+# Application::loop_interval_ when esphome: sets no loop_interval. Kept here: the fork's components run on an
+# installed ESPHome core, which external_components cannot replace.
+_DEFAULT_LOOP_INTERVAL = TimePeriodMilliseconds(milliseconds=16)
+
+
+def get_loop_interval() -> TimePeriodMilliseconds:
+    """Return the main loop interval of the configuration; for final validation."""
+    return fv.full_config.get()[CONF_ESPHOME].get(
+        CONF_LOOP_INTERVAL, _DEFAULT_LOOP_INTERVAL
+    )
 
 
 class SocketType(StrEnum):
@@ -221,9 +233,12 @@ def require_tcp_listener() -> None:
     cg.add_define("USE_SOCKET_TCP_LISTENER")
 
 
-def consume_role_sockets(component: str) -> Callable[[ConfigType], ConfigType]:
+def consume_role_sockets(
+    component: str, connections_key: str | None = None
+) -> Callable[[ConfigType], ConfigType]:
     """Socket accounting for a role keyed client or server schema.
 
+    A server holds as many connections as its connections_key says, default 1.
     Also requires IPv4, since the TCP link and listener helpers are IPv4 only.
     """
 
@@ -231,9 +246,12 @@ def consume_role_sockets(component: str) -> Callable[[ConfigType], ConfigType]:
         from esphome.components import network
 
         network.require_ipv4(component)(config)
+        count = 1
         if config[CONF_ROLE] == "server":
             consume_sockets(1, component, SocketType.TCP_LISTEN)(config)
-        return consume_sockets(1, component)(config)
+            if connections_key is not None:
+                count = config.get(connections_key, 1)
+        return consume_sockets(count, component)(config)
 
     return validator
 
