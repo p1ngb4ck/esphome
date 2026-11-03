@@ -4,6 +4,7 @@
 #include <span>
 #include <string>
 #include "esphome/core/helpers.h"
+#include "esphome/core/string_ref.h"
 #include "ip_address.h"
 
 #ifdef USE_ETHERNET
@@ -17,6 +18,9 @@
 #endif
 #ifdef USE_OPENTHREAD
 #include "esphome/components/openthread/openthread.h"
+#endif
+#ifdef USE_USB_ETHERNET
+#include "esphome/components/usb_ethernet/usb_ethernet.h"
 #endif
 #ifdef USE_ESP32
 #include "esp_netif.h"
@@ -52,6 +56,11 @@ ESPHOME_ALWAYS_INLINE inline bool is_connected() {
     return true;
 #endif
 
+#ifdef USE_USB_ETHERNET
+  if (usb_ethernet::global_usb_ethernet != nullptr && usb_ethernet::global_usb_ethernet->is_connected())
+    return true;
+#endif
+
 #if defined(USE_OPENTHREAD) && !defined(USE_OPENTHREAD_BORDER_ROUTER)
   // A border router is reached over its Wi-Fi backbone, so the Thread link alone does not count
   if (openthread::global_openthread_component != nullptr && openthread::global_openthread_component->is_connected())
@@ -76,6 +85,8 @@ static constexpr size_t USE_ADDRESS_BUFFER_SIZE = 70;
 /// device name into buf (so it includes the MAC suffix from name_add_mac_suffix).
 const char *get_use_address_to(std::span<char, USE_ADDRESS_BUFFER_SIZE> buf);
 IPAddresses get_ip_addresses();
+StringRef device_name();
+StringRef device_friendly_name();
 
 }  // namespace esphome::network
 #endif
