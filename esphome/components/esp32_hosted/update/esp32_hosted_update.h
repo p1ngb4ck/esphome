@@ -12,6 +12,9 @@
 #ifdef USE_ESP32_HOSTED_HTTP_UPDATE
 #include "esphome/components/http_request/http_request.h"
 #endif
+#ifdef USE_ESP32_HOSTED_UPDATE_NETWORK_EVENT
+#include "esphome/components/network/network_component.h"
+#endif
 
 #ifdef USE_ESP32_HOSTED_STORAGE_UPDATE
 #include "esphome/components/storage/storage.h"
@@ -23,13 +26,22 @@ namespace esphome::esp32_hosted {
 
 enum class UpdateMethod : uint8_t { EMBEDDED, HTTP, STORAGE };
 
-class Esp32HostedUpdate final : public update::UpdateEntity, public PollingComponent {
+class Esp32HostedUpdate final : public update::UpdateEntity,
+                                public PollingComponent
+#ifdef USE_ESP32_HOSTED_UPDATE_NETWORK_EVENT
+    ,
+                                public network::ActiveInterfaceListener
+#endif
+{
  public:
   void setup() override;
+#ifdef USE_ESP32_HOSTED_UPDATE_NETWORK_EVENT
+  void on_active_interface(network::NetworkInterface interface) override;
+#endif
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
-  void update() override { this->check(); }
+  void update() override;
   void perform(bool force) override;
   void check() override;
   bool is_busy() const { return this->busy_; }
@@ -71,6 +83,7 @@ class Esp32HostedUpdate final : public update::UpdateEntity, public PollingCompo
   std::shared_ptr<http_request::HttpContainer> container_;
   uint32_t last_data_time_{0};
   uint8_t initial_check_remaining_{0};
+  bool initial_check_pending_{false};
 #endif
 #ifdef USE_ESP32_HOSTED_STORAGE_UPDATE
   bool is_manifest_() const;

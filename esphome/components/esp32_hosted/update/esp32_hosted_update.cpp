@@ -176,6 +176,10 @@ void Esp32HostedUpdate::setup() {
   if (this->method_ == UpdateMethod::HTTP) {
     // HTTP mode: check every 10s until network is ready (max 6 attempts)
     // Only if update interval is > 1 minute to avoid redundant checks
+#ifdef USE_ESP32_HOSTED_UPDATE_NETWORK_EVENT
+    this->initial_check_pending_ = true;
+    return;
+#endif
     if (this->get_update_interval() > 60000) {
       this->initial_check_remaining_ = 6;
       this->set_interval(INITIAL_CHECK_INTERVAL_ID, 10000, [this]() {
@@ -191,6 +195,23 @@ void Esp32HostedUpdate::setup() {
   }
 #endif
 }
+
+void Esp32HostedUpdate::update() {
+#ifdef USE_ESP32_HOSTED_UPDATE_NETWORK_EVENT
+  if (this->initial_check_pending_)
+    return;
+#endif
+  this->check();
+}
+
+#ifdef USE_ESP32_HOSTED_UPDATE_NETWORK_EVENT
+void Esp32HostedUpdate::on_active_interface(network::NetworkInterface interface) {
+  if (!this->initial_check_pending_ || interface == network::NetworkInterface::NETWORK_INTERFACE_NONE)
+    return;
+  this->initial_check_pending_ = false;
+  this->defer([this]() { this->check(); });
+}
+#endif
 
 void Esp32HostedUpdate::dump_config() {
   ESP_LOGCONFIG(TAG,

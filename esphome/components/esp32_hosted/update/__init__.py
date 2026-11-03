@@ -9,7 +9,7 @@ import voluptuous as vol
 
 from esphome import external_files
 import esphome.codegen as cg
-from esphome.components import esp32, update
+from esphome.components import esp32, network, update
 from esphome.components.const import CONF_SHA256
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_PATH, CONF_SOURCE, CONF_TYPE, CONF_URL
@@ -219,5 +219,7 @@ async def to_code(config: dict[str, Any]) -> None:
         cg.add(var.set_source_url(config[CONF_SOURCE]))
         cg.add(var.set_method(UpdateMethod.HTTP))
         cg.add_define("USE_ESP32_HOSTED_HTTP_UPDATE")
+        if await network.register_active_interface_listener(var):
+            cg.add_define("USE_ESP32_HOSTED_UPDATE_NETWORK_EVENT")
 
     await cg.register_component(var, config)
