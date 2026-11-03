@@ -19,6 +19,14 @@
 
 namespace esphome::ota {
 
+#if defined(USE_OTA_SELF_UPDATE) && defined(USE_OTA_PARTITIONS)
+struct PsramFree {
+  void operator()(uint8_t *data) const;
+};
+
+bool is_app_image(const uint8_t *head, size_t len);
+#endif
+
 #ifdef USE_OTA_PARTITIONS
 // Staging buffer holds the entire partition table for verification before any flash op.
 static constexpr size_t PARTITION_TABLE_BUFFER_SIZE = ESP_PARTITION_TABLE_MAX_LEN;  // 0xC00
@@ -29,13 +37,25 @@ void get_running_app_position(uint32_t &offset, size_t &size);
 class IDFOTABackend final {
  public:
   OTAResponseTypes begin(size_t image_size, ota::OTAType ota_type = ota::OTA_TYPE_UPDATE_APP);
+
   void set_update_md5(const char *md5);
   OTAResponseTypes write(uint8_t *data, size_t len);
   OTAResponseTypes end();
   void abort();
   static constexpr bool supports_compression() { return false; }
+#if defined(USE_OTA_SELF_UPDATE) && defined(USE_OTA_PARTITIONS)
+  void set_write_progress(void (*callback)(void *context, float percent), void *context) {
+    this->write_progress_ = callback;
+    this->write_progress_context_ = context;
+  }
+#endif
 
  protected:
+  // Used by every app update, header-routed or plain -- deliberately outside the
+  // USE_OTA_PARTITIONS guard: builds without partition access run the plain begin() path
+  // through it too (its original guarded placement broke exactly those builds, since both
+  // the call site and the definition in ota_backend_esp_idf.cpp are unguarded).
+  OTAResponseTypes app_slot_begin_(size_t image_size);
   UpdateLock lock_;
   OTAResponseTypes hold_lock_if_ok_(OTAResponseTypes result) {
     if (result == OTA_RESPONSE_OK)
@@ -67,6 +87,23 @@ class IDFOTABackend final {
   bool is_app_or_bootloader_update_() const {
     return this->ota_type_ == ota::OTA_TYPE_UPDATE_APP || this->ota_type_ == ota::OTA_TYPE_UPDATE_BOOTLOADER;
   }
+
+  // In-band pre-fill support ([64-byte header][app][littlefs image], streamed by a
+  // completely stock sender — see esphome_esp_littlefs tools/make_prefill_ota.py). begin()
+  // defers the slot for plain app updates until the first 64 bytes reveal whether a header
+  // leads them; decide_stream_head_() then sizes the slot for the app alone, prepares the
+  // named data partition (listener unmounts first) and route_stream_() splits every chunk
+  // at the seam in a single pass. finish_data_partition_() hands the filesystem back —
+  // success only after the boot switch, so old app never meets new data.
+  OTAResponseTypes write_app_(const uint8_t *data, size_t len);
+  OTAResponseTypes decide_stream_head_();
+  OTAResponseTypes route_stream_(const uint8_t *data, size_t len);
+#ifdef USE_OTA_SELF_UPDATE
+  OTAResponseTypes self_image_begin_();
+  OTAResponseTypes self_store_(const uint8_t *data, size_t len);
+  OTAResponseTypes self_image_finish_();
+#endif
+  void finish_data_partition_(bool success);
 #endif
 
  private:
@@ -98,6 +135,22 @@ class IDFOTABackend final {
   const esp_partition_t *partition_table_part_{nullptr};
   const esp_partition_t *bootloader_part_{nullptr};
   ota::OTAType ota_type_{ota::OTA_TYPE_UPDATE_APP};
+  uint8_t head_buf_[64]{};
+  size_t head_have_{0};
+  bool head_decided_{false};
+  size_t pending_total_{0};
+  const esp_partition_t *data_partition_{nullptr};
+  OTADataPartitionListener *data_listener_{nullptr};
+  size_t data_app_size_{0};
+  size_t data_image_size_{0};
+  size_t data_stream_pos_{0};
+  bool data_active_{false};
+#ifdef USE_OTA_SELF_UPDATE
+  std::unique_ptr<uint8_t[], PsramFree> self_image_;
+  size_t self_have_{0};
+  void (*write_progress_)(void *context, float percent){nullptr};
+  void *write_progress_context_{nullptr};
+#endif
 #endif
 };
 
