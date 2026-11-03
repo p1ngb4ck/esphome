@@ -1,0 +1,7 @@
+version: "0.1.0"
+description: >
+  ESPHome component_as_lib helper. Ships a project_include.cmake that, after the firmware
+  binary is built, compiles the per-component glue + sources emitted by the ESPHome
+  component_as_lib codegen into loadable .so libraries (pure ESP-IDF, no PlatformIO).
+dependencies:
+  idf: ">=5.0"
