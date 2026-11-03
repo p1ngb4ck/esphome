@@ -9,7 +9,9 @@
 #endif
 
 #include <esp_vfs_eventfd.h>
+#if __has_include(<sys/eventfd.h>)
 #include <sys/eventfd.h>
+#endif
 #include <unistd.h>
 
 #include <algorithm>
@@ -288,7 +290,7 @@ void RemoteDesktop::loop() {
 
 void RemoteDesktop::task_entry_(void *param) {
   auto *self = static_cast<RemoteDesktop *>(param);
-  self->session_();
+  self->run_session_();
   self->failed_.store(self->state_.load() == STATE_STARTING);
   self->state_.store(STATE_ENDED);
   self->enable_loop_soon_any_context();
