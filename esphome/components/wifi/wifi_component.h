@@ -5,6 +5,7 @@
 #include "esphome/components/network/ip_address.h"
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
+#include "esphome/core/entity_list.h"
 #include "esphome/core/helpers.h"
 #ifdef USE_ESP32
 #include "esphome/core/lock_free_queue.h"
@@ -88,6 +89,33 @@ struct SavedWifiSettings {
   char ssid[33];
   char password[65];
 } PACKED;  // NOLINT
+
+#ifdef USE_WIFI_SAVED_NETWORKS
+// The saved network list (saved_networks:): a header, then one preference per network
+static constexpr uint8_t SAVED_WIFI_NETWORKS_VERSION = 1;
+static constexpr uint8_t SAVED_WIFI_NETWORKS_DISABLED = 1 << 0;
+static constexpr uint8_t SAVED_WIFI_NETWORK_HIDDEN = 1 << 0;
+static constexpr uint8_t SAVED_WIFI_NETWORK_MANUAL_IP = 1 << 1;
+
+struct SavedWifiNetworksHeader {
+  uint8_t version;
+  uint8_t count;
+  uint8_t flags;
+} PACKED;  // NOLINT
+
+struct SavedWifiNetwork {
+  char ssid[33];
+  char password[65];
+  uint8_t bssid[6];
+  uint8_t channel;
+  uint8_t flags;
+  uint32_t static_ip;
+  uint32_t gateway;
+  uint32_t subnet;
+  uint32_t dns1;
+  uint32_t dns2;
+} PACKED;  // NOLINT
+#endif
 
 struct SavedWifiFastConnectSettings {
   uint8_t bssid[6];
@@ -487,6 +515,9 @@ class WiFiComponent final : public Component {
   void set_ap(const WiFiAP &ap);
   WiFiAP get_ap() { return this->ap_; }
   void set_ap_timeout(uint32_t ap_timeout) { ap_timeout_ = ap_timeout; }
+  template<typename F> void add_on_ap_state_callback(F &&callback) {
+    this->ap_state_callback_.add(std::forward<F>(callback));
+  }
 #endif  // USE_WIFI_AP
 
 #ifdef USE_WIFI_DPP
@@ -549,6 +580,26 @@ class WiFiComponent final : public Component {
   void save_wifi_sta(const std::string &ssid, const std::string &password);
   void save_wifi_sta(const char *ssid, const char *password);
   void save_wifi_sta(StringRef ssid, StringRef password) { this->save_wifi_sta(ssid.c_str(), password.c_str()); }
+
+#ifdef USE_WIFI_SAVED_NETWORKS
+  /// The networks tried, in this order: the configured ones until the list is changed, then the saved list (the
+  /// configuration's EAP networks after it). Changes are saved and win from the next boot on.
+  size_t network_count() const { return this->sta_.size(); }
+  const WiFiAP &network_at(size_t index) const { return this->sta_[index]; }
+  /// Replaces the network with the same SSID, else adds it (at the end, or first); false when the list is full.
+  bool put_network(const WiFiAP &ap, bool first = false);
+  /// The network at index (network_at()) replaced, in its place; false for an EAP network.
+  bool replace_network(size_t index, const WiFiAP &ap);
+  bool forget_network(size_t index);
+  /// Moves a network one place earlier (delta < 0) or later (delta > 0).
+  bool move_network(size_t index, int delta);
+  /// A scan while connected, for the list of networks around (get_scan_result(), on_scan_results); false when
+  /// not connected or a scan runs (the connecting cycle's own scans report as well).
+  bool browse_scan();
+  bool is_browse_scanning() const { return this->browse_scan_; }
+  /// enable() / disable(), saved.
+  void set_enabled(bool enabled);
+#endif
 
   // ========== INTERNAL METHODS ==========
   // (In most use cases you won't need these)
@@ -638,27 +689,38 @@ class WiFiComponent final : public Component {
   /** Add a listener for IP state changes.
    * Listener receives: IP addresses, DNS address 1, DNS address 2
    */
-  void add_ip_state_listener(WiFiIPStateListener *listener) { this->ip_state_listeners_.push_back(listener); }
+  void add_ip_state_listener(WiFiIPStateListener *listener) {
+    this->add_listener_(this->ip_state_listeners_, listener);
+  }
 #endif  // USE_WIFI_IP_STATE_LISTENERS
 #ifdef USE_WIFI_SCAN_RESULTS_LISTENERS
   /// Add a listener for WiFi scan results
   void add_scan_results_listener(WiFiScanResultsListener *listener) {
-    this->scan_results_listeners_.push_back(listener);
+    this->add_listener_(this->scan_results_listeners_, listener);
   }
 #endif  // USE_WIFI_SCAN_RESULTS_LISTENERS
+  /// The WiFi start-up is done (main loop, once per boot): connected, or the first attempt ended without a
+  /// connection (cooldown, AP), or WiFi is disabled at boot. Components that must not overlap WiFi's start
+  /// (its RAM peak on the shared co-processor) start on it instead of a time.
+  template<typename F> void add_on_startup_done_callback(F &&callback) {
+    this->startup_done_callback_.add(std::forward<F>(callback));
+  }
+  bool is_startup_done() const { return this->startup_done_; }
 #ifdef USE_WIFI_CONNECT_STATE_LISTENERS
   /** Add a listener for WiFi connection state changes.
    * Listener receives: SSID, BSSID
    */
   void add_connect_state_listener(WiFiConnectStateListener *listener) {
-    this->connect_state_listeners_.push_back(listener);
+    this->add_listener_(this->connect_state_listeners_, listener);
   }
 #endif  // USE_WIFI_CONNECT_STATE_LISTENERS
 #ifdef USE_WIFI_POWER_SAVE_LISTENERS
   /** Add a listener for WiFi power save mode changes.
    * Listener receives: WiFiPowerSaveMode
    */
-  void add_power_save_listener(WiFiPowerSaveListener *listener) { this->power_save_listeners_.push_back(listener); }
+  void add_power_save_listener(WiFiPowerSaveListener *listener) {
+    this->add_listener_(this->power_save_listeners_, listener);
+  }
 #endif  // USE_WIFI_POWER_SAVE_LISTENERS
 
 #ifdef USE_WIFI_RUNTIME_POWER_SAVE
@@ -984,22 +1046,40 @@ class WiFiComponent final : public Component {
   std::vector<WiFiSTAPriority> sta_priorities_;
   // Guarded by ScanResultsLock (see below this class)
   wifi_scan_vector_t<WiFiScanResult> scan_result_;
+  template<typename L> static void remove_listener_(void *list, void *listener, void *unused) {
+    static_cast<L *>(list)->remove(static_cast<typename L::value_type>(listener));
+  }
+  template<typename L> void add_listener_(L &list, typename L::value_type listener) {
+    list.push_back(listener);
+    note_registration(&WiFiComponent::remove_listener_<L>, &list, listener, nullptr);
+  }
 #ifdef WIFI_SCAN_RESULTS_LOCK_ENABLED
   Mutex scan_result_lock_;
 #endif
 #ifdef USE_WIFI_IP_STATE_LISTENERS
-  StaticVector<WiFiIPStateListener *, ESPHOME_WIFI_IP_STATE_LISTENERS> ip_state_listeners_;
+  EntityList<WiFiIPStateListener *, ESPHOME_WIFI_IP_STATE_LISTENERS> ip_state_listeners_;
 #endif
 #ifdef USE_WIFI_SCAN_RESULTS_LISTENERS
-  StaticVector<WiFiScanResultsListener *, ESPHOME_WIFI_SCAN_RESULTS_LISTENERS> scan_results_listeners_;
+  EntityList<WiFiScanResultsListener *, ESPHOME_WIFI_SCAN_RESULTS_LISTENERS> scan_results_listeners_;
 #endif
 #ifdef USE_WIFI_CONNECT_STATE_LISTENERS
-  StaticVector<WiFiConnectStateListener *, ESPHOME_WIFI_CONNECT_STATE_LISTENERS> connect_state_listeners_;
+  EntityList<WiFiConnectStateListener *, ESPHOME_WIFI_CONNECT_STATE_LISTENERS> connect_state_listeners_;
 #endif
 #ifdef USE_WIFI_POWER_SAVE_LISTENERS
-  StaticVector<WiFiPowerSaveListener *, ESPHOME_WIFI_POWER_SAVE_LISTENERS> power_save_listeners_;
+  EntityList<WiFiPowerSaveListener *, ESPHOME_WIFI_POWER_SAVE_LISTENERS> power_save_listeners_;
 #endif
   ESPPreferenceObject pref_;
+#ifdef USE_WIFI_SAVED_NETWORKS
+  void load_saved_networks_();
+  bool store_networks_(const std::vector<WiFiAP> &networks, bool disabled);
+  void use_networks_(const std::vector<WiFiAP> &networks);
+  bool change_networks_(const std::vector<WiFiAP> &networks);
+  std::vector<WiFiAP> saveable_networks_() const;
+  ESPPreferenceObject saved_header_pref_;
+  ESPPreferenceObject saved_network_prefs_[WIFI_SAVED_NETWORKS_MAX];
+  uint32_t browse_started_{0};
+  bool browse_scan_{false};
+#endif
 #ifdef USE_WIFI_FAST_CONNECT
   ESPPreferenceObject fast_connect_pref_;
 #endif
@@ -1055,6 +1135,17 @@ class WiFiComponent final : public Component {
   // 1-byte members so they pack into its trailing bytes instead of padding after it
   WiFiAP ap_;
 #endif  // USE_WIFI_AP
+  void finish_startup_() {
+    if (this->startup_done_)
+      return;
+    this->startup_done_ = true;
+    this->startup_done_callback_.call();
+  }
+  LazyCallbackManager<void()> startup_done_callback_;
+#ifdef USE_WIFI_AP
+  LazyCallbackManager<void(bool)> ap_state_callback_;
+#endif
+  bool startup_done_{false};
 #ifdef USE_WIFI_DPP
   const char *dpp_key_{nullptr};
   const char *dpp_device_info_{nullptr};
