@@ -36,6 +36,13 @@ extern const uint8_t ESPHOME_WEBSERVER_JS_INCLUDE[] PROGMEM;
 extern const size_t ESPHOME_WEBSERVER_JS_INCLUDE_SIZE;
 #endif
 
+#ifdef USE_WEBSERVER_FILE_BROWSER
+// See file_api.h — declared here as well so main.cpp (which always includes this header)
+// gives the codegen-emitted constexpr definition external linkage.
+extern const uint8_t ESPHOME_WEBSERVER_FILE_BROWSER_JS[] PROGMEM;
+extern const size_t ESPHOME_WEBSERVER_FILE_BROWSER_JS_SIZE;
+#endif
+
 namespace esphome::web_server {
 
 // ESP-IDF cuts a log event here: nothing a browser log view needs is longer, and it bounds the
@@ -537,6 +544,7 @@ class WebServer final : public Component, public AsyncWebHandler {
 
 #ifdef USE_WEBSERVER_SORTING
   void add_entity_config(EntityBase *entity, float weight, uint64_t group);
+  static void remove_entity_config_(void *server, void *entity, void *unused);
   void add_sorting_group(uint64_t group_id, const std::string &group_name, float weight);
 
   std::map<EntityBase *, SortingComponents> sorting_entitys_;
