@@ -62,6 +62,10 @@ One branch per change; `main` contains every branch. Base: ESPHome `dev` at `1f7
 | `pr/spdif` | `spdif`: IEC 60958 (S/PDIF) speaker on one GPIO (the PARLIO peripheral) | ESP32 chips with PARLIO (C5, C6, H2, P4) |
 | `pr/lvgl-color-picker-setters` | lvgl color picker: LVGL 9.6's flag setters | all |
 | `pr/lvgl-keyboard-text` | lvgl: a keyboard trigger's text is its textarea's (empty without one) | all |
+| `pr/lvgl-menu-back-button` | lvgl: the menu's root back-button check reads the back buttons and depth itself (no deprecated `lv_menu_back_button_is_root`) | all |
+| `pr/ir-rf-base-define` | ir_rf_base: `USE_IR_RF` whenever the component is loaded | all |
+| `pr/web-server-entity-row-css` | web_server: the version 3 entity table's value cell may shrink (`min-width: 0`) | all |
+| `pr/api-crash-report-once` | api: the stored crash report goes only to the connection that subscribes to logs | all |
 
 `pr/acs712` and `pr/zmpt101b` build on `pr/adc`. All topics together: `github://p1ngb4ck/esphome@dev`.
 `external_components` replaces components only; the ESPHome core of the build host stays as installed.
