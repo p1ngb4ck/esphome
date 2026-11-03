@@ -16,12 +16,17 @@
 #include <esp_ota_ops.h>
 #include <esp_system.h>
 #include <esp_image_format.h>
+#include "esphome/components/esp32/system_info.h"
 #endif
 #endif
 
 namespace esphome::safe_mode {
 
 ESPHOME_LOG_TAG(TAG, "safe_mode");
+
+#ifdef USE_SAFE_MODE_SPLIT
+bool global_safe_mode_active{false};
+#endif
 
 #if defined(USE_ESP32) && defined(USE_OTA_ROLLBACK) && !defined(USE_OTA_PARTITIONS)
 // Find a non-running app partition. If verify is true, only returns a partition
@@ -85,7 +90,8 @@ void SafeModeComponent::dump_config() {
   }
 
 #if defined(USE_ESP32) && defined(USE_OTA_ROLLBACK)
-  const esp_partition_t *last_invalid = esp_ota_get_last_invalid_partition();
+  const esp_partition_t *last_invalid =
+      esp32::system_info::has_otadata() ? esp_ota_get_last_invalid_partition() : nullptr;
   if (last_invalid != nullptr) {
     ESP_LOGW(TAG,
              "OTA rollback detected! Rolled back from partition '%s'\n"
@@ -126,7 +132,7 @@ void SafeModeComponent::confirm_app_image_() {
   // for the next boot, not the running one. After an OTA update those differ:
   // the new image is already selected, and marking it valid before it has ever
   // booted would disable rollback protection for that update.
-  if (esp_ota_get_running_partition() == esp_ota_get_boot_partition()) {
+  if (esp32::system_info::has_otadata() && esp_ota_get_running_partition() == esp_ota_get_boot_partition()) {
     esp_ota_mark_app_valid_cancel_rollback();
   }
 #endif
@@ -170,6 +176,12 @@ bool SafeModeComponent::get_safe_mode_pending() {
   return this->read_rtc_() == SafeModeComponent::ENTER_SAFE_MODE_MAGIC;
 }
 
+void SafeModeComponent::leave_safe_mode() {
+  ESP_LOGI(TAG, "Restarting without safe mode");
+  this->clean_rtc();
+  App.safe_reboot();
+}
+
 void SafeModeComponent::restart_in_safe_mode() {
   ESP_LOGI(TAG, "Restarting in safe mode");
   this->set_safe_mode_pending(true);
@@ -189,9 +201,15 @@ bool SafeModeComponent::should_enter_safe_mode(uint8_t num_attempts, uint32_t en
 #if defined(USE_ESP32) && defined(USE_OTA_ROLLBACK)
   // Check partition state to detect if bootloader supports rollback
   const esp_partition_t *running_part = esp_ota_get_running_partition();
-  esp_ota_get_state_partition(running_part, &this->ota_state_);
   const esp_partition_t *next_part = esp_ota_get_next_update_partition(nullptr);
   this->app_ota_possible_ = (next_part != nullptr && next_part != running_part);
+  if (esp32::system_info::has_otadata()) {
+    esp_ota_get_state_partition(running_part, &this->ota_state_);
+  } else {
+#ifdef USE_OTA_SELF_UPDATE
+    this->app_ota_possible_ = true;
+#endif
+  }
 #endif
 
   uint32_t rtc_val = this->read_rtc_();
@@ -240,14 +258,18 @@ bool SafeModeComponent::should_enter_safe_mode(uint8_t num_attempts, uint32_t en
 #endif
 
   this->status_set_error();
+#ifndef USE_SAFE_MODE_SPLIT
   this->set_timeout(enable_time, []() {
     ESP_LOGW(TAG, "Timeout, restarting");
     App.reboot();
   });
+#endif
 
   // Delay here to allow power to stabilize before Wi-Fi/Ethernet is initialised
   delay(300);  // NOLINT
+#ifndef USE_SAFE_MODE_SPLIT
   App.setup();
+#endif
 
   ESP_LOGW(TAG, "SAFE MODE IS ACTIVE");
 
