@@ -10,7 +10,7 @@ EthernetComponent *global_eth_component;  // NOLINT(cppcoreguidelines-avoid-non-
 
 EthernetComponent::EthernetComponent() { global_eth_component = this; }
 
-#ifdef USE_ETHERNET_MANUAL_IP
+#ifdef USE_ETHERNET_MANUAL_IP_CONFIG
 ManualIP load_manual_ip() {
   uint8_t b[ETHERNET_MANUAL_IP_SIZE];
   progmem_memcpy(b, ETHERNET_MANUAL_IP, sizeof(b));
