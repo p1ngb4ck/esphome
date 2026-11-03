@@ -207,7 +207,7 @@ static constexpr uint8_t CLIENT_FEATURE_SUPPORTS_NOISE = 0x08;
 static constexpr uint8_t CLIENT_FEATURE_SUPPORTS_DEFLATE = 0x10;
 #ifdef ESPHOME_OTA_UDP
 static constexpr uint8_t CLIENT_FEATURE_SUPPORTS_UDP = 0x20;
-static constexpr uint8_t CLIENT_FEATURE_SUPPORTS_WRITE_PROGRESS = 0x40;
+static constexpr uint8_t CLIENT_FEATURE_SUPPORTS_WRITE_PROGRESS = 0x80;
 #endif
 // Noise needs the extended protocol: the prologue binds the 2-byte feature ack
 static constexpr uint8_t CLIENT_NOISE_FEATURES =
