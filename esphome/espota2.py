@@ -57,6 +57,7 @@ RESPONSE_UPDATE_END_OK = 0x45
 RESPONSE_SUPPORTS_COMPRESSION = 0x46
 RESPONSE_CHUNK_OK = 0x47
 RESPONSE_FEATURE_FLAGS = 0x48
+RESPONSE_WRITE_PROGRESS = 0x49
 
 RESPONSE_ERROR_MAGIC = 0x80
 RESPONSE_ERROR_UPDATE_PREPARE = 0x81
@@ -93,6 +94,7 @@ CLIENT_FEATURE_SUPPORTS_EXTENDED_PROTOCOL = 0x04
 CLIENT_FEATURE_SUPPORTS_NOISE = 0x08
 CLIENT_FEATURE_SUPPORTS_DEFLATE = 0x10
 CLIENT_FEATURE_SUPPORTS_UDP = 0x20
+CLIENT_FEATURE_SUPPORTS_WRITE_PROGRESS = 0x80
 SERVER_FEATURE_SUPPORTS_COMPRESSION = 0x01
 SERVER_FEATURE_SUPPORTS_PARTITION_ACCESS = 0x02
 SERVER_FEATURE_SUPPORTS_NOISE = 0x04
@@ -1054,6 +1056,7 @@ def _negotiate_session(
         | CLIENT_FEATURE_SUPPORTS_EXTENDED_PROTOCOL
         | CLIENT_FEATURE_SUPPORTS_DEFLATE
         | CLIENT_FEATURE_SUPPORTS_UDP
+        | CLIENT_FEATURE_SUPPORTS_WRITE_PROGRESS
     )
     if rtl8710b:
         features_to_send &= ~CLIENT_FEATURE_SUPPORTS_DEFLATE
@@ -1374,7 +1377,22 @@ def perform_ota(
         commit_start = time.perf_counter()
         try:
             receive_exactly(sock, 1, "update receive result", RESPONSE_RECEIVE_OK)
-            receive_exactly(sock, 1, "update end result", RESPONSE_UPDATE_END_OK)
+            writing = None
+            while (
+                receive_exactly(
+                    sock,
+                    1,
+                    "update end result",
+                    [RESPONSE_UPDATE_END_OK, RESPONSE_WRITE_PROGRESS],
+                )[0]
+                == RESPONSE_WRITE_PROGRESS
+            ):
+                percent = receive_exactly(sock, 1, "write progress", None)[0]
+                if writing is None:
+                    writing = ProgressBar("Writing at flash")
+                writing.update(min(percent, 100) / 100)
+            if writing is not None:
+                writing.done()
         except OTANetworkError as err:
             raise _committed_error(err) from err
         commit_duration = time.perf_counter() - commit_start
