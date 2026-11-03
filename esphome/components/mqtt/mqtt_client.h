@@ -11,6 +11,7 @@
 #include "esphome/core/entity_base.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
+#include "esphome/core/preferences.h"
 #include "esphome/core/progmem.h"
 #include "esphome/core/string_ref.h"
 #ifdef USE_LOGGER
@@ -146,6 +147,8 @@ enum MQTTClientState {
 
 class MQTTComponent;
 
+enum PublishWay : uint8_t { PUBLISH_BOTH = 0, PUBLISH_API = 1, PUBLISH_MQTT = 2 };
+
 class MQTTClientComponent final : public Component {
  public:
   MQTTClientComponent();
@@ -181,6 +184,16 @@ class MQTTClientComponent final : public Component {
   const MQTTDiscoveryInfo &get_discovery_info() const;
   /// Globally disable Home Assistant discovery.
   void disable_discovery();
+  void set_publish_count(uint16_t count);
+  void add_publish_entry(const EntityBase *entity, MQTTComponent *component, PublishWay way);
+  uint16_t publish_count() const { return this->publish_count_; }
+  const EntityBase *publish_entity(uint16_t index) const { return this->publish_[index].entity; }
+  const char *publish_kind(uint16_t index) const;
+  PublishWay publish_way(uint16_t index) const { return static_cast<PublishWay>(this->publish_[index].way); }
+  PublishWay publish_way_of(const EntityBase *entity) const;
+  bool is_mqtt_only(const EntityBase *entity) const { return this->publish_way_of(entity) == PUBLISH_MQTT; }
+  void set_publish_way(uint16_t index, PublishWay way);
+  void set_publish_way_all(PublishWay way);
   bool is_discovery_enabled() const;
   bool is_discovery_ip_enabled() const;
 
@@ -326,6 +339,11 @@ class MQTTClientComponent final : public Component {
   void set_reboot_timeout(uint32_t reboot_timeout) { this->reboot_timeout_ = reboot_timeout; }
 
   void register_mqtt_component(MQTTComponent *component);
+  static void unregister_mqtt_component_(void *client, void *component, void *unused);
+  static void remove_publish_entry_(void *client, void *entity, void *unused);
+  bool publish_grow_();
+  void publish_sort_();
+  static void remove_subscription_(void *client, void *fn, void *ctx);
 
   bool is_connected();
   void set_enable_on_boot(bool enable_on_boot) { this->enable_on_boot_ = enable_on_boot; }
@@ -358,6 +376,20 @@ class MQTTClientComponent final : public Component {
   static MQTTTopicSource copy_topic(StringRef topic);
 
   void send_device_info_();
+  struct PublishEntry {
+    const EntityBase *entity;
+    MQTTComponent *component;
+    uint8_t way;
+    uint8_t yaml_way;
+  };
+  void publish_setup_();
+  bool publish_apply_(uint16_t index, PublishWay way);
+  void publish_save_();
+  PublishEntry *publish_{nullptr};
+  uint16_t *publish_order_{nullptr};
+  uint16_t publish_count_{0};
+  uint16_t publish_capacity_{0};
+  ESPPreferenceObject publish_pref_;
 
   /// Reconnect to the MQTT broker if not already connected.
   void start_connect_();
