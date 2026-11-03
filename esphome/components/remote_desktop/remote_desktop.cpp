@@ -85,6 +85,9 @@ void RemoteDesktop::setup() {
     this->touchscreen_->register_listener(&this->touch_listener_);
 #endif
   this->saved_setup_();
+#ifdef USE_REMOTE_DESKTOP_KEY_BINDINGS
+  this->set_close_action(this->close_name_);
+#endif
   this->disable_loop();
 }
 
@@ -191,6 +194,8 @@ bool RemoteDesktop::connect(Protocol protocol, const std::string &host, uint16_t
   this->active_saved_ = -1;
   this->stop_.store(false);
   xQueueReset(this->inputs_q_);
+  this->failed_.store(false);
+  this->session_++;
   this->state_.store(STATE_STARTING);
   if (!this->task_.create(&RemoteDesktop::task_entry_, "remote_desktop", 8192, this, 4, true, 0)) {
     ESP_LOGE(TAG, "No session task");
@@ -198,6 +203,7 @@ bool RemoteDesktop::connect(Protocol protocol, const std::string &host, uint16_t
     return false;
   }
   this->enable_loop();
+  this->changed_();
   return true;
 }
 
@@ -211,10 +217,9 @@ void RemoteDesktop::disconnect() {
 
 bool RemoteDesktop::close_key_(hid::HIDInput *input, uint16_t page, uint16_t usage, bool pressed) {
 #ifdef USE_REMOTE_DESKTOP_KEY_BINDINGS
-  if (pressed && !this->key_held_ && this->bindings_ != nullptr) {
+  if (pressed && !this->key_held_ && this->bindings_ != nullptr && this->close_action_ >= 0) {
     const int action = this->bindings_->resolve(page, usage, lvgl::KeyBindings::modifiers_of(input->get_modifiers()));
-    if ((action == lvgl::KeyBindings::ACT_BACK && (this->close_keys_ & 1)) ||
-        (action == lvgl::KeyBindings::ACT_HOME && (this->close_keys_ & 2))) {
+    if (action == this->close_action_) {
       this->key_held_ = true;
       this->key_page_ = page;
       this->key_usage_ = usage;
@@ -286,6 +291,7 @@ void RemoteDesktop::loop() {
 void RemoteDesktop::task_entry_(void *param) {
   auto *self = static_cast<RemoteDesktop *>(param);
   self->run_session_();
+  self->failed_.store(self->state_.load() == STATE_STARTING);
   self->state_.store(STATE_ENDED);
   self->enable_loop_soon_any_context();
   vTaskSuspend(nullptr);
