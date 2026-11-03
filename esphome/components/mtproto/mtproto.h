@@ -51,6 +51,7 @@ class Mtproto final : public Component
   void setup() override;
   void loop() override;
   void dump_config() override;
+  bool teardown() override;
   float get_setup_priority() const override { return setup_priority::AFTER_CONNECTION; }
 
   void set_default_api(int32_t api_id, const char *api_hash);
@@ -250,6 +251,8 @@ class Mtproto final : public Component
   QueueHandle_t events_{nullptr};
   int wake_fd_{-1};
   std::atomic<bool> network_up_{true};
+  std::atomic<bool> stopping_{false};
+  std::atomic<bool> parked_{false};
 
   mutable Mutex lock_;
   char qr_url_[160]{};

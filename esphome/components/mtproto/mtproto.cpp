@@ -476,7 +476,7 @@ void Mtproto::close_buffers_() {
 }
 
 void Mtproto::run_() {
-  for (;;) {
+  while (!this->stopping_.load()) {
     const bool can_run = this->api_id_ != 0 && this->network_up_.load();
     if (!can_run || this->retry_delay_ != 0) {
       if (this->api_id_ == 0 && this->state_ != State::NO_API)
@@ -541,7 +541,7 @@ void Mtproto::run_() {
     uint32_t rx_deadline = 0;
     while (!reconnect) {
       const uint32_t now = millis();
-      if (this->target_dc_ != 0 || this->logging_out_ || this->api_id_ == 0)
+      if (this->target_dc_ != 0 || this->logging_out_ || this->api_id_ == 0 || this->stopping_.load())
         break;
       if (this->next_ping_ != 0 && elapsed_until(this->next_ping_, now) == 0) {
         if (!this->send_ping_())
@@ -617,6 +617,38 @@ void Mtproto::run_() {
     if (this->target_dc_ == 0)
       this->retry_delay_ = RETRY_MIN_MS;
   }
+  this->close_link_();
+  this->close_buffers_();
+  this->parked_.store(true);
+  vTaskSuspend(nullptr);
+}
+
+bool Mtproto::teardown() {
+  if (this->task_.is_created()) {
+    if (!this->stopping_.exchange(true))
+      this->wake_();
+    if (!this->parked_.load() || !this->task_.deallocate())
+      return false;
+  }
+  if (this->commands_ != nullptr) {
+    Command command;
+    while (xQueueReceive(this->commands_, &command, 0) == pdTRUE) {
+      if (command.type == CommandType::INVOKE)
+        this->finish_job_(command.job, "STOPPED", TlReader());
+      memset(command.text, 0, sizeof(command.text));
+    }
+    vQueueDeleteWithCaps(this->commands_);
+    this->commands_ = nullptr;
+  }
+  if (this->events_ != nullptr) {
+    vQueueDeleteWithCaps(this->events_);
+    this->events_ = nullptr;
+  }
+  if (this->wake_fd_ >= 0) {
+    ::close(this->wake_fd_);
+    this->wake_fd_ = -1;
+  }
+  return true;
 }
 
 void Mtproto::handle_command_(const Command &command) {
