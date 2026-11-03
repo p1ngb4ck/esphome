@@ -8,8 +8,10 @@ One messenger for one user: channels (Telegram, WhatsApp, Facebook Messenger) wi
   downloads, the spool folder on a storage, triggers.
 - `telegram_account.*`: the `account` transport on `mtproto` - dialogs, history, files, avatars, thumbnails;
   `tl_read.h`: helpers for reading TL objects.
-- `telegram_call.*`: Telegram calls as a `sip_phone::MediaTransport` (the phone's media path), video from the
-  camera's H.264 stream (`camera::CameraListener`), an optional video relay.
+- `telegram_call.*`: Telegram calls over `esp_peer`; audio Opus (the `audio` component's `OpusVoiceEncoder` /
+  `OpusVoiceDecoder`, encoded on the call task) from the messenger's microphone source to the call's speaker, video
+  from the camera's H.264 stream
+  (`camera::CameraListener`), an optional video relay.
 - Network and file work runs on tasks / the storage worker; results reach the main loop through `defer()`; LVGL UIs
   are built in YAML and fed by the triggers.
 - Files are streamed through the storage worker with the borrowed transfer buffer; nothing holds a whole file in RAM.

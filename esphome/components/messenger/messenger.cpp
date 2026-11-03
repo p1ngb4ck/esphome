@@ -23,7 +23,7 @@
 #include "esphome/core/log.h"
 
 #ifdef USE_MESSENGER_MICROPHONE
-#include <opus.h>
+#include "esphome/components/audio/opus_voice.h"
 #endif
 
 namespace esphome::messenger {
@@ -553,7 +553,7 @@ void Messenger::poll_task_entry_(void *param) { static_cast<Messenger *>(param)-
 void Messenger::send_task_entry_(void *param) { static_cast<Messenger *>(param)->send_loop_(); }
 
 void Messenger::poll_loop_() {
-  while (true) {
+  while (!this->stopping_.load()) {
     if (!this->is_ready(Channel::TELEGRAM)) {
       ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
       continue;
@@ -568,9 +568,11 @@ void Messenger::poll_loop_() {
     }
     if (this->token_changed_.exchange(false, std::memory_order_acq_rel))
       this->offset_ = 0;
-    if (!this->poll_once_())
+    if (!this->poll_once_() && !this->stopping_.load())
       ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(RETRY_MS));
   }
+  this->parked_.fetch_add(1);
+  vTaskSuspend(nullptr);
 }
 
 bool Messenger::poll_once_() {
@@ -1151,7 +1153,7 @@ bool Messenger::send_message(Channel channel, int64_t chat_id, const std::string
 }
 
 void Messenger::send_loop_() {
-  while (true) {
+  while (!this->stopping_.load()) {
     Job *job = nullptr;
     if (xQueueReceive(this->jobs_, &job, portMAX_DELAY) != pdTRUE || job == nullptr)
       continue;
@@ -1174,6 +1176,47 @@ void Messenger::send_loop_() {
     }
     this->finish_job_(job, ok, error);
   }
+  this->parked_.fetch_add(1);
+  vTaskSuspend(nullptr);
+}
+
+bool Messenger::teardown() {
+  if (!this->stopping_.exchange(true)) {
+#ifdef USE_MESSENGER_CALL
+    this->call_.hangup();
+#endif
+    if (this->poll_task_.is_created())
+      xTaskNotifyGive(this->poll_task_.get_handle());
+    if (this->send_task_.is_created()) {
+      Job *wake = nullptr;
+      xQueueSend(this->jobs_, &wake, 0);
+    }
+  }
+#ifdef USE_MESSENGER_CALL
+  if (this->call_.state() != CallState::IDLE)
+    return false;
+#endif
+  const uint8_t tasks = (this->poll_task_.is_created() ? 1 : 0) + (this->send_task_.is_created() ? 1 : 0);
+  if (this->parked_.load() < tasks || !this->poll_task_.deallocate() || !this->send_task_.deallocate())
+    return false;
+  if (this->jobs_ != nullptr) {
+    Job *job = nullptr;
+    while (xQueueReceive(this->jobs_, &job, 0) == pdTRUE) {
+      if (job != nullptr)
+        free_job_(job);
+    }
+    vQueueDelete(this->jobs_);
+    this->jobs_ = nullptr;
+  }
+  if (this->inbound_ != nullptr) {
+    RAMAllocator<Inbound>(RAMAllocator<Inbound>::ALLOC_EXTERNAL).deallocate(this->inbound_, INBOUND_SLOTS);
+    this->inbound_ = nullptr;
+  }
+  if (this->history_ != nullptr) {
+    RAMAllocator<HistoryEntry>(RAMAllocator<HistoryEntry>::ALLOC_EXTERNAL).deallocate(this->history_, HISTORY_SLOTS);
+    this->history_ = nullptr;
+  }
+  return true;
 }
 
 void Messenger::finish_job_(Job *job, bool ok, const std::string &error) {
@@ -2019,6 +2062,9 @@ void Messenger::set_microphone_source(microphone::MicrophoneSource *source) {
     if (ring != nullptr)
       ring->write_without_replacement(data.data(), data.size(), 0);
   });
+#ifdef USE_MESSENGER_CALL
+  this->call_.set_microphone(source);
+#endif
 }
 
 bool Messenger::voice_start(Channel channel, int64_t chat_id) {
@@ -2137,14 +2183,11 @@ bool Messenger::run_voice_(Job *job, std::string *error) {
   const size_t max_frames = static_cast<size_t>(this->max_voice_seconds_) * 50;
   const size_t scratch_bytes = frame_bytes + 2 * OPUS_MAX_PACKET;
   uint8_t *scratch = RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::ALLOC_EXTERNAL).allocate(scratch_bytes);
-  int err = 0;
-  OpusEncoder *encoder =
-      scratch == nullptr ? nullptr
-                         : opus_encoder_create(static_cast<opus_int32>(rate), 1, OPUS_APPLICATION_VOIP, &err);
+  audio::OpusVoiceEncoder encoder;
+  const bool started = scratch != nullptr && encoder.start(rate, 1, 20, VOICE_BITRATE);
   const size_t estimate = max_frames * (VOICE_BITRATE / 8 / 50 + 32);
-  if (scratch == nullptr || encoder == nullptr || err != OPUS_OK || !this->begin_body_(job, estimate)) {
-    if (encoder != nullptr)
-      opus_encoder_destroy(encoder);
+  if (!started || !this->begin_body_(job, estimate)) {
+    encoder.stop();
     if (scratch != nullptr)
       RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::ALLOC_EXTERNAL).deallocate(scratch, scratch_bytes);
     post_to_loop(this, 0, [this]() { this->voice_end_capture_(); });
@@ -2152,9 +2195,7 @@ bool Messenger::run_voice_(Job *job, std::string *error) {
     *error = "no memory for the voice note";
     return false;
   }
-  opus_encoder_ctl(encoder, OPUS_SET_BITRATE(VOICE_BITRATE));
-  opus_int32 lookahead = 0;
-  opus_encoder_ctl(encoder, OPUS_GET_LOOKAHEAD(&lookahead));
+  const int32_t lookahead = encoder.lookahead();
   const uint32_t to_48k = 48000 / rate;
   const uint16_t pre_skip = static_cast<uint16_t>(lookahead * to_48k);
 
@@ -2203,8 +2244,7 @@ bool Messenger::run_voice_(Job *job, std::string *error) {
       memset(pcm + have, 0, frame_bytes - have);
     }
     const int slot = pending == 0 ? 1 : 0;
-    const opus_int32 bytes = opus_encode(encoder, reinterpret_cast<const opus_int16 *>(pcm), static_cast<int>(frame),
-                                         packets[slot], static_cast<opus_int32>(OPUS_MAX_PACKET));
+    const int bytes = encoder.encode(reinterpret_cast<const int16_t *>(pcm), packets[slot], OPUS_MAX_PACKET);
     if (bytes < 0) {
       *error = "Opus encoding failed";
       ok = false;
@@ -2227,7 +2267,7 @@ bool Messenger::run_voice_(Job *job, std::string *error) {
   }
   if (ok && pending >= 0)
     append_ogg_page(body, 0x04, granule, serial, sequence++, packets[pending], pending_len);
-  opus_encoder_destroy(encoder);
+  encoder.stop();
   RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::ALLOC_EXTERNAL).deallocate(scratch, scratch_bytes);
   this->voice_release_();
   if (this->voice_cancelled_.load()) {

@@ -4,8 +4,10 @@
 
 #ifdef USE_MESSENGER_CALL
 
+#include "esphome/components/audio/opus_voice.h"
+#include "esphome/components/microphone/microphone_source.h"
 #include "esphome/components/mtproto/mtproto.h"
-#include "esphome/components/sip_phone/sip_phone.h"
+#include "esphome/components/speaker/speaker.h"
 #ifdef USE_CAMERA
 #include "esphome/components/camera/camera.h"
 #endif
@@ -20,6 +22,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <span>
 #include <string>
 
 namespace esphome::messenger {
@@ -29,9 +32,9 @@ enum class CallState : uint8_t { IDLE = 0, OUTGOING, RINGING, INCOMING, CONNECTI
 struct CallSession;
 
 #ifdef USE_CAMERA
-class TelegramCall : public sip_phone::MediaTransport, public camera::CameraListener {
+class TelegramCall : public camera::CameraListener {
 #else
-class TelegramCall : public sip_phone::MediaTransport {
+class TelegramCall {
 #endif
  public:
   static constexpr uint32_t TASK_STACK = 16384;
@@ -39,7 +42,8 @@ class TelegramCall : public sip_phone::MediaTransport {
 
   void attach(mtproto::Mtproto *mtproto, Component *owner);
   void attach_camera();
-  void set_phone(sip_phone::SipPhone *phone) { this->phone_ = phone; }
+  void set_microphone(microphone::MicrophoneSource *microphone);
+  void set_speaker(speaker::Speaker *speaker) { this->speaker_ = speaker; }
   void set_video_relay(const char *host, uint16_t port) {
     this->video_host_ = host;
     this->video_port_ = port;
@@ -55,7 +59,6 @@ class TelegramCall : public sip_phone::MediaTransport {
   std::string error() const;
   uint32_t seconds() const;
   bool take_change() { return this->changed_.exchange(false); }
-  void on_media_payload(const uint8_t *payload, size_t len, uint32_t timestamp) override;
 #ifdef USE_CAMERA
   void on_camera_image(const std::shared_ptr<camera::CameraImage> &image) override;
 #endif
@@ -69,6 +72,10 @@ class TelegramCall : public sip_phone::MediaTransport {
   void fail_(const char *text);
   bool begin_(bool outgoing, int64_t call_id, int64_t call_hash, const uint8_t *g_a_hash);
   void finish_();
+  bool start_audio_();
+  void stop_audio_();
+  void on_mic_data_(std::span<const uint8_t> data);
+  void play_payload_(const uint8_t *payload, size_t len);
 
   static void task_entry_(void *param);
   void run_();
@@ -99,7 +106,14 @@ class TelegramCall : public sip_phone::MediaTransport {
 
   mtproto::Mtproto *mtproto_{nullptr};
   Component *owner_{nullptr};
-  sip_phone::SipPhone *phone_{nullptr};
+  microphone::MicrophoneSource *microphone_{nullptr};
+  speaker::Speaker *speaker_{nullptr};
+  audio::OpusVoiceEncoder encoder_;
+  audio::OpusVoiceDecoder decoder_;
+  int16_t *pcm_{nullptr};
+  int16_t *decoded_{nullptr};
+  size_t decoded_samples_{0};
+  uint32_t audio_rate_{0};
   const char *video_host_{nullptr};
   uint16_t video_port_{0};
 
