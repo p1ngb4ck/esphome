@@ -7,6 +7,7 @@ from esphome.components.esp32.const import (
     VARIANT_ESP32S3,
     VARIANT_ESP32S31,
 )
+from esphome.components.esp_ldo import EspLdo
 from esphome.components.storage import (
     CONF_MOUNT_PATH,
     FILE_SYSTEM_SCHEMA_ENTRY,
@@ -77,6 +78,7 @@ CONF_CD_PIN = "cd_pin"
 CONF_FORMAT_ON_MISMATCH = "format_on_mismatch"
 CONF_SPI_INTERFACE = "spi_interface"
 CONF_ASSUME_EXCLUSIVE_BUS = "assume_exclusive_bus"
+CONF_POWER_LDO = "power_ldo"
 
 TYPE_SD_MMC = "sd_mmc"
 TYPE_SD_SPI = "sd_spi"
@@ -154,6 +156,7 @@ SD_MMC_SCHEMA = cv.Schema(
         cv.Optional(CONF_MOUNT_PATH, default="/sdcard"): validate_mount_path,
         cv.Optional(CONF_CD_PIN): pins.gpio_input_pullup_pin_schema,
         cv.Optional(CONF_FORMAT_ON_MISMATCH, default=False): cv.boolean,
+        cv.Optional(CONF_POWER_LDO): cv.use_id(EspLdo),
         cv.Optional(CONF_ON_MOUNTED): automation.validate_automation(
             {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(CardMountedTrigger)}
         ),
@@ -408,6 +411,10 @@ async def to_code(config):
                 cg.add(var.set_data2_pin(config[CONF_DATA2_PIN]))
             if CONF_DATA3_PIN in config:
                 cg.add(var.set_data3_pin(config[CONF_DATA3_PIN]))
+
+        if power_ldo := config.get(CONF_POWER_LDO):
+            cg.add_define("USE_SD_STORAGE_POWER_LDO")
+            cg.add(var.set_power_ldo(await cg.get_variable(power_ldo)))
 
     cg.add(var.set_mount_path(config[CONF_MOUNT_PATH]))
     # Full VFS paths carry the mount point; the storage component sizes its buffers from the

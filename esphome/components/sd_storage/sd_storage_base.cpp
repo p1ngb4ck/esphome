@@ -181,6 +181,45 @@ void SdStorageBase::loop_cd_() {
   }
 }
 
+#ifdef USE_SD_STORAGE_POWER_LDO
+bool SdStorageBase::defer_mount_until_powered_() {
+  if (this->power_ldo_ == nullptr)
+    return false;
+  this->power_ldo_->add_on_turn_on_callback([this]() {
+    if (!this->mount_deferred_)
+      return;
+    this->mount_deferred_ = false;
+    if (!this->card_present_())
+      return;
+    storage::StorageError result = this->mount();
+    this->log_mount_result_(result);
+    if (result != storage::StorageError::STORAGE_ERROR_OK)
+      this->power_cycle_retry_();
+  });
+  if (this->power_ldo_->is_on())
+    return false;
+  ESP_LOGD(TAG_BASE, "Waiting for the card's power");
+  this->mount_deferred_ = true;
+  return true;
+}
+
+void SdStorageBase::power_cycle_retry_() {
+  if (this->power_ldo_ == nullptr || this->power_retried_)
+    return;
+  this->power_retried_ = true;
+  ESP_LOGW(TAG_BASE, "Mount failed, power-cycling the card once");
+  this->power_ldo_->turn_off();
+  if (this->power_ldo_->is_on())
+    return;
+  this->mount_deferred_ = true;
+  this->set_timeout(POWER_CYCLE_OFF_MS, [this]() {
+    this->power_ldo_->turn_on();
+    if (!this->power_ldo_->is_on())
+      this->mount_deferred_ = false;
+  });
+}
+#endif
+
 bool SdStorageBase::card_present_() {
   if (this->cd_pin_ == nullptr)
     return true;

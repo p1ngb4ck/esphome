@@ -10,6 +10,11 @@ An SD card as a `FilesystemStorage` + `MountableStorage` of the storage interfac
 - `sd_storage_spi.*` (`SdSpi`): SD over SPI. `IO_TASK_SAFE` only with `assume_exclusive_bus: true` (validated: the
   card must be the only device on its bus), because another device's transfer from the main loop would otherwise
   collide with the worker task.
+- `power_ldo` (`SdMmc`, `USE_SD_STORAGE_POWER_LDO`): the esp_ldo channel that powers the card. When it is off at
+  `setup()`, the first mount waits for its turn-on callback and `can_proceed()` holds the components after it; the
+  core keeps running the scheduler meanwhile, so `esp_ldo.turn_off` / `delay` / `esp_ldo.turn_on` in an on_boot
+  before priority 800 power-cycles the card without blocking. A failed first mount power-cycles the card once
+  (`power_cycle_retry_()`: LDO off, `POWER_CYCLE_OFF_MS` by a scheduler timeout, on, mount again), held the same way.
 - `automation.h`: mount / unmount / list_files actions, `is_mounted` condition.
 
 Rules:

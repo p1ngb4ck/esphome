@@ -133,3 +133,15 @@ automation.register_apply_action(
     ),
     automation.ApplyField(CONF_VOLTAGE, "adjust_voltage", cg.float_),
 )
+
+automation.register_apply_action(
+    "esp_ldo.turn_off",
+    automation.maybe_simple_id({cv.Required(CONF_ID): cv.use_id(EspLdo)}),
+    automation.ApplyCall("turn_off()"),
+)
+
+automation.register_apply_action(
+    "esp_ldo.turn_on",
+    automation.maybe_simple_id({cv.Required(CONF_ID): cv.use_id(EspLdo)}),
+    automation.ApplyCall("turn_on()"),
+)

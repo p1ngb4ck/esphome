@@ -10,6 +10,9 @@
 #ifdef USE_ESP_IDF
 #include <esp_vfs.h>
 #include <ff.h>
+#ifdef USE_SD_STORAGE_POWER_LDO
+#include "esphome/components/esp_ldo/esp_ldo.h"
+#endif
 
 namespace esphome::sd_storage {
 
@@ -59,6 +62,10 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
   void set_requested_file_system(uint8_t fs) { this->requested_file_system_ = fs; }
 #endif
   bool is_mounted() const { return this->is_mounted_; }
+#ifdef USE_SD_STORAGE_POWER_LDO
+  void set_power_ldo(esp_ldo::EspLdo *ldo) { this->power_ldo_ = ldo; }
+  bool can_proceed() override { return !this->mount_deferred_; }
+#endif
   // No-RTTI downcast hook -- see PathStorage::as_mountable().
   storage::MountableStorage *as_mountable() override { return this; }
 
@@ -164,6 +171,15 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
   template<typename... Ts> friend class MountCardAction;
   template<typename... Ts> friend class UnmountCardAction;
   template<typename... Ts> friend class ListFilesAction;
+
+#ifdef USE_SD_STORAGE_POWER_LDO
+  static constexpr uint32_t POWER_CYCLE_OFF_MS = 150;
+  bool defer_mount_until_powered_();
+  void power_cycle_retry_();
+  esp_ldo::EspLdo *power_ldo_{nullptr};
+  bool mount_deferred_{false};
+  bool power_retried_{false};
+#endif
 
   void log_mount_result_(storage::StorageError err) const;
   void log_unmount_(storage::StorageError err) const;
