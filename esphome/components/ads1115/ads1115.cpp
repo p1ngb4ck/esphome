@@ -62,13 +62,81 @@ void ADS1115Component::setup() {
     return;
   }
   this->prev_config_ = config;
+
+#ifdef USE_ESP32
+  // Create non-blocking mutex for burst measurements
+  this->burst_mutex_ = xSemaphoreCreateMutex();
+#endif
 }
+
 void ADS1115Component::dump_config() {
   ESP_LOGCONFIG(TAG, "ADS1115:");
   LOG_I2C_DEVICE(this);
 }
+
+void ADS1115Component::loop() {}
+
 float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1115Gain gain,
                                             ADS1115Resolution resolution, ADS1115Samplerate samplerate) {
+#ifdef USE_ESP32
+  // Acquire burst lock (blocking - safe because called from background task)
+  // Will wait if RMS measurement is in progress
+  if (xSemaphoreTake(this->burst_mutex_, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Failed to acquire burst lock");
+    return NAN;
+  }
+
+  // Lock acquired, do measurement
+  float result = this->do_measurement_(multiplexer, gain, resolution, samplerate);
+
+  // Release lock
+  xSemaphoreGive(this->burst_mutex_);
+  return result;
+#else
+  // Non-ESP32: Direct measurement
+  return this->do_measurement_(multiplexer, gain, resolution, samplerate);
+#endif
+}
+
+#ifdef USE_ESP32
+bool ADS1115Component::do_burst_measurement(ADS1115Multiplexer multiplexer, ADS1115Gain gain,
+                                            ADS1115Resolution resolution, ADS1115Samplerate samplerate,
+                                            std::function<void(float)> sample_callback, uint16_t num_samples) {
+  // Acquire lock (blocking - safe because called from background task)
+  // Will wait if another measurement is in progress
+  if (xSemaphoreTake(this->burst_mutex_, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Failed to acquire burst lock");
+    return false;
+  }
+
+  // Lock acquired, perform all samples consecutively
+  for (uint16_t i = 0; i < num_samples; i++) {
+    float voltage = this->do_measurement_(multiplexer, gain, resolution, samplerate);
+
+    if (std::isnan(voltage)) {
+      // Measurement failed, release lock and return
+      xSemaphoreGive(this->burst_mutex_);
+      ESP_LOGW(TAG, "Burst measurement failed at sample %d/%d", i + 1, num_samples);
+      return false;
+    }
+
+    // Call callback with sample value
+    sample_callback(voltage);
+
+    // Yield every 10 samples to keep system responsive
+    if (i % 10 == 0) {
+      yield();
+    }
+  }
+
+  // All samples complete, release lock
+  xSemaphoreGive(this->burst_mutex_);
+  return true;
+}
+#endif
+
+float ADS1115Component::do_measurement_(ADS1115Multiplexer multiplexer, ADS1115Gain gain, ADS1115Resolution resolution,
+                                        ADS1115Samplerate samplerate) {
   uint16_t config = this->prev_config_;
   // Multiplexer
   //        0bxBBBxxxxxxxxxxxx

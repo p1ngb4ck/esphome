@@ -53,3 +53,7 @@ async def register_ir_rf_entity(
     await cg.register_component(var, config)
     queue_entity_register(domain, config)
     CORE.register_platform_component(domain, var)
+
+
+async def to_code(config: ConfigType) -> None:
+    cg.add_define("USE_IR_RF")
