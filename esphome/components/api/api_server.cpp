@@ -779,6 +779,8 @@ void APIServer::on_log(uint8_t level, const char *tag, const char *message, size
     return;
   }
   for (auto &c : this->active_clients()) {
+    if (this->log_target_ != nullptr && &*c != this->log_target_)
+      continue;
     if (!c->flags_.remove && c->get_log_subscription_level() >= level)
       c->try_send_log_message(level, tag, message, message_len);
   }
