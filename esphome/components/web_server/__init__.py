@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import gzip
 import logging
+from pathlib import Path
 import re
 from typing import Any
 
@@ -51,7 +52,7 @@ from esphome.const import (  # noqa: F401
     PLATFORM_RP2,
     PLATFORM_RTL87XX,
 )
-from esphome.core import CORE, CoroPriority, coroutine_with_priority
+from esphome.core import CORE, ID, CoroPriority, coroutine_with_priority
 from esphome.core.entity_helpers import WEBSERVER_SORTING_SCHEMA  # noqa: F401
 from esphome.cpp_generator import MockObj
 import esphome.final_validate as fv
@@ -89,6 +90,7 @@ DEFAULT_PORT = 80
 
 web_server_ns = cg.esphome_ns.namespace("web_server")
 WebServer = web_server_ns.class_("WebServer", cg.Component)
+WebServerPackageApi = web_server_ns.class_("WebServerPackageApi", cg.Component)
 
 sorting_groups = {}
 
@@ -440,10 +442,16 @@ def build_index_html(config: ConfigType) -> str:
     if js_include:
         html += "<script type=module src=/0.js></script>"
     html += "<esp-app></esp-app>"
+    if _package_card(config):
+        html += "<script src=/packages/card.js></script>"
     if config[CONF_JS_URL]:
         html += f'<script src="{config[CONF_JS_URL]}"></script>'
     html += "</body></html>"
     return html
+
+
+def _package_card(config: ConfigType) -> bool:
+    return config[CONF_VERSION] == 3 and "package_manager" in CORE.config
 
 
 def add_resource_as_progmem(
@@ -559,6 +567,22 @@ async def to_code(config: ConfigType) -> None:
     if (sorting_group_config := config.get(CONF_SORTING_GROUPS)) is not None:
         cg.add_define("USE_WEBSERVER_SORTING")
         add_sorting_groups(var, sorting_group_config)
+
+    if _package_card(config):
+        cg.add_define("USE_WEBSERVER_PACKAGE_API")
+        pkg_id = ID(f"{var}_package_api", is_declaration=True, type=WebServerPackageApi)
+        CORE.component_ids.add(str(pkg_id))
+        pkg_var = cg.new_Pvariable(pkg_id)
+        await cg.register_component(pkg_var, {})
+        cg.add(pkg_var.set_web_server_base(paren))
+        cg.add(
+            pkg_var.set_package_manager(
+                await cg.get_variable(CORE.config["package_manager"][CONF_ID])
+            )
+        )
+        js_path = Path(__file__).parent / "packages_card.js"
+        with js_path.open(encoding="utf-8") as js_file:
+            add_resource_as_progmem("PACKAGES_JS", js_file.read())
 
 
 def FILTER_SOURCE_FILES() -> list[str]:
