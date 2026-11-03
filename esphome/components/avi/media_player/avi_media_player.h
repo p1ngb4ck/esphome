@@ -67,7 +67,7 @@ class AviMediaPlayer : public Component, public media_player::MediaPlayer {
   void task_();
   bool open_();
   void play_();
-  bool frame_(const uint8_t *data, size_t len);
+  bool show_picture_(const uint8_t *data, size_t len);
   void sound_(const uint8_t *data, size_t len);
   void wait_until_(int64_t when_us);
 #ifdef USE_SPEAKER
