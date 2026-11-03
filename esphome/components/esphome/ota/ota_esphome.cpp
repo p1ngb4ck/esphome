@@ -204,6 +204,7 @@ static constexpr uint8_t CLIENT_FEATURE_SUPPORTS_NOISE = 0x08;
 static constexpr uint8_t CLIENT_FEATURE_SUPPORTS_DEFLATE = 0x10;
 #ifdef ESPHOME_OTA_UDP
 static constexpr uint8_t CLIENT_FEATURE_SUPPORTS_UDP = 0x20;
+static constexpr uint8_t CLIENT_FEATURE_SUPPORTS_WRITE_PROGRESS = 0x40;
 #endif
 // Noise needs the extended protocol: the prologue binds the 2-byte feature ack
 static constexpr uint8_t CLIENT_NOISE_FEATURES =
@@ -574,6 +575,8 @@ void ESPHomeOTAComponent::handle_data_() {
     goto error;  // NOLINT(cppcoreguidelines-avoid-goto)
   }
   image_size = xfer.ota_size;
+  this->update_size_ = xfer.ota_size;
+  this->writing_ = false;
 #ifdef USE_OTA_DEFLATE
   if (this->inflate_ != nullptr && !this->read_size_(buf, image_size, LOG_STR("image size"))) {
     this->log_read_error_(LOG_STR("image size"));
@@ -643,6 +646,15 @@ void ESPHomeOTAComponent::handle_data_() {
 
   // Acknowledge receive OK - 1 byte
   this->data_write_byte_(ota::OTA_RESPONSE_RECEIVE_OK);
+  this->writing_ = true;
+#ifdef USE_OTA_STATE_LISTENER
+  this->notify_state_(ota::OTA_IN_PROGRESS, 0.0f, 0);
+#endif
+#if defined(USE_ESP32) && defined(USE_OTA_SELF_UPDATE) && defined(USE_OTA_PARTITIONS)
+  this->backend_->set_write_progress(
+      [](void *context, float percent) { static_cast<ESPHomeOTAComponent *>(context)->write_progress_(percent); },
+      this);
+#endif
 
   error_code = this->backend_->end();
   if (error_code != ota::OTA_RESPONSE_OK) {
@@ -704,6 +716,18 @@ error:
   this->notify_state_(ota::OTA_ERROR, 0.0f, static_cast<uint8_t>(error_code));
 #endif
 }
+
+#if defined(USE_ESP32) && defined(USE_OTA_SELF_UPDATE) && defined(USE_OTA_PARTITIONS)
+void ESPHomeOTAComponent::write_progress_(float percent) {
+  if ((this->ota_features_ & CLIENT_FEATURE_SUPPORTS_WRITE_PROGRESS) != 0) {
+    this->data_write_byte_(ota::OTA_RESPONSE_WRITE_PROGRESS);
+    this->data_write_byte_(static_cast<uint8_t>(percent));
+  }
+#ifdef USE_OTA_STATE_LISTENER
+  this->notify_state_(ota::OTA_IN_PROGRESS, percent, 0);
+#endif
+}
+#endif
 
 bool ESPHomeOTAComponent::readall_(uint8_t *buf, size_t len) {
   uint32_t start = millis();
