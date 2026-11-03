@@ -339,6 +339,11 @@ class MQTTClientComponent final : public Component {
   void set_reboot_timeout(uint32_t reboot_timeout) { this->reboot_timeout_ = reboot_timeout; }
 
   void register_mqtt_component(MQTTComponent *component);
+  static void unregister_mqtt_component_(void *client, void *component, void *unused);
+  static void remove_publish_entry_(void *client, void *entity, void *unused);
+  bool publish_grow_();
+  void publish_sort_();
+  static void remove_subscription_(void *client, void *fn, void *ctx);
 
   bool is_connected();
   void set_enable_on_boot(bool enable_on_boot) { this->enable_on_boot_ = enable_on_boot; }

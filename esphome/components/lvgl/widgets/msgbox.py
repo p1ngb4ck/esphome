@@ -1,7 +1,7 @@
 from esphome import codegen as cg, config_validation as cv
 from esphome.components.const import CONF_BUTTONS
 from esphome.const import CONF_BUTTON, CONF_HIDDEN, CONF_ID, CONF_TEXT
-from esphome.core import ID
+from esphome.core import CORE, ID
 from esphome.cpp_generator import MockObjClass
 from esphome.cpp_types import nullptr
 
@@ -30,7 +30,14 @@ from ..schemas import (
 )
 from ..styles import LVStyle
 from ..types import LV_EVENT, lv_obj_t
-from . import Widget, WidgetType, add_widgets, set_obj_properties, widget_to_code
+from . import (
+    Widget,
+    WidgetType,
+    add_widgets,
+    lvgl_unit,
+    set_obj_properties,
+    widget_to_code,
+)
 from .button import button_spec, lv_button_t
 from .img import CONF_IMAGE
 from .label import CONF_LABEL
@@ -173,4 +180,5 @@ async def msgbox_to_code(top_layer, conf):
 async def msgboxes_to_code(lv_component, config):
     top_layer = lv_expr.disp_get_layer_top(lv_component.get_disp())
     for conf in config.get(CONF_MSGBOXES, ()):
-        await msgbox_to_code(top_layer, conf)
+        with CORE.codegen_unit(lvgl_unit(conf)):
+            await msgbox_to_code(top_layer, conf)

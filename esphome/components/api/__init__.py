@@ -581,7 +581,96 @@ def _add_action_strings(index: int, strings: list[str | None]) -> MockObj:
 
 
 @coroutine_with_priority(CoroPriority.WEB)
+async def _actions_to_code(var, actions) -> list:
+    triggers: list = []
+    # Metadata is compiled in for every action once any action declares it, because the
+    # string table layout is fixed by the define rather than per action
+    has_metadata = _has_action_metadata(actions)
+    if has_metadata:
+        cg.add_define("USE_API_USER_DEFINED_ACTION_METADATA")
+    has_optional = _has_optional_args(actions)
+    if has_optional:
+        cg.add_define("USE_API_USER_DEFINED_ACTION_OPTIONAL_ARGS")
+    # Collect all triggers first, then register all at once with initializer_list
+    for index, conf in enumerate(actions):
+        func_args: list[tuple[MockObj, str]] = []
+        service_template_args: list[MockObj] = []  # User service argument types
+
+        # Determine supports_response mode
+        # cv.enum returns the key with enum_value attribute containing the MockObj
+        supports_response_key = conf[CONF_SUPPORTS_RESPONSE]
+        supports_response = supports_response_key.enum_value
+        is_none = supports_response_key == "none"
+        is_optional = supports_response_key == "optional"
+
+        # Add call_id and return_response based on supports_response mode
+        # These must match the C++ Trigger template arguments
+        # - none: no extra args
+        # - status: call_id only (for reporting success/error without data)
+        # - only: call_id only (response always expected with data)
+        # - optional: call_id + return_response (client decides)
+        if not is_none:
+            # call_id is present for "optional", "only", and "status"
+            func_args.append((cg.uint32, "call_id"))
+            # return_response only present for "optional"
+            if is_optional:
+                func_args.append((cg.bool_, "return_response"))
+
+        # Check if action chain has non-synchronous actions that would make
+        # non-owning args (StringRef, const FixedVector&) dangle once the
+        # rx_buf_ is reused after a delay/wait_until/script.wait/etc.  The
+        # FixedVector references would also fail to compile because they
+        # are non-copyable and DelayAction captures args by value.
+        has_non_synchronous = automation.has_non_synchronous_actions(
+            conf.get(CONF_THEN, [])
+        )
+
+        for name, var_ in conf[CONF_VARIABLES].items():
+            var_type = var_[CONF_TYPE]
+            if has_non_synchronous and var_type in SERVICE_ARG_FALLBACK_TYPES:
+                native = SERVICE_ARG_FALLBACK_TYPES[var_type]
+            else:
+                native = SERVICE_ARG_NATIVE_TYPES[var_type]
+            service_template_args.append(native)
+            func_args.append((native, name))
+        strings = _action_strings(conf, has_metadata, has_optional)
+        table = _add_action_strings(index, strings)
+        # Template args: supports_response mode, then user service arg types
+        templ = cg.TemplateArguments(supports_response, *service_template_args)
+        # Key is hashed here because the name is not readable at runtime on ESP8266
+        trigger = cg.new_Pvariable(
+            conf[CONF_TRIGGER_ID], templ, table, fnv1_hash(conf[CONF_ACTION])
+        )
+        triggers.append(trigger)
+        auto = await automation.build_automation(trigger, func_args, conf)
+
+        # For non-none response modes, automatically append unregister action
+        # This ensures the call is unregistered after all actions complete (including async ones)
+        if not is_none:
+            arg_types = [arg[0] for arg in func_args]
+            action_templ = cg.TemplateArguments(*arg_types)
+            unregister_id = ID(
+                f"{conf[CONF_TRIGGER_ID]}__unregister",
+                is_declaration=True,
+                type=APIUnregisterServiceCallAction.template(action_templ),
+            )
+            unregister_action = cg.new_Pvariable(
+                unregister_id,
+                var,
+            )
+            cg.add(auto.add_action(unregister_action))
+    # Register all services at once - single allocation, no reallocations
+    return triggers
+
+
 async def to_code(config: ConfigType) -> None:
+    from esphome.components.package_manager.build import package_pass
+
+    if package_pass():
+        var = await cg.get_variable(config[CONF_ID])
+        for trigger in await _actions_to_code(var, config.get(CONF_ACTIONS, [])):
+            cg.add(var.register_user_service(trigger))
+        return
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
@@ -633,84 +722,7 @@ async def to_code(config: ConfigType) -> None:
         cg.add_define("USE_API_HOMEASSISTANT_STATES")
 
     if actions:
-        # Metadata is compiled in for every action once any action declares it, because the
-        # string table layout is fixed by the define rather than per action
-        has_metadata = _has_action_metadata(actions)
-        if has_metadata:
-            cg.add_define("USE_API_USER_DEFINED_ACTION_METADATA")
-        has_optional = _has_optional_args(actions)
-        if has_optional:
-            cg.add_define("USE_API_USER_DEFINED_ACTION_OPTIONAL_ARGS")
-        # Collect all triggers first, then register all at once with initializer_list
-        triggers: list[cg.MockObj] = []
-        for index, conf in enumerate(actions):
-            func_args: list[tuple[MockObj, str]] = []
-            service_template_args: list[MockObj] = []  # User service argument types
-
-            # Determine supports_response mode
-            # cv.enum returns the key with enum_value attribute containing the MockObj
-            supports_response_key = conf[CONF_SUPPORTS_RESPONSE]
-            supports_response = supports_response_key.enum_value
-            is_none = supports_response_key == "none"
-            is_optional = supports_response_key == "optional"
-
-            # Add call_id and return_response based on supports_response mode
-            # These must match the C++ Trigger template arguments
-            # - none: no extra args
-            # - status: call_id only (for reporting success/error without data)
-            # - only: call_id only (response always expected with data)
-            # - optional: call_id + return_response (client decides)
-            if not is_none:
-                # call_id is present for "optional", "only", and "status"
-                func_args.append((cg.uint32, "call_id"))
-                # return_response only present for "optional"
-                if is_optional:
-                    func_args.append((cg.bool_, "return_response"))
-
-            # Check if action chain has non-synchronous actions that would make
-            # non-owning args (StringRef, const FixedVector&) dangle once the
-            # rx_buf_ is reused after a delay/wait_until/script.wait/etc.  The
-            # FixedVector references would also fail to compile because they
-            # are non-copyable and DelayAction captures args by value.
-            has_non_synchronous = automation.has_non_synchronous_actions(
-                conf.get(CONF_THEN, [])
-            )
-
-            for name, var_ in conf[CONF_VARIABLES].items():
-                var_type = var_[CONF_TYPE]
-                if has_non_synchronous and var_type in SERVICE_ARG_FALLBACK_TYPES:
-                    native = SERVICE_ARG_FALLBACK_TYPES[var_type]
-                else:
-                    native = SERVICE_ARG_NATIVE_TYPES[var_type]
-                service_template_args.append(native)
-                func_args.append((native, name))
-            strings = _action_strings(conf, has_metadata, has_optional)
-            table = _add_action_strings(index, strings)
-            # Template args: supports_response mode, then user service arg types
-            templ = cg.TemplateArguments(supports_response, *service_template_args)
-            # Key is hashed here because the name is not readable at runtime on ESP8266
-            trigger = cg.new_Pvariable(
-                conf[CONF_TRIGGER_ID], templ, table, fnv1_hash(conf[CONF_ACTION])
-            )
-            triggers.append(trigger)
-            auto = await automation.build_automation(trigger, func_args, conf)
-
-            # For non-none response modes, automatically append unregister action
-            # This ensures the call is unregistered after all actions complete (including async ones)
-            if not is_none:
-                arg_types = [arg[0] for arg in func_args]
-                action_templ = cg.TemplateArguments(*arg_types)
-                unregister_id = ID(
-                    f"{conf[CONF_TRIGGER_ID]}__unregister",
-                    is_declaration=True,
-                    type=APIUnregisterServiceCallAction.template(action_templ),
-                )
-                unregister_action = cg.new_Pvariable(
-                    unregister_id,
-                    var,
-                )
-                cg.add(auto.add_action(unregister_action))
-        # Register all services at once - single allocation, no reallocations
+        triggers = await _actions_to_code(var, actions)
         cg.add(var.initialize_user_services(triggers))
 
     if (wizard_config := config.get(wizard.CONF_WIZARD)) is not None:

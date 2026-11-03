@@ -11,6 +11,9 @@
 #include "display/lv_display_private.h"
 #include "misc/lv_area_private.h"
 #include "misc/lv_text_private.h"
+#ifdef USE_LVGL_MENU
+#include "widgets/menu/lv_menu_private.h"
+#endif
 
 #include <algorithm>
 #include <climits>
@@ -236,6 +239,8 @@ void LvglComponent::set_paused(bool paused, bool show_snow) {
     this->pause_callback_->trigger();
   if (!paused && this->resume_callback_ != nullptr)
     this->resume_callback_->trigger();
+  if (!paused)
+    this->resume_callbacks_.call();
 }
 
 void LvglComponent::esphome_lvgl_init() {
@@ -251,8 +256,14 @@ void LvglComponent::esphome_lvgl_init() {
   lv_update_event = static_cast<lv_event_code_t>(lv_event_register_id());
 }
 
+static void remove_event_cb(void *obj, void *callback, void *user_data) {
+  lv_obj_remove_event_cb_with_user_data(static_cast<lv_obj_t *>(obj), reinterpret_cast<lv_event_cb_t>(callback),
+                                        user_data);
+}
+
 void LvglComponent::add_event_cb(lv_obj_t *obj, event_callback_t callback, lv_event_code_t event, void *user_data) {
   lv_obj_add_event_cb(obj, callback, event, user_data);
+  note_registration(remove_event_cb, obj, reinterpret_cast<void *>(callback), user_data);
 }
 
 void LvglComponent::add_event_cb(lv_obj_t *obj, event_callback_t callback, lv_event_code_t event1,
@@ -298,11 +309,36 @@ void LvglComponent::lv_obj_set_custom_flag(lv_obj_t *obj, lv_obj_flag_t flag, bo
   }
 }
 
+static void remove_page_registration(void *component, void *page, void *unused) {
+  static_cast<LvglComponent *>(component)->remove_page(static_cast<LvPageType *>(page));
+}
+
 void LvglComponent::add_page(LvPageType *page) {
   this->pages_.push_back(page);
   page->set_parent(this);
   lv_display_set_default(this->disp_);
   page->setup(this->pages_.size() - 1);
+  note_registration(remove_page_registration, this, page, nullptr);
+}
+
+void LvglComponent::remove_page(LvPageType *page) {
+  auto it = std::find(this->pages_.begin(), this->pages_.end(), page);
+  if (it == this->pages_.end())
+    return;
+  const size_t index = it - this->pages_.begin();
+  const bool showing = page->obj != nullptr && lv_screen_active() == page->obj;
+  this->pages_.erase(it);
+  for (size_t i = index; i < this->pages_.size(); i++)
+    this->pages_[i]->index = i;
+  if (showing && !this->pages_.empty()) {
+    this->current_page_ = 0;
+    lv_screen_load(this->pages_[0]->obj);
+  } else if (this->current_page_ > index) {
+    this->current_page_--;
+  }
+  if (page->obj != nullptr)
+    lv_obj_delete(page->obj);
+  page->obj = nullptr;
 }
 
 void LvglComponent::show_page(size_t index, lv_screen_load_anim_t anim, uint32_t time) {
@@ -2930,7 +2966,12 @@ void LvglComponent::update_orientation_() {
     trigger->trigger();
 }
 
+static LvglComponent *stop_guard = nullptr;
+static bool lvgl_blocks_package_stop() { return stop_guard != nullptr && stop_guard->is_paused(); }
+
 void LvglComponent::setup() {
+  stop_guard = this;
+  package_stop_blocked = lvgl_blocks_package_stop;
   auto *display = this->displays_[0];
   auto rounding = this->draw_rounding;
   this->width_ = display->get_native_width();
@@ -3158,8 +3199,11 @@ lv_color_t lv_grad_calculate_color(const lv_grad_dsc_t *dsc, int32_t pos) {
 
 #ifdef USE_LVGL_MENU
 bool lv_menu_back_button_is_root_click(lv_obj_t *menu, lv_event_t *e) {
-  return lv_event_get_code(e) == LV_EVENT_CLICKED &&
-         lv_menu_back_button_is_root(menu, static_cast<lv_obj_t *>(lv_event_get_target(e)));
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    return false;
+  const auto *data = reinterpret_cast<const lv_menu_t *>(menu);
+  const auto *target = static_cast<lv_obj_t *>(lv_event_get_target(e));
+  return target == data->sidebar_header_back_btn || (target == data->main_header_back_btn && data->prev_depth <= 1);
 }
 #endif  // USE_LVGL_MENU
 

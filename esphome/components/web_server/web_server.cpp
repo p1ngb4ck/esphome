@@ -18,6 +18,9 @@
 
 #include <cstdlib>
 
+#ifdef USE_RUNTIME_LANGUAGE
+#include "esphome/components/runtime_language/runtime_language.h"
+#endif
 #ifdef USE_LIGHT
 #include "esphome/components/light/light_json_schema.h"
 #endif
@@ -415,6 +418,9 @@ json::SerializationBuffer<> WebServer::get_config_json() {
 
 void WebServer::setup() {
   this->base_->init();
+#ifdef USE_ESP32
+  App.add_on_entities_changed_callback([this]() { this->defer("relist", [this]() { this->events_.relist(); }); });
+#endif
 
 #ifdef USE_LOGGER
   if (logger::global_logger != nullptr && this->expose_log_) {
@@ -667,7 +673,12 @@ static void set_json_id(JsonObject root, EntityBase *obj, ProgmemStr prefix, Jso
     root[ESPHOME_F("name")] = name;  // in id_buf on the stack, so copied
 #else
     const StringRef &ram_name = obj->get_name_progmem().ram_ref();
+#ifdef USE_RUNTIME_LANGUAGE
+    const char *shown = runtime_language::tr(ram_name.c_str());
+    root[ESPHOME_F("name")] = linked(shown, strlen(shown));
+#else
     root[ESPHOME_F("name")] = linked(ram_name.c_str(), ram_name.size());
+#endif
 #endif
 #ifdef USE_DEVICES
     if (device_name) {
@@ -1496,12 +1507,21 @@ void WebServer::select_json_(select::Select *obj, StringRef value, JsonDetail st
 
   const JsonString state = linked(value);
   set_json_icon_state_value(root, obj, ESPHOME_F("select"), state, state, start_config);
+  const auto &traits = obj->traits;
+  root[ESPHOME_F("orev")] = traits.get_options_revision();
   if (start_config == DETAIL_ALL) {
     JsonArray opt = root[ESPHOME_F("option")].to<JsonArray>();
-    for (auto &option : obj->traits.get_options()) {
+    for (auto &option : traits.get_options()) {
       opt.add(linked(option));
     }
     this->add_sorting_info_(root, obj);
+  } else if (traits.get_last_change() != select::SelectOptionsChange::REPLACED) {
+    // The change that led to orev, for a client holding the revision before it; any other gap refetches the list
+    JsonObject op = root[ESPHOME_F("option_op")].to<JsonObject>();
+    const size_t index = traits.get_last_change_index();
+    op[ESPHOME_F("i")] = index;
+    if (traits.get_last_change() != select::SelectOptionsChange::REMOVED)
+      op[ESPHOME_F("v")] = linked(traits.get_options()[index]);
   }
 }
 #endif
@@ -2616,6 +2636,11 @@ void WebServer::add_sorting_info_(JsonObject &root, EntityBase *entity) {
 #ifdef USE_WEBSERVER_SORTING
 void WebServer::add_entity_config(EntityBase *entity, float weight, uint64_t group) {
   this->sorting_entitys_[entity] = SortingComponents{weight, group};
+  note_registration(&WebServer::remove_entity_config_, this, entity, nullptr);
+}
+
+void WebServer::remove_entity_config_(void *server, void *entity, void *unused) {
+  static_cast<WebServer *>(server)->sorting_entitys_.erase(static_cast<EntityBase *>(entity));
 }
 
 void WebServer::add_sorting_group(uint64_t group_id, const std::string &group_name, float weight) {

@@ -2,6 +2,7 @@ import esphome.codegen as cg
 from esphome.components.binary_sensor import BinarySensor
 import esphome.config_validation as cv
 from esphome.const import CONF_GROUP, CONF_ID
+from esphome.core import CORE
 
 from .defines import (
     CONF_ENCODERS,
@@ -10,11 +11,13 @@ from .defines import (
     CONF_LONG_PRESS_REPEAT_TIME,
     CONF_LONG_PRESS_TIME,
     add_lv_use,
+    get_widget_map,
     literal,
 )
 from .lvcode import lv, lv_assign, lv_expr, lv_Pvariable
 from .schemas import ENCODER_SCHEMA
 from .types import lv_group_t, lv_indev_type_t
+from .widgets import widget_unit
 
 KEYPAD_KEYS = (
     "up",
@@ -74,4 +77,5 @@ async def initial_focus_to_code(config):
     for enc_conf in config[CONF_ENCODERS]:
         if default_focus := enc_conf.get(CONF_INITIAL_FOCUS):
             obj = await cg.get_variable(default_focus)
-            lv.group_focus_obj(obj)
+            with CORE.codegen_unit(widget_unit(get_widget_map().get(default_focus))):
+                lv.group_focus_obj(obj)

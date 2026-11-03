@@ -26,6 +26,7 @@ struct TaskResult {
   update::UpdateInfo info;
   const LogString *error_str{nullptr};  // set on failure, nullptr on success
   bool owns_source_url{false};          // the check holds the buffer until it ends, see begin_check_()
+  uint8_t flash_frequency_mhz{0};
 };
 
 class HttpRequestUpdate final : public update::UpdateEntity, public PollingComponent, public ota::OTAStateListener {
@@ -49,6 +50,9 @@ class HttpRequestUpdate final : public update::UpdateEntity, public PollingCompo
   void set_source_url(const char *source_url, size_t len);
   const char *get_source_url() const { return this->source_url_; }
 
+  void set_flash_frequency_mhz(uint8_t mhz) { this->flash_frequency_mhz_ = mhz; }
+  uint8_t get_flash_frequency_mhz() const { return this->flash_frequency_mhz_; }
+
   void set_request_parent(HttpRequestComponent *request_parent) { this->request_parent_ = request_parent; }
   void set_ota_parent(OtaHttpRequestComponent *ota_parent) { this->ota_parent_ = ota_parent; }
 
@@ -65,6 +69,7 @@ class HttpRequestUpdate final : public update::UpdateEntity, public PollingCompo
   TaskResult *task_result_{nullptr};  // set while a check runs on the update task
 #endif
   uint8_t initial_check_remaining_{0};
+  uint8_t flash_frequency_mhz_{0};
 
  private:
   friend class testing::HttpRequestUpdateTest;

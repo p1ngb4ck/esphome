@@ -1,17 +1,21 @@
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components.const import CONF_ON_STATE_CHANGE
+from esphome.components.esp32 import CONF_EXECUTE_FROM_PSRAM
 from esphome.config_helpers import (
     filter_source_files_from_defines,
     filter_source_files_from_platform,
 )
 import esphome.config_validation as cv
 from esphome.const import (
+    CONF_ADVANCED,
     CONF_ESPHOME,
+    CONF_FRAMEWORK,
     CONF_ON_ERROR,
     CONF_OTA,
     CONF_PLATFORM,
     CONF_TRIGGER_ID,
+    PLATFORM_ESP32,
     PlatformFramework,
 )
 from esphome.core import CORE, coroutine_with_priority
@@ -53,6 +57,7 @@ OTAStartTrigger = ota_ns.class_("OTAStartTrigger", automation.Trigger.template()
 OTAStateChangeTrigger = ota_ns.class_(
     "OTAStateChangeTrigger", automation.Trigger.template()
 )
+
 
 
 def _ota_final_validate(config: ConfigType) -> None:
@@ -155,6 +160,9 @@ async def final_step() -> None:
     """Final code generation step to configure optional OTA features."""
     if CORE.data.get(OTA_STATE_LISTENER_KEY, False):
         cg.add_define("USE_OTA_STATE_LISTENER")
+    advanced = CORE.config.get(PLATFORM_ESP32, {}).get(CONF_FRAMEWORK, {}).get(CONF_ADVANCED, {})
+    if advanced.get(CONF_EXECUTE_FROM_PSRAM):
+        cg.add_define("USE_OTA_SELF_UPDATE")
 
 
 _filter_backend_source_files = filter_source_files_from_platform(
@@ -183,6 +191,7 @@ _filter_define_source_files = filter_source_files_from_defines(
         "ota_signature_esp_idf.cpp": "USE_OTA_SIGNED_VERIFICATION_MULTI_KEY",
         "ota_bootloader_esp_idf.cpp": "USE_OTA_PARTITIONS",
         "ota_partitions_esp_idf.cpp": "USE_OTA_PARTITIONS",
+        "ota_self_update_esp_idf.cpp": "USE_OTA_SELF_UPDATE",
     }
 )
 

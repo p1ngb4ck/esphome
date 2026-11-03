@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/core/entity_list.h"
 #include "esphome/core/defines.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
@@ -233,7 +234,10 @@ class EthernetComponent final : public Component
 #endif  // USE_RP2
 
 #ifdef USE_ETHERNET_IP_STATE_LISTENERS
-  void add_ip_state_listener(EthernetIPStateListener *listener) { this->ip_state_listeners_.push_back(listener); }
+  void add_ip_state_listener(EthernetIPStateListener *listener) {
+    this->ip_state_listeners_.push_back(listener);
+    note_registration(&EthernetComponent::remove_ip_state_listener_, this, listener, nullptr);
+  }
 #endif
 
 #ifdef USE_ETHERNET_CONNECT_TRIGGER
@@ -425,7 +429,11 @@ class EthernetComponent final : public Component
   optional<std::array<uint8_t, MAC_ADDRESS_SIZE>> fixed_mac_;
 
 #ifdef USE_ETHERNET_IP_STATE_LISTENERS
-  StaticVector<EthernetIPStateListener *, ESPHOME_ETHERNET_IP_STATE_LISTENERS> ip_state_listeners_;
+  static void remove_ip_state_listener_(void *ethernet, void *listener, void *unused) {
+    static_cast<EthernetComponent *>(ethernet)->ip_state_listeners_.remove(
+        static_cast<EthernetIPStateListener *>(listener));
+  }
+  EntityList<EthernetIPStateListener *, ESPHOME_ETHERNET_IP_STATE_LISTENERS> ip_state_listeners_;
 #endif
 
 #ifdef USE_ETHERNET_CONNECT_TRIGGER

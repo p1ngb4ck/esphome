@@ -1,6 +1,6 @@
 #pragma once
 #include "esphome/core/defines.h"
-#if defined(USE_ESP32) && defined(USE_WEBSERVER_OTA)
+#if defined(USE_ESP32) && (defined(USE_WEBSERVER_OTA) || defined(USE_WEBSERVER_FILE_API))
 
 #include <cctype>
 #include <cstring>
@@ -82,4 +82,4 @@ bool parse_multipart_boundary(const char *content_type, const char **boundary_st
 void str_trim(const char *str, size_t len, std::string &out);
 
 }  // namespace esphome::web_server_idf
-#endif  // defined(USE_ESP32) && defined(USE_WEBSERVER_OTA)
+#endif  // defined(USE_ESP32) && (defined(USE_WEBSERVER_OTA) || defined(USE_WEBSERVER_FILE_API))

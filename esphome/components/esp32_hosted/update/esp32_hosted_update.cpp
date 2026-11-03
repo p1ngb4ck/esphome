@@ -1,5 +1,6 @@
 #if defined(USE_ESP32_VARIANT_ESP32H2) || defined(USE_ESP32_VARIANT_ESP32P4)
 #include "esp32_hosted_update.h"
+#include "esphome/components/esp32/system_info.h"
 #include "esphome/components/watchdog/watchdog.h"
 #include "esphome/core/application.h"
 #include "esphome/core/helpers.h"
@@ -777,7 +778,8 @@ void Esp32HostedUpdate::finish_install_(bool ok) {
 #ifdef USE_OTA_ROLLBACK
   // Mark the host partition as valid before rebooting, in case the safe mode
   // timer hasn't expired yet.
-  esp_ota_mark_app_valid_cancel_rollback();
+  if (esp32::system_info::has_otadata())
+    esp_ota_mark_app_valid_cancel_rollback();
 #endif
 
   // Schedule a restart to ensure everything is in sync

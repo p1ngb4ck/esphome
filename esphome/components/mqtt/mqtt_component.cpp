@@ -370,6 +370,15 @@ bool MQTTComponent::is_discovery_enabled() const {
   return this->discovery_enabled_ && global_mqtt_client->is_discovery_enabled();
 }
 
+void MQTTComponent::clear_discovery() {
+  if (!this->is_discovery_enabled() || !global_mqtt_client->is_connected())
+    return;
+  char discovery_topic_buf[MQTT_DISCOVERY_TOPIC_MAX_LEN];
+  StringRef discovery_topic =
+      this->get_discovery_topic_to_(discovery_topic_buf, global_mqtt_client->get_discovery_info());
+  global_mqtt_client->publish(discovery_topic.c_str(), "", 0, this->qos_, true);
+}
+
 MQTTComponent::MQTTComponent() = default;
 
 float MQTTComponent::get_setup_priority() const { return setup_priority::AFTER_CONNECTION; }

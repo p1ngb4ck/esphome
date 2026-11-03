@@ -80,10 +80,17 @@ class ESPHomeOTAComponent final : public ota::OTAComponent {
   void loop() override;
 
   uint16_t get_port() const { return this->port_; }
+  size_t get_update_size() const { return this->update_size_; }
+  bool is_writing() const { return this->writing_; }
 
  protected:
+  size_t update_size_{0};
+  bool writing_{false};
   void handle_handshake_();
   void handle_data_();
+#if defined(USE_ESP32) && defined(USE_OTA_SELF_UPDATE) && defined(USE_OTA_PARTITIONS)
+  void write_progress_(float percent);
+#endif
 
 #ifdef ESPHOME_OTA_UDP
   // UDP transport for the data phase; wire format in ota_esphome_udp.cpp

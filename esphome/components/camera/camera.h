@@ -4,6 +4,7 @@
 #include "esphome/core/component.h"
 #include "esphome/core/entity_base.h"
 #include "esphome/core/helpers.h"
+#include <algorithm>
 
 namespace esphome::camera {
 
@@ -77,6 +78,17 @@ class CameraListener {
   virtual void on_stream_start() {}
   virtual void on_stream_stop() {}
 };
+
+template<typename V> void note_listener(V &listeners, CameraListener *listener) {
+  note_registration(
+      [](void *target, void *removed, void *unused) {
+        auto &list = *static_cast<V *>(target);
+        auto it = std::find(list.begin(), list.end(), static_cast<CameraListener *>(removed));
+        if (it != list.end())
+          list.erase(it);
+      },
+      &listeners, listener, nullptr);
+}
 
 /** Abstract camera image base class.
  *  Encapsulates the JPEG encoded data and it is shared among

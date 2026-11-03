@@ -11,6 +11,7 @@ from esphome.types import ConfigType
 
 CODEOWNERS = ["@esphome/core"]
 DOMAIN = "script"
+CODEGEN_PER_ITEM = True
 script_ns = cg.esphome_ns.namespace("script")
 Script = script_ns.class_("Script", automation.Trigger.template())
 ScriptWaitAction = script_ns.class_("ScriptWaitAction", automation.Action, cg.Component)
@@ -185,26 +186,28 @@ CONFIG_SCHEMA = cv.All(
 async def to_code(config):
     # Register all variables first, so that scripts can use other scripts
     triggers = []
-    for conf in config:
-        template, func_args = parameters_to_template(conf[CONF_PARAMETERS])
-        trigger = cg.new_Pvariable(conf[CONF_ID], template)
-        # Add a human-readable name to the script
-        cg.add(trigger.set_name(cg.LogStringLiteral(conf[CONF_ID].id)))
+    for index, conf in enumerate(config):
+        with CORE.codegen_unit((DOMAIN, index)):
+            template, func_args = parameters_to_template(conf[CONF_PARAMETERS])
+            trigger = cg.new_Pvariable(conf[CONF_ID], template)
+            # Add a human-readable name to the script
+            cg.add(trigger.set_name(cg.LogStringLiteral(conf[CONF_ID].id)))
 
-        if CONF_MAX_RUNS in conf:
-            cg.add(trigger.set_max_runs(conf[CONF_MAX_RUNS]))
+            if CONF_MAX_RUNS in conf:
+                cg.add(trigger.set_max_runs(conf[CONF_MAX_RUNS]))
 
-        if conf[CONF_MODE] == CONF_QUEUED:
-            await cg.register_component(trigger, conf)
+            if conf[CONF_MODE] == CONF_QUEUED:
+                await cg.register_component(trigger, conf)
 
-        triggers.append((trigger, func_args, conf))
+        triggers.append((index, trigger, func_args, conf))
 
     if any(CONF_ON_STOP in conf for conf in config):
         cg.add_define("USE_SCRIPT_ON_STOP")
-    for trigger, func_args, conf in triggers:
-        await automation.build_automation(trigger, func_args, conf)
-        if (stop_conf := conf.get(CONF_ON_STOP)) is not None:
-            await automation.build_automation(trigger.get_stop_trigger(), [], stop_conf)
+    for index, trigger, func_args, conf in triggers:
+        with CORE.codegen_unit((DOMAIN, index)):
+            await automation.build_automation(trigger, func_args, conf)
+            if (stop_conf := conf.get(CONF_ON_STOP)) is not None:
+                await automation.build_automation(trigger.get_stop_trigger(), [], stop_conf)
 
 
 @automation.register_action(

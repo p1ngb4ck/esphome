@@ -192,9 +192,13 @@ inline int usage_percent(Usage usage) {
   return usage.size == 0 ? 0 : static_cast<int>(static_cast<uint64_t>(usage.used) * 100 / usage.size);
 }
 
+inline bool has_otadata() {
+  return esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, nullptr) != nullptr;
+}
+
 template<typename F> void for_each_partition(F &&row) {
   const esp_partition_t *running = esp_ota_get_running_partition();
-  const esp_partition_t *next = esp_ota_get_boot_partition();
+  const esp_partition_t *next = has_otadata() ? esp_ota_get_boot_partition() : running;
   char title[64];
   char detail[112];
   char subtype[16];

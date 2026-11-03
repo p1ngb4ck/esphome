@@ -116,6 +116,7 @@ class MQTTComponent : public Component {
   /// Disable discovery. Sets friendly name to "".
   void disable_discovery();
   bool is_discovery_enabled() const;
+  void clear_discovery();
 
   /// Set the QOS for subscribe messages (used in discovery).
   void set_subscribe_qos(uint8_t qos);

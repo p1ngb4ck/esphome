@@ -67,6 +67,7 @@ class APIServer final : public Component
   bool teardown() override;
 #ifdef USE_LOGGER
   void on_log(uint8_t level, const char *tag, const char *message, size_t message_len);
+  void set_log_target(APIConnection *connection) { this->log_target_ = connection; }
 #endif
 #ifdef USE_CAMERA
   void on_camera_image(const std::shared_ptr<camera::CameraImage> &image) override;
@@ -176,7 +177,11 @@ class APIServer final : public Component
   }
 #ifdef USE_API_CUSTOM_SERVICES
   // Only compile push_back method when custom_services: true (external components)
-  void register_user_service(UserServiceDescriptor *descriptor) { this->user_services_.push_back(descriptor); }
+  void register_user_service(UserServiceDescriptor *descriptor) {
+    this->user_services_.push_back(descriptor);
+    note_registration(&APIServer::unregister_user_service_, this, descriptor, nullptr);
+  }
+  static void unregister_user_service_(void *server, void *descriptor, void *unused);
 #endif
 #ifdef USE_API_USER_DEFINED_ACTION_RESPONSES
   // Action call context management - supports concurrent calls from multiple clients
@@ -353,6 +358,9 @@ class APIServer final : public Component
 
   // Slots [0, api_connection_count_) are populated; trailing slots are always nullptr.
   std::array<APIConnectionPtr, MAX_API_CONNECTIONS> clients_{};
+#ifdef USE_LOGGER
+  APIConnection *log_target_{nullptr};
+#endif
   // Vectors and strings (12 bytes each on 32-bit)
   // Shared proto write buffer for all connections.
   // Not pre-allocated: all send paths call prepare_first_message_buffer() which

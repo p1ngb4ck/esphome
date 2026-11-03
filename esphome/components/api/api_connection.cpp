@@ -459,7 +459,9 @@ void APIConnection::on_subscribe_logs_request(const SubscribeLogsRequest &msg) {
   if (msg.dump_config)
     App.schedule_dump_config();
 #if defined(USE_LOGGER) && defined(USE_CRASH_HANDLER)
+  this->parent_->set_log_target(this);
   logger::log_crash_to_client();
+  this->parent_->set_log_target(nullptr);
 #endif
 }
 

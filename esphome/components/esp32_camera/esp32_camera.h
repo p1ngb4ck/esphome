@@ -225,7 +225,10 @@ class ESP32Camera final : public camera::Camera {
 #endif  // USE_ESP32_CAMERA_WINDOW
 
   /// Add a listener to receive camera events
-  void add_listener(camera::CameraListener *listener) override { this->listeners_.push_back(listener); }
+  void add_listener(camera::CameraListener *listener) override {
+    this->listeners_.push_back(listener);
+    camera::note_listener(this->listeners_, listener);
+  }
   camera::CameraImageReader *create_image_reader() override;
 
  protected:

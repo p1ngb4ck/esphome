@@ -364,6 +364,7 @@ class LvglComponent final : public PollingComponent {
 #endif
 
   void add_page(LvPageType *page);
+  void remove_page(LvPageType *page);
   void show_page(size_t index, lv_screen_load_anim_t anim, uint32_t time);
   void show_next_page(lv_screen_load_anim_t anim, uint32_t time);
   void show_prev_page(lv_screen_load_anim_t anim, uint32_t time);
@@ -382,6 +383,9 @@ class LvglComponent final : public PollingComponent {
 
   void set_pause_trigger(Trigger<> *trigger) { this->pause_callback_ = trigger; }
   void set_resume_trigger(Trigger<> *trigger) { this->resume_callback_ = trigger; }
+  template<typename F> void add_on_resume_callback(F &&callback) {
+    this->resume_callbacks_.add(std::forward<F>(callback));
+  }
   void set_draw_start_trigger(Trigger<> *trigger) { this->draw_start_callback_ = trigger; }
   void set_draw_end_trigger(Trigger<> *trigger) { this->draw_end_callback_ = trigger; }
   void set_landscape_trigger(Trigger<> *trigger) { this->landscape_callback_ = trigger; }
@@ -532,6 +536,7 @@ class LvglComponent final : public PollingComponent {
   bool draw_end_event_registered_{false};
   Trigger<> *pause_callback_{};
   Trigger<> *resume_callback_{};
+  CallbackManager<void()> resume_callbacks_{};
   Trigger<> *draw_start_callback_{};
   Trigger<> *draw_end_callback_{};
   Trigger<> *landscape_callback_{};

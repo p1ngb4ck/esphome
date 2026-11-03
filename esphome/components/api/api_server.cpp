@@ -96,6 +96,8 @@ void APIServer::setup() {
   }
 #endif
 
+  App.add_on_entities_changed_callback([this]() { this->defer("relist", [this]() { this->relist_clients(); }); });
+
   // Initialize last_connected_ for reboot timeout tracking
   this->last_connected_ = App.get_loop_component_start_time();
 #if defined(USE_PROVISIONING) && defined(USE_API_NOISE)
@@ -788,6 +790,8 @@ void APIServer::on_log(uint8_t level, const char *tag, const char *message, size
     return;
   }
   for (auto &c : this->active_clients()) {
+    if (this->log_target_ != nullptr && &*c != this->log_target_)
+      continue;
     if (!c->flags_.remove && c->get_log_subscription_level() >= level)
       c->try_send_log_message(level, tag, message, message_len);
   }
@@ -923,6 +927,19 @@ void APIServer::send_action_response(uint32_t action_call_id, bool success, Stri
 }
 #endif  // USE_API_USER_DEFINED_ACTION_RESPONSES_JSON
 #endif  // USE_API_USER_DEFINED_ACTION_RESPONSES
+
+#ifdef USE_API_USER_DEFINED_ACTIONS
+void APIServer::unregister_user_service_(void *server, void *descriptor, void *unused) {
+  auto &services = static_cast<APIServer *>(server)->user_services_;
+  for (auto it = services.begin(); it != services.end(); ++it) {
+    if (*it == descriptor) {
+      services.erase(it);
+      App.notify_entities_changed();
+      return;
+    }
+  }
+}
+#endif
 
 }  // namespace esphome::api
 #endif

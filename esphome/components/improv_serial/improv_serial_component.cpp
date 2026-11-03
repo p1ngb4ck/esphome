@@ -19,6 +19,13 @@
 #include <cstring>
 #include <nvs.h>
 #include <nvs_flash.h>
+#include <esp_app_desc.h>
+#include <esp_ota_ops.h>
+#include "esphome/components/esp32/nvs_browse.h"
+#include "esphome/components/esp32/system_info.h"
+#ifdef USE_ESP32_NVS_GUARD
+#include "esphome/components/esp32/nvs_guard.h"
+#endif
 #endif
 #if defined(USE_API) && defined(USE_API_NOISE) && !defined(USE_API_NOISE_PSK_FROM_YAML)
 #include "esphome/components/api/api_server.h"
@@ -42,6 +49,12 @@ static constexpr uint8_t RPC_SET_MQTT = 0x88;
 static constexpr uint8_t RPC_GET_AP = 0x89;
 static constexpr uint8_t RPC_SET_AP = 0x8A;
 static constexpr uint8_t RPC_SET_API_KEY = 0x8B;
+static constexpr uint8_t RPC_GET_SYSTEM = 0x8C;
+static constexpr uint8_t RPC_NVS_LIST = 0x8D;
+static constexpr uint8_t RPC_NVS_ERASE = 0x8E;
+static constexpr uint8_t RPC_NVS_REQUEST = 0x8F;
+static constexpr uint8_t RPC_NVS_RESET = 0x90;
+static constexpr size_t NVS_LIST_SCAN_MAX = 256;
 static constexpr size_t IDENTITY_NAME_MAX = 24;
 static constexpr size_t IDENTITY_FRIENDLY_NAME_MAX = 63;
 static constexpr size_t IDENTITY_MQTT_BROKER_MAX = 63;
@@ -688,6 +701,97 @@ bool ImprovSerialComponent::identity_rpc_(uint8_t code) {
         return true;
       }
       this->send_ack_(code);
+#else
+      this->set_error_(improv::ERROR_UNKNOWN_RPC);
+#endif
+      return true;
+    }
+    case RPC_GET_SYSTEM: {
+      const esp_partition_t *running = esp_ota_get_running_partition();
+      const esp_partition_t *boot = esp32::system_info::has_otadata() ? esp_ota_get_boot_partition() : running;
+      char usage[48];
+      esp32::nvs_browse::usage_text(usage, sizeof(usage));
+#ifdef USE_ESP32_NVS_GUARD
+      const char *guard = esp32::nvs_guard::result_name(esp32::nvs_guard::state().result);
+#else
+      const char *guard = "";
+#endif
+      std::array<uint8_t, improv::RPC_RESPONSE_MAX_SIZE> buf;
+      improv::RpcResponseBuilder builder(buf, static_cast<improv::Command>(code));
+      if (!builder.add_string(running != nullptr ? running->label : "") ||
+          !builder.add_string(boot != nullptr ? boot->label : "") ||
+          !builder.add_string(esp_app_get_description()->version) || !builder.add_string(usage) ||
+          !builder.add_string(guard)) {
+        this->set_error_(improv::ERROR_UNKNOWN);
+        return true;
+      }
+      this->send_response_(builder.finish(false));
+      return true;
+    }
+    case RPC_NVS_LIST: {
+      const std::string name = args.empty() ? std::string() : args[0];
+      const size_t start = args.size() > 1 ? strtoul(args[1].c_str(), nullptr, 10) : 0;
+      std::array<uint8_t, improv::RPC_RESPONSE_MAX_SIZE> buf;
+      improv::RpcResponseBuilder builder(buf, static_cast<improv::Command>(code));
+      char line[NVS_KEY_NAME_MAX_SIZE + 8 + 48];
+      size_t total = 0;
+      bool full = false;
+      if (name.empty()) {
+        esp32::nvs_browse::Namespace found[esp32::nvs_browse::MAX_NAMESPACES];
+        total = esp32::nvs_browse::namespaces(found, esp32::nvs_browse::MAX_NAMESPACES);
+        snprintf(line, sizeof(line), "%u", static_cast<unsigned>(total));
+        full = !builder.add_string(line);
+        for (size_t i = start; i < total && !full; i++) {
+          snprintf(line, sizeof(line), "%s\t%u", found[i].name, static_cast<unsigned>(found[i].count));
+          full = !builder.add_string(line);
+        }
+      } else {
+        total = esp32::nvs_browse::entries(name.c_str(), 0, 0, [](const char *, const char *, const char *) {});
+        snprintf(line, sizeof(line), "%u", static_cast<unsigned>(total));
+        full = !builder.add_string(line);
+        esp32::nvs_browse::entries(name.c_str(), start, NVS_LIST_SCAN_MAX,
+                                   [&](const char *key, const char *type, const char *value) {
+                                     if (full)
+                                       return;
+                                     snprintf(line, sizeof(line), "%s\t%s\t%s", key, type, value);
+                                     full = !builder.add_string(line);
+                                   });
+      }
+      this->send_response_(builder.finish(false));
+      return true;
+    }
+    case RPC_NVS_ERASE: {
+      if (args.empty() || args[0].empty() || args[0].size() >= NVS_NS_NAME_MAX_SIZE ||
+          !esp32::nvs_browse::erase(args[0].c_str(), args.size() > 1 ? args[1].c_str() : "")) {
+        this->set_error_(improv::ERROR_INVALID_RPC);
+        return true;
+      }
+      this->send_ack_(code);
+      return true;
+    }
+    case RPC_NVS_REQUEST: {
+#ifdef USE_ESP32_NVS_GUARD
+      esp32::nvs_guard::Policy policy;
+      if (args.empty() || !esp32::nvs_guard::parse_policy(args[0].c_str(), &policy) ||
+          !esp32::nvs_guard::request(policy)) {
+        this->set_error_(improv::ERROR_INVALID_RPC);
+        return true;
+      }
+      this->send_ack_(code);
+#else
+      this->set_error_(improv::ERROR_UNKNOWN_RPC);
+#endif
+      return true;
+    }
+    case RPC_NVS_RESET: {
+#ifdef USE_ESP32_NVS_GUARD
+      uint16_t restored = 0;
+      if (!esp32::nvs_guard::reset(args.empty() || args[0] != "0", &restored)) {
+        this->set_error_(improv::ERROR_UNKNOWN);
+        return true;
+      }
+      this->send_ack_(code);
+      this->defer([]() { App.safe_reboot(); });
 #else
       this->set_error_(improv::ERROR_UNKNOWN_RPC);
 #endif
