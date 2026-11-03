@@ -1644,17 +1644,9 @@ def _apply_detected_flash(value: ConfigType) -> ConfigType:
     framework = value.get(CONF_FRAMEWORK, {})
     advanced = framework.get(CONF_ADVANCED, {})
     value = value.copy()
-    if (explicit_chip := advanced.get(CONF_FLASH_CHIP)) is None:
+    if advanced.get(CONF_FLASH_CHIP) is None:
         advanced = {**advanced, CONF_FLASH_CHIP: auto_chip}
         value[CONF_FRAMEWORK] = {**framework, CONF_ADVANCED: advanced}
-    elif explicit_chip != auto_chip:
-        _warn_once(
-            "'%s: %s' does not match the detected flash %06X (auto: %s); the configured value is used",
-            CONF_FLASH_CHIP,
-            explicit_chip,
-            flash_id,
-            auto_chip,
-        )
     if value[CONF_VARIANT] != VARIANT_ESP32P4:
         return value
     limited = os.environ.get(FLASH_MAX_FREQUENCY_ENV, "").upper() == FLASH_SAFE_FREQUENCY
@@ -1669,16 +1661,8 @@ def _apply_detected_flash(value: ConfigType) -> ConfigType:
             "The flash check of this device failed at a higher speed; auto is %s",
             FLASH_SAFE_FREQUENCY,
         )
-    if (explicit_frequency := value.get(CONF_FLASH_FREQUENCY)) is None:
+    if value.get(CONF_FLASH_FREQUENCY) is None:
         value[CONF_FLASH_FREQUENCY] = auto_frequency
-    elif explicit_frequency != auto_frequency:
-        _warn_once(
-            "'%s: %s' does not match the detected flash %06X (auto: %s); the configured value is used",
-            CONF_FLASH_FREQUENCY,
-            explicit_frequency,
-            flash_id,
-            auto_frequency,
-        )
     return value
 
 
