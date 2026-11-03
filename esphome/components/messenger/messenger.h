@@ -146,7 +146,7 @@ class Messenger : public Component
   Trigger<uint8_t> *get_account_trigger() { return &this->account_trigger_; }
 #endif
 #ifdef USE_MESSENGER_CALL
-  void set_call_phone(sip_phone::SipPhone *phone) { this->call_.set_phone(phone); }
+  void set_call_speaker(speaker::Speaker *speaker) { this->call_.set_speaker(speaker); }
   void set_call_video_relay(const char *host, uint16_t port) { this->call_.set_video_relay(host, port); }
   TelegramCall *call() { return &this->call_; }
   bool call_open_chat(bool video);

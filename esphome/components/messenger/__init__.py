@@ -1,6 +1,6 @@
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components import audio, microphone, network, socket
+from esphome.components import audio, microphone, network, socket, speaker
 from esphome.components.esp32 import (
     add_idf_component,
     add_idf_sdkconfig_option,
@@ -9,7 +9,6 @@ from esphome.components.esp32 import (
 )
 from esphome.components.mtproto import CONF_MTPROTO_ID, Mtproto
 from esphome.components.http_request import CONF_HTTP_REQUEST_ID, HttpRequestComponent
-from esphome.components.sip_phone import SipPhone
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_CHANNEL,
@@ -20,6 +19,7 @@ from esphome.const import (
     CONF_PAYLOAD,
     CONF_PORT,
     CONF_SIZE,
+    CONF_SPEAKER,
     CONF_TEXT,
     PLATFORM_ESP32,
 )
@@ -36,7 +36,6 @@ CONF_ALLOWED_CHATS = "allowed_chats"
 CONF_DEFAULT_CHAT = "default_chat"
 CONF_DEFAULT_CHANNEL = "default_channel"
 CONF_PHONE_NUMBER_ID = "phone_number_id"
-CONF_PHONE = "phone"
 CONF_API_VERSION = "api_version"
 CONF_SPOOL_DIR = "spool_dir"
 CONF_TOKEN = "token"
@@ -116,7 +115,7 @@ VIDEO_RELAY_SCHEMA = cv.Schema(
 
 CALL_SCHEMA = cv.Schema(
     {
-        cv.Required(CONF_PHONE): cv.use_id(SipPhone),
+        cv.Required(CONF_SPEAKER): cv.use_id(speaker.Speaker),
         cv.Optional(CONF_VIDEO_RELAY): VIDEO_RELAY_SCHEMA,
     }
 )
@@ -159,6 +158,8 @@ def _validate_channels(config: ConfigType) -> ConfigType:
     if CONF_TELEGRAM in config and CONF_CALL in config[CONF_TELEGRAM]:
         if config[CONF_TELEGRAM][CONF_TRANSPORT] != "account":
             raise cv.Invalid("telegram call needs transport account (the panel's own Telegram account)")
+        if CONF_MICROPHONE not in config:
+            raise cv.Invalid("telegram call needs the messenger's microphone")
     for name in (CONF_WHATSAPP, CONF_FACEBOOK):
         if name in config and config[name][CONF_TRANSPORT] == "account":
             raise cv.Invalid(f"transport account is only for telegram (its own user account), not {name}")
@@ -280,8 +281,8 @@ async def to_code(config: ConfigType) -> None:
             )
         if call := config[CONF_TELEGRAM].get(CONF_CALL):
             cg.add_define("USE_MESSENGER_CALL")
-            phone = await cg.get_variable(call[CONF_PHONE])
-            cg.add(var.set_call_phone(phone))
+            call_speaker = await cg.get_variable(call[CONF_SPEAKER])
+            cg.add(var.set_call_speaker(call_speaker))
             if relay := call.get(CONF_VIDEO_RELAY):
                 cg.add(var.set_call_video_relay(relay[CONF_HOST], relay[CONF_PORT]))
             add_idf_component(name="espressif/esp_peer", ref="1.5.7")

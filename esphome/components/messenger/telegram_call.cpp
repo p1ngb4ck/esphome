@@ -87,8 +87,11 @@ constexpr size_t MAX_SERVERS = 8;
 constexpr size_t MAX_CANDIDATES = 16;
 constexpr size_t SDP_SIZE = 2048;
 constexpr int DEFAULT_PT = 111;
-constexpr size_t TX_RING_BYTES = 4096;
+constexpr uint32_t TX_RING_MS = 100;
 constexpr size_t MAX_FRAME = 1280;
+constexpr uint32_t FRAME_MS = 20;
+constexpr uint32_t MAX_DECODE_MS = 120;
+constexpr int32_t AUDIO_BITRATE = 64000;
 constexpr int VIDEO_WIDTH = 1280;
 constexpr int VIDEO_HEIGHT = 720;
 constexpr int VIDEO_FPS = 30;
@@ -136,10 +139,8 @@ struct CallSession {
   char server_pass[MAX_SERVERS][96];
   uint8_t server_count;
   uint8_t packet[MAX_PACKET];
-  uint32_t ts_base;
-  bool ts_set;
   ring_buffer::RingBuffer *tx;
-  uint16_t tx_pending;
+  uint32_t tx_frames;
   uint8_t frame[MAX_FRAME];
   char local_ufrag[64];
   char local_pwd[128];
@@ -358,10 +359,75 @@ void TelegramCall::attach_camera() {
 #endif
 }
 
-void TelegramCall::set_mute(bool mute) {
-  this->mute_.store(mute);
-  if (this->phone_ != nullptr)
-    this->phone_->set_transport_mute(mute);
+void TelegramCall::set_mute(bool mute) { this->mute_.store(mute); }
+
+void TelegramCall::set_microphone(microphone::MicrophoneSource *microphone) {
+  this->microphone_ = microphone;
+  microphone->add_data_callback([this](const microphone::AudioCapture &capture) { this->on_mic_data_(capture.data); });
+}
+
+bool TelegramCall::start_audio_() {
+  if (this->microphone_ == nullptr || this->speaker_ == nullptr)
+    return false;
+  this->audio_rate_ = this->microphone_->get_audio_stream_info().get_sample_rate();
+  this->decoded_samples_ = this->audio_rate_ * MAX_DECODE_MS / 1000;
+  if (!this->encoder_.start(this->audio_rate_, 1, FRAME_MS, AUDIO_BITRATE) ||
+      !this->decoder_.start(this->audio_rate_, 1)) {
+    this->stop_audio_();
+    return false;
+  }
+  RAMAllocator<int16_t> samples(RAMAllocator<int16_t>::ALLOC_EXTERNAL);
+  this->pcm_ = samples.allocate(this->encoder_.frame_samples());
+  this->decoded_ = samples.allocate(this->decoded_samples_);
+  if (this->pcm_ == nullptr || this->decoded_ == nullptr) {
+    this->stop_audio_();
+    return false;
+  }
+  this->speaker_->set_audio_stream_info(audio::AudioStreamInfo(16, 1, this->audio_rate_));
+  this->speaker_->start();
+  this->microphone_->start();
+  return true;
+}
+
+void TelegramCall::stop_audio_() {
+  this->media_on_.store(false, std::memory_order_release);
+  if (this->microphone_ != nullptr)
+    this->microphone_->stop();
+  if (this->speaker_ != nullptr)
+    this->speaker_->stop();
+  RAMAllocator<int16_t> samples(RAMAllocator<int16_t>::ALLOC_EXTERNAL);
+  if (this->pcm_ != nullptr)
+    samples.deallocate(this->pcm_, this->encoder_.frame_samples());
+  if (this->decoded_ != nullptr)
+    samples.deallocate(this->decoded_, this->decoded_samples_);
+  this->pcm_ = nullptr;
+  this->decoded_ = nullptr;
+  this->encoder_.stop();
+  this->decoder_.stop();
+}
+
+void TelegramCall::on_mic_data_(std::span<const uint8_t> data) {
+  peer_users.fetch_add(1);
+  CallSession *s = this->session_;
+  if (this->media_on_.load(std::memory_order_acquire) && s != nullptr && s->tx != nullptr) {
+    s->tx->write(data.data(), data.size());
+    if (s->tx->available() >= this->encoder_.frame_bytes()) {
+      Event *wake = nullptr;
+      xQueueSend(s->events, &wake, 0);
+    }
+  }
+  peer_users.fetch_sub(1);
+}
+
+void TelegramCall::play_payload_(const uint8_t *payload, size_t len) {
+  peer_users.fetch_add(1);
+  if (this->media_on_.load(std::memory_order_acquire)) {
+    const int samples = this->decoder_.decode(payload, len, this->decoded_, this->decoded_samples_);
+    if (samples > 0)
+      this->speaker_->play(reinterpret_cast<const uint8_t *>(this->decoded_),
+                           static_cast<size_t>(samples) * sizeof(int16_t), 0);
+  }
+  peer_users.fetch_sub(1);
 }
 
 std::string TelegramCall::peer_name() const {
@@ -454,7 +520,7 @@ void TelegramCall::finish_() {
 }
 
 bool TelegramCall::start(int64_t user_id, int64_t access_hash, const std::string &name, bool video) {
-  if (this->state_.load() != CallState::IDLE || this->phone_ == nullptr || this->mtproto_ == nullptr ||
+  if (this->state_.load() != CallState::IDLE || this->speaker_ == nullptr || this->mtproto_ == nullptr ||
       !this->mtproto_->logged_in() || (video && this->video_host_ == nullptr))
     return false;
   if (!this->begin_(true, 0, 0, nullptr))
@@ -605,7 +671,7 @@ void TelegramCall::on_phone_call_(TlReader call) {
       return;
     uint8_t body[64];
     TlWriter w(body, sizeof(body));
-    if (this->state_.load() != CallState::IDLE || this->phone_ == nullptr) {
+    if (this->state_.load() != CallState::IDLE || this->speaker_ == nullptr) {
       w.u32(ID_DISCARD_CALL);
       w.u32(0);
       w.u32(ID_INPUT_PHONE_CALL);
@@ -985,13 +1051,15 @@ bool TelegramCall::start_media_(CallSession *s, TlReader call) {
         break;
     }
   }
-  if (heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) >= TX_RING_BYTES)
-    s->tx = ring_buffer::RingBuffer::create(TX_RING_BYTES).release();
+  const size_t tx_bytes =
+      this->microphone_->get_audio_stream_info().get_sample_rate() * sizeof(int16_t) * TX_RING_MS / 1000;
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) >= tx_bytes)
+    s->tx = ring_buffer::RingBuffer::create(tx_bytes).release();
   if (s->tx == nullptr) {
     this->fail_("No memory for the call's audio");
     return false;
   }
-  s->tx_pending = 0;
+  s->tx_frames = 0;
   if (s->video) {
     if (heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) >= VIDEO_RING_BYTES)
       s->video_ring = ring_buffer::RingBuffer::create(VIDEO_RING_BYTES).release();
@@ -1068,7 +1136,7 @@ bool TelegramCall::start_media_(CallSession *s, TlReader call) {
     TelegramCall *self = session->owner;
     if (self->media_on_.load(std::memory_order_acquire) && frame != nullptr && frame->data != nullptr &&
         frame->size > 0)
-      self->phone_->transport_payload(frame->data, static_cast<size_t>(frame->size));
+      self->play_payload_(frame->data, static_cast<size_t>(frame->size));
     return 0;
   };
   cfg.on_video_data = [](esp_peer_video_frame_t *frame, void *ctx) -> int {
@@ -1088,7 +1156,7 @@ bool TelegramCall::start_media_(CallSession *s, TlReader call) {
   App.scheduler.set_timeout(this->owner_, static_cast<const char *>(nullptr), 0, [this]() {
     if (this->session_ == nullptr || !this->session_->media)
       return;
-    if (!this->phone_->start_transport_media(this, this->mute_.load())) {
+    if (!this->start_audio_()) {
       this->fail_("Call audio busy");
       this->hangup();
       return;
@@ -1116,10 +1184,7 @@ void TelegramCall::stop_media_(CallSession *s) {
     this->camera_stream_(false);
   if (s->media) {
     s->media = false;
-    App.scheduler.set_timeout(this->owner_, static_cast<const char *>(nullptr), 0, [this]() {
-      this->media_on_.store(false, std::memory_order_release);
-      this->phone_->stop_transport_media();
-    });
+    App.scheduler.set_timeout(this->owner_, static_cast<const char *>(nullptr), 0, [this]() { this->stop_audio_(); });
   }
 }
 
@@ -1674,27 +1739,6 @@ void TelegramCall::send_candidate_(CallSession *s, const char *candidate) {
   this->send_signaling_(s, json);
 }
 
-void TelegramCall::on_media_payload(const uint8_t *payload, size_t len, uint32_t timestamp) {
-  if (len == 0 || len > MAX_FRAME)
-    return;
-  peer_users.fetch_add(1);
-  CallSession *s = this->session_;
-  if (this->media_on_.load(std::memory_order_acquire) && s != nullptr && s->tx != nullptr &&
-      this->state_.load() == CallState::ACTIVE &&
-      s->tx->free() >= sizeof(uint16_t) + sizeof(uint32_t) + len) {
-    const bool idle = s->tx->available() == 0;
-    const uint16_t length = static_cast<uint16_t>(len);
-    s->tx->write_without_replacement(&length, sizeof(length), 0);
-    s->tx->write_without_replacement(&timestamp, sizeof(timestamp), 0);
-    s->tx->write_without_replacement(payload, len, 0);
-    if (idle) {
-      Event *wake = nullptr;
-      xQueueSend(s->events, &wake, 0);
-    }
-  }
-  peer_users.fetch_sub(1);
-}
-
 void TelegramCall::open_video_relay_(CallSession *s) {
   struct sockaddr_in address {};
   address.sin_family = AF_INET;
@@ -1810,30 +1854,22 @@ void TelegramCall::pump_video_relay_(CallSession *s) {
 }
 
 void TelegramCall::send_frames_(CallSession *s) {
-  if (s->tx == nullptr)
+  if (s->tx == nullptr || !this->media_on_.load(std::memory_order_acquire) ||
+      this->state_.load() != CallState::ACTIVE)
     return;
-  for (;;) {
-    if (s->tx_pending == 0) {
-      if (s->tx->available() < sizeof(uint16_t))
-        return;
-      uint16_t length = 0;
-      s->tx->read(&length, sizeof(length), 0);
-      s->tx_pending = length;
-    }
-    if (s->tx->available() < sizeof(uint32_t) + s->tx_pending)
-      return;
-    uint32_t timestamp = 0;
-    s->tx->read(&timestamp, sizeof(timestamp), 0);
-    const size_t len = s->tx->read(s->frame, s->tx_pending, 0);
-    s->tx_pending = 0;
-    if (!s->ts_set) {
-      s->ts_base = timestamp;
-      s->ts_set = true;
-    }
+  const size_t frame_bytes = this->encoder_.frame_bytes();
+  while (s->tx->available() >= frame_bytes) {
+    s->tx->read(this->pcm_, frame_bytes, 0);
+    const uint32_t pts = s->tx_frames++ * FRAME_MS;
+    if (this->mute_.load())
+      continue;
+    const int len = this->encoder_.encode(this->pcm_, s->frame, MAX_FRAME);
+    if (len <= 0)
+      continue;
     esp_peer_audio_frame_t frame{};
-    frame.pts = (timestamp - s->ts_base) / (SAMPLE_RATE / 1000);
+    frame.pts = pts;
     frame.data = s->frame;
-    frame.size = static_cast<int>(len);
+    frame.size = len;
     esp_peer_send_audio(s->peer, &frame);
   }
 }
