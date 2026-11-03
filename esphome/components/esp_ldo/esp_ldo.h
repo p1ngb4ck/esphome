@@ -15,6 +15,8 @@ class EspLdo final : public Component {
   void set_adjustable(bool adjustable) { this->adjustable_ = adjustable; }
   void set_voltage(int voltage_mv) { this->voltage_mv_ = voltage_mv; }
   void adjust_voltage(float voltage);
+  void turn_off();
+  void turn_on();
   float get_setup_priority() const override {
     return setup_priority::BUS;  // LDO setup should be done early
   }

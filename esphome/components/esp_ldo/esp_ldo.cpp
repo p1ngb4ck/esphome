@@ -27,6 +27,23 @@ void EspLdo::dump_config() {
                 this->channel_, this->voltage_mv_, YESNO(this->adjustable_));
 }
 
+void EspLdo::turn_off() {
+  if (this->handle_ == nullptr)
+    return;
+  esp_err_t err = esp_ldo_release_channel(this->handle_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to release LDO channel %d: %s", this->channel_, esp_err_to_name(err));
+    return;
+  }
+  this->handle_ = nullptr;
+}
+
+void EspLdo::turn_on() {
+  if (this->handle_ != nullptr)
+    return;
+  this->setup();
+}
+
 void EspLdo::adjust_voltage(float voltage) {
   if (!std::isfinite(voltage) || voltage < 0.5f || voltage > 2.7f) {
     ESP_LOGE(TAG, "Invalid voltage %fV for LDO channel %d (must be 0.5V-2.7V)", voltage, this->channel_);
