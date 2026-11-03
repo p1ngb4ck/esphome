@@ -412,3 +412,45 @@ Function and method comment blocks may include more detail as required to make
 calling contracts clear and document parameter usage, but should still be kept concise.
 
 Avoid redundancy and repetition; comments should never simply restate what the code already says.
+
+## 11. This repository: ESPHome `dev` with the topic repositories
+
+Everything above is ESPHome's own guide and applies unchanged. This branch is ESPHome `dev` with the `main` of every
+topic repository of p1ngb4ck merged in (storage, USB, Bluetooth, audio, video, displays, HID, networking, apps, ...;
+the list is in `README.md`). Thanks and credits: `ATTRIBUTIONS.md`.
+
+### Where things live
+- Every change belongs to a topic repository (`p1ngb4ck/esphome-<topic>`), one branch per change (`pr/<change>`),
+  merged into that topic's `main`; `dev` is rebuilt from the topics' `main` branches. Fix things in the topic, not
+  only here.
+- Components the topics add carry their own `AGENTS.md` in their folder (design, threading, memory). Read it before
+  changing the component. Central ones many others build on:
+  - `esphome/components/storage/AGENTS.md` - the storage interface, the worker, the threading contract (every
+    component that touches files).
+  - `esphome/components/usb_host/AGENTS.md` - USB routing by class, the USB task, transfers.
+  - `esphome/components/hid/AGENTS.md` - HID input for every transport.
+  - `esphome/components/display/AGENTS.md` and `esphome/components/mipi_dsi/AGENTS.md` - the video output and the
+    scanout every video writer shares.
+  - `esphome/components/relay_link/AGENTS.md` - the link to Home Assistant for what the device cannot do itself.
+- Each topic repository's `CONFIGURATION.md` documents every option of its components; update it with the change.
+- Licences: new files are MIT (`LICENSE-MIT`); changes to ESPHome's own files stay under that file's ESPHome
+  License; third-party code keeps its licence file or notice. Name every third-party source in `ATTRIBUTIONS.md`
+  of `dev` and in the README's thanks.
+
+### Target constraints (microcontrollers)
+- Internal RAM is scarce (an ESP32-P4 has 512 KB SRAM shared by everything, PSRAM up to 32 MB). Large buffers,
+  lists, strings and long-lived objects go to PSRAM where the chip has it (`RAMAllocator`, `ExternalRAMAllocator`);
+  buffers are allocated for the use and given back afterwards, not kept "for later".
+- No polling. Work is driven by events, callbacks and task notifications; a component with nothing to do disables
+  its loop (`disable_loop()` / `enable_loop()`).
+- The main loop is shared by every component: nothing blocks it (no bulk I/O, no network waits). Long work runs on
+  a task or in slices; results come back to the main loop (`defer()`, the storage worker's completions).
+- No driver, storage or network calls inside an LVGL event handler or another component's callback frame: defer
+  them to the next loop pass (`defer()` in C++, `delay: 0ms` first in a YAML script).
+- LVGL 9.6: dedicated setters (`lv_obj_set_hidden`, ...), never `lv_obj_add_flag` / `lv_obj_remove_flag`; never touch
+  LVGL while it is paused or a video writer owns the display.
+- Library buffers are not cut below the library's tested defaults to save memory.
+- No log output in hot paths. INFO for operational events, DEBUG for setup detail, ERROR for errors.
+- Code must build on the ESP-IDF versions ESPHome supports (5.5 and 6.1 at the time of writing).
+- Components are general purpose: no board, device or user specific values in code, defaults or examples beyond
+  well-known boards named as such.
