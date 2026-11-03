@@ -14,10 +14,10 @@
 #include <functional>
 #include <string>
 
-namespace esphome::web_server {
-
 extern const uint8_t ESPHOME_WEBSERVER_PACKAGES_JS[] PROGMEM;
 extern const size_t ESPHOME_WEBSERVER_PACKAGES_JS_SIZE;
+
+namespace esphome::web_server {
 
 class WebServerPackageApi : public Component, public AsyncWebHandler {
  public:
