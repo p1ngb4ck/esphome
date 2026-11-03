@@ -3,6 +3,7 @@ from esphome.automation import Trigger
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.const import CONF_BUTTON, CONF_ID, CONF_PAGES, CONF_TRIGGER_ID
+from esphome.core import CORE
 from esphome.final_validate import FinalValidateConfig
 from esphome.types import ConfigType
 
@@ -42,6 +43,7 @@ from ..lvcode import (
 from ..schemas import container_schema, part_schema
 from ..types import LV_EVENT, LvType, ObjUpdateAction, lv_obj_t, lv_obj_t_ptr, lvgl_ns
 from . import (
+    widget_unit,
     Widget,
     WidgetType,
     get_widget_,
@@ -278,16 +280,17 @@ async def add_root_back_button_triggers() -> None:
         if not isinstance(w.type, MenuType):
             continue
         for conf in w.config.get(CONF_ON_ROOT_BACK_BUTTON_CLICK, ()):
-            trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
-            await automation.build_automation(trigger, [], conf)
-            async with LambdaContext(EVENT_ARG, where=conf[CONF_TRIGGER_ID]) as context:
-                with LvConditional(
-                    lvgl_ns.lv_menu_back_button_is_root_click(w.obj, literal("event"))
-                ):
-                    lv_add(trigger.trigger())
-            lv_obj.add_event_cb(
-                w.obj, await context.get_lambda(), LV_EVENT.CLICKED, cg.nullptr
-            )
+            with CORE.codegen_unit(widget_unit(w)):
+                trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
+                await automation.build_automation(trigger, [], conf)
+                async with LambdaContext(EVENT_ARG, where=conf[CONF_TRIGGER_ID]) as context:
+                    with LvConditional(
+                        lvgl_ns.lv_menu_back_button_is_root_click(w.obj, literal("event"))
+                    ):
+                        lv_add(trigger.trigger())
+                lv_obj.add_event_cb(
+                    w.obj, await context.get_lambda(), LV_EVENT.CLICKED, cg.nullptr
+                )
 
 
 def _record_set_page_action(config: ConfigType) -> ConfigType:

@@ -14,7 +14,7 @@ from esphome.const import (
     CONF_ROTATION,
     CONF_TIMEOUT,
 )
-from esphome.core import Lambda
+from esphome.core import CORE, Lambda
 from esphome.cpp_generator import StaticCastExpression, TemplateArguments, get_variable
 from esphome.cpp_types import nullptr
 
@@ -30,6 +30,7 @@ from .defines import (
     CONF_SCROLLBAR,
     CONF_SHOW_SNOW,
     CONF_TOP_LAYER,
+    CONF_WIDGETS,
     PARTS,
     add_warning,
     get_focused_widgets,
@@ -78,6 +79,7 @@ from .widgets import (
     add_widgets,
     get_screen_active,
     get_widgets,
+    lvgl_unit,
     set_obj_properties,
 )
 
@@ -86,19 +88,24 @@ from .widgets import (
 # successive compilations / unit tests via ``CORE.reset()``.
 
 
+async def _layer_to_code(name: str, layer, conf):
+    with LocalVariable(name, lv_obj_t, layer) as layer_obj:
+        await set_obj_properties(Widget(layer_obj, layer_spec, conf), conf)
+    for widget in conf.get(CONF_WIDGETS, ()):
+        with CORE.codegen_unit(lvgl_unit(next(iter(widget.values())))):
+            with LocalVariable(name, lv_obj_t, layer) as layer_obj:
+                await add_widgets(Widget(layer_obj, layer_spec, conf), {CONF_WIDGETS: [widget]})
+
+
 async def layers_to_code(lv_component, config):
     if top_conf := config.get(CONF_TOP_LAYER):
-        top_layer = lv_expr.display_get_layer_top(lv_component.get_disp())
-        with LocalVariable("top_layer", lv_obj_t, top_layer) as top_layer_obj:
-            top_w = Widget(top_layer_obj, layer_spec, top_conf)
-            await set_obj_properties(top_w, top_conf)
-            await add_widgets(top_w, top_conf)
+        await _layer_to_code(
+            "top_layer", lv_expr.display_get_layer_top(lv_component.get_disp()), top_conf
+        )
     if bottom_conf := config.get(CONF_BOTTOM_LAYER):
-        bottom_layer = lv_expr.display_get_layer_bottom(lv_component.get_disp())
-        with LocalVariable("bottom_layer", lv_obj_t, bottom_layer) as bottom_layer_obj:
-            bottom_w = Widget(bottom_layer_obj, layer_spec, bottom_conf)
-            await set_obj_properties(bottom_w, bottom_conf)
-            await add_widgets(bottom_w, bottom_conf)
+        await _layer_to_code(
+            "bottom_layer", lv_expr.display_get_layer_bottom(lv_component.get_disp()), bottom_conf
+        )
 
 
 async def lvgl_update(lv_component, config):

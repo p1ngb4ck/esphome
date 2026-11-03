@@ -15,7 +15,7 @@ from esphome.const import (
     CONF_STATE,
     CONF_TYPE,
 )
-from esphome.core import ID, EsphomeError, TimePeriod
+from esphome.core import CODEGEN_UNIT, CORE, ID, EsphomeError, TimePeriod
 from esphome.coroutine import FakeAwaitable
 from esphome.cpp_generator import MockObj, call_lambda
 from esphome.schema_extractors import EnableSchemaExtraction
@@ -360,6 +360,7 @@ class Widget:
         name: ID | str, var: MockObj, wtype: WidgetType, config: dict | None = None
     ) -> "Widget":
         w = Widget(var, wtype, config)
+        w.unit = CODEGEN_UNIT.get()
         get_widget_map()[name] = w
         return w
 
@@ -769,6 +770,17 @@ async def set_obj_properties(w: Widget, config):
             await target.set_property(property, config, lv_name="obj")
 
 
+def widget_unit(widget):
+    return getattr(widget, "unit", None) or CODEGEN_UNIT.get()
+
+
+def lvgl_unit(config: dict):
+    current = CODEGEN_UNIT.get()
+    if current is not None and (current[0] != "lvgl" or isinstance(current[1], str)):
+        return current
+    return ("lvgl", str(config[CONF_ID]))
+
+
 async def add_widgets(parent: Widget, config: dict):
     """
     Add all widgets to an object
@@ -778,7 +790,8 @@ async def add_widgets(parent: Widget, config: dict):
     """
     for w in config.get(CONF_WIDGETS, ()):
         w_type, w_cnfig = next(iter(w.items()))
-        await widget_to_code(w_cnfig, w_type, parent.obj)
+        with CORE.codegen_unit(lvgl_unit(w_cnfig)):
+            await widget_to_code(w_cnfig, w_type, parent.obj)
 
 
 async def widget_to_code(w_cnfig, w_type: WidgetType | str, parent) -> Widget:

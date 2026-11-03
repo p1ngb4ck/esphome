@@ -4,6 +4,7 @@ from esphome.components.rotary_encoder import DOMAIN as ROTARY_ENCODER_DOMAIN
 from esphome.components.rotary_encoder.sensor import RotaryEncoderSensor
 import esphome.config_validation as cv
 from esphome.const import CONF_GROUP, CONF_ID, CONF_SENSOR
+from esphome.core import CORE
 
 from .defines import (
     CONF_DEFAULT_GROUP,
@@ -19,7 +20,7 @@ from .defines import (
 from .lvcode import lv, lv_add, lv_assign, lv_expr, lv_Pvariable
 from .schemas import ENCODER_SCHEMA
 from .types import lv_group_t, lv_indev_type_t, lv_key_t
-from .widgets import get_widgets
+from .widgets import get_widgets, widget_unit
 
 ENCODERS_CONFIG = cv.ensure_list(
     ENCODER_SCHEMA.extend(
@@ -80,4 +81,5 @@ async def initial_focus_to_code(config):
     for enc_conf in config[CONF_ENCODERS]:
         if default_focus := enc_conf.get(CONF_INITIAL_FOCUS):
             widget = await get_widgets(default_focus)
-            lv.group_focus_obj(widget[0].obj)
+            with CORE.codegen_unit(widget_unit(widget[0])):
+                lv.group_focus_obj(widget[0].obj)
