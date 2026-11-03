@@ -1,5 +1,9 @@
 #include "ble.h"
 
+#ifdef USE_WIFI
+#include "esphome/components/wifi/wifi_component.h"
+#endif
+
 #ifdef USE_ESP32
 
 #include "esphome/core/application.h"
@@ -25,6 +29,9 @@ extern "C" {
 #include <freertos/FreeRTOSConfig.h>
 #include <freertos/task.h>
 
+#ifdef USE_BT_PERSISTENCE
+#include "esphome/components/bt_host/persistence.h"
+#endif
 #include <cstring>
 
 #ifdef USE_ARDUINO
@@ -143,13 +150,25 @@ static constexpr uint32_t HOSTED_BT_WDT_TIMEOUT_MS = 60000;
 void ESP32BLE::setup() {
   global_ble = this;
   // Preferences opens NVS in app_main(); a zero handle means it could not be opened, even after an erase
-  if (global_preferences->nvs_handle == 0) {
+  if (!global_preferences->nvs_ready) {
     ESP_LOGE(TAG, "NVS unavailable");
     this->mark_failed();
     return;
   }
 
   this->state_ = BLE_COMPONENT_STATE_DISABLED;
+#ifdef USE_WIFI
+  // Bluedroid's start and WiFi's start-up both take their RAM at once otherwise (the internal DMA low of the
+  // boot, 2026-10-19): the stack starts once WiFi reports its start-up done - connected, the first attempt
+  // over, or WiFi disabled. Event-driven; an enable() before that (enable_on_boot, the USB dongle) waits.
+  if (wifi::global_wifi_component != nullptr && !wifi::global_wifi_component->is_startup_done()) {
+    this->wifi_done_ = false;
+    wifi::global_wifi_component->add_on_startup_done_callback([this]() {
+      this->wifi_done_ = true;
+      this->start_if_allowed_();
+    });
+  }
+#endif
   if (this->enable_on_boot_) {
     this->enable();
   }
@@ -631,11 +650,17 @@ void ESP32BLE::loop_handle_state_transition_not_active_() {
       return;
     }
     this->drain_ble_events_();
-    // A status callback may have asked for BLE back; the stack is down now, so
+    // A status callback may have asked for BLE back, or restart() did; the stack is down now, so
     // that request becomes a bring-up.
-    this->state_ =
-        this->state_ == BLE_COMPONENT_STATE_ACTIVE ? BLE_COMPONENT_STATE_ENABLE : BLE_COMPONENT_STATE_DISABLED;
+    this->state_ = this->state_ == BLE_COMPONENT_STATE_ACTIVE || this->restart_requested_ ? BLE_COMPONENT_STATE_ENABLE
+                                                                                          : BLE_COMPONENT_STATE_DISABLED;
+    this->restart_requested_ = false;
   } else if (this->state_ == BLE_COMPONENT_STATE_ENABLE) {
+#ifdef USE_BT_PERSISTENCE
+    // Bluedroid reads its pairing data once, when it starts.
+    if (bt_host::global_bt_persistence != nullptr && !bt_host::global_bt_persistence->is_ready())
+      return;
+#endif
     ESP_LOGD(TAG, "Enabling");
     this->state_ = BLE_COMPONENT_STATE_OFF;
 

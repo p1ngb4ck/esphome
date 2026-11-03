@@ -251,7 +251,7 @@ class UARTComponent {
   UARTFlowControl flow_control_{UART_FLOW_CONTROL_NONE};
   UARTParityOptions parity_{UART_CONFIG_PARITY_NONE};  // Must match the parity check in __init__.py
 #ifdef USE_UART_DEBUGGER
-  CallbackManager<void(UARTDirection, uint8_t)> debug_callback_{};
+  CallbackManager<void(UARTDirection, uint8_t, StringRef)> debug_callback_{};
 #endif
 };
 
