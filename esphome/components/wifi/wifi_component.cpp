@@ -1426,8 +1426,8 @@ bool WiFiComponent::store_networks_(const std::vector<WiFiAP> &networks, bool di
     saved.channel = ap.get_channel();
     if (ap.get_hidden())
       saved.flags |= SAVED_WIFI_NETWORK_HIDDEN;
-    if (ap.get_manual_ip().has_value()) {
-      const ManualIP &manual_ip = *ap.get_manual_ip();
+    if (const optional<ManualIP> manual = ap.get_manual_ip(); manual.has_value()) {
+      const ManualIP &manual_ip = *manual;
       saved.flags |= SAVED_WIFI_NETWORK_MANUAL_IP;
       saved.static_ip = ip4_value(manual_ip.static_ip);
       saved.gateway = ip4_value(manual_ip.gateway);
