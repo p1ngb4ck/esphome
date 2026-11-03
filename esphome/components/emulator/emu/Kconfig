@@ -1,0 +1,39 @@
+menu "emulator"
+
+    config EMU_NES
+        bool "NES"
+        default n
+
+    config EMU_GB
+        bool "Game Boy / Color"
+        default n
+
+    config EMU_SMS
+        bool "Master System / Game Gear / SG-1000 / ColecoVision"
+        default n
+
+    config EMU_PCE
+        bool "PC Engine"
+        default n
+
+    config EMU_LYNX
+        bool "Lynx"
+        default n
+
+    config EMU_SNES
+        bool "Super Nintendo"
+        default n
+
+    config EMU_MD
+        bool "Mega Drive / Genesis"
+        default n
+
+    config EMU_GW
+        bool "Game & Watch"
+        default n
+
+    config EMU_MSX
+        bool "MSX"
+        default n
+
+endmenu

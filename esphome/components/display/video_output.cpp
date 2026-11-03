@@ -159,6 +159,33 @@ bool VideoCanvas::page_rect(const uint8_t *jpeg, size_t len, uint32_t x, uint32_
 
 uint8_t VideoCanvas::page_bpp() { return BUFFER_BPP; }
 
+bool VideoCanvas::open_rows(Component *owner) {
+  if (this->display_ == nullptr) {
+    this->release_();
+    return false;
+  }
+  this->rows_wanted_ = true;
+  const bool ok = this->open(static_cast<uint32_t>(this->display_->get_native_width()),
+                             static_cast<uint32_t>(this->display_->get_native_height()) & ~15u, 0, false, owner);
+  this->rows_wanted_ = false;
+  return ok;
+}
+
+bool VideoCanvas::rows_begin(lvgl::LvglComponent::VideoCanvasTarget *target, uint32_t wait_ms) {
+  if (this->mode_.load() != MODE_ROWS || this->closing_ || target == nullptr)
+    return false;
+  return this->lvgl_->video_canvas_begin(target, wait_ms);
+}
+
+void VideoCanvas::rows_end(bool ok) {
+  if (this->mode_.load() == MODE_ROWS)
+    this->lvgl_->video_canvas_end(ok);
+}
+
+DisplayRotation VideoCanvas::rotation() const {
+  return this->lvgl_ != nullptr ? this->lvgl_->get_rotation() : DISPLAY_ROTATION_0_DEGREES;
+}
+
 static void page_sync(uint8_t *page, size_t stride, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
   uint8_t *first = page + static_cast<size_t>(y) * stride + static_cast<size_t>(x) * BUFFER_BPP;
   uint8_t *last = page + (static_cast<size_t>(y) + height - 1) * stride + (static_cast<size_t>(x) + width) * BUFFER_BPP;
@@ -377,7 +404,7 @@ bool VideoCanvas::open(uint32_t width, uint32_t height, uint32_t fps, bool worke
       const bool turned = this->turned_();
       this->canvas_w_ = turned ? rows : width;
       this->canvas_h_ = turned ? width : rows;
-    } else if (this->picture_fit_(width, height, fps, this->combined_)) {
+    } else if (!this->rows_wanted_ && this->picture_fit_(width, height, fps, this->combined_)) {
       this->mode_.store(MODE_PICTURE);
       if (!this->allocate_buffers_()) {
         this->closing_ = true;
@@ -393,18 +420,20 @@ bool VideoCanvas::open(uint32_t width, uint32_t height, uint32_t fps, bool worke
   } else
 #endif
   {
-    if (!this->screen_fits_(width, height)) {
+    if (this->rows_wanted_ || !this->screen_fits_(width, height)) {
       this->release_();
       return false;
     }
     this->mode_.store(MODE_SCREEN);
   }
-  jpeg_decode_engine_cfg_t eng{};
-  eng.timeout_ms = 200;
-  if (jpeg_new_decoder_engine(&eng, &this->decoder_) != ESP_OK) {
-    this->decoder_ = nullptr;
-    this->closing_ = true;
-    return false;
+  if (!this->rows_wanted_) {
+    jpeg_decode_engine_cfg_t eng{};
+    eng.timeout_ms = 200;
+    if (jpeg_new_decoder_engine(&eng, &this->decoder_) != ESP_OK) {
+      this->decoder_ = nullptr;
+      this->closing_ = true;
+      return false;
+    }
   }
   if (worker && xTaskCreatePinnedToCoreWithCaps(&VideoCanvas::worker_entry_, "video_out", 4096, this, 1,
                                                 &this->worker_, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
@@ -691,6 +720,37 @@ VideoCanvas *VideoOutput::open_page(Component *owner) {
     return nullptr;
   }
   return canvas->open_page(width, height, owner) ? canvas : nullptr;
+}
+
+VideoCanvas *VideoOutput::open_page_on(uint8_t index, uint32_t width, uint32_t height, Component *owner) {
+  if (this->held(owner) != nullptr || index >= this->count_)
+    return nullptr;
+  VideoCanvas *canvas = this->canvases_[index];
+  bool other = false;
+  bool claimed = false;
+  portENTER_CRITICAL(&this->lock_);
+  for (uint8_t i = 0; i != this->count_; i++) {
+    if (i != index && !this->canvases_[i]->idle())
+      other = true;
+  }
+  if (canvas->idle())
+    claimed = canvas->claim();
+  portEXIT_CRITICAL(&this->lock_);
+  if (!claimed)
+    return nullptr;
+  canvas->set_combined(other);
+  return canvas->open_page(width, height, owner) ? canvas : nullptr;
+}
+
+VideoCanvas *VideoOutput::open_rows(Component *owner) {
+  if (this->held(owner) != nullptr)
+    return nullptr;
+  bool combined = false;
+  VideoCanvas *canvas = this->acquire_(&combined);
+  if (canvas == nullptr)
+    return nullptr;
+  canvas->set_combined(combined);
+  return canvas->open_rows(owner) ? canvas : nullptr;
 }
 
 bool VideoOutput::page_size(uint32_t *width, uint32_t *height, const Component *owner) const {

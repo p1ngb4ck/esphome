@@ -412,3 +412,51 @@ Function and method comment blocks may include more detail as required to make
 calling contracts clear and document parameter usage, but should still be kept concise.
 
 Avoid redundancy and repetition; comments should never simply restate what the code already says.
+
+## 11. This repository: an ESPHome topic repository
+
+Everything above is ESPHome's own guide and applies unchanged. This section adds what is specific to the topic
+repositories of [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome).
+
+### Layout
+- The tree is ESPHome `dev` (the base commit is named in `README.md`) plus the components and changes of one topic.
+- One branch per change, named `pr/<change>`. A branch contains the branches it needs as merges, also branches of
+  other topic repositories (the README's branch table names them). `main` merges every branch of the topic.
+- `p1ngb4ck/esphome@dev` merges the `main` of every topic repository; a change made here reaches `dev` through
+  `main`.
+- Components the topic adds carry their own `AGENTS.md` (in the component's folder) with the design, the threading
+  model and the memory rules of that component. Read it before changing the component.
+
+### Documentation belongs to the change
+- `README.md`: what the topic is, the first steps (the smallest working configuration), the branch table.
+- `CONFIGURATION.md`: every option of every component the topic adds or changes, with defaults and an example per
+  variant. A new or changed option is documented there in the same change.
+- The component's `AGENTS.md`: updated when the design, the threading or the memory use changes.
+- Licences: new files are MIT (`LICENSE-MIT`); changes to ESPHome's own files stay under that file's ESPHome
+  License; third-party code keeps its licence file or notice. Name every third-party source in `ATTRIBUTIONS.md`
+  of `dev` and in the README's thanks.
+
+### Target constraints (microcontrollers)
+- Internal RAM is scarce (an ESP32-P4 has 512 KB SRAM shared by everything, PSRAM up to 32 MB). Large buffers,
+  lists, strings and long-lived objects go to PSRAM where the chip has it (`RAMAllocator`, `ExternalRAMAllocator`);
+  buffers are allocated for the use and given back afterwards, not kept "for later".
+- No polling. Work is driven by events, callbacks and task notifications; a component with nothing to do disables
+  its loop (`disable_loop()` / `enable_loop()`).
+- The main loop is shared by every component: nothing blocks it (no bulk I/O, no network waits). Long work runs on
+  a task or in slices; results come back to the main loop (`defer()`, the storage worker's completions).
+- No driver, storage or network calls inside an LVGL event handler or another component's callback frame: defer
+  them to the next loop pass (`defer()` in C++, `delay: 0ms` first in a YAML script).
+- Library buffers are not cut below the library's tested defaults to save memory.
+- No log output in hot paths. INFO for operational events, DEBUG for setup detail, ERROR for errors.
+- Code must build on the ESP-IDF versions ESPHome supports (5.5 and 6.1 at the time of writing).
+- Components are general purpose: no board, device or user specific values in code, defaults or examples beyond
+  well-known boards named as such.
+
+### This topic: the emulator app
+- `esphome/components/emulator/` and its `AGENTS.md`. It draws through the display's video output rows
+  (esphome-esp-video), reads files through the storage interface (esphome-storage-interface) and takes input from
+  `hid` and LVGL's key bindings (esphome-hid).
+- An app of its own: every app page keeps the shared UI rules (touch and key navigation, the close gesture, no LVGL
+  access while paused).
+- The cores are third-party code under their own licences; keep their licence files and keep changes in the ports
+  and the shim.
