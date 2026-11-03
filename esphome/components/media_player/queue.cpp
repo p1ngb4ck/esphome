@@ -286,7 +286,7 @@ void MediaQueue::folder_listed_(bool ok) {
 #endif
 
 void MediaQueue::set_repeat(uint8_t repeat) {
-  this->repeat_ = repeat <= REPEAT_ALL ? repeat : REPEAT_OFF;
+  this->repeat_ = repeat <= REPEAT_ALL ? repeat : static_cast<uint8_t>(REPEAT_OFF);
   this->callbacks_.call();
 }
 
