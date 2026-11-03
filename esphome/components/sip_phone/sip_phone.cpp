@@ -727,7 +727,7 @@ void SipPhone::sig_run_() {
   if (this->network_up_.load())
     this->start_register_(false);
   const int max_fd = std::max(this->sig_fd_, this->wake_fd_);
-  for (;;) {
+  while (!this->stopping_.load()) {
     const uint32_t now = millis();
     this->service_timers_(now);
     const uint32_t wait = this->next_deadline_(millis());
@@ -764,7 +764,44 @@ void SipPhone::sig_run_() {
       }
     }
   }
+  this->hangup_call_(false);
+  this->sig_parked_.store(true);
   vTaskSuspend(nullptr);
+}
+
+bool SipPhone::teardown() {
+  if (!this->stopping_.exchange(true)) {
+    this->stop_media_();
+    if (this->wake_fd_ >= 0)
+      this->wake_sig_();
+  }
+  if (this->media_parked_.load()) {
+    if (!this->media_.release())
+      return false;
+    this->media_parked_.store(false);
+    this->speaker_->stop();
+  }
+  if (this->media_.is_running())
+    return false;
+  if (this->sig_task_.is_created() && (!this->sig_parked_.load() || !this->sig_task_.deallocate()))
+    return false;
+  if (this->sig_fd_ >= 0) {
+    ::close(this->sig_fd_);
+    this->sig_fd_ = -1;
+  }
+  if (this->wake_fd_ >= 0) {
+    ::close(this->wake_fd_);
+    this->wake_fd_ = -1;
+  }
+  if (this->commands_ != nullptr) {
+    vQueueDeleteWithCaps(this->commands_);
+    this->commands_ = nullptr;
+  }
+  if (this->events_ != nullptr) {
+    vQueueDeleteWithCaps(this->events_);
+    this->events_ = nullptr;
+  }
+  return true;
 }
 
 void SipPhone::handle_command_(const Command &command) {

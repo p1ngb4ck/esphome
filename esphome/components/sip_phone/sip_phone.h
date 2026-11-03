@@ -99,6 +99,7 @@ class SipPhone final : public Component,
   void setup() override;
   void loop() override;
   void dump_config() override;
+  bool teardown() override;
   float get_setup_priority() const override { return setup_priority::AFTER_CONNECTION; }
 
   void set_microphone(resampler::ResamplerMicrophone *microphone) { this->microphone_ = microphone; }
@@ -386,6 +387,8 @@ class SipPhone final : public Component,
   int sig_fd_{-1};
   int wake_fd_{-1};
   std::atomic<bool> network_up_{false};
+  std::atomic<bool> stopping_{false};
+  std::atomic<bool> sig_parked_{false};
 
   char rx_buf_[RX_BUFFER + 1];
   char scratch_[TX_BUFFER];
