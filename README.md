@@ -1,16 +1,58 @@
-# ESPHome [![Discord Chat](https://img.shields.io/discord/429907082951524364.svg)](https://discord.gg/KhAMKrd) [![GitHub release](https://img.shields.io/github/release/esphome/esphome.svg)](https://GitHub.com/esphome/esphome/releases/) [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/esphome/esphome)
+# esphome-browser
 
-<a href="https://esphome.io/">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://media.esphome.io/logo/logo-text-on-dark.svg">
-    <img src="https://media.esphome.io/logo/logo-text-on-light.svg" alt="ESPHome Logo">
-  </picture>
-</a>
+`browser`: a web browser on the ESP32-P4 display. A server on the network runs a full browser and offers it over VNC
+or SPICE; the device shows it through `remote_desktop` (esphome-remote-desktop) - keyboard, mouse and touch work as
+on a desktop. The heavy part (rendering the web) stays on the server, the device stays responsive.
 
----
+## Getting started
 
-[Documentation](https://esphome.io) -- [Issues](https://github.com/esphome/esphome/issues) -- [Feature requests](https://github.com/orgs/esphome/discussions)
+```yaml
+external_components:
+  - source: github://p1ngb4ck/esphome-browser@main
+    components: [browser, remote_desktop, display, lvgl, hid, storage, usb_host]
 
----
+remote_desktop:
+  id: rdp
+  lvgl_id: lvgl_main
+  hid_ids: [keyboard, mouse]
+  touchscreen_id: touch
 
-[![ESPHome - A project from the Open Home Foundation](https://www.openhomefoundation.org/badges/esphome.png)](https://www.openhomefoundation.org/)
+browser:
+  host: browser-server.local
+  port: 5900
+
+button:
+  - platform: template
+    name: Open browser
+    on_press:
+      - browser.open:
+```
+
+The server is any machine that runs a browser in a VNC or SPICE session (for example a container with a browser
+and a VNC server).
+
+## More
+
+**[CONFIGURATION.md](CONFIGURATION.md)**: every option and action.
+
+## Branches
+
+One branch per change; `main` contains every branch. Base: ESPHome `dev` at `1f70f86b47`.
+
+| Branch | Change | Needs | Chips |
+|---|---|---|---|
+| `pr/browser` | `browser`: a browser served over VNC / SPICE, opened through remote_desktop (`browser.open` / `close` / `is_open`) | `pr/remote-desktop` ([esphome-remote-desktop](https://github.com/p1ngb4ck/esphome-remote-desktop)) | P4 |
+
+All topics together: `github://p1ngb4ck/esphome@dev`. `external_components` replaces components only; the ESPHome
+core of the build host stays as installed.
+
+## License
+
+- ESPHome's own files, also where this repository changes them: the [ESPHome License](LICENSE) (MIT for the Python
+  code and everything else, GPLv3 for the C++ runtime files).
+- New files written for this repository (new components, their code, tests and documentation): MIT,
+  [LICENSE-MIT](LICENSE-MIT).
+
+## Thanks
+
+Everyone this project builds on: [ATTRIBUTIONS.md](https://github.com/p1ngb4ck/esphome/blob/dev/ATTRIBUTIONS.md).
