@@ -85,6 +85,14 @@ CH934X_TX_HEADER_SIZE = 3
 CONF_DEBUG_ADD_UART_SETTINGS = "debug_add_uart_settings"
 CONF_CLAIM_NOTIFICATION_EP = "claim_notification_ep"
 CONF_CLAIM_COMM_INTERFACE = "claim_comm_interface"
+CONF_DTR = "dtr"
+CONF_RTS = "rts"
+CONF_FLOW_CONTROL = "flow_control"
+
+UARTFlowControl = cg.esphome_ns.namespace("uart").enum("UARTFlowControl")
+UART_FLOW_CONTROL_OPTIONS = UARTFlowControl.options(
+    "NONE", "RTS_CTS", "XON_XOFF", prefix="UART_FLOW_CONTROL_"
+)
 
 
 class Type:
@@ -242,6 +250,11 @@ def channel_schema(type_: "Type") -> cv.Schema:
                                 cv.Optional(CONF_PARITY, default="NONE"): cv.enum(
                                     UART_PARITY_OPTIONS, upper=True
                                 ),
+                                cv.Optional(CONF_FLOW_CONTROL, default="NONE"): cv.enum(
+                                    UART_FLOW_CONTROL_OPTIONS, upper=True
+                                ),
+                                cv.Optional(CONF_DTR, default=False): cv.boolean,
+                                cv.Optional(CONF_RTS, default=False): cv.boolean,
                                 cv.Optional(CONF_DATA_BITS, default=8): cv.int_range(
                                     min=5, max=8
                                 ),
@@ -397,6 +410,9 @@ async def to_code(config: ConfigType) -> None:
             cg.add(chvar.set_data_bits(channel[CONF_DATA_BITS]))
             cg.add(chvar.set_parity(channel[CONF_PARITY]))
             cg.add(chvar.set_baud_rate(channel[CONF_BAUD_RATE]))
+            cg.add(chvar.set_flow_control(channel[CONF_FLOW_CONTROL]))
+            cg.add(chvar.set_dtr(channel[CONF_DTR]))
+            cg.add(chvar.set_rts(channel[CONF_RTS]))
             restore_line_settings(chvar, channel[CONF_ID])
             cg.add(chvar.set_dummy_receiver(channel[CONF_DUMMY_RECEIVER]))
             cg.add(chvar.set_claim_notification_ep(channel[CONF_CLAIM_NOTIFICATION_EP]))

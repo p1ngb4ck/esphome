@@ -337,6 +337,8 @@ class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartCo
 
   /// Store DTR/RTS and send them to the device. False when not connected.
   bool set_modem_control(bool dtr, bool rts);
+  void set_dtr(bool dtr) { this->dtr_ = dtr; }
+  void set_rts(bool rts) { this->rts_ = rts; }
   bool get_dtr() const { return this->dtr_; }
   bool get_rts() const { return this->rts_; }
 
@@ -378,9 +380,9 @@ class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartCo
   bool debug_{};
   bool dummy_receiver_{};
   bool claim_notification_ep_{false};
-  // Asserted whenever a device connects, as a host driver does when it opens the port
-  bool dtr_{true};
-  bool rts_{true};
+  // Default to false (inactive) on initial connection
+  bool dtr_{false};
+  bool rts_{false};
   // Line settings or DTR/RTS changed while the config machine was busy; sent once it is idle
   bool reload_pending_{false};
   bool modem_pending_{false};

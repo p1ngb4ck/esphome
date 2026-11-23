@@ -21,11 +21,13 @@ static constexpr uint16_t SIO_RTS_CTS_HS = 0x0100;
 static constexpr uint16_t SIO_XON_XOFF_HS = 0x0400;
 // wValue carries the XOFF and XON characters, which the termios defaults fix as DC3 and DC1
 static constexpr uint16_t SIO_XON_XOFF_CHARS = 0x1311;
-// The high byte selects which lines the low byte changes
-static constexpr uint16_t SIO_SET_DTR_MASK = 0x0100;
-static constexpr uint16_t SIO_SET_RTS_MASK = 0x0200;
-static constexpr uint16_t SIO_DTR_HIGH = 0x0001;
-static constexpr uint16_t SIO_RTS_HIGH = 0x0002;
+// The high byte selects which lines the low byte changes.
+// Linux ftdi_sio: FTDI_SIO_SET_DTR_MASK (0x1), FTDI_SIO_SET_DTR_HIGH ((1 << 8) | 1), FTDI_SIO_SET_DTR_LOW ((1 << 8) | 0)
+// FTDI_SIO_SET_RTS_MASK (0x2), FTDI_SIO_SET_RTS_HIGH ((2 << 8) | 2), FTDI_SIO_SET_RTS_LOW ((2 << 8) | 0)
+static constexpr uint16_t SIO_SET_DTR_HIGH = (0x01 << 8) | 1;
+static constexpr uint16_t SIO_SET_DTR_LOW = (0x01 << 8) | 0;
+static constexpr uint16_t SIO_SET_RTS_HIGH = (0x02 << 8) | 2;
+static constexpr uint16_t SIO_SET_RTS_LOW = (0x02 << 8) | 0;
 
 // FTDI chip family identifiers. These map to USB device bcdDevice values
 // and determine how baudrate divisors and clock sources are calculated.
@@ -409,9 +411,9 @@ bool USBUartTypeFT23XX::config_step(USBUartChannelBase *channel, uint8_t step, b
 }
 
 void USBUartTypeFT23XX::modem_control_transfer(USBUartChannelBase *channel) {
-  const uint16_t value =
-      SIO_SET_DTR_MASK | SIO_SET_RTS_MASK | (channel->dtr_ ? SIO_DTR_HIGH : 0) | (channel->rts_ ? SIO_RTS_HIGH : 0);
-  ESP_LOGD(TAG, "SIO_SET_MODEM_CTRL: DTR=%s RTS=%s", ONOFF(channel->dtr_), ONOFF(channel->rts_));
+  uint16_t value = (channel->dtr_ ? SIO_SET_DTR_HIGH : SIO_SET_DTR_LOW) |
+                   (channel->rts_ ? SIO_SET_RTS_HIGH : SIO_SET_RTS_LOW);
+  ESP_LOGD(TAG, "SIO_SET_MODEM_CTRL: DTR=%s RTS=%s, value=0x%04X", ONOFF(channel->dtr_), ONOFF(channel->rts_), value);
   this->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, SIO_SET_MODEM_CTRL, value,
                          channel->cdc_dev_.bulk_interface_number + 1);
 }

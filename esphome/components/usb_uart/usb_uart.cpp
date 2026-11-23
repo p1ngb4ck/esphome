@@ -550,8 +550,8 @@ void USBUartTypeCdcAcm::on_disconnected() {
     channel->destroying_.store(true);
     // The descriptors these point into are freed with the device
     channel->cdc_dev_ = {};
-    channel->dtr_ = true;
-    channel->rts_ = true;
+    channel->dtr_ = false;
+    channel->rts_ = false;
   }
 }
 
