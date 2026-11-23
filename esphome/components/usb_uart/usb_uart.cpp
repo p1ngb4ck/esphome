@@ -481,8 +481,6 @@ void USBUartTypeCdcAcm::on_connected() {
           channel->cdc_dev_.interrupt_interface_claimed = true;
         }
       }
-    } else if (!channel->claim_notification_ep_) {
-      channel->cdc_dev_.interrupt_interface_number = 0xFF;
     }
     auto err =
         usb_host_interface_claim(this->handle_, this->device_handle_, channel->cdc_dev_.bulk_interface_number, 0);
