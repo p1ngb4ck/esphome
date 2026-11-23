@@ -300,7 +300,13 @@ def validate_usb_clients(configs: list[ConfigType]) -> list[ConfigType]:
 def _final_validate(config: ConfigType) -> ConfigType:
     # Any two overlapping clients could otherwise open the same device
     devices = config.get(CONF_DEVICES) or []
-    uarts = (fv.full_config.get().get("usb_uart") or {}).get(CONF_DEVICES) or []
+    raw_uarts = fv.full_config.get().get("usb_uart")
+    if isinstance(raw_uarts, list):
+        uarts = raw_uarts
+    elif isinstance(raw_uarts, dict):
+        uarts = raw_uarts.get(CONF_DEVICES) or []
+    else:
+        uarts = []
     validate_usb_clients(devices)
     validate_usb_clients(uarts)
     # Remove before 2027.10.0, then pool devices and uarts in one validate_usb_clients call

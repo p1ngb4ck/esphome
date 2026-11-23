@@ -1186,8 +1186,22 @@ static bool _unblock_client(client_t *client_obj, bool in_isr)
 """
 
 
+_CMAKE_PHY_ANCHOR = """        # Get path to usb component inside esp-idf
+        idf_component_get_property(esp_idf_usb_dir usb COMPONENT_OVERRIDEN_DIR)
+        if(NOT esp_idf_usb_dir)
+            idf_component_get_property(esp_idf_usb_dir usb COMPONENT_DIR)
+        endif()"""
+
+_CMAKE_PHY_REPLACEMENT = """        # Get path to usb component inside esp-idf
+        idf_component_get_property(esp_idf_usb_dir usb COMPONENT_OVERRIDEN_DIR)
+        if(NOT esp_idf_usb_dir)
+            set(esp_idf_usb_dir "${IDF_PATH}/components/usb")
+        endif()"""
+
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
+    ("CMakeLists.txt", _CMAKE_PHY_ANCHOR, _CMAKE_PHY_REPLACEMENT),
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
     ("include/usb/usb_host.h", _PUBLIC_HEADER_ANCHOR, _PUBLIC_HEADER_ADDITION),
     ("include/usb/usb_host.h", _PUBLIC_CONFIG_ANCHOR, _PUBLIC_CONFIG_ADDITION),
