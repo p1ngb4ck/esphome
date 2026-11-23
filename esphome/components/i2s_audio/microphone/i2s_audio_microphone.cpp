@@ -480,6 +480,9 @@ size_t I2SAudioMicrophone::read_(uint8_t *buf, size_t len, uint32_t timeout_ms) 
   } else {
     this->status_clear_warning();
   }
+  if (bytes_read == 0) {
+    taskYIELD();
+  }
   // Even after an error, any bytes read have left the DMA buffers and are valid audio
 #ifdef USE_ESP32_VARIANT_ESP32
   // For ESP32 16-bit standard mono mode, adjacent samples need to be swapped.
