@@ -735,6 +735,12 @@ bool USBUartComponent::run_config_machine_() {
       // otherwise, leave the already-working channel as it was.
       if (init)
         channel->initialised_.store(false);
+    } else if (!this->cfg_ok_) {
+      // For CDC ACM devices: some firmware (like Marlin LPC176x) STALLs or ignores
+      // optional CDC class requests (such as SET_LINE_CODING / SET_CONTROL_LINE_STATE).
+      // Do not abort or disable the channel on a rejected CDC class request.
+      ESP_LOGW(TAG, "CDC config step %d was rejected by device, continuing anyway", this->cfg_step_ - 1);
+      this->cfg_ok_ = true;
     } else if (this->cfg_mode_ == ConfigMode::CONFIG_MODE_MODEM) {
       // A single transfer, so only the first step issues one
       if (this->cfg_step_ == 0) {
