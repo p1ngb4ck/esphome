@@ -360,6 +360,7 @@ void I2SAudioMicrophone::mic_task(void *params) {
         samples.resize(bytes_to_read);
         size_t bytes_read = this_microphone->read_(samples.data(), bytes_to_read, 2 * read_duration_ms);
         if (bytes_read == 0) {
+          vTaskDelay(pdMS_TO_TICKS(10));
           continue;
         }
 
@@ -481,7 +482,7 @@ size_t I2SAudioMicrophone::read_(uint8_t *buf, size_t len, uint32_t timeout_ms) 
     this->status_clear_warning();
   }
   if (bytes_read == 0) {
-    taskYIELD();
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
   // Even after an error, any bytes read have left the DMA buffers and are valid audio
 #ifdef USE_ESP32_VARIANT_ESP32
