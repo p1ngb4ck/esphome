@@ -1194,7 +1194,7 @@ _CMAKE_PHY_ANCHOR = """        # Get path to usb component inside esp-idf
 
 _CMAKE_PHY_REPLACEMENT = """        # Get path to usb component inside esp-idf
         idf_component_get_property(esp_idf_usb_dir usb COMPONENT_OVERRIDEN_DIR)
-        if(NOT esp_idf_usb_dir)
+        if(NOT esp_idf_usb_dir OR NOT EXISTS "${esp_idf_usb_dir}/usb_phy.c")
             set(esp_idf_usb_dir "${IDF_PATH}/components/usb")
         endif()"""
 
