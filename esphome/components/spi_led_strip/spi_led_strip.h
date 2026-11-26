@@ -12,7 +12,7 @@ class SpiLedStrip final : public light::AddressableLight,
                           public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_HIGH,
                                                 spi::CLOCK_PHASE_TRAILING, spi::DATA_RATE_1MHZ> {
  public:
-  SpiLedStrip(uint16_t num_leds);
+  SpiLedStrip(uint16_t num_leds, bool ws2801 = false, uint8_t r = 2, uint8_t g = 1, uint8_t b = 0);
   void setup() override;
   float get_setup_priority() const override { return setup_priority::IO; }
 
@@ -30,7 +30,9 @@ class SpiLedStrip final : public light::AddressableLight,
   light::CorrectedBufferColorAccessor internal_accessor_{
       nullptr, nullptr, {2, 1, 0, light::ChannelColors::RESERVED_WHITE}, &this->correction_};
   size_t buffer_size_{};
+  size_t color_offset_{5};
   uint16_t num_leds_;
+  bool ws2801_{false};
 };
 
 }  // namespace esphome::spi_led_strip
