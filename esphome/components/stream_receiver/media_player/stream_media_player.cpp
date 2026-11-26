@@ -142,8 +142,10 @@ void StreamMediaPlayer::loop() {
 #endif
   if (closing && !this->draw_busy_.load() && uxQueueMessagesWaiting(this->filled_q_) == 0) {
     this->close_page_.store(false);
-    if (this->canvas_ != nullptr && this->canvas_->held_by(this))
+    if (this->canvas_ != nullptr && this->canvas_->held_by(this)) {
+      this->canvas_->stop_feed();
       this->canvas_->close();
+    }
 #ifdef USE_STREAM_CANVAS
     this->reopen_.store(false);
 #endif
@@ -161,7 +163,9 @@ void StreamMediaPlayer::loop() {
     this->disable_loop();
 }
 
-bool StreamMediaPlayer::page_target_(uint32_t *width, uint32_t *height) const {
+bool StreamMediaPlayer::page_target_(uint32_t *width, uint32_t *height, uint8_t *turns, bool *direct_rows) const {
+  *turns = 0;
+  *direct_rows = false;
 #ifdef USE_STREAM_CANVAS
   if (!this->fullscreen_.load()) {
     *width = this->canvas_w_;
@@ -169,14 +173,31 @@ bool StreamMediaPlayer::page_target_(uint32_t *width, uint32_t *height) const {
     return true;
   }
 #endif
-  return this->output_ != nullptr && this->output_->page_size(width, height, this);
+  if (this->output_ == nullptr)
+    return false;
+  uint8_t report[32]{};
+  const size_t report_len = this->output_->report(report, sizeof(report));
+  if (report_len >= 16 && report[15] != 0) {
+    const uint16_t nw = rd16(report + 2);
+    const uint16_t nh = rd16(report + 4);
+    if (nw > 0 && nh > 0 && this->output_->fits(nw, nh, 0, true, this)) {
+      *width = nw;
+      *height = nh;
+      *turns = report[6] % 4;
+      *direct_rows = true;
+      return true;
+    }
+  }
+  return this->output_->page_size(width, height, this);
 }
 
-display::VideoCanvas *StreamMediaPlayer::open_target_() {
+display::VideoCanvas *StreamMediaPlayer::open_target_(bool direct_rows) {
 #ifdef USE_STREAM_CANVAS
   if (!this->fullscreen_.load())
     return this->output_->open_page_on(this->canvas_index_, this->canvas_w_, this->canvas_h_, this);
 #endif
+  if (direct_rows)
+    return this->output_->open(this->page_w_, this->page_h_, 0, false, this);
   return this->output_->open_page(this);
 }
 
@@ -187,10 +208,14 @@ void StreamMediaPlayer::set_fullscreen(bool fullscreen) {
   ESP_LOGI(TAG, "Streams are made for the %s", fullscreen ? "screen" : "canvas");
   uint32_t width = 0;
   uint32_t height = 0;
-  if (!this->page_target_(&width, &height))
+  uint8_t turns = 0;
+  bool direct_rows = false;
+  if (!this->page_target_(&width, &height, &turns, &direct_rows))
     width = height = 0;
   this->page_w_ = static_cast<uint16_t>(width);
   this->page_h_ = static_cast<uint16_t>(height);
+  this->turns_ = turns;
+  this->direct_rows_ = direct_rows;
   this->reopen_.store(true);
   this->view_pending_.store(true);
   this->wake_();
@@ -320,10 +345,14 @@ void StreamMediaPlayer::serve_(int client) {
   this->echo_.store(0);
   uint32_t width = 0;
   uint32_t height = 0;
-  if (!this->page_target_(&width, &height))
+  uint8_t turns = 0;
+  bool direct_rows = false;
+  if (!this->page_target_(&width, &height, &turns, &direct_rows))
     width = height = 0;
   this->page_w_ = static_cast<uint16_t>(width);
   this->page_h_ = static_cast<uint16_t>(height);
+  this->turns_ = turns;
+  this->direct_rows_ = direct_rows;
 #ifdef USE_SPEAKER
   this->sound_left_ = 0;
   this->sound_carry_len_ = 0;
@@ -612,7 +641,7 @@ void StreamMediaPlayer::send_pending_(int client) {
     message[at++] = static_cast<uint8_t>(this->page_w_ >> 8);
     message[at++] = static_cast<uint8_t>(this->page_h_ & 0xFF);
     message[at++] = static_cast<uint8_t>(this->page_h_ >> 8);
-    message[at++] = 0;
+    message[at++] = this->turns_;
     const uint32_t still = static_cast<uint32_t>(this->max_frame_bytes_);
     for (int shift = 0; shift < 32; shift += 8)
       message[at++] = static_cast<uint8_t>(still >> shift);
@@ -698,22 +727,31 @@ void StreamMediaPlayer::draw_loop_() {
       continue;
     }
 #endif
+    const bool whole_direct = this->direct_rows_ && frame->x == 0 && frame->y == 0 &&
+                              frame->w == this->page_w_ && frame->h == this->page_h_;
     if (this->connected_.load() && this->output_ != nullptr &&
         (this->canvas_ == nullptr || !this->canvas_->held_by(this))) {
-      display::VideoCanvas *canvas = this->open_target_();
+      display::VideoCanvas *canvas = this->open_target_(whole_direct);
       if (canvas != nullptr) {
         this->canvas_ = canvas;
-        if (canvas->width() != this->page_w_ || canvas->height() != this->page_h_) {
+        if (!whole_direct && (canvas->width() != this->page_w_ || canvas->height() != this->page_h_)) {
           this->page_w_ = static_cast<uint16_t>(canvas->width());
           this->page_h_ = static_cast<uint16_t>(canvas->height());
+          this->turns_ = 0;
+          this->direct_rows_ = false;
           this->view_pending_.store(true);
         }
         this->status_pending_.store(true);
         this->enable_loop_soon_any_context();
       }
     }
-    if (this->canvas_ != nullptr && this->canvas_->held_by(this))
-      this->canvas_->page_rect(frame->data, frame->received, frame->x, frame->y, frame->w, frame->h);
+    if (this->canvas_ != nullptr && this->canvas_->held_by(this)) {
+      if (whole_direct) {
+        this->canvas_->frame(frame->data, frame->received, FRAME_WAIT_MS);
+      } else {
+        this->canvas_->page_rect(frame->data, frame->received, frame->x, frame->y, frame->w, frame->h);
+      }
+    }
     xQueueSend(this->empty_q_, &frame, 0);
     this->draw_busy_.store(false);
     this->wake_();
@@ -819,8 +857,12 @@ void StreamMediaPlayer::on_touch(const touchscreen::TouchPoints_t &points) {
       break;
     int32_t x = point.x;
     int32_t y = point.y;
-    if (!this->canvas_->canvas_point(&x, &y))
+    if (this->direct_rows_) {
+      if (x < 0 || y < 0 || x >= this->page_w_ || y >= this->page_h_)
+        continue;
+    } else if (!this->canvas_->canvas_point(&x, &y)) {
       continue;
+    }
     event.id[event.count] = point.id;
     event.x[event.count] = static_cast<uint16_t>(x);
     event.y[event.count] = static_cast<uint16_t>(y);

@@ -122,8 +122,8 @@ class StreamMediaPlayer : public Component, public media_player::MediaPlayer {
   void feed_(const uint8_t *data, size_t len);
   void send_pending_(int client);
   void hold_wifi_(bool &held, bool want);
-  bool page_target_(uint32_t *width, uint32_t *height) const;
-  display::VideoCanvas *open_target_();
+  bool page_target_(uint32_t *width, uint32_t *height, uint8_t *turns, bool *direct_rows) const;
+  display::VideoCanvas *open_target_(bool direct_rows);
 #ifdef USE_SPEAKER
   void play_sound_(const uint8_t *data, size_t len);
   void emit_sound_(const uint8_t *src, size_t frames);
@@ -151,6 +151,8 @@ class StreamMediaPlayer : public Component, public media_player::MediaPlayer {
   uint32_t skip_{0};
   uint16_t page_w_{0};
   uint16_t page_h_{0};
+  uint8_t turns_{0};
+  bool direct_rows_{false};
   bool logged_bad_header_{false};
   std::atomic<bool> connected_{false};
   std::atomic<bool> drop_{false};
