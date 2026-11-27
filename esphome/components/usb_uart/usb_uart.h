@@ -335,6 +335,10 @@ class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartCo
   /// port per interface; a multiplexed driver would index its channels.
   uint8_t get_port_number() const { return 0; }
 
+  const char *get_interface_description() const {
+    return this->interface_description_ != nullptr ? this->interface_description_ : "";
+  }
+
   /// Store DTR/RTS and send them to the device. False when not connected.
   bool set_modem_control(bool dtr, bool rts);
   void set_dtr(bool dtr) { this->dtr_ = dtr; }
@@ -354,6 +358,8 @@ class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartCo
   void check_logger_conflict() override {}
   LineStopBits line_stop_bits_() const;
   LineParity line_parity_() const;
+  void set_interface_description_(const usb_str_desc_t *desc);
+  void clear_interface_description_();
   // Larger structures first (8+ bytes)
   RingBuffer input_buffer_;
   LockFreeQueue<UsbOutputChunk, USB_OUTPUT_CHUNK_COUNT> output_queue_;
@@ -371,6 +377,7 @@ class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartCo
 #endif
   // 4-byte fields
   uint32_t flush_timeout_ms_{100};
+  char *interface_description_{nullptr};
   // 1-byte fields (no padding between groups)
   std::atomic<bool> input_started_{true};
   std::atomic<bool> output_started_{true};
@@ -386,6 +393,7 @@ class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartCo
   // Line settings or DTR/RTS changed while the config machine was busy; sent once it is idle
   bool reload_pending_{false};
   bool modem_pending_{false};
+  bool description_read_{false};
 };
 
 // Concrete channel type for CDC-style USB serial devices (2 bulk endpoints per
@@ -419,7 +427,7 @@ class USBUartComponent {
   USBUartComponent(USBUartClient *client, usb_host::UsbDevice *dev);
   virtual ~USBUartComponent();
   virtual void dump_config();
-  std::vector<USBUartChannelBase *> get_channels() { return this->channels_; }
+  const auto &get_channels() const { return this->channels_; }
 
   void add_channel(USBUartChannelBase *channel) { this->channels_.push_back(channel); }
 
@@ -727,12 +735,16 @@ class USBUartClient : public usb_host::USBClient {
   void on_device_connected(usb_host::UsbDevice &dev) override;
   void on_device_disconnected(usb_host::UsbDevice &dev) override;
   void free_device_context(usb_host::UsbDevice &dev) override;
+  void on_interface_string(uint8_t interface_number, const usb_str_desc_t *desc) override;
+  void read_next_interface_string_();
 
   /// The entry naming this adapter whose channels are free (nullptr: none).
   USBUartEntry *find_entry_(uint16_t vid, uint16_t pid);
 
   std::vector<USBUartEntry> entries_{};
   std::vector<USBUartComponent *> adapters_{};
+  USBUartChannelBase *string_channel_{nullptr};
+  bool string_busy_{false};
 };
 
 }  // namespace esphome::usb_uart

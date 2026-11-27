@@ -14,6 +14,9 @@
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
+#ifdef USE_ESP32_BLE_SWITCH
+#include "esphome/components/switch/switch.h"
+#endif
 
 #include "ble_event.h"
 #include "esphome/core/lock_free_queue.h"
@@ -130,6 +133,16 @@ class ESP32BLE final : public Component {
       this->state_ = BLE_COMPONENT_STATE_DISABLE;
     }
   }
+  void set_enabled(bool enabled) {
+    if (enabled) {
+      this->enable();
+    } else {
+      this->disable();
+    }
+  }
+#ifdef USE_ESP32_BLE_SWITCH
+  SUB_SWITCH(enabled)
+#endif
   ESPHOME_ALWAYS_INLINE bool is_active() { return this->state_ == BLE_COMPONENT_STATE_ACTIVE; }
   void setup() override;
   void loop() override;
@@ -138,6 +151,10 @@ class ESP32BLE final : public Component {
   void get_mac_msb_first(uint8_t out[MAC_ADDRESS_SIZE]) const;
   float get_setup_priority() const override;
   void set_name(const char *name) { this->name_ = name; }
+  // BLE device names are limited to 20 bytes (UTF-8)
+  static constexpr size_t DEVICE_NAME_BUFFER_SIZE = 21;
+  /// The device name; written to `buffer` unless the configured name is used as is.
+  const char *device_name(char *buffer) const;
 
 #ifdef USE_ESP32_BLE_ADVERTISING
   /** Request advertising on behalf of a component.
@@ -157,6 +174,9 @@ class ESP32BLE final : public Component {
   void advertising_set_service_data_and_name(std::span<const uint8_t> data, bool include_name);
   void advertising_add_service_uuid(ESPBTUUID uuid);
   void advertising_remove_service_uuid(ESPBTUUID uuid);
+  /// Keep `uuid` and the service data alone in the advertising packet; applies on the next refresh.
+  void advertising_set_priority_uuid(ESPBTUUID uuid);
+  void advertising_clear_priority_uuid();
   void advertising_register_raw_advertisement_callback(std::function<void(bool)> &&callback);
 #endif
 
@@ -214,8 +234,18 @@ class ESP32BLE final : public Component {
     }
     this->ble_events_.get_and_reset_dropped_count();
   }
+  ESPHOME_ALWAYS_INLINE void advertising_loop_() {
+#ifdef USE_ESP32_BLE_ADVERTISING
+    if (this->advertising_ != nullptr)
+      this->advertising_->loop();
+#endif
+  }
 #ifdef USE_ESP32_BLE_ADVERTISING
   void advertising_init_();
+  void advertising_cancel_start_() {
+    if (this->advertising_ != nullptr)
+      this->advertising_->cancel_start();
+  }
 #endif
 
   // BLE uses the core wake_loop_threadsafe() mechanism to wake the main event loop

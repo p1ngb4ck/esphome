@@ -9,15 +9,15 @@ CODEOWNERS = ["@esphome/core"]
 DOMAIN = "interval"
 CODEGEN_PER_ITEM = True
 interval_ns = cg.esphome_ns.namespace("interval")
-IntervalTrigger = interval_ns.class_(
-    "IntervalTrigger", automation.Trigger.template(), cg.PollingComponent
+IntervalCallback = interval_ns.class_("IntervalCallback", cg.PollingComponent)
+DelayedIntervalCallback = interval_ns.class_(
+    "DelayedIntervalCallback", IntervalCallback
 )
-DelayedIntervalTrigger = interval_ns.class_("DelayedIntervalTrigger", IntervalTrigger)
 
 CONFIG_SCHEMA = automation.validate_automation(
     cv.Schema(
         {
-            cv.GenerateID(): cv.declare_id(IntervalTrigger),
+            cv.GenerateID(): cv.declare_id(IntervalCallback),
             cv.Optional(
                 CONF_STARTUP_DELAY, default="0s"
             ): cv.positive_time_period_milliseconds,
@@ -30,12 +30,11 @@ CONFIG_SCHEMA = automation.validate_automation(
 async def to_code(config: list[ConfigType]) -> None:
     for index, conf in enumerate(config):
         with CORE.codegen_unit((DOMAIN, index)):
-            if startup_delay := conf[CONF_STARTUP_DELAY].total_milliseconds:
-                conf[CONF_ID].type = DelayedIntervalTrigger
-                var = cg.new_Pvariable(conf[CONF_ID], startup_delay)
+            if startup_delay := conf[CONF_STARTUP_DELAY].total_milliseconds & 0xFFFFFFFF:
+                component_class, template_args = DelayedIntervalCallback, [startup_delay]
             else:
-                var = cg.new_Pvariable(conf[CONF_ID])
-            await cg.register_component(var, conf)
-            await automation.build_automation(var, [], conf)
-
+                component_class, template_args = IntervalCallback, []
+            var = await automation.build_component_automation(
+                conf, component_class, id_key=CONF_ID, template_args=template_args
+            )
             cg.add(var.set_update_interval(conf[CONF_INTERVAL]))

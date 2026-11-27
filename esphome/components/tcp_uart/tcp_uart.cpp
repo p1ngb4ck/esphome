@@ -27,7 +27,6 @@ void TcpUart::set_max_connections(uint8_t count) {
   }
   // The first search for a holder starts at slot 0.
   this->last_holder_ = count - 1;
-  this->listener_.set_backlog(count);
 }
 #endif
 
@@ -81,13 +80,11 @@ void TcpUart::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "TCP UART:\n"
                 "  %s: %s:%u\n"
-                "  Reconnect Interval: %" PRIu32 "ms",
+                "  Reconnect Interval: %" PRIu32 "ms\n"
+                "  Timeout: %" PRIu32 "ms",
                 this->server_ ? LOG_STR_LITERAL("Listen") : LOG_STR_LITERAL("Host"),
                 this->server_ ? LOG_STR_LITERAL("*") : this->link_.host(), this->link_.port(),
-                this->link_.reconnect_interval());
-  if (this->link_.idle_timeout() != 0) {
-    ESP_LOGCONFIG(TAG, "  Timeout: %" PRIu32 "ms", this->link_.idle_timeout());
-  }
+                this->link_.reconnect_interval(), this->link_.idle_timeout());
 #ifdef USE_TCP_UART_MAX_CONNECTIONS
   if (!this->extra_.empty()) {
     ESP_LOGCONFIG(TAG,
@@ -212,7 +209,7 @@ void TcpUart::loop() {
 #ifdef USE_TCP_UART_MAX_CONNECTIONS
   if (!this->extra_.empty()) {
     // Inline until a client connects.
-    bool waiting = this->listener_.poll_listen(this->link_);
+    bool waiting = this->listener_.poll_listen(this->link_, this->slot_count_());
     bool active = waiting || this->up_mask_ != 0;
 #ifdef USE_NOISE_STREAM
     // A handshake runs before its slot counts as up

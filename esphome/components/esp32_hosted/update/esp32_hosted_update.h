@@ -71,7 +71,7 @@ class Esp32HostedUpdate final : public update::UpdateEntity,
 
 #if defined(USE_ESP32_HOSTED_HTTP_UPDATE) || defined(USE_ESP32_HOSTED_STORAGE_UPDATE)
   bool parse_manifest_(const std::string &json_str);
-  void finish_check_();
+  void finish_check_(bool was_warned = false);
   std::string firmware_url_;
 #endif
 #ifdef USE_ESP32_HOSTED_HTTP_UPDATE

@@ -603,6 +603,26 @@ void USBUartTypeCdcAcm::modem_control_transfer(USBUartChannelBase *channel) {
                          channel->cdc_dev_.interrupt_interface_number);
 }
 
+void USBUartChannelBase::set_interface_description_(const usb_str_desc_t *desc) {
+  char text[usb_host::DESC_STRING_BUF_SIZE];
+  if (desc == nullptr || !usb_host::copy_descriptor_string(desc, text) || text[0] == '\0')
+    return;
+  const size_t size = strlen(text) + 1;
+  RAMAllocator<char> allocator(RAMAllocator<char>::ALLOC_EXTERNAL);
+  this->interface_description_ = allocator.allocate(size);
+  if (this->interface_description_ != nullptr)
+    memcpy(this->interface_description_, text, size);
+}
+
+void USBUartChannelBase::clear_interface_description_() {
+  this->description_read_ = false;
+  if (this->interface_description_ == nullptr)
+    return;
+  RAMAllocator<char> allocator(RAMAllocator<char>::ALLOC_EXTERNAL);
+  allocator.deallocate(this->interface_description_, strlen(this->interface_description_) + 1);
+  this->interface_description_ = nullptr;
+}
+
 void USBUartComponent::enable_channels() {
   this->cfg_single_ = nullptr;
   // Init sends every channel's current line settings and DTR/RTS
@@ -1029,6 +1049,32 @@ void USBUartClient::on_device_connected(usb_host::UsbDevice &dev) {
   dev.context = adapter;
   this->adapters_.push_back(adapter);
   adapter->on_connected();  // on failure the adapter is closed again (on_device_disconnected follows)
+  this->read_next_interface_string_();
+}
+
+void USBUartClient::read_next_interface_string_() {
+  if (this->string_busy_)
+    return;
+  for (auto *adapter : this->adapters_) {
+    for (auto *channel : adapter->channels_) {
+      if (channel->description_read_ || channel->cdc_dev_.in_ep == nullptr)
+        continue;
+      channel->description_read_ = true;
+      if (this->read_interface_string_(adapter->dev_->handle, channel->get_interface_number())) {
+        this->string_channel_ = channel;
+        this->string_busy_ = true;
+        return;
+      }
+    }
+  }
+}
+
+void USBUartClient::on_interface_string(uint8_t interface_number, const usb_str_desc_t *desc) {
+  this->string_busy_ = false;
+  if (this->string_channel_ != nullptr)
+    this->string_channel_->set_interface_description_(desc);
+  this->string_channel_ = nullptr;
+  this->read_next_interface_string_();
 }
 
 void USBUartClient::on_device_disconnected(usb_host::UsbDevice &dev) {
@@ -1037,6 +1083,11 @@ void USBUartClient::on_device_disconnected(usb_host::UsbDevice &dev) {
     return;
   adapter->connected_ = false;
   adapter->on_disconnected();
+  for (auto *channel : adapter->channels_) {
+    if (channel == this->string_channel_)
+      this->string_channel_ = nullptr;
+    channel->clear_interface_description_();
+  }
   this->adapters_.erase(std::remove(this->adapters_.begin(), this->adapters_.end(), adapter), this->adapters_.end());
 }
 

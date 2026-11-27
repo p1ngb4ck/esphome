@@ -6,6 +6,7 @@
 #ifdef USE_ESP32
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <functional>
 #endif
 
 namespace esphome::ads1115 {
@@ -48,15 +49,13 @@ enum ADS1115Samplerate {
 
 class ADS1115Component final : public Component, public i2c::I2CDevice {
  public:
+  explicit ADS1115Component(bool continuous_mode) : continuous_mode_(continuous_mode) {}
   void setup() override;
   void loop() override;
   void dump_config() override;
-  /// HARDWARE_LATE setup priority
-  void set_continuous_mode(bool continuous_mode) { continuous_mode_ = continuous_mode; }
 
-  /// Helper method to request a measurement from a sensor.
-  float request_measurement(ADS1115Multiplexer multiplexer, ADS1115Gain gain, ADS1115Resolution resolution,
-                            ADS1115Samplerate samplerate);
+  /// Returns volts for `config_bits` (multiplexer, gain and data rate fields of the config register).
+  float request_measurement(uint16_t config_bits, uint8_t conversion_delay_ms);
 
 #ifdef USE_ESP32
   /// Perform multiple consecutive measurements on the same channel (for RMS calculations)
@@ -74,11 +73,10 @@ class ADS1115Component final : public Component, public i2c::I2CDevice {
 #endif
 
  protected:
-  float do_measurement_(ADS1115Multiplexer multiplexer, ADS1115Gain gain, ADS1115Resolution resolution,
-                        ADS1115Samplerate samplerate);
+  float do_measurement_(uint16_t config_bits, uint8_t conversion_delay_ms);
 
   uint16_t prev_config_{0};
-  bool continuous_mode_;
+  const bool continuous_mode_;
 
 #ifdef USE_ESP32
   // Non-blocking mutex for burst measurements

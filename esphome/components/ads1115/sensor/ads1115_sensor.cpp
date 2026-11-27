@@ -30,7 +30,7 @@ float ADS1115Sensor::sample() {
   return NAN;
 #else
   // Non-ESP32: Direct blocking measurement
-  return this->parent_->request_measurement(this->multiplexer_, this->gain_, this->resolution_, this->samplerate_);
+  return this->parent_->request_measurement(this->config_bits_, this->conversion_delay_ms_);
 #endif
 }
 
@@ -80,11 +80,9 @@ void ADS1115Sensor::loop() {
 void ADS1115Sensor::dump_config() {
   LOG_SENSOR("  ", "ADS1115 Sensor", this);
   ESP_LOGCONFIG(TAG,
-                "    Multiplexer: %u\n"
-                "    Gain: %u\n"
-                "    Resolution: %u\n"
-                "    Sample rate: %u",
-                this->multiplexer_, this->gain_, this->resolution_, this->samplerate_);
+                "    Config: 0x%04X\n"
+                "    Conversion delay: %u ms",
+                this->config_bits_, this->conversion_delay_ms_);
 }
 
 #ifdef USE_ESP32
@@ -98,8 +96,7 @@ void ADS1115Sensor::sampling_task_(void *param) {
 
     if (notification_value > 0 && sensor->task_running_) {
       // Perform measurement (will block on burst_mutex_ if RMS measurement in progress)
-      float voltage = sensor->parent_->request_measurement(sensor->multiplexer_, sensor->gain_, sensor->resolution_,
-                                                           sensor->samplerate_);
+      float voltage = sensor->parent_->request_measurement(sensor->config_bits_, sensor->conversion_delay_ms_);
 
       // Store result with mutex protection
       if (sensor->data_mutex_ != nullptr && xSemaphoreTake(sensor->data_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {

@@ -101,6 +101,12 @@ static constexpr uint8_t USB_DIR_MASK = 1 << 7;
 static constexpr uint8_t USB_DIR_IN = 1 << 7;
 static constexpr uint8_t USB_DIR_OUT = 0;
 static constexpr size_t SETUP_PACKET_SIZE = 8;
+// A string descriptor is at most 255 bytes, since bLength is one byte
+static constexpr size_t STRING_DESC_MAX_SIZE = 255;
+// Room for the setup packet and the largest string, read in whole packets of a 64-byte EP0
+static constexpr size_t STRING_TRANSFER_SIZE = SETUP_PACKET_SIZE + 256;
+// The host stack enumerates with this language only, so the strings it caches use it too
+static constexpr uint16_t STRING_DESC_LANGID = 0x0409;
 
 static constexpr size_t MAX_REQUESTS = USB_HOST_MAX_REQUESTS;
 static_assert(MAX_REQUESTS >= 1 && MAX_REQUESTS <= 32, "MAX_REQUESTS must be between 1 and 32");
@@ -281,9 +287,9 @@ struct UsbDeviceInfo {
 };
 
 /// Copy a USB string descriptor into a NUL-terminated buffer. A missing descriptor copies as
-/// an empty string. Returns false when a descriptor contains non-ASCII characters,
-/// UTF-16 to UTF-8 conversion is not currently implemented.
-bool copy_descriptor_string(const usb_str_desc_t *desc, std::span<char, DESC_STRING_BUF_SIZE> buffer);
+/// an empty string. Returns false, leaving the buffer empty, when the string does not fit or
+/// contains non-ASCII characters; UTF-16 to UTF-8 conversion is not currently implemented.
+bool copy_descriptor_string(const usb_str_desc_t *desc, std::span<char> buffer);
 
 enum ClientState {
   USB_CLIENT_INIT = 0,
@@ -416,6 +422,8 @@ class USBClient : public Component {
   }
   void set_manufacturer_filter(const char16_t *manufacturer) { this->manufacturer_filter_ = manufacturer; }
   void set_product_filter(const char16_t *product) { this->product_filter_ = product; }
+  /// A device matches when any of its interfaces carries exactly this iInterface string
+  void set_interface_filter(const char16_t *interface) { this->interface_filter_ = interface; }
 
   /// Whether a device has been opened and its setup by the subclass has finished
   bool is_connected() const { return this->connection_reported_; }
@@ -630,7 +638,22 @@ class USBClient : public Component {
   size_t transfer_buffer_size_() const;
   bool alloc_transfer_pool_();
   void free_transfer_pool_();
-  TransferRequest *get_trq_();
+  void handle_get_desc_state_();
+  void finish_open_();
+  /// Start reading the iInterface string of an interface; the host stack does not cache
+  /// those. Completes on the main loop through on_interface_string(), one read at a time.
+  /// Returns false, with no completion to follow, when the interface has no string or the
+  /// read could not be started.
+  bool read_interface_string_(uint8_t interface_number);
+  bool read_interface_string_(usb_device_handle_t device, uint8_t interface_number);
+  /// The string read_interface_string_() asked for, or null when the read failed. It lives
+  /// in the transfer buffer only until the next read, so copy what is needed.
+  virtual void on_interface_string(uint8_t interface_number, const usb_str_desc_t *desc) {}
+  const usb_str_desc_t *string_result_() const;
+  static void string_transfer_callback(usb_transfer_t *xfer);
+  TransferRequest *get_trq_();  // Lock-free allocation using atomic bitmask (multi-consumer safe)
+  /// Must not be called while a control transfer is in flight: the host stack asserts on
+  /// closing a device with one pending, and has no way to cancel it
   virtual void disconnect();
   virtual void on_connected() {}
 
@@ -658,6 +681,8 @@ class USBClient : public Component {
   static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg);
 
   TransferRequest requests_[MAX_REQUESTS]{};
+  // Reads iInterface strings: a string can outgrow the packet-sized pool buffers
+  usb_transfer_t *string_transfer_{nullptr};
 #ifdef USE_USB_HOST_SHARED_TASK
   std::atomic<uint8_t> release_{RELEASE_NONE};
   bool registered_{false};
@@ -676,6 +701,7 @@ class USBClient : public Component {
   std::atomic<trq_bitmask_t> trq_in_use_;
   const char16_t *manufacturer_filter_{nullptr};
   const char16_t *product_filter_{nullptr};
+  const char16_t *interface_filter_{nullptr};
   uint16_t vid_{};
   uint16_t pid_{};
   std::vector<std::unique_ptr<UsbDevice>> devices_{};  // several-devices drivers: one per device
@@ -690,6 +716,13 @@ class USBClient : public Component {
   // Resolved once in setup(); the forwarders below would otherwise dereference the global
   // accessor unchecked on every call, including on the RX hot path.
   USBHost *host_{nullptr};
+  // Set by the USB task when the string transfer completes, cleared by the main loop
+  std::atomic<uint8_t> string_done_{0};
+  // The interface whose string was last asked for
+  uint8_t string_interface_{0};
+  // The next interface the filter pass reads, and whether one has matched the filter so far
+  uint8_t filter_interface_{0};
+  bool interface_matched_{false};
   // Whether the connection callbacks were told about the current device, so a removal is
   // only ever reported for a device that was reported connected
   bool connection_reported_{false};

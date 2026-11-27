@@ -9,6 +9,8 @@
 #include "esphome/core/preferences.h"
 #include "esphome/components/network/ip_address.h"
 
+#include <atomic>
+
 #ifdef USE_ETHERNET
 
 #ifdef USE_ESP32
@@ -61,8 +63,10 @@ class Wiznet6300NoSPI : public Wiznet6300 {
 using Wiznet6300lwIPFixed = LwipIntfDev<Wiznet6300NoSPI>;
 #elif defined(USE_ETHERNET_ENC28J60)
 #include <ENC28J60lwIP.h>
+#elif defined(USE_ETHERNET_USB)
+#include <NCMEthernetlwIP.h>
 #else
-#error "Unsupported RP2040 SPI Ethernet type"
+#error "Unsupported RP2040 Ethernet type"
 #endif
 #endif
 
@@ -83,6 +87,12 @@ class EthernetIPStateListener {
                            const network::IPAddress &dns2) = 0;
 };
 #endif  // USE_ETHERNET_IP_STATE_LISTENERS
+
+/// Called on the main loop with the on_connect and on_disconnect triggers.
+class EthernetConnectStateListener {
+ public:
+  virtual void on_ethernet_connect_state(bool connected) = 0;
+};
 
 enum EthernetType : uint8_t {
   ETHERNET_TYPE_UNKNOWN = 0,
@@ -105,6 +115,7 @@ enum EthernetType : uint8_t {
   ETHERNET_TYPE_YT8531,
   ETHERNET_TYPE_CH390,
   ETHERNET_TYPE_KSZ8851SNL,
+  ETHERNET_TYPE_USB,
 };
 
 struct ManualIP {
@@ -159,7 +170,13 @@ class EthernetComponent final : public Component
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::ETHERNET; }
   void on_powerdown() override { powerdown(); }
-  bool is_connected() { return this->state_ == EthernetComponentState::CONNECTED; }
+  bool is_connected() {
+#ifdef USE_ESP32
+    if (this->disabled_)
+      return false;
+#endif
+    return this->state_ == EthernetComponentState::CONNECTED;
+  }
 
   // Per-interface lifecycle (parallels WiFiComponent::enable/disable/is_disabled).
   // enable_on_boot defaults to true; when false, setup() runs all the driver/netif
@@ -173,6 +190,10 @@ class EthernetComponent final : public Component
   bool is_enabled() { return !this->disabled_; }
 
 #ifdef USE_ESP32
+  // True while disabled if the driver never started or its STOP event was delivered.
+  bool is_driver_stopped() const {
+    return this->disabled_ && this->driver_stopped_.load(std::memory_order_acquire) != 0;
+  }
   /// esp_netif handle, used by network for default-route arbitration.
   /// nullptr until the driver/netif installation has run.
   esp_netif_t *get_esp_netif() { return this->eth_netif_; }
@@ -239,6 +260,8 @@ class EthernetComponent final : public Component
     note_registration(&EthernetComponent::remove_ip_state_listener_, this, listener, nullptr);
   }
 #endif
+  SLOT_LIST(EthernetConnectStateListener, connect_state_listeners_, add_connect_state_listener,
+            ESPHOME_ETHERNET_CONNECT_STATE_LISTENERS)
 
 #ifdef USE_ETHERNET_CONNECT_TRIGGER
   Trigger<> *get_connect_trigger() { return &this->connect_trigger_; }
@@ -270,13 +293,14 @@ class EthernetComponent final : public Component
   void dump_connect_params_();
 
 #ifdef USE_ESP32
-  // ESP-IDF only: defers the SPI bus init, netif creation, MAC/PHY install, driver
+  // Defers the SPI bus init, netif creation, MAC/PHY install, driver
   // install, netif attach, and event handler registration (which together allocate
   // ~3-8KB of DMA-capable internal SRAM via SPI driver state + eth driver RX queue)
   // until ethernet actually needs to come up. Idempotent — guarded by the
   // ethernet_initialized_ flag. Called from setup() when enable_on_boot_=true, or
   // from enable() on first runtime enable. Mirrors wifi_lazy_init_() in WiFi.
   void ethernet_lazy_init_();
+  bool stop_driver_();
 #endif
 #ifdef USE_ETHERNET_EMAC_PROBE
   void driver_uninstall_();
@@ -291,6 +315,11 @@ class EthernetComponent final : public Component
 #ifdef USE_ETHERNET_IP_STATE_LISTENERS
   void notify_ip_state_listeners_();
 #endif
+  void notify_connect_state_listeners_(bool connected) {
+    for (auto *listener : this->connect_state_listeners_) {
+      listener->on_ethernet_connect_state(connected);
+    }
+  }
 
 #ifdef USE_ESP32
   static void eth_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
@@ -309,7 +338,7 @@ class EthernetComponent final : public Component
   void yt8531_phy_init_();
 #endif
 #ifdef ESPHOME_ETHERNET_PHY_REGISTER_COUNT
-  /// @brief Set arbitratry PHY registers from config.
+  /// @brief Set arbitrary PHY registers from config.
   void write_phy_register_(esp_eth_mac_t *mac, PHYRegister register_data);
 #endif
 
@@ -363,6 +392,8 @@ class EthernetComponent final : public Component
   std::atomic<bool> link_lost_{false};
 #endif
   bool handlers_registered_{false};
+  // Registered by enable() on the main loop so builds without callers can discard the restart code.
+  void (*pending_enable_)(EthernetComponent *){nullptr};
 #endif  // USE_ESP32
 
 #ifdef USE_RP2
@@ -384,8 +415,10 @@ class EthernetComponent final : public Component
   Wiznet6300lwIPFixed *eth_{nullptr};
 #elif defined(USE_ETHERNET_ENC28J60)
   ENC28J60lwIP *eth_{nullptr};
+#elif defined(USE_ETHERNET_USB)
+  NCMEthernetlwIP *eth_{nullptr};
 #else
-#error "Unsupported RP2040 SPI Ethernet type"
+#error "Unsupported RP2040 Ethernet type"
 #endif
   uint32_t last_link_check_{0};
   uint8_t clk_pin_;
@@ -404,8 +437,6 @@ class EthernetComponent final : public Component
   EthernetComponentState state_{EthernetComponentState::STOPPED};
   bool started_{false};
   bool connected_{false};
-  // The PHY reports a link (cable in): ETHERNET_EVENT_CONNECTED / _DISCONNECTED.
-  bool link_up_{false};
   bool got_ipv4_address_{false};
   // Codegen-time YAML option. When false, setup() defers esp_eth_start().
   bool enable_on_boot_{true};
@@ -420,6 +451,11 @@ class EthernetComponent final : public Component
   // to be called at runtime after enable_on_boot:false without re-allocating, and
   // ensures setup() skips the heavy init when enable_on_boot_ is false.
   bool ethernet_initialized_{false};
+  std::atomic<uint8_t> driver_stopped_{1};
+  // PHY link state, written by the event task; the connect timeout retries only with a link.
+  std::atomic<bool> link_up_{false};
+  // Last link state loop() saw; a rising edge restarts the connect timeout.
+  bool link_was_up_{false};
 #endif
 #if LWIP_IPV6
   uint8_t ipv6_count_{0};
@@ -434,6 +470,9 @@ class EthernetComponent final : public Component
         static_cast<EthernetIPStateListener *>(listener));
   }
   EntityList<EthernetIPStateListener *, ESPHOME_ETHERNET_IP_STATE_LISTENERS> ip_state_listeners_;
+#ifdef USE_ESP32
+  std::atomic<uint8_t> ip_state_pending_{0};
+#endif
 #endif
 
 #ifdef USE_ETHERNET_CONNECT_TRIGGER

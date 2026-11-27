@@ -72,6 +72,8 @@ def consume_sockets(
 ) -> Callable[[MutableMapping], MutableMapping]:
     """Register socket usage for a component.
 
+    On nRF52 the TCP stack is only built when a component registers a TCP socket.
+
     Args:
         value: Number of sockets needed by the component
         consumer: Name of the component consuming the sockets
@@ -138,6 +140,19 @@ def get_socket_counts() -> SocketCounts:
     )
     return SocketCounts(
         tcp, udp, tcp_listen, tcp_details, udp_details, tcp_listen_details
+    )
+
+
+def needs_tcp() -> bool:
+    """True when a component registered a TCP or listening socket, or loads async_tcp.
+
+    async_tcp is TCP only but leaves socket registration to its users.
+    Valid from code generation on, once every component has validated.
+    """
+    return bool(
+        CORE.data.get(KEY_SOCKET_CONSUMERS_TCP)
+        or CORE.data.get(KEY_SOCKET_CONSUMERS_TCP_LISTEN)
+        or "async_tcp" in CORE.loaded_integrations
     )
 
 
@@ -238,7 +253,7 @@ def consume_role_sockets(
 ) -> Callable[[ConfigType], ConfigType]:
     """Socket accounting for a role keyed client or server schema.
 
-    A server holds as many connections as its connections_key says, default 1.
+    A server holds as many connections as its connections_key says, otherwise 1.
     Also requires IPv4, since the TCP link and listener helpers are IPv4 only.
     """
 
@@ -246,11 +261,10 @@ def consume_role_sockets(
         from esphome.components import network
 
         network.require_ipv4(component)(config)
-        count = 1
-        if config[CONF_ROLE] == "server":
+        server = config[CONF_ROLE] == "server"
+        if server:
             consume_sockets(1, component, SocketType.TCP_LISTEN)(config)
-            if connections_key is not None:
-                count = config.get(connections_key, 1)
+        count = config.get(connections_key, 1) if server and connections_key else 1
         return consume_sockets(count, component)(config)
 
     return validator

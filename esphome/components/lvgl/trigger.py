@@ -10,9 +10,11 @@ from esphome.const import (
     CONF_Y,
 )
 from esphome.core import CORE, ID
+from esphome.core.config import StartupCallback
 from esphome.cpp_generator import MockObj, new_Pvariable
 from esphome.cpp_helpers import register_component
 from esphome.cpp_types import nullptr
+from esphome.types import ConfigType
 
 from .defines import (
     CONF_ALIGN,
@@ -46,11 +48,9 @@ from .types import LV_EVENT, lv_point_t
 from .widgets import LvScrActType, get_screen_active, widget_unit
 
 
-async def add_on_boot_triggers(triggers):
+async def add_on_boot_triggers(triggers: list[ConfigType]) -> None:
     for conf in triggers:
-        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], 390)
-        await cg.register_component(trigger, conf)
-        await automation.build_automation(trigger, [], conf)
+        await automation.build_component_automation(conf, StartupCallback, 390)
 
 
 async def generate_triggers():

@@ -305,6 +305,15 @@ bool ESP32Preferences::sync() {
     return false;
   }
 #endif
+  // No handle after reset() or a failed open, both already logged
+#ifdef USE_ESP32_PREFERENCES_STORAGE
+  if (this->nvs_handle == 0 && s_kv == nullptr) {
+#else
+  if (this->nvs_handle == 0) {
+#endif
+    s_pending_save.clear();
+    return false;
+  }
 
   ESP_LOGV(TAG, "Saving %zu items...", s_pending_save.size());
   int cached = 0, written = 0, failed = 0;

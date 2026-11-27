@@ -214,6 +214,8 @@ void NetworkComponent::loop() {
     this->default_netif_ = nullptr;
     return;
   }
+  // Set when only lwIP's DNS table needs repairing; logged at debug, not as an interface change.
+  bool dns_only = false;
   if (best == this->default_netif_) {
     // Same winner as the last assert. Still re-assert if lwIP's default route is
     // not the winner's netif: a winner whose netif bounced down and up between two
@@ -227,22 +229,23 @@ void NetworkComponent::loop() {
       return;
     this->last_route_check_ = now;
     bool route_is_ours;
+    bool dns_is_ours;
     {
       LwIPLock lock;
       route_is_ours = static_cast<void *>(netif_default) == esp_netif_get_netif_impl(best);
     }
-    bool dns_ok = true;
+    // DHCP starting on another netif empties lwIP's DNS table, and the manual default
+    // stops ESP-IDF from refilling it (espressif/esp-idf#19082); re-asserting copies it back.
 #ifdef CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF
-    // Another netif's address change cleared the global DNS servers: setting the default again
-    // gives them back (esp_netif_set_default_netif applies the winner's servers).
-    if (route_is_ours) {
-      dns_ok = dns_is_netifs(best);
-      if (!dns_ok)
-        ESP_LOGW(TAG, "DNS servers lost; restoring those of %s", esp_netif_get_desc(best));
-    }
+    dns_is_ours = route_is_ours && dns_is_netifs(best);
+#else
+    dns_is_ours = route_is_ours;
 #endif
-    if (route_is_ours && dns_ok)
+    if (dns_is_ours)
       return;
+    dns_only = route_is_ours;
+    if (dns_only)
+      ESP_LOGW(TAG, "DNS servers lost; restoring those of %s", esp_netif_get_desc(best));
   }
   esp_err_t err = esp_netif_set_default_netif(best);
   if (err != ESP_OK) {
@@ -255,7 +258,11 @@ void NetworkComponent::loop() {
     return;
   }
   this->default_netif_ = best;
-  ESP_LOGI(TAG, "Default interface: %s", esp_netif_get_desc(best));
+  if (dns_only) {
+    ESP_LOGD(TAG, "DNS servers restored from %s", esp_netif_get_desc(best));
+  } else {
+    ESP_LOGI(TAG, "Default interface: %s", esp_netif_get_desc(best));
+  }
 }
 #endif  // USE_NETWORK_DEFAULT_ROUTE
 

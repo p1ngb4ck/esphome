@@ -1,5 +1,6 @@
 """Speaker Media Player Base - Shared implementation."""
 
+from esphome.components import ota
 import esphome.config_validation as cv
 
 CODEOWNERS = ["@kahrendt", "@synesthesiam"]
@@ -10,3 +11,7 @@ CODEOWNERS = ["@kahrendt", "@synesthesiam"]
 CONFIG_SCHEMA = cv.All(
     cv.Schema({}),
 )
+
+
+async def to_code(config):
+    ota.request_ota_state_listeners()

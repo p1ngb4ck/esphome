@@ -19,15 +19,22 @@ static constexpr size_t MIPI_DSI_MAX_CMD_LOG_BYTES = 64;
 // Highest AXI QoS priority (4 bits); all masters start at 0
 static constexpr uint32_t DSI_DMA_READ_PRIORITY = 15;
 
-bool MipiDsi::notify_refresh_ready_(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata,
-                                    void *user_ctx) {
+// With CONFIG_LCD_DSI_ISR_CACHE_SAFE the DPI driver only accepts callbacks in IRAM
+#if CONFIG_LCD_DSI_ISR_CACHE_SAFE
+#define MIPI_DSI_ISR_ATTR IRAM_ATTR
+#else
+#define MIPI_DSI_ISR_ATTR
+#endif
+
+bool MIPI_DSI_ISR_ATTR MipiDsi::notify_refresh_ready_(esp_lcd_panel_handle_t panel,
+                                                      esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx) {
   BaseType_t need_yield = pdFALSE;
   xSemaphoreGiveFromISR(static_cast<MipiDsi *>(user_ctx)->io_lock_, &need_yield);
   return (need_yield == pdTRUE);
 }
 
-bool MipiDsi::notify_frame_started_(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata,
-                                    void *user_ctx) {
+bool MIPI_DSI_ISR_ATTR MipiDsi::notify_frame_started_(esp_lcd_panel_handle_t panel,
+                                                      esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx) {
   auto *self = static_cast<MipiDsi *>(user_ctx);
   const uint32_t frames = self->scan_frames_.fetch_add(1, std::memory_order_acq_rel) + 1;
   if (self->flip_waiting_.load(std::memory_order_acquire) &&
@@ -50,8 +57,7 @@ void MipiDsi::setup() {
 
   if (!this->enable_pins_.empty()) {
     for (auto *pin : this->enable_pins_) {
-      pin->setup();
-      pin->digital_write(true);
+      setup_output_pin(pin, true);
     }
     delay(10);
   }

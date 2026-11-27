@@ -185,8 +185,6 @@ void SafeModeComponent::leave_safe_mode() {
 void SafeModeComponent::restart_in_safe_mode() {
   ESP_LOGI(TAG, "Restarting in safe mode");
   this->set_safe_mode_pending(true);
-  // Let MQTT settle a bit
-  delay(100);  // NOLINT
   App.safe_reboot();
 }
 
