@@ -294,6 +294,7 @@ void Esp32HostedUpdate::check() {
     }
 
 #ifdef CONFIG_ESP_HOSTED_CP_TARGET_ESP32C5
+    // Until the manifest is fetched, update_info_ still holds the offer from the last check
     const bool was_warned = esp32c5_partition_table_at_risk(this->update_info_);
 #else
     const bool was_warned = false;
